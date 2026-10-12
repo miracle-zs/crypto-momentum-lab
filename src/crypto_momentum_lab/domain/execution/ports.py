@@ -10,6 +10,9 @@ from typing import Protocol
 from crypto_momentum_lab.domain.execution.order_read_models import (
     PersistedExchangeOrder,
 )
+from crypto_momentum_lab.domain.execution.order_submission import (
+    OrderRejectionOutcome,
+)
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
     JournalFactDelta,
@@ -138,7 +141,7 @@ class ExecutionTransactionPort(Protocol):
         reason: str,
         occurred_at: datetime | None = None,
         intent_id: str | None = None,
-    ) -> bool: ...
+    ) -> OrderRejectionOutcome: ...
 
     async def record_evidence(
         self,
@@ -229,13 +232,6 @@ class CommandRepository(Protocol):
         details: dict[str, JsonValue],
     ) -> None: ...
     async def load_active_execution_commands(
-        self,
-        *,
-        account_label: str | None,
-    ) -> Sequence[Mapping[str, object]]: ...
-    async def load_seen_event_ids(self) -> Sequence[str]: ...
-    async def load_seen_fill_trade_ids(self) -> Sequence[str]: ...
-    async def load_execution_order_watermarks(
         self,
         *,
         account_label: str | None,

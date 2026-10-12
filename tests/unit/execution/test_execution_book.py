@@ -976,6 +976,13 @@ async def test_execution_book_persists_reservation_link_with_first_outbox_write(
 
 
 @pytest.mark.asyncio
+class _EmptyDurableUnitOfWork:
+    """Durable restore for command-only fixtures: no persisted positions."""
+
+    async def load_positions(self, **kwargs: object) -> tuple[object, ...]:
+        return ()
+
+
 async def test_execution_book_restore_rejects_incomplete_active_command() -> None:
     class LegacyCommandRepository:
         async def load_active_execution_commands(self, **kwargs: object):
@@ -987,16 +994,10 @@ async def test_execution_book_restore_rejects_incomplete_active_command() -> Non
                 },
             )
 
-        async def load_seen_event_ids(self) -> tuple[str, ...]:
-            return ()
-
-        async def load_seen_fill_trade_ids(self) -> tuple[str, ...]:
-            return ()
-
-        async def load_execution_order_watermarks(self, **kwargs: object):
-            return ()
-
-    book = ExecutionBook(command_repository=LegacyCommandRepository())
+    book = ExecutionBook(
+        command_repository=LegacyCommandRepository(),
+        execution_unit_of_work=_EmptyDurableUnitOfWork(),
+    )
 
     with pytest.raises(RuntimeError, match="restore active execution commands"):
         await book.restore(account_label="primary")
@@ -1212,431 +1213,6 @@ async def test_duplicate_trade_id_does_not_consume_twice() -> None:
     assert isinstance(duplicate, Applied)
     assert duplicate.consumed_quantity == Decimal("0")
     assert book.get_active_reservations(key)[0].consumed_quantity == Decimal("2")
-
-
-@pytest.mark.asyncio
-async def test_restore_cumulative_quantity_and_quote_watermarks() -> None:
-    from copy import deepcopy
-
-    from crypto_momentum_lab.domain.execution.trade_command import (
-        PositionReservation,
-        TradeCommand,
-    )
-    from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
-    from tests.fixtures.async_reservations import InMemoryPositionReservationRepository
-
-    class PersistedCommandRepository:
-        def __init__(self) -> None:
-            self.rows: dict[str, dict[str, object]] = {}
-
-        async def upsert_execution_command(self, **values: object) -> None:
-            command_id = str(values["command_id"])
-            self.rows[command_id] = dict(values)
-
-        async def load_active_execution_commands(
-            self, account_label: str | None = None
-        ) -> tuple[dict[str, object], ...]:
-            active = []
-            for row in self.rows.values():
-                details = row["details"]
-                assert isinstance(details, dict)
-                scope_data = details["scope"]
-                assert isinstance(scope_data, dict)
-                if row["status"] in ("terminal", "rejected"):
-                    continue
-                if (
-                    account_label is not None
-                    and scope_data["account_label"] != account_label
-                ):
-                    continue
-                active.append(row)
-            return tuple(active)
-
-        async def load_execution_order_watermarks(
-            self, account_label: str | None = None
-        ) -> tuple[dict[str, object], ...]:
-            watermarks = []
-            for row in self.rows.values():
-                details = row["details"]
-                assert isinstance(details, dict)
-                scope_data = details["scope"]
-                assert isinstance(scope_data, dict)
-                if (
-                    account_label is not None
-                    and scope_data["account_label"] != account_label
-                ):
-                    continue
-                watermarks.append(
-                    {
-                        "scope": scope_data,
-                        "client_order_id": row["client_order_id"],
-                        "cumulative_filled_quantity": details[
-                            "cumulative_filled_quantity"
-                        ],
-                        "cumulative_filled_quote": details["cumulative_filled_quote"],
-                        "status": row["status"],
-                    }
-                )
-            return tuple(watermarks)
-
-        async def load_seen_event_ids(self) -> tuple[str, ...]:
-            return ()
-
-        async def load_seen_fill_trade_ids(self) -> tuple[str, ...]:
-            return ()
-
-    scope = _scope()
-    key = scope.to_position_key()
-    command_repo = PersistedCommandRepository()
-    reservation_repo = InMemoryPositionReservationRepository()
-    order_command = TradeCommand(
-        command_id="order-restart-cumulative",
-        position_key=key,
-        command_type=TradeCommandType.EXIT,
-        side=StrategySide.LONG,
-        order_type=EntryType.MARKET,
-        requested_quantity=Decimal("10"),
-        reduce_only=True,
-        created_at=_dt(10, 0),
-    )
-    reservation = PositionReservation(
-        reservation_id="reservation-restart-cumulative",
-        command_id=order_command.command_id,
-        position_key=key,
-        batch_id="batch-restart",
-        reserved_quantity=Decimal("10"),
-        created_at=_dt(10, 0),
-    )
-    await reservation_repo.save_reservation(reservation)
-
-    first_book = ExecutionBook(
-        command_repository=command_repo,
-        reservation_repository=reservation_repo,
-    )
-    first_book.coordinator.register_reservation(reservation)
-    first_entry = first_book.register_prepared_command(
-        order_command, scope, [reservation.reservation_id]
-    )
-    await first_book._persist_outbox_state(first_entry)
-    await first_book.mark_dispatching(order_command.command_id)
-    await first_book.mark_acknowledged(order_command.command_id, "exchange-order-1")
-
-    terminal_command = TradeCommand(
-        command_id="order-restart-terminal",
-        position_key=key,
-        command_type=TradeCommandType.ENTRY,
-        side=StrategySide.LONG,
-        order_type=EntryType.MARKET,
-        requested_quantity=Decimal("1"),
-        reduce_only=False,
-        created_at=_dt(9, 0),
-    )
-    terminal_entry = first_book.register_prepared_command(terminal_command, scope)
-    terminal_key = first_book._order_watermark_key(key, terminal_command.command_id)
-    first_book._order_cumulative_fills[terminal_key] = Decimal("2")
-    first_book._order_cumulative_quotes[terminal_key] = Decimal("190")
-    await first_book._persist_outbox_state(terminal_entry)
-    await first_book.mark_terminal(terminal_command.command_id)
-
-    def cumulative_evidence(
-        evidence_id: str,
-        quantity: str,
-        quote: str,
-        price: str,
-    ) -> ExecutionEvidence:
-        cumulative_quantity = Decimal(quantity)
-        return ExecutionEvidence(
-            evidence_id=evidence_id,
-            scope=scope,
-            observed_at=_dt(10, 1),
-            fill=AccountFillEvent(
-                environment="live",
-                account_label="primary",
-                symbol="BTCUSDT",
-                trade_id=f"cum-{quantity}",
-                order_id=order_command.command_id,
-                side="SELL",
-                price=Decimal(price),
-                quantity=cumulative_quantity,
-                realized_pnl=Decimal("0"),
-                fee=Decimal("0"),
-                fee_asset="USDT",
-                trade_at=_dt(10, 1),
-                raw_payload={
-                    "is_cumulative": True,
-                    "cum_qty": quantity,
-                    "cum_quote": quote,
-                    "reduce_only": True,
-                },
-            ),
-        )
-
-    first_result = await first_book.observe(
-        cumulative_evidence("cumulative-3", "3", "300", "100")
-    )
-    assert isinstance(first_result, Applied)
-    assert first_result.consumed_quantity == Decimal("3")
-
-    restored_book = ExecutionBook(
-        command_repository=command_repo,
-        reservation_repository=reservation_repo,
-    )
-    await restored_book.restore(account_label="primary")
-    replay = await restored_book.observe(
-        cumulative_evidence("same-cumulative-after-restart", "3", "300", "100")
-    )
-    assert isinstance(replay, Applied)
-    assert replay.consumed_quantity == Decimal("0")
-
-    second_result = await restored_book.observe(
-        cumulative_evidence("cumulative-5-after-restart", "5", "700", "140")
-    )
-    assert isinstance(second_result, Applied)
-    assert second_result.consumed_quantity == Decimal("2")
-    fills = restored_book._ensure_journal(key).read_cut().fills
-    incremental_fill = next(fill for fill in fills if fill.trade_id == "cum-5")
-    assert incremental_fill.quantity == Decimal("2")
-    assert incremental_fill.price == Decimal("200")
-    restored_reservation = restored_book.get_active_reservations(key)[0]
-    assert restored_reservation.consumed_quantity == Decimal("5")
-    assert restored_reservation.active_quantity == Decimal("5")
-
-    invalid_command_repo = deepcopy(command_repo)
-    active_details = invalid_command_repo.rows[order_command.command_id]["details"]
-    assert isinstance(active_details, dict)
-    active_details["cumulative_filled_quote"] = "0"
-    invalid_book = ExecutionBook(command_repository=invalid_command_repo)
-    with pytest.raises(RuntimeError, match="cumulative fill watermarks"):
-        await invalid_book.restore(account_label="primary")
-
-
-@pytest.mark.parametrize(
-    "resolution_state",
-    (
-        ExchangeOrderState.CANCELED,
-        ExchangeOrderState.FILLED,
-        ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
-    ),
-)
-@pytest.mark.asyncio
-async def test_restored_dispatch_latch_requires_durable_resolution(
-    resolution_state: ExchangeOrderState,
-) -> None:
-    from crypto_momentum_lab.domain.execution.trade_command import (
-        PositionReservation,
-        TradeCommand,
-    )
-    from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
-    from tests.fixtures.async_reservations import InMemoryPositionReservationRepository
-
-    class CommandRepository:
-        def __init__(self) -> None:
-            self.rows: dict[str, dict[str, object]] = {}
-
-        async def upsert_execution_command(self, **values: object) -> None:
-            self.rows[str(values["command_id"])] = dict(values)
-
-        async def load_active_execution_commands(
-            self, account_label: str | None = None
-        ) -> tuple[dict[str, object], ...]:
-            active = []
-            for row in self.rows.values():
-                if row["status"] in ("terminal", "rejected"):
-                    continue
-                details = row["details"]
-                assert isinstance(details, dict)
-                scope_data = details["scope"]
-                assert isinstance(scope_data, dict)
-                if (
-                    account_label is None
-                    or scope_data["account_label"] == account_label
-                ):
-                    active.append(row)
-            return tuple(active)
-
-        async def load_execution_order_watermarks(
-            self, account_label: str | None = None
-        ) -> tuple[dict[str, object], ...]:
-            watermarks = []
-            for row in self.rows.values():
-                details = row["details"]
-                assert isinstance(details, dict)
-                scope_data = details["scope"]
-                assert isinstance(scope_data, dict)
-                if (
-                    account_label is None
-                    or scope_data["account_label"] == account_label
-                ):
-                    watermarks.append(
-                        {
-                            "scope": scope_data,
-                            "client_order_id": row["client_order_id"],
-                            "cumulative_filled_quantity": details[
-                                "cumulative_filled_quantity"
-                            ],
-                            "cumulative_filled_quote": details[
-                                "cumulative_filled_quote"
-                            ],
-                        }
-                    )
-            return tuple(watermarks)
-
-        async def load_seen_event_ids(self) -> tuple[str, ...]:
-            return ()
-
-        async def load_seen_fill_trade_ids(self) -> tuple[str, ...]:
-            return ()
-
-    scope = _scope()
-    key = scope.to_position_key()
-    command_id = f"restored-{resolution_state.value}"
-    command_repo = CommandRepository()
-    reservation_repo = InMemoryPositionReservationRepository()
-    command = TradeCommand(
-        command_id=command_id,
-        position_key=key,
-        command_type=TradeCommandType.EXIT,
-        side=StrategySide.LONG,
-        order_type=EntryType.MARKET,
-        requested_quantity=Decimal("1"),
-        reduce_only=True,
-        created_at=_dt(10, 0),
-    )
-    reservation = PositionReservation(
-        reservation_id=f"reservation-{command_id}",
-        command_id=command_id,
-        position_key=key,
-        batch_id="batch-restored",
-        reserved_quantity=Decimal("1"),
-        created_at=_dt(10, 0),
-    )
-    await reservation_repo.save_reservation(reservation)
-    first_book = ExecutionBook(
-        command_repository=command_repo,
-        reservation_repository=reservation_repo,
-    )
-    first_book.coordinator.register_reservation(reservation)
-    prepared = first_book.register_prepared_command(
-        command, scope, [reservation.reservation_id]
-    )
-    await first_book._persist_outbox_state(prepared)
-    await first_book.mark_dispatching(command_id)
-
-    book = ExecutionBook(
-        command_repository=command_repo,
-        reservation_repository=reservation_repo,
-    )
-    await book.restore(account_label="primary")
-    restored = book.get_outbox(command_id)
-    assert restored is not None
-    assert restored.state is DispatchState.UNKNOWN
-    assert book.command_requires_recovery(command_id)
-
-    fill = None
-    if resolution_state is ExchangeOrderState.FILLED:
-        fill = AccountFillEvent(
-            environment="live",
-            account_label="primary",
-            symbol="BTCUSDT",
-            trade_id=f"fill-{command_id}",
-            order_id=command_id,
-            side="SELL",
-            price=Decimal("100"),
-            quantity=Decimal("1"),
-            realized_pnl=Decimal("0"),
-            fee=Decimal("0"),
-            fee_asset="USDT",
-            trade_at=_dt(10, 1),
-            raw_payload={
-                "positionSide": "LONG",
-                "is_cumulative": True,
-                "cum_qty": "1",
-                "cum_quote": "100",
-                "reduce_only": True,
-            },
-        )
-    observed = await book.observe(
-        ExecutionEvidence(
-            evidence_id=f"resolution-{resolution_state.value}",
-            scope=scope,
-            observed_at=_dt(10, 1),
-            fill=fill,
-            order_event=ExchangeOrderEvent(
-                event_id=f"event-{resolution_state.value}",
-                client_order_id=command_id,
-                state=resolution_state,
-                occurred_at=_dt(10, 1),
-                exchange_order_id="exchange-1",
-                details={"account_label": "primary", "symbol": "BTCUSDT"},
-            ),
-        )
-    )
-    assert isinstance(observed, Applied)
-
-    if resolution_state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
-        assert book.command_requires_recovery(command_id)
-        blocked = await book.act(
-            ExecutionRequest(
-                request_id=command_id,
-                scope=scope,
-                strategy_name="trend_v1",
-                run_id="run-after-restore",
-                decision_ref="decision-after-restore",
-                expected_view_token="*",
-                action=TradeCommandType.ENTRY,
-                requested_quantity=Decimal("1"),
-                side=StrategySide.LONG,
-            )
-        )
-        assert isinstance(blocked, Blocked)
-        assert "reconciliation" in blocked.reason
-        assert command_id in blocked.diagnostics
-        return
-
-    assert not book.command_requires_recovery(command_id)
-    assert not book.command_requires_recovery(command_id)
-
-    timestamp = _dt(10, 2)
-    journal = book._ensure_journal(key)
-    journal.set_coverage(
-        FactCoverageInterval(
-            start_at=timestamp,
-            end_at=timestamp,
-            status=FactCoverageStatus.CONFIRMED,
-        )
-    )
-    journal.record_snapshot(
-        AccountPositionSnapshot(
-            environment="live",
-            account_label="primary",
-            symbol="BTCUSDT",
-            position_side="LONG",
-            position_amt=Decimal("0"),
-            entry_price=Decimal("0"),
-            mark_price=Decimal("100"),
-            unrealized_pnl=Decimal("0"),
-            notional=Decimal("0"),
-            leverage=5,
-            margin_type="cross",
-            observed_at=timestamp,
-            raw_payload={},
-        )
-    )
-    view = await book.read(scope)
-    accepted = await book.act(
-        ExecutionRequest(
-            request_id=f"new-entry-{command_id}",
-            scope=scope,
-            strategy_name="trend_v1",
-            run_id="run-after-restore",
-            decision_ref="decision-after-restore",
-            expected_view_token=view.projection_version,
-            action=TradeCommandType.ENTRY,
-            requested_quantity=Decimal("1"),
-            side=StrategySide.LONG,
-        )
-    )
-    assert isinstance(accepted, Accepted)
 
 
 @pytest.mark.asyncio
@@ -2964,106 +2540,14 @@ async def test_outbox_scope_controls_cross_stream_read(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "field", ["expected_projection_version", "external_order_id", "last_error"]
-)
-async def test_unparseable_active_command_blocks_restore_before_identity_reads(field):
-    from unittest.mock import AsyncMock
-
-    repository = AsyncMock()
-    details = {
-        "scope": {
-            "environment": "live",
-            "account_label": "primary",
-            "symbol": "BTCUSDT",
-            "position_side": "LONG",
-        },
-        "side": "long",
-        "order_type": "market",
-        "quantity": "1",
-        "reduce_only": False,
-        "reservations": [],
-        "request_id": "request",
-        "attempt_count": 0,
-        field: 123,
-    }
-    repository.load_active_execution_commands.return_value = [
-        {
-            "command_id": "unparseable-command",
-            "client_order_id": "unparseable-command",
-            "command": "entry",
-            "status": "prepared",
-            "requested_at": _dt(10, 0),
-            "details": details,
-        }
-    ]
-    from copy import deepcopy
-
-    first_valid = deepcopy(repository.load_active_execution_commands.return_value[0])
-    first_valid["command_id"] = "first-valid-command"
-    first_valid["client_order_id"] = "first-valid-command"
-    first_valid["details"][field] = None
-    first_valid["details"]["reservations"] = ["reservation-before-failure"]
-    first_valid["status"] = "unknown"
-    repository.load_active_execution_commands.return_value.insert(0, first_valid)
-    book = ExecutionBook(command_repository=repository)
-    with pytest.raises(
-        RuntimeError, match="restore active execution commands"
-    ) as error:
-        await book.restore(account_label="primary")
-    assert field in str(error.value.__cause__)
-    assert "unparseable-command" in str(error.value.__cause__)
-    assert not book.list_outbox()
-    assert not book._command_reservations
-    assert not book._dispatch_reconciliation_required_commands
-    repository.load_seen_event_ids.assert_not_awaited()
-    repository.load_seen_fill_trade_ids.assert_not_awaited()
-    repository.load_execution_order_watermarks.assert_not_awaited()
-
-    request = ExecutionRequest(
-        request_id="blocked-during-restore",
-        scope=_scope(),
-        strategy_name="trend",
-        run_id="run",
-        decision_ref="decision",
-        expected_view_token="unused",
-        action=TradeCommandType.ENTRY,
-        requested_quantity=Decimal("1"),
-        side=StrategySide.LONG,
-    )
-    result = await book.act(request)
-    assert isinstance(result, Blocked)
-    assert "restore is required" in result.reason
-    repository.upsert_execution_command.assert_not_awaited()
-
-    # Correct the durable record and retry on the same Book instance.
-    details[field] = None
-    repository.load_seen_event_ids.return_value = ()
-    repository.load_seen_fill_trade_ids.return_value = ()
-    repository.load_execution_order_watermarks.return_value = ()
-    await book.restore(account_label="primary")
-    entry = book.get_outbox("unparseable-command")
-    assert entry is not None
-    assert entry.state is DispatchState.PREPARED
-    assert entry.scope == _scope()
-    assert entry.command.requested_quantity == Decimal("1")
-    first = book.get_outbox("first-valid-command")
-    assert first is not None and first.state is DispatchState.UNKNOWN
-    assert book._command_reservations[first.command_id] == [
-        "reservation-before-failure"
-    ]
-    assert book.command_requires_recovery(first.command_id)
-    repository.load_seen_event_ids.assert_awaited_once()
-    repository.load_seen_fill_trade_ids.assert_awaited_once()
-    repository.load_execution_order_watermarks.assert_awaited_once()
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("conflicting", [False, True])
-@pytest.mark.parametrize("status", ["prepared", "dispatching"])
 async def test_restore_deduplicates_equal_command_rows_and_rejects_conflicts(
-    conflicting, status
+    conflicting,
 ):
+    # A restored *dispatching* command additionally flushes a deferred unknown
+    # write through the durable transaction; that path is covered by
+    # test_headless_command_recovery.py against a transactional unit of work.
+    status = "prepared"
     from copy import deepcopy
     from unittest.mock import AsyncMock
 
@@ -3094,10 +2578,10 @@ async def test_restore_deduplicates_equal_command_rows_and_rejects_conflicts(
     if conflicting:
         duplicate["details"]["quantity"] = "2"
     repository.load_active_execution_commands.return_value = [row, duplicate]
-    repository.load_seen_event_ids.return_value = ()
-    repository.load_seen_fill_trade_ids.return_value = ()
-    repository.load_execution_order_watermarks.return_value = ()
-    book = ExecutionBook(command_repository=repository)
+    book = ExecutionBook(
+        command_repository=repository,
+        execution_unit_of_work=_EmptyDurableUnitOfWork(),
+    )
     if conflicting:
         with pytest.raises(
             RuntimeError, match="restore active execution commands"
@@ -3106,7 +2590,6 @@ async def test_restore_deduplicates_equal_command_rows_and_rejects_conflicts(
         assert "conflicting rows" in str(error.value.__cause__)
         assert not book.list_outbox()
         repository.upsert_execution_command.assert_not_awaited()
-        repository.load_seen_event_ids.assert_not_awaited()
     else:
         await book.restore(account_label="primary")
         assert len(book.list_outbox()) == 1

@@ -52,8 +52,20 @@ async def test_async_repository_requires_awaited_restore(
             self.loads += 1
             return (reservation,)
 
+    class EmptyUnitOfWork:
+        async def load_positions(self, **kwargs: object) -> tuple[object, ...]:
+            return ()
+
+    class EmptyCommandRepository:
+        async def load_active_execution_commands(self, **kwargs: object):
+            return ()
+
     repo = AsyncRepository()
-    book = ExecutionBook(reservation_repository=repo)
+    book = ExecutionBook(
+        reservation_repository=repo,
+        command_repository=EmptyCommandRepository(),
+        execution_unit_of_work=EmptyUnitOfWork(),
+    )
     assert repo.loads == 0
     await book.restore(account_label="account-3")
     assert repo.loads == 1

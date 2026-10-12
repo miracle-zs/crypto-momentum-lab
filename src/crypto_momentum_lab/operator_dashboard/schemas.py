@@ -1,10 +1,24 @@
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.operator_dashboard.status import OperationalStatus
+
+
+def json_value(value: object) -> JsonValue:
+    """Coerce durable payload values into the JSON shape the API promises."""
+    if isinstance(value, Decimal | datetime):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): json_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [json_value(item) for item in value]
+    if isinstance(value, str | int | float | bool) or value is None:
+        return value
+    return str(value)
 
 
 class DashboardSchema(BaseModel):
@@ -74,6 +88,9 @@ class LiveAccountSummaryResponse(DashboardSchema):
     lease_expires_at: datetime | None = None
     runtime_tradeability: TradeabilityDetailResponse | None = None
     runtime_observed_at: datetime | None = None
+    # Observation-queue backpressure published with the runtime readiness
+    # snapshot: depth, high watermark, overflow count, oldest pending age.
+    runtime_order_observation: dict[str, JsonValue] | None = None
 
 
 class LiveAccountMetricPointResponse(DashboardSchema):

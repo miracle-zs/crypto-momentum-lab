@@ -18,7 +18,6 @@ import structlog
 from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
 from crypto_momentum_lab.domain.execution.command_codec import (
     decode_active_commands,
-    decode_order_watermark,
 )
 from crypto_momentum_lab.domain.execution.command_models import OutboxEntry
 from crypto_momentum_lab.domain.execution.evidence_rules import (
@@ -119,45 +118,49 @@ async def restore_execution_state(
     command_repository = dependencies.command_repository
     deferred_unknown_commands: list[str] = []
     unit_of_work = dependencies.unit_of_work
-    if unit_of_work is not None:
-        if not account_label:
-            raise ValueError("durable restore requires an account_label")
-        if command_repository is None:
-            raise RuntimeError(
-                "durable execution restore requires a command repository"
-            )
-        as_of = as_of or datetime.now(UTC)
-        if as_of.tzinfo is None or as_of.utcoffset() is None:
-            raise ValueError("restore as_of must be timezone-aware")
-        for values in (
-            state.books,
-            state.journals,
-            state.stream_scopes,
-            state.head_revisions,
-            state.head_expected_reservation_ids,
-            state.journal_revisions,
-            state.last_sequences,
-            state.seen_evidence_ids,
-            state.seen_trade_ids,
-            state.order_cumulative_fills,
-            state.order_cumulative_quotes,
-            state.outbox_by_command_id,
-            state.command_reservations,
-            state.recovery_required_commands,
-            state.external_recovery_positions,
-            state.dispatch_reconciliation_required_commands,
-        ):
-            values.clear()
-        dependencies.clear_requests()
-        state.coordinator.clear_reservations()
-        await restore_durable_positions(
-            state,
-            unit_of_work=unit_of_work,
-            account_label=account_label,
-            environment=environment,
-            as_of=as_of,
-            watermark_key=dependencies.watermark_key,
+    if unit_of_work is None:
+        raise RuntimeError(
+            "durable execution restore requires a unit of work; an in-memory "
+            "book has no durable facts to restore"
         )
+    if not account_label:
+        raise ValueError("durable restore requires an account_label")
+    if command_repository is None:
+        raise RuntimeError(
+            "durable execution restore requires a command repository"
+        )
+    as_of = as_of or datetime.now(UTC)
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise ValueError("restore as_of must be timezone-aware")
+    for values in (
+        state.books,
+        state.journals,
+        state.stream_scopes,
+        state.head_revisions,
+        state.head_expected_reservation_ids,
+        state.journal_revisions,
+        state.last_sequences,
+        state.seen_evidence_ids,
+        state.seen_trade_ids,
+        state.order_cumulative_fills,
+        state.order_cumulative_quotes,
+        state.outbox_by_command_id,
+        state.command_reservations,
+        state.recovery_required_commands,
+        state.external_recovery_positions,
+        state.dispatch_reconciliation_required_commands,
+    ):
+        values.clear()
+    dependencies.clear_requests()
+    state.coordinator.clear_reservations()
+    await restore_durable_positions(
+        state,
+        unit_of_work=unit_of_work,
+        account_label=account_label,
+        environment=environment,
+        as_of=as_of,
+        watermark_key=dependencies.watermark_key,
+    )
 
     if command_repository is not None:
         try:
@@ -175,55 +178,10 @@ async def restore_execution_state(
                 if recovered.requires_reconciliation:
                     state.dispatch_reconciliation_required_commands.add(command_id)
                 if recovered.needs_unknown_write:
-                    if unit_of_work is not None:
-                        deferred_unknown_commands.append(command_id)
-                    else:
-                        await dependencies.persist_outbox_state(entry)
+                    deferred_unknown_commands.append(command_id)
         except Exception as err:
             log.error("restore_active_commands_failed", error=str(err))
             raise RuntimeError("Failed to restore active execution commands") from err
-
-        if unit_of_work is None:
-            try:
-                state.seen_evidence_ids.update(
-                    await command_repository.load_seen_event_ids()
-                )
-            except Exception as err:
-                raise RuntimeError(
-                    "Failed to restore execution event identities"
-                ) from err
-            try:
-                state.seen_trade_ids.update(
-                    await command_repository.load_seen_fill_trade_ids()
-                )
-            except Exception as err:
-                raise RuntimeError("Failed to restore fill identities") from err
-            try:
-                watermark_rows = (
-                    await command_repository.load_execution_order_watermarks(
-                        account_label=account_label
-                    )
-                )
-                for row in watermark_rows:
-                    restored = decode_order_watermark(row, account_label=account_label)
-                    if restored is None:
-                        continue
-                    watermark_key = dependencies.watermark_key(
-                        restored.scope.to_position_key(), restored.order_id
-                    )
-                    state.order_cumulative_fills[watermark_key] = max(
-                        state.order_cumulative_fills.get(watermark_key, Decimal("0")),
-                        restored.quantity,
-                    )
-                    state.order_cumulative_quotes[watermark_key] = max(
-                        state.order_cumulative_quotes.get(watermark_key, Decimal("0")),
-                        restored.quote,
-                    )
-            except Exception as err:
-                log.error("restore_watermarks_failed", error=str(err))
-                raise RuntimeError(
-                    f"Failed to restore cumulative fill watermarks: {err}"
-                ) from err
 
     if dependencies.reservation_repository is not None:
         try:

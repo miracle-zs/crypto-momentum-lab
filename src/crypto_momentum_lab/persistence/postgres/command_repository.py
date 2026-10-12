@@ -1,6 +1,5 @@
 """Execution commands, recovery identities and order-watermark persistence."""
 
-from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -21,8 +20,6 @@ from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models impo
     ExecutionBookHeadRow,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
-    ExchangeFillRow,
-    ExchangeOrderEventRow,
     ExchangeOrderRow,
     ExecutionCommandRow,
     ExecutionReconciliationEventRow,
@@ -203,15 +200,10 @@ class PostgresCommandRepository:
                 dtls = dict(r.details)
                 if dtls.get("external_order_id") is None:
                     dtls["external_order_id"] = order.exchange_order_id if order is not None else None
-                scope = dtls.get("scope")
-                acc = (
-                    scope.get("account_label")
-                    if isinstance(scope, dict)
-                    else dtls.get("account_label")
-                )
-                if account_label is not None:
-                    if acc != account_label:
-                        continue
+                # The account scope is already filtered in SQL above. A row
+                # without a scope mapping cannot be restored (the command codec
+                # requires one), so there is no second Python-side filter here:
+                # adding one would only hide which rows recovery must report.
                 result.append(
                     {
                         "command_id": r.command_id,
@@ -223,137 +215,6 @@ class PostgresCommandRepository:
                     }
                 )
             return tuple(result)
-
-    async def load_execution_order_watermarks(
-        self,
-        account_label: str | None = None,
-    ) -> tuple[dict[str, object], ...]:
-        """Load cumulative quantity/quote cuts for every persisted command.
-
-        Terminal commands are included because a later order response can be
-        stale or duplicated after the active outbox row has closed.
-
-        Each command must persist its complete scope and cumulative watermarks.
-        """
-        async with self._session_factory() as session:
-            rows = (
-                await session.scalars(
-                    select(ExecutionCommandRow).order_by(
-                        ExecutionCommandRow.requested_at
-                    )
-                )
-            ).all()
-
-        result: list[dict[str, object]] = []
-        for row in rows:
-            if row.command in (
-                "resolve_unknown_order",
-                "manual_reduce_only_recovery",
-                "manual_recovery_result",
-            ):
-                continue
-            details = dict(row.details)
-            raw_scope = details.get("scope")
-            scope = dict(raw_scope) if isinstance(raw_scope, Mapping) else {}
-            status = str(row.status)
-            quantity = details.get("cumulative_filled_quantity")
-            quote = details.get("cumulative_filled_quote")
-            if (
-                account_label is not None
-                and isinstance(scope.get("account_label"), str)
-                and scope["account_label"] != account_label
-            ):
-                continue
-
-            client_order_id = row.client_order_id
-            if not isinstance(client_order_id, str) or not client_order_id.strip():
-                raise ValueError(
-                    f"execution command {row.command_id} has no client order ID; "
-                    "migration/recovery required"
-                )
-
-            missing_scope = tuple(
-                field_name
-                for field_name in (
-                    "environment",
-                    "account_label",
-                    "symbol",
-                    "position_side",
-                )
-                if not isinstance(scope.get(field_name), str)
-                or not scope[field_name].strip()
-            )
-            if missing_scope:
-                raise ValueError(
-                    f"execution command {row.command_id} has incomplete scope "
-                    f"({', '.join(missing_scope)})"
-                )
-
-            if quantity is None or quote is None:
-                raise ValueError(
-                    f"execution command {row.command_id} has incomplete cumulative "
-                    "watermark"
-                )
-
-            cumulative_quantity = _execution_decimal(
-                quantity,
-                command_id=row.command_id,
-                field_name="cumulative_filled_quantity",
-            )
-            cumulative_quote = _execution_decimal(
-                quote,
-                command_id=row.command_id,
-                field_name="cumulative_filled_quote",
-            )
-            if cumulative_quantity == Decimal("0") and cumulative_quote != Decimal("0"):
-                raise ValueError(
-                    f"execution command {row.command_id} has quote without quantity; "
-                    "migration/recovery required"
-                )
-            if cumulative_quantity > Decimal("0") and cumulative_quote == Decimal("0"):
-                raise ValueError(
-                    f"execution command {row.command_id} has zero quote with positive "
-                    "quantity; migration/recovery required"
-                )
-
-            result.append(
-                {
-                    "scope": scope,
-                    "client_order_id": client_order_id,
-                    "cumulative_filled_quantity": quantity,
-                    "cumulative_filled_quote": quote,
-                    "status": status,
-                }
-            )
-        return tuple(result)
-
-    async def load_seen_event_ids(
-        self,
-        limit: int = 2000,
-    ) -> tuple[str, ...]:
-        async with self._session_factory() as session:
-            rows = (
-                await session.scalars(
-                    select(ExchangeOrderEventRow.event_id)
-                    .order_by(ExchangeOrderEventRow.occurred_at.desc())
-                    .limit(limit)
-                )
-            ).all()
-            return tuple(str(r) for r in rows if r)
-
-    async def load_seen_fill_trade_ids(
-        self,
-        limit: int = 2000,
-    ) -> tuple[str, ...]:
-        async with self._session_factory() as session:
-            rows = (
-                await session.scalars(
-                    select(ExchangeFillRow.exchange_trade_id)
-                    .order_by(ExchangeFillRow.filled_at.desc())
-                    .limit(limit)
-                )
-            ).all()
-            return tuple(str(r) for r in rows if r)
 
     async def save_reconciliation_event(
         self,

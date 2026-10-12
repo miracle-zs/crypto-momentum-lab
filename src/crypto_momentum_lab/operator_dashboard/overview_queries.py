@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.domain.operational import (
+    CapabilityState,
     HealthDimensionName,
     OperationalView,
     aggregate_operational_views,
@@ -28,6 +29,7 @@ from crypto_momentum_lab.operator_dashboard.collector_status import (
     read_research_collector_status,
 )
 from crypto_momentum_lab.operator_dashboard.fact_integrity_queries import (
+    FactIntegritySummary,
     load_fact_integrity,
 )
 from crypto_momentum_lab.operator_dashboard.schemas import (
@@ -205,6 +207,27 @@ def live_account_summaries(
     return summaries
 
 
+def _fact_integrity_details(
+    summary: FactIntegritySummary | None,
+) -> str | None:
+    """Name the missing evidence and its scope instead of a bare unknown."""
+    if summary is None:
+        # Keep the default "unconfirmed" wording: no proof was produced at all.
+        return None
+    if summary.gaps is not None and summary.gaps == 0:
+        if summary.historical_reasons:
+            # Current risk is proven, but closed objects are missing evidence:
+            # name it instead of hiding it behind a healthy current status.
+            return "fact_integrity_historical_" + ",".join(
+                summary.historical_reasons
+            )
+        return None
+    parts = list(summary.reasons) or ["fact_integrity_unconfirmed"]
+    if summary.unknown_scopes:
+        parts.append("scope=" + ",".join(summary.unknown_scopes))
+    return "_".join(("fact_integrity", *parts))
+
+
 class OverviewQueries:
     """Deep query module for the dashboard's operational overview."""
 
@@ -292,6 +315,7 @@ class OverviewQueries:
             # An unavailable or malformed proof cannot be reported as complete.
             pass
         account_views: list[OperationalView] = []
+        account_capabilities: dict[str, object] = {}
         for acc in accounts_resp.accounts:
             observed = acc.observed_at or now
             lag = max(0.0, (now - observed).total_seconds())
@@ -310,13 +334,25 @@ class OverviewQueries:
                 recon_matched = False
                 recon_details = "unconfirmed_reconciliation_head_absent"
 
+            # Entry and exit are independent: a blocked entry (new risk) must
+            # not hide an open exit (risk reduction), and missing runtime
+            # readiness leaves the unreported capability UNKNOWN.
             runtime_gate = published_tradeability(acc, now)
-            capability_reason = (
-                runtime_gate.entry_gate_reason
-                if runtime_gate is not None
-                else "runtime_readiness_missing_or_stale"
-            )
-            cap_ok = runtime_gate is not None and runtime_gate.entry_gate_open
+            if runtime_gate is None:
+                missing = "runtime_readiness_missing_or_stale"
+                entry_capability = CapabilityState("entry", False, missing)
+                exit_capability = CapabilityState("exit", None, missing)
+            else:
+                entry_capability = CapabilityState(
+                    "entry",
+                    runtime_gate.entry_gate_open,
+                    runtime_gate.entry_gate_reason,
+                )
+                exit_capability = CapabilityState(
+                    "exit",
+                    runtime_gate.exit_gate_open,
+                    runtime_gate.exit_gate_reason,
+                )
 
             acc_view = evaluate_standard_health(
                 scope=f"account:{acc.account_label}",
@@ -330,8 +366,11 @@ class OverviewQueries:
                     if acc.account_label in fact_integrity
                     else None
                 ),
-                capability_permitted=cap_ok,
-                capability_reason=capability_reason,
+                fact_details_override=_fact_integrity_details(
+                    fact_integrity.get(acc.account_label)
+                ),
+                entry_capability=entry_capability,
+                exit_capability=exit_capability,
                 reconciliation_matched=recon_matched,
                 reconciliation_details=recon_details,
                 observed_at=observed,
@@ -347,8 +386,12 @@ class OverviewQueries:
                         for dimension in acc_view.dimensions
                     ),
                     evidence_cut=now,
+                    details=acc_view.details,
                 )
             account_views.append(acc_view)
+            account_capabilities[acc.account_label] = acc_view.details.get(
+                "capabilities", {}
+            )
 
         if account_views:
             composite_view = aggregate_operational_views(
@@ -385,6 +428,9 @@ class OverviewQueries:
                 for d in composite_view.dimensions
             ],
             "details": composite_view.details,
+            # Per-account entry/exit capability: isolation must be visible in
+            # the payload, not only in the aggregate status.
+            "account_capabilities": account_capabilities,
         }
 
     async def readiness(self) -> SystemReadinessResponse:
@@ -611,6 +657,9 @@ class OverviewQueries:
                     account.runtime_observed_at = row.occurred_at
                 except (ValueError, KeyError, TypeError):
                     continue
+                observation = payload.get("order_observation")
+                if isinstance(observation, dict):
+                    account.runtime_order_observation = observation
 
         return LiveAccountsResponse(
             status=live_account_fleet_status(accounts),

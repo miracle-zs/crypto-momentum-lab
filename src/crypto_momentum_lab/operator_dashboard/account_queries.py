@@ -29,6 +29,7 @@ from crypto_momentum_lab.operator_dashboard.overview_queries import (
 from crypto_momentum_lab.operator_dashboard.schemas import (
     AccountOverviewResponse,
     LiveAccountSummaryResponse,
+    json_value,
 )
 from crypto_momentum_lab.operator_dashboard.status import OperationalStatus
 from crypto_momentum_lab.persistence.postgres.models import (
@@ -654,19 +655,7 @@ def _live_strategy_signal(row: LiveStrategySignalRow) -> dict[str, JsonValue]:
 
 
 def _json_mapping(value: dict[str, object]) -> dict[str, JsonValue]:
-    return {key: _json_value(item) for key, item in value.items()}
-
-
-def _json_value(value: object) -> JsonValue:
-    if isinstance(value, Decimal | datetime):
-        return str(value)
-    if isinstance(value, dict):
-        return {str(key): _json_value(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_json_value(item) for item in value]
-    if isinstance(value, str | int | float | bool) or value is None:
-        return value
-    return str(value)
+    return {key: json_value(item) for key, item in value.items()}
 
 
 __all__ = [
