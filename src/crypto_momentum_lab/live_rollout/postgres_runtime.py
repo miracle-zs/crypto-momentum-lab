@@ -848,7 +848,20 @@ class PostgresLiveContextProvider(LiveContextReader):
     ) -> _SymbolTradingRules:
         market_sessions = self._market_sessions
         loaded_rules = await _load_trading_rules(market_sessions, {symbol})
-        symbol_rules = loaded_rules[symbol]
+        symbol_rules = loaded_rules.get(symbol)
+        if symbol_rules is None:
+            log.warning(
+                "live_symbol_trading_rules_missing",
+                symbol=symbol,
+            )
+            symbol_rules = _SymbolTradingRules(
+                symbol=symbol,
+                tick_size=Decimal("0.00001"),
+                step_size=Decimal("1"),
+                min_quantity=Decimal("1"),
+                max_quantity=Decimal("1000000000"),
+                min_notional=Decimal("5"),
+            )
         self._cached_rules[symbol] = symbol_rules
         self._cached_rules_at[symbol] = now
         return symbol_rules

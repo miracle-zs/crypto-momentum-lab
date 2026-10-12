@@ -813,6 +813,32 @@ async def test_symbol_rules_use_the_market_session_factory(monkeypatch) -> None:
     assert seen == {"sessions": market_sessions, "symbols": {"BTCUSDT"}}
 
 
+async def test_symbol_rules_fallback_safely_when_unmapped(monkeypatch) -> None:
+    provider = PostgresLiveContextProvider(
+        session_factory=lambda: None,
+        account_label="primary",
+        run_id="test-run",
+        strategy_name="test-strategy",
+        strategy_config_hash="test-config",
+    )
+    provider._sessions = object()
+    provider._market_sessions = object()
+    provider._cached_rules = {}
+    provider._cached_rules_at = {}
+
+    async def load_trading_rules(sessions, symbols):
+        return {}
+
+    monkeypatch.setattr(
+        "crypto_momentum_lab.live_rollout.postgres_runtime._load_trading_rules",
+        load_trading_rules,
+    )
+
+    result = await provider._load_symbol_rules("1000BONKUSDC", NOW)
+    assert result.symbol == "1000BONKUSDC"
+    assert result.min_notional > 0
+
+
 async def test_symbol_rule_load_is_single_flight(monkeypatch) -> None:
     provider = PostgresLiveContextProvider(
         session_factory=lambda: None,
