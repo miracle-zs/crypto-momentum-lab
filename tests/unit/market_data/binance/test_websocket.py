@@ -1,6 +1,7 @@
 import asyncio
 import json
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
@@ -13,6 +14,60 @@ from crypto_momentum_lab.market_data.binance.websocket import (
     route_for,
 )
 from crypto_momentum_lab.market_data.capture.queue import CaptureQueueFull
+
+
+@pytest.mark.parametrize("prefix", ["symbol", "币" * 12])
+async def test_large_subscription_set_converges_with_bounded_acknowledged_controls(
+    prefix,
+):
+    names = tuple(f"{prefix}{i:04d}usdt@kline_15m" for i in range(924))
+    connection = BinanceWebSocketConnection(
+        base_url="wss://example.test/ws",
+        route=route_for(CaptureStream.KLINE_15M),
+        environment="test",
+        desired_names=names,
+        generation=1,
+        on_envelope=AsyncMock(),
+        on_lifecycle=AsyncMock(),
+        reconnect_delays=(0,),
+        connection_lifetime_seconds=60,
+        open_timeout_seconds=1,
+        ping_interval_seconds=20,
+        ping_timeout_seconds=20,
+        silence_timeout_seconds=60,
+    )
+    connection._control_interval_seconds = 0
+    socket = AsyncMock()
+    await connection._start_control(socket, "SUBSCRIBE", names, generation=1)
+    for _ in range(100):
+        pending = connection._pending_control
+        if pending is None:
+            break
+        payload = socket.send.call_args.args[0]
+        assert len(payload.encode("utf-8")) <= 4096
+        assert connection._resolve_control_ack(
+            {"id": pending.control_id, "result": None}
+        )
+        await connection._maybe_start_next_control(socket)
+    assert set(connection._applied_names) == set(names)
+    assert connection._pending_control is None
+
+    # A new desired set can arrive before the first unsubscribe ACK. The
+    # actor must converge to that set rather than finish a stale removal plan.
+    await connection.unsubscribe(names, generation=2)
+    await connection._maybe_start_next_control(socket)
+    await connection.subscribe(("btcusdt@kline_15m",), generation=3)
+    for _ in range(100):
+        pending = connection._pending_control
+        if pending is None:
+            break
+        assert len(socket.send.call_args.args[0].encode("utf-8")) <= 4096
+        assert connection._resolve_control_ack(
+            {"id": pending.control_id, "result": None}
+        )
+        await connection._maybe_start_next_control(socket)
+    assert connection._applied_names == ("btcusdt@kline_15m",)
+    assert connection._pending_control is None
 
 
 @pytest.mark.parametrize(

@@ -16,6 +16,23 @@ from crypto_momentum_lab.operator_dashboard.status import OperationalStatus
 NOW = datetime(2026, 9, 30, 2, tzinfo=UTC)
 
 
+async def test_running_process_with_exit_stream_outage_is_not_ready():
+    queries = Queries(strategy_state="active")
+    queries.account.runtime_observed_at = NOW
+    queries.account.runtime_tradeability = TradeabilityDetailResponse(
+        mode="RUNNING",
+        entry_gate_open=True,
+        entry_gate_reason="ready",
+        exit_gate_open=False,
+        exit_gate_reason="closed_candle_stream_unavailable",
+        unmanaged_risk_clear=True,
+        halt_active=False,
+    )
+    result = await queries.readiness()
+    assert result.status is OperationalStatus.DEGRADED
+    assert result.tradeability.exit_gate_reason == "closed_candle_stream_unavailable"
+
+
 @pytest.mark.parametrize("durable_halt", [False, True])
 async def test_action_halt_preserves_published_running_mode(durable_halt):
     queries = Queries(strategy_state="active")

@@ -53,6 +53,38 @@ def _scope() -> ExecutionScope:
     )
 
 
+async def test_committed_epoch_rollover_publishes_journal_with_reset_revision():
+    from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
+    from crypto_momentum_lab.domain.execution.position_book import PositionBook
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFactStreamScope,
+    )
+
+    book = ExecutionBook()
+    key = _scope().to_position_key()
+    old_scope = AccountFactStreamScope.for_position_key(
+        key, stream_id="account_event_hub", stream_epoch="old"
+    )
+    new_scope = replace(old_scope, stream_epoch="new")
+    book._journal_for_scope(key, old_scope)
+    book._head_revisions[key.canonical_id] = 10
+    book._journal_revisions[key.canonical_id] = 50
+    candidate = book._staged_copy(key)
+    journal = AccountJournal(key, stream_scope=new_scope)
+    candidate._journals[key.canonical_id] = journal
+    candidate._books[key.canonical_id] = PositionBook(journal)
+    candidate._stream_scopes[key.canonical_id] = new_scope
+    candidate._head_revisions[key.canonical_id] = 11
+    candidate._journal_revisions[key.canonical_id] = 1
+    book._publish_candidate(candidate, key)
+    # The next account/order observation must find the committed epoch's journal.
+    assert book._journal_for_scope(key, new_scope) is journal
+    assert book._journal_revisions[key.canonical_id] == 1
+    assert (
+        await book.read(_scope(), stream_id="account_event_hub", stream_epoch="new")
+    ).stream_scope == new_scope
+
+
 @pytest.mark.asyncio
 async def test_old_stream_snapshot_waits_without_copy_or_transaction() -> None:
     from crypto_momentum_lab.domain.execution.observation_models import (

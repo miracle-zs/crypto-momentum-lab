@@ -179,7 +179,10 @@ class BinanceWebSocketConnection:
             connection_attempts=self._connection_attempts,
             reconnect_count=self._reconnect_count,
             active=self._connection is not None,
-            ready=self._phase is _ConnectionPhase.READY,
+            ready=(
+                self._phase is _ConnectionPhase.READY
+                and self._applied_names == self._desired_names
+            ),
             ack_mismatch_count=self._ack_mismatch_count,
             control_commands_sent=self._control_commands_sent,
             received_messages=self._received_messages,
@@ -255,8 +258,10 @@ class BinanceWebSocketConnection:
                     # creating a reconnect storm that drops more events.
                     self._stopping = True
                 self._last_close_code = (
-                    error.rcvd.code if error.rcvd is not None else 1006
-                ) if isinstance(error, ConnectionClosed) else None
+                    (error.rcvd.code if error.rcvd is not None else 1006)
+                    if isinstance(error, ConnectionClosed)
+                    else None
+                )
                 log.warning(
                     "binance_websocket_session_ended",
                     group_id=self._group_id,
@@ -322,15 +327,19 @@ class BinanceWebSocketConnection:
         if self._task is not None:
             await self._task
 
-    def set_desired_subscriptions(self, names: tuple[str, ...], *, generation: int) -> None:
-        """Replace the local target on the owning event loop; control I/O stays in run()."""
+    def set_desired_subscriptions(
+        self, names: tuple[str, ...], *, generation: int
+    ) -> None:
+        """Replace the local target; the owning actor handles control I/O."""
         self._desired_names = tuple(sorted(set(names)))
         self._generation = generation
         self._desired_event.set()
 
     async def subscribe(self, names: tuple[str, ...], *, generation: int) -> None:
         if names:
-            self.set_desired_subscriptions((*self._desired_names, *names), generation=generation)
+            self.set_desired_subscriptions(
+                (*self._desired_names, *names), generation=generation
+            )
 
     async def unsubscribe(self, names: tuple[str, ...], *, generation: int) -> None:
         remove = set(names)
@@ -712,6 +721,23 @@ class BinanceWebSocketConnection:
             return
         if self._pending_control is not None:
             raise RuntimeError("a Binance control command is already pending")
+        # Acknowledge each bounded batch before sending the remainder. The
+        # actor recomputes the delta after every ACK, including desired changes.
+        batch: list[str] = []
+        for name in names[:100]:
+            payload = json.dumps(
+                {
+                    "method": method,
+                    "params": [*batch, name],
+                    "id": str(self._control_id + 1),
+                }
+            )
+            if len(payload.encode("utf-8")) > 4096:
+                break
+            batch.append(name)
+        if not batch:
+            raise ValueError("subscription name exceeds control payload budget")
+        names = tuple(batch)
         control_id = await self._send_control(connection, method, names)
         self._pending_control = _PendingControl(
             control_id=control_id,

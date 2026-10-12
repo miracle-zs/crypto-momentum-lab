@@ -471,7 +471,12 @@ class OverviewQueries:
                 else (
                     OperationalStatus.READY
                     if (
-                        entry_gate_open or any(item.mode == "RUNNING" for item in gates)
+                        exit_gate_open
+                        and streams_all_ready
+                        and (
+                            entry_gate_open
+                            or any(item.mode == "RUNNING" for item in gates)
+                        )
                     )
                     else OperationalStatus.DEGRADED
                 )

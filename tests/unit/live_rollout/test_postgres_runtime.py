@@ -813,7 +813,9 @@ async def test_symbol_rules_use_the_market_session_factory(monkeypatch) -> None:
     assert seen == {"sessions": market_sessions, "symbols": {"BTCUSDT"}}
 
 
-async def test_symbol_rules_fallback_safely_when_unmapped(monkeypatch) -> None:
+async def test_missing_symbol_rules_block_trading_and_are_negative_cached(
+    monkeypatch,
+) -> None:
     provider = PostgresLiveContextProvider(
         session_factory=lambda: None,
         account_label="primary",
@@ -826,7 +828,11 @@ async def test_symbol_rules_fallback_safely_when_unmapped(monkeypatch) -> None:
     provider._cached_rules = {}
     provider._cached_rules_at = {}
 
+    loads = 0
+
     async def load_trading_rules(sessions, symbols):
+        nonlocal loads
+        loads += 1
         return {}
 
     monkeypatch.setattr(
@@ -835,8 +841,15 @@ async def test_symbol_rules_fallback_safely_when_unmapped(monkeypatch) -> None:
     )
 
     result = await provider._load_symbol_rules("1000BONKUSDC", NOW)
-    assert result.symbol == "1000BONKUSDC"
-    assert result.min_notional > 0
+    assert result is None
+    assert not provider.is_symbol_rules_warmed("1000BONKUSDC")
+    assert await provider._load_symbol_rules("1000BONKUSDC", NOW) is None
+    assert loads == 1
+    assert (
+        await provider._load_symbol_rules("1000BONKUSDC", NOW + timedelta(seconds=301))
+        is None
+    )
+    assert loads == 2
 
 
 async def test_symbol_rule_load_is_single_flight(monkeypatch) -> None:
@@ -2198,8 +2211,7 @@ async def test_context_reads_request_repair_without_database_or_book_writes():
 
 
 @pytest.mark.asyncio
-async def test_zero_exposure_position_with_pending_credibility_classified_as_pending(
-) -> None:
+async def test_flat_snapshot_does_not_subscribe_historical_pending_scopes() -> None:
     from unittest.mock import AsyncMock
 
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
@@ -2255,7 +2267,62 @@ async def test_zero_exposure_position_with_pending_credibility_classified_as_pen
     result = await provider._with_execution_book(
         context, SimpleNamespace(bucket_end=NOW)
     )
-    assert "BTCUSDT" in result.pending_position_symbols
+    assert result.pending_position_symbols == frozenset()
+    provider._execution_book.list_position_views.assert_not_awaited()
+
+
+@pytest.mark.parametrize("has_exposure", [True, False])
+async def test_exit_scope_keeps_real_exposure_and_pending_orders_only(has_exposure):
+    from unittest.mock import AsyncMock
+
+    provider = PostgresLiveContextProvider(
+        session_factory=lambda: None,
+        account_label="primary",
+        run_id="run",
+        strategy_name="strategy",
+        strategy_config_hash="config",
+    )
+    book = SimpleNamespace(
+        context_revision=0, list_position_views=AsyncMock(return_value=())
+    )
+    provider._execution_book = book
+    provider._observe_book_drift = AsyncMock()
+    order = PersistedExchangeOrder(
+        plan=OrderExecutionPlan(
+            intent_id="entry",
+            run_id="run",
+            client_order_id="entry",
+            symbol="ETHUSDT",
+            side="BUY",
+            order_type="MARKET",
+            quantity=Decimal("1"),
+            price=None,
+            reduce_only=False,
+            created_at=NOW,
+        ),
+        state=ExchangeOrderState.SUBMITTED,
+        exchange_order_id=None,
+        updated_at=NOW,
+    )
+    context = replace(
+        _runtime_context(),
+        unresolved_orders=(order,),
+        open_position_symbols=frozenset({"BTCUSDT"}) if has_exposure else frozenset(),
+        account_snapshot=SimpleNamespace(
+            sequence=0,
+            positions=(
+                _position(position_amt=Decimal("1") if has_exposure else Decimal("0")),
+                _position(symbol="ZEROUSDT", position_amt=Decimal("0")),
+            ),
+        ),
+    )
+    await provider._with_execution_book(
+        context, SimpleNamespace(symbol="SOLUSDT", bucket_end=NOW)
+    )
+    expected = {"ETHUSDT", "BTCUSDT"} if has_exposure else {"ETHUSDT"}
+    book.list_position_views.assert_awaited_once_with(
+        environment="live", account_label="primary", symbols=frozenset(expected)
+    )
 
 
 @pytest.mark.asyncio

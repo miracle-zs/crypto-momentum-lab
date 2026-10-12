@@ -368,6 +368,14 @@ if ! flock -n 9; then
   exit 75
 fi
 
+# The retention service runs inside dashboard. Hold its existing lock until
+# deployment ends so a container replacement cannot kill an in-flight prune.
+exec 8>/run/lock/cml-position-recovery-retention.lock
+if ! flock -w 1200 8; then
+  echo "Refusing deployment: position recovery retention is still running" >&2
+  exit 75
+fi
+
 deploy_state_target=""
 deploy_state_checkout=""
 deploy_state_runtime=""

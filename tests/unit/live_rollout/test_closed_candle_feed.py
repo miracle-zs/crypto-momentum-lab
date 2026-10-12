@@ -21,6 +21,25 @@ from crypto_momentum_lab.live_rollout.closed_candle_feed import (
 RECEIVED_AT = datetime(2026, 8, 24, 14, 45, 0, 100000, tzinfo=UTC)
 
 
+def test_required_exit_symbols_need_acknowledged_live_connection():
+    from types import SimpleNamespace
+
+    feed = BinanceClosedCandle15mFeed(
+        config=ClosedCandle15mFeedConfig(websocket_url="wss://example.test/ws")
+    )
+    assert feed.connection_available
+    feed._symbols = frozenset({"BTCUSDT"})
+    assert not feed.connection_available
+    feed._connection = SimpleNamespace(
+        metrics_snapshot=lambda: SimpleNamespace(ready=False)
+    )
+    assert not feed.connection_available
+    feed._connection = SimpleNamespace(
+        metrics_snapshot=lambda: SimpleNamespace(ready=True)
+    )
+    assert feed.connection_available
+
+
 def _envelope(*, closed: bool = True) -> RawEnvelope:
     return RawEnvelope(
         schema_version=1,

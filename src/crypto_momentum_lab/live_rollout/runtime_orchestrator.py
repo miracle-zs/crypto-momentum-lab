@@ -721,9 +721,7 @@ async def run_live_daemon(
             cancel_order=execution_coordinator.cancel_order,
             terminal_barrier=terminal_barrier,
         )
-        ownership_registry.register(
-            "entry_order_lifecycle", entry_order_lifecycle.stop
-        )
+        ownership_registry.register("entry_order_lifecycle", entry_order_lifecycle.stop)
         order_event_runtime.set_terminal_barrier(terminal_barrier)
         order_event_runtime.set_entry_order_lifecycle(entry_order_lifecycle)
         await entry_order_lifecycle.restore(unresolved)
@@ -1380,14 +1378,23 @@ async def run_live_daemon(
                     ),
                 }
 
+            def runtime_is_degraded() -> bool:
+                exit_stream_available = (
+                    closed_candle_feed is None
+                    or closed_candle_feed.connection_available
+                )
+                live_readiness.update_exit_stream(available=exit_stream_available)
+                return (
+                    not exit_stream_available
+                    or market_task.done()
+                    or account_task.done()
+                    or (risk_control_task is not None and risk_control_task.done())
+                )
+
             health_monitor = LiveHealthMonitor(
                 health=health,
                 interval_seconds=_LIVE_STATUS_HEARTBEAT_INTERVAL_SECONDS,
-                is_degraded=lambda: (
-                    market_task.done()
-                    or account_task.done()
-                    or (risk_control_task is not None and risk_control_task.done())
-                ),
+                is_degraded=runtime_is_degraded,
                 resource_dimensions={
                     "account_label": account_label,
                     "run_id": session_id,

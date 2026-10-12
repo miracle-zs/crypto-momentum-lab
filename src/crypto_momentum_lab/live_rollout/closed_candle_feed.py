@@ -203,6 +203,13 @@ class BinanceClosedCandle15mFeed:
         return self._symbols
 
     @property
+    def connection_available(self) -> bool:
+        """No exposure needs a stream; required subscriptions must be ACKed."""
+        return not self._symbols or (
+            self._connection is not None and self._connection.metrics_snapshot().ready
+        )
+
+    @property
     def last_seen_start(self) -> dict[str, datetime]:
         return dict(self._last_seen_start)
 

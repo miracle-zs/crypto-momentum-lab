@@ -664,20 +664,22 @@ class ExecutionBook:
             cand_head = candidate._head_revisions.get(canon, 0)
             if cand_head < current_head:
                 continue
-            if canon in candidate._books:
-                self._books[canon] = candidate._books[canon]
             current_journal = self._journal_revisions.get(canon, 0)
             cand_journal = candidate._journal_revisions.get(canon, 0)
-            if cand_journal >= current_journal and canon in candidate._journals:
+            # Journal revisions are scoped to an epoch; a committed newer
+            # head may start a new journal at revision 1. Publish the journal,
+            # projection and scope together rather than retaining old facts.
+            if cand_head == current_head and cand_journal < current_journal:
+                continue
+            if canon in candidate._books:
+                self._books[canon] = candidate._books[canon]
+            if canon in candidate._journals:
                 self._journals[canon] = candidate._journals[canon]
             if canon in candidate._stream_scopes:
                 self._stream_scopes[canon] = candidate._stream_scopes[canon]
             if canon in candidate._head_revisions:
                 self._head_revisions[canon] = candidate._head_revisions[canon]
-            if (
-                cand_journal >= current_journal
-                and canon in candidate._journal_revisions
-            ):
+            if canon in candidate._journal_revisions:
                 self._journal_revisions[canon] = candidate._journal_revisions[canon]
             if canon in candidate._last_sequences:
                 self._last_sequences[canon] = candidate._last_sequences[canon]

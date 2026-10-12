@@ -185,8 +185,10 @@ def _evidence(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("parent_refreshes", [0, 5])
 async def test_nonzero_checkpoint_adoption_survives_restart_and_carries_batches(
     async_database_url: str,
+    parent_refreshes: int,
 ) -> None:
     engine = create_async_database_engine(async_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -257,6 +259,29 @@ async def test_nonzero_checkpoint_adoption_survives_restart_and_carries_batches(
             ),
             Applied,
         )
+        for refresh in range(parent_refreshes):
+            parent_at += timedelta(seconds=1)
+            proof = _coverage(
+                old_scope,
+                load_id=f"parent-refresh-{refresh}",
+                scan_origin=flat_at,
+                anchor_id=anchor_id,
+                anchor_cut=flat_at,
+                anchor_kind="zero_snapshot",
+                checked_through=parent_at,
+            )
+            refreshed = await book.observe(
+                _evidence(
+                    key,
+                    evidence_id=f"parent-refresh-{refresh}",
+                    scope=old_scope,
+                    at=parent_at,
+                    sequence=refresh + 3,
+                    snapshot=_snapshot(key, parent_at, "2", "100"),
+                    proof=proof,
+                )
+            )
+            assert isinstance(refreshed, Applied), refreshed
         original_parent = await book.load_recovery_checkpoint(old_scope)
         assert original_parent is not None
         assert original_parent.projection.total_active_quantity == Decimal("2")
@@ -297,7 +322,11 @@ async def test_nonzero_checkpoint_adoption_survives_restart_and_carries_batches(
             )
         )
         assert isinstance(result, Applied), result
-        adopted = await book.read(ExecutionScope("live", account, "BTCUSDT"))
+        adopted = await book.read(
+            ExecutionScope("live", account, "BTCUSDT"),
+            stream_id=new_scope.stream_id,
+            stream_epoch=new_scope.stream_epoch,
+        )
         assert adopted.total_quantity == Decimal("1.5")
         # The adopted suffix carries the parent batch identity forward; the SELL
         # observed together with the adoption moves the quantity, not the identity.

@@ -109,6 +109,7 @@ class LiveReadinessPublisher:
         self._last_published_market_bucket: datetime | None = None
         self._entry_enabled = False
         self._entry_enabled_reason = "initializing"
+        self._exit_stream_available = False
         self.publish()
 
     @property
@@ -207,6 +208,12 @@ class LiveReadinessPublisher:
 
         self.publish()
 
+    def update_exit_stream(self, *, available: bool) -> None:
+        """Publish required exit transport availability independently of entry."""
+        if self._exit_stream_available != available:
+            self._exit_stream_available = available
+            self.publish()
+
     def observe_market_state(
         self,
         state: MarketState15s,
@@ -280,8 +287,12 @@ class LiveReadinessPublisher:
                 "mode": "RUNNING",
                 "entry_gate_open": self._entry_enabled,
                 "entry_gate_reason": self._entry_enabled_reason,
-                "exit_gate_open": True,
-                "exit_gate_reason": "normal",
+                "exit_gate_open": self._exit_stream_available,
+                "exit_gate_reason": (
+                    "normal"
+                    if self._exit_stream_available
+                    else "closed_candle_stream_unavailable"
+                ),
                 "unmanaged_risk_clear": True,
                 "halt_active": False,
             },

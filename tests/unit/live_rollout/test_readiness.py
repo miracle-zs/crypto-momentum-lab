@@ -23,6 +23,25 @@ def _publisher(tmp_path):
     return health, publisher
 
 
+def test_exit_stream_outage_is_published_even_when_entry_is_enabled(tmp_path):
+    health, publisher = _publisher(tmp_path)
+    publisher.update_entry_gate(
+        entry_universe_count=2, entry_enabled=True, entry_enabled_reason="ready"
+    )
+    publisher.update_exit_stream(available=False)
+    payload = json.loads(health.readiness_path.read_text())
+    assert payload["tradeability"]["exit_gate_open"] is False
+    assert (
+        payload["tradeability"]["exit_gate_reason"]
+        == "closed_candle_stream_unavailable"
+    )
+    publisher.update_exit_stream(available=True)
+    assert (
+        json.loads(health.readiness_path.read_text())["tradeability"]["exit_gate_open"]
+        is True
+    )
+
+
 def test_readiness_publishes_warmup_and_entry_gate_state(tmp_path) -> None:
     health, publisher = _publisher(tmp_path)
     cutover = datetime(2026, 9, 12, 2, 0, tzinfo=UTC)

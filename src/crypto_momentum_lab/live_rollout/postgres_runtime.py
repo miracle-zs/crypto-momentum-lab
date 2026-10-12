@@ -172,7 +172,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         self._cache_epoch = 0
         self._last_book_drift_scan_at: datetime | None = None
         self._reported_stale_book_symbols: frozenset[str] | None = None
-        self._cached_rules: dict[str, _SymbolTradingRules] = {}
+        self._cached_rules: dict[str, _SymbolTradingRules | None] = {}
         self._cached_rules_at: dict[str, datetime] = {}
         self._context_load_lock = asyncio.Lock()
         self._rules_load_lock = asyncio.Lock()
@@ -189,7 +189,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         self._cached_book_revision: int | None = None
         self._rules_load_tasks: dict[
             str,
-            asyncio.Task[_SymbolTradingRules],
+            asyncio.Task[_SymbolTradingRules | None],
         ] = {}
 
     async def __call__(self, state: MarketState15s) -> LiveDaemonRuntimeContext:
@@ -227,7 +227,9 @@ class PostgresLiveContextProvider(LiveContextReader):
                     replace(
                         current_context,
                         now=now,
-                        trading_rules={state.symbol: symbol_rules},
+                        trading_rules={state.symbol: symbol_rules}
+                        if symbol_rules is not None
+                        else {},
                     ),
                     state,
                 )
@@ -270,7 +272,9 @@ class PostgresLiveContextProvider(LiveContextReader):
                         replace(
                             current_context,
                             now=now,
-                            trading_rules={state.symbol: symbol_rules},
+                            trading_rules={state.symbol: symbol_rules}
+                            if symbol_rules is not None
+                            else {},
                         ),
                         state,
                     )
@@ -296,9 +300,8 @@ class PostgresLiveContextProvider(LiveContextReader):
         if context.open_position_symbols is None:
             # Unknown account exposure cannot authorize exits or position repair.
             return replace(context, managed_positions=())
-        has_snapshot_positions = (
-            context.account_snapshot is not None
-            and bool(context.account_snapshot.positions)
+        has_snapshot_positions = context.account_snapshot is not None and any(
+            p.position_amt != 0 for p in context.account_snapshot.positions
         )
         if (
             context.open_position_symbols == frozenset()
@@ -308,7 +311,12 @@ class PostgresLiveContextProvider(LiveContextReader):
             # A confirmed flat account has no lots to allocate or exit. Reading
             # every historical Book scope at each market cut can replay hundreds
             # of journals even though none can represent current exposure.
-            return replace(context, managed_positions=())
+            return replace(
+                context,
+                managed_positions=(),
+                pending_position_symbols=frozenset(),
+                unmanaged_position_symbols=frozenset(),
+            )
         cached_bucket_end = self._cached_book_bucket_end
         cached_unresolved = self._cached_book_unresolved
         cached_result = self._cached_book_result
@@ -339,9 +347,12 @@ class PostgresLiveContextProvider(LiveContextReader):
         query_symbols: frozenset[str] | None = None
         if context.account_snapshot is not None:
             symbols_set = set(context.open_position_symbols)
-            symbols_set.update(p.symbol for p in context.account_snapshot.positions)
-            if hasattr(state, "symbol") and state.symbol:
-                symbols_set.add(state.symbol)
+            symbols_set.update(
+                p.symbol
+                for p in context.account_snapshot.positions
+                if p.position_amt != 0
+            )
+            symbols_set.update(order.plan.symbol for order in context.unresolved_orders)
             query_symbols = frozenset(symbols_set)
         views = await book.list_position_views(
             environment="live",
@@ -537,7 +548,9 @@ class PostgresLiveContextProvider(LiveContextReader):
                 return replace(
                     current_context,
                     now=now,
-                    trading_rules={state.symbol: symbol_rules},
+                    trading_rules={state.symbol: symbol_rules}
+                    if symbol_rules is not None
+                    else {},
                 )
             # An account event may invalidate the cache while symbol rules are
             # loading. Fall through and reload the full account/risk context;
@@ -629,7 +642,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         ) = unresolved_and_positions[1]
         coverage_by_symbol: Mapping[str, CoverageEvidence] = rest[0] if rest else {}
         unresolved = unresolved_and_positions[0]
-        rules = {state.symbol: symbol_rules}
+        rules = {state.symbol: symbol_rules} if symbol_rules is not None else {}
         unresolved_states = tuple(item.state for item in unresolved)
         gate_context = LiveGateContext(
             live_submit_enabled=True,
@@ -772,7 +785,7 @@ class PostgresLiveContextProvider(LiveContextReader):
 
     def is_symbol_rules_warmed(self, symbol: str) -> bool:
         """Return whether symbol trading rules are already cached."""
-        return symbol in self._cached_rules
+        return self._cached_rules.get(symbol) is not None
 
     async def warm_symbol_rules(
         self,
@@ -780,14 +793,20 @@ class PostgresLiveContextProvider(LiveContextReader):
         now: datetime,
     ) -> None:
         """Preload symbol trading rules in a single batch before market loop."""
-        missing = [s for s in symbols if s not in self._cached_rules]
+        missing = [
+            s
+            for s in symbols
+            if s not in self._cached_rules_at
+            or (now - self._cached_rules_at[s]).total_seconds()
+            >= self._TRADING_RULE_CACHE_SECONDS
+        ]
         if not missing:
             return
         market_sessions = self._market_sessions
         try:
             loaded_rules = await _load_trading_rules(market_sessions, set(missing))
-            for symbol, rules in loaded_rules.items():
-                self._cached_rules[symbol] = rules
+            for symbol in missing:
+                self._cached_rules[symbol] = loaded_rules.get(symbol)
                 self._cached_rules_at[symbol] = now
         except Exception as error:
             log.warning(
@@ -800,12 +819,11 @@ class PostgresLiveContextProvider(LiveContextReader):
         self,
         symbol: str,
         now: datetime,
-    ) -> _SymbolTradingRules:
+    ) -> _SymbolTradingRules | None:
         cached = self._cached_rules.get(symbol)
         cached_at = self._cached_rules_at.get(symbol)
         if (
-            cached is not None
-            and cached_at is not None
+            cached_at is not None
             and (now - cached_at).total_seconds() < self._TRADING_RULE_CACHE_SECONDS
         ):
             return cached
@@ -816,8 +834,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             cached = self._cached_rules.get(symbol)
             cached_at = self._cached_rules_at.get(symbol)
             if (
-                cached is not None
-                and cached_at is not None
+                cached_at is not None
                 and (now - cached_at).total_seconds() < self._TRADING_RULE_CACHE_SECONDS
             ):
                 return cached
@@ -845,7 +862,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         self,
         symbol: str,
         now: datetime,
-    ) -> _SymbolTradingRules:
+    ) -> _SymbolTradingRules | None:
         market_sessions = self._market_sessions
         loaded_rules = await _load_trading_rules(market_sessions, {symbol})
         symbol_rules = loaded_rules.get(symbol)
@@ -853,14 +870,6 @@ class PostgresLiveContextProvider(LiveContextReader):
             log.warning(
                 "live_symbol_trading_rules_missing",
                 symbol=symbol,
-            )
-            symbol_rules = _SymbolTradingRules(
-                symbol=symbol,
-                tick_size=Decimal("0.00001"),
-                step_size=Decimal("1"),
-                min_quantity=Decimal("1"),
-                max_quantity=Decimal("1000000000"),
-                min_notional=Decimal("5"),
             )
         self._cached_rules[symbol] = symbol_rules
         self._cached_rules_at[symbol] = now
