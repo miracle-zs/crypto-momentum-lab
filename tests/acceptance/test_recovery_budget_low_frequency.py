@@ -158,6 +158,7 @@ async def test_crossing_the_deadline_runs_one_more_bounded_pass() -> None:
     deadline is a full interval ahead instead.
     """
     clock = _Clock()
+    interval = 2.0
     spend_budget = asyncio.Event()
     calls = 0
 
@@ -176,7 +177,7 @@ async def test_crossing_the_deadline_runs_one_more_bounded_pass() -> None:
         ),
         run_id="run-1",
         max_order_lookups_per_pass=2,
-        interval_seconds=2.0,
+        interval_seconds=interval,
         time_source=clock,
     )
     task = asyncio.create_task(worker.run_requested())
@@ -203,15 +204,26 @@ async def test_crossing_the_deadline_runs_one_more_bounded_pass() -> None:
         assert next_in is not None, (
             "the responsibility and its next deadline must stay visible"
         )
-        assert 1.5 <= next_in <= 2.0, (
+        assert next_in == pytest.approx(interval, abs=0.5), (
             "the next deadline must be republished a full interval ahead, not "
             f"left at the expired one: {next_in}"
         )
         assert task.done() is False
 
-        # Before the republished deadline the worker must stay parked: a stale
-        # or zero deadline would show up here as extra lookups or a hot loop.
-        await asyncio.sleep(0.05)
+        # The worker is parked on its low-frequency deadline: no pending wake-up
+        # request remains, the deadline is still in the worker's future, and it
+        # is scheduled to fire later. This is the barrier -- no real sleep is
+        # used to let the worker "settle".
+        assert not worker._requested.is_set(), (
+            "a wake-up request is still pending, so the worker has not parked"
+        )
+        assert worker._retry_at["orders"] > clock.now
+        assert worker._requested_tasks == set()
+
+        # Draining the loop cannot add lookups while the deadline is in the
+        # future, so a hot loop or a stale deadline would show up as extra calls.
+        for _ in range(50):
+            await asyncio.sleep(0)
         assert calls == 4, (
             "the worker hot-looped instead of waiting for the new deadline: "
             f"{calls - 4} extra lookups"
