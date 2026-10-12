@@ -3,9 +3,17 @@
 Research and trading infrastructure for independent short-horizon momentum
 strategies on Binance USD-M perpetual futures.
 
-The [system guide](docs/architecture/overview.md) covers architecture, Hub data
-flow, core terms, and transaction rules. Task-specific operations and research
-guides are linked below.
+The [system guide](docs/architecture/overview.md) is the maintained reference for
+implemented architecture and trading contracts. Read this README and that guide
+first; load the operations, testing or research guide only for the task at hand.
+Do not load all documentation by default.
+
+The [architecture simplification report](docs/architecture/execution-simplification-report.md)
+is a proposal with dated evidence, not a description of completed changes or
+current server health. Read it only when evaluating or implementing simplification.
+Historical audits and task contracts are retained in Git history, not as current
+instructions. Code, runtime configuration and fresh server evidence determine
+implementation and live status; discrepancies require verification.
 
 ## Local Setup
 
@@ -84,7 +92,7 @@ and [the Live runbook](docs/runbooks/small-capital-live-session.md) for updates,
 
 ## Operations and Testing
 
-- [Alerts, incidents, and dashboard](docs/runbooks/operational-alert-monitor.md)
+- [Alerts and dashboard](docs/runbooks/operational-alert-monitor.md)
 - [PostgreSQL operations](docs/runbooks/postgres-operations.md)
 - [Behavior tests](docs/testing/behavior-tests.md)
 - [Script index](scripts/README.md)

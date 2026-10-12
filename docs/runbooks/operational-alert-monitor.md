@@ -1,6 +1,6 @@
-# 告警、事故与只读看板
+# 告警与只读看板
 
-核对日期：2026-10-09。监控不参与交易准入；自动定向重启仅用于已说明的心跳失效策略。数据库增长预算与恢复条件见[PostgreSQL 运维手册](postgres-operations.md)。
+操作说明基线：2026-10-09；文档整理：2026-10-12。不代表当前服务器状态；未提交实现仍需独立验收。监控不参与交易准入；自动定向重启仅用于已说明的心跳失效策略。数据库增长预算与恢复条件见[PostgreSQL 运维手册](postgres-operations.md)。
 
 The single-host deployment runs a small host-side monitor instead of adding a
 Prometheus stack to the trading machine. It samples Docker lifecycle/memory
@@ -186,6 +186,48 @@ Migration `20260911_0036` adds the standalone `occurred_at` index used by this
 time-bounded query; apply it to every configured observability database before
 enabling the endpoint in a deployment.
 
+### Entry/exit capability and observation backpressure
+
+`GET /api/health/operational` reports the account `executable_capability`
+dimension with entry and exit expressed separately, and repeats them per
+account under `account_capabilities`:
+
+```json
+{"entry": {"permitted": true, "state": "open", "reason": "ready"},
+ "exit": {"permitted": null, "state": "unknown", "reason": "runtime_readiness_missing_or_stale"}}
+```
+
+`state` is `open`, `blocked`, or `unknown`. A blocked entry degrades the
+dimension even when the exit is open (risk still reduces), and an unreported
+capability stays `unknown` instead of being read as open; the reason string
+names the missing evidence. `unknown` therefore means "no fresh runtime
+readiness was published for this account", not "flat".
+
+The runtime readiness snapshot also carries the order-observation queue:
+
+```json
+{"capacity": 256, "depth": 3, "high_watermark": 17, "overflow_count": 1,
+ "oldest_pending_age_seconds": 2.5}
+```
+
+The ops monitor turns these numbers into two alerts:
+
+* `live_order_observation_backpressure` — warning at 80% depth or a 30-second
+  oldest pending age, critical at full depth or 2 minutes.
+* `live_order_observation_overflow` — warning whenever the queue overflowed at
+  least once, because that already forced a command through recovery.
+
+Both read the freshest `runtime_readiness` event only (180-second window); a
+stale or absent snapshot produces no alert, so silence here is not proof of a
+small queue.
+
+Depth approaching capacity is backpressure, not an error. On overflow the
+result is never dropped: the command is marked recovery-required and the
+recovery callback runs, so `overflow_count` > 0 means "recovered, but the queue
+is too small for the current burst" — raise capacity or reduce the observation
+burst rather than ignoring it. The same numbers are visible per account as
+`runtime_order_observation` on `/api/live-accounts`.
+
 ### Verification
 
 Run the focused checks before a release:
@@ -253,20 +295,6 @@ a low-volume RiskControlHub notification. The `cancel-all-open-entries` and
 `request-flatten` CLI paths likewise write `live_rollback_commands` first and
 are executed by the live worker through its existing order/exit lanes.
 
-## 已确认故障与观测边界
+## 观测边界
 
-整理日期：2026-10-10。下表是历史问题和已固化的处理约束，不表示服务器当前状态。原始导出仍在被 Git 忽略的 `server_exports/` 和 `reports/` 本地目录。
-
-|时间|问题|处理约束|
-|---|---|---|
-|2026-09|批次重建与外部平仓使用不同事实切面|依据成交、订单和当前仓位重建，不猜测数量|
-|2026-09|重启期间旧 stream 与 sequence 接续造成重复恢复|以持久化事实和幂等订单身份恢复|
-|2026-10-01|零仓或覆盖证明缺失、订单回执接线不全|按原订单回执和明确事实核验，不由本地零仓推断完成|
-|2026-10-02|隐藏持有时限覆盖 K 线退出；外部成交与订单身份混淆|退出遵守显式 K 线和宽限规则；按账户、标的、方向隔离恢复|
-|2026-10-02|退出排队期间仓位改变；FILLED 暂无成交价|发送前按最新事实重评数量；保留预留并反查原订单，不用委托价结算|
-|2026-10-03|宽限预留恢复后不可见；旧快照晚落库|按已提交 client-order-id 恢复预留；按事件切点过滤旧快照|
-|2026-10-03|策略装配读取已删除字段，导致 POST 前拒单|运行配置和订单计划使用正式字段，并覆盖发单前回归|
-|2026-10-04|人工定向平仓被误认成自动宽限退出|分别记录人工操作、ACK 和实际成交|
-|2026-10-10|LUMIAUSDT 旧批次的 reduce-only 撤单预留仍作用于聚合仓位，阻塞宽限到期退出|先确认或撤销旧订单责任，再处理剩余数量；回归见 `test_grace_reservation_visibility.py`，修复提交 `b73da9a9`|
-
-局部函数基准不能代表端到端行情延迟或发单 RTT；重启后累计 CPU 也不能直接比较。没有新订单样本的观察，不能证明开仓、宽限平仓或未知订单恢复通过实盘验收。当前镜像、订单、仓位和性能须现场读取；测试与容器健康不替代线上核验。
+当前镜像、重启原因、订单、成交、持仓与告警须现场读取；测试通过与容器 healthy 不替代交易正确性。局部函数基准不能代表端到端延迟，没有新订单样本的窗口不证明完整开平仓通过。历史事故见 Git 历史，长期交易约束集中在[架构契约](../architecture/overview.md)，回归见[测试说明](../testing/behavior-tests.md)。

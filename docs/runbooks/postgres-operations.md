@@ -1,6 +1,6 @@
 # PostgreSQL 容量、连接、保留期与延迟
 
-内容整理至：2026-10-09。本文归纳连接预算、数据保留、归档和增长告警操作，不是线上状态报告。增长阈值以本手册为准，告警安装与通知流程见[告警手册](operational-alert-monitor.md)；执行前仍须核对目标服务器版本、配置和 dry-run 结果。历史删除量与参数试验不作为当前默认值。
+操作说明基线：2026-10-09；文档整理：2026-10-12。未提交实现说明仍需独立验收。本文归纳连接预算、数据保留、归档和增长告警操作，不是线上状态报告。增长阈值以本手册为准，告警安装与通知流程见[告警手册](operational-alert-monitor.md)；执行前仍须核对目标服务器版本、配置和 dry-run 结果。历史删除量与参数试验不作为当前默认值。
 
 ## 连接与观测
 
@@ -98,7 +98,7 @@ docker compose --env-file .env.server -f compose.server.yaml --profile maintenan
 
 [archive_and_trim.py](../../deploy/ops/archive_and_trim.py) 对将删除的范围归档并核对数量；仍需核对活动批次、未知订单、结算和恢复消费者水位。保留期不等于“交易事实超过一天即可删”。预建未来分区范围也不等于保留期。
 
-2026-09-25 旧 timer 曾删除 51356 条 account_position_snapshots 和 10105 条 exchange_order_events 后失败；随后观测为停止/禁用。该历史状态不证明 timer 此刻仍禁用。本轮未启用 timer 或删除数据。
+历史 timer 状态不能证明当前是否启用；执行前读取目标服务器的 unit、日志和 dry-run，不依据历史删除量判断清理成功。
 
 先只读核对调度及 dry-run：
 
@@ -244,6 +244,31 @@ systemctl status cml-position-recovery-retention.service --no-pager
 journalctl -u cml-position-recovery-retention.service -n 100 --no-pager
 ```
 
+### 单一持仓事实分歧定位（只读）
+
+当某个账户出现 `live_local_fact_inconsistency`（例如
+`live_local_fact_inconsistency:account-2:WUSDT`）时，先用只读诊断按该账户自己的
+证据定位第一个分歧，再决定是否修复。它只发 SELECT，不会写库、不会自动修复，也不会
+用其他账户的数量补齐。
+
+```bash
+docker exec crypto-momentum-lab-dashboard-1 \
+  python -m crypto_momentum_lab.tools.diagnose_position_divergence \
+  --account-label account-2 --symbol WUSDT --position-side BOTH
+```
+
+输出包含每个证据自己的切口时间（执行头 revision 与
+`journal_revision`、检查点 `event_cut`/`source_revision`、后缀已持久化修订数、
+订单累计成交量与最新时间、成交累计量与最新时间、最新账户快照与对账头
+`mismatch_count`），以及 `findings`：`no_execution_head_for_scope`、
+`head_has_no_bound_checkpoint`、`bound_checkpoint_row_missing`、
+`checkpoint_records_unresolved_conflicts`、`journal_suffix_incomplete`、
+`order_fact_newer_than_coverage`、`orders_vs_fills_mismatch`、
+`snapshot_vs_projection_mismatch`。
+
+`findings` 为空只表示这些来源彼此一致且被覆盖，不表示可以跳过对账；任何数量修正都
+必须以该账户的成交与快照为依据。
+
 ### 磁盘水位与数据库增速
 
 运维监控每分钟检查 `/var/lib/docker` 所在文件系统，使用率达到 75% 告警、85% 严重
@@ -294,9 +319,7 @@ python -m crypto_momentum_lab.tools.reproduce_decision <decision-id> \
 `effective_cutoff`、依赖原因及实际删除分区数。
 
 `market-data` 的 `CML_RETIRED_STRATEGY_RUN_IDS` 是操作员明确退役的完整 run ID
-列表，不支持通配符，不按检查点年龄或心跳自动退役。服务器 Compose 的名单记录了
-2026-10-07 已确认永久停用的 10 个旧 Paper 策略；它们的检查点保留用于审计，但不再
-阻塞行情清理。恢复这些 run ID 运行前必须先移除退役声明，不能承诺已回收行情仍可续跑。
+列表，不支持通配符，不按检查点年龄或心跳自动退役。名单以目标版本 Compose 为准；显式退役 run 的检查点保留用于审计，但不再阻塞行情清理。恢复这些 run ID 运行前必须先移除退役声明，不能承诺已回收行情仍可续跑。
 该名单不取消其他显式注册的恢复依赖，也不删除 Paper 历史持仓或订阅保护。
 
 当前持仓保护从账户 reconciliation head 获取持仓腿，再按账户、symbol 和
