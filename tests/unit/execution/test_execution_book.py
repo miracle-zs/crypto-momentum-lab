@@ -53,6 +53,40 @@ def _scope() -> ExecutionScope:
     )
 
 
+async def test_staged_recovery_reload_is_isolated_from_published_book():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from crypto_momentum_lab.domain.execution.ports import DurableExecutionPositionState
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFactStreamScope,
+    )
+    from crypto_momentum_lab.domain.execution.recovery_models import (
+        AccountFacts,
+        DurableJournalCut,
+    )
+
+    key = _scope().to_position_key()
+    scope = AccountFactStreamScope.for_position_key(
+        key, stream_id="hub", stream_epoch="new"
+    )
+    cut = DurableJournalCut(
+        scope=scope,
+        facts=AccountFacts(position_key=key, stream_scope=scope),
+        revision=1,
+        as_of=_dt(10, 0),
+    )
+    durable = DurableExecutionPositionState(scope, cut, None, (), (), ())
+    uow = SimpleNamespace(load_position=AsyncMock(return_value=durable))
+    book = ExecutionBook(execution_unit_of_work=uow)
+    candidate = book._staged_copy(key)
+    view = await candidate.reload_position(key, as_of=_dt(10, 0))
+    assert view is not None
+    assert key.canonical_id not in book._books
+    assert key.canonical_id not in book._stream_scopes
+    assert candidate._stream_scopes[key.canonical_id] == scope
+
+
 async def test_committed_epoch_rollover_publishes_journal_with_reset_revision():
     from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
     from crypto_momentum_lab.domain.execution.position_book import PositionBook

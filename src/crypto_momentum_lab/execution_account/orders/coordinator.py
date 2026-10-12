@@ -919,12 +919,7 @@ class OrderExecutionCoordinator:
                 f"{plan.client_order_id}: {result.reason}"
             ) from cause
         if isinstance(result, StaleView):
-            error_type = (
-                OrderProjectionConflictError
-                if plan.reduce_only
-                else OrderPreSubmissionError
-            )
-            raise error_type(
+            raise OrderProjectionConflictError(
                 "Failed to create position reservation (stale view) for "
                 f"{plan.client_order_id}: {result.reason}"
             )

@@ -293,6 +293,20 @@ async def test_nonzero_checkpoint_adoption_survives_restart_and_carries_batches(
         parent = await book.load_recovery_checkpoint(old_scope)
         assert parent == original_parent
 
+        # Reloading a staged transaction from PostgreSQL must not replace the
+        # published parent projection before the transaction commits.
+        published_book = book._books[key.canonical_id]
+        published_journal = book._journals[key.canonical_id]
+        published_heads = dict(book._head_revisions)
+        staged = book._staged_copy(key)
+        staged_view = await staged.reload_position(key)
+        assert staged_view is not None
+        assert staged_view.total_quantity == Decimal("2")
+        assert book._books[key.canonical_id] is published_book
+        assert book._journals[key.canonical_id] is published_journal
+        assert book._head_revisions == published_heads
+        assert staged._journals[key.canonical_id] is not published_journal
+
         target_coverage = _coverage(
             new_scope,
             load_id="new-stream-scan",

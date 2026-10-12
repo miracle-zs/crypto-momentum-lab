@@ -42,6 +42,33 @@ from tests.unit.live_rollout.test_daemon import _runtime_context
 NOW = datetime(2026, 7, 4, 0, 0, 20, tzinfo=UTC)
 
 
+async def test_stale_entry_projection_does_not_post_or_crash():
+    from crypto_momentum_lab.domain.execution.execution_action_models import StaleView
+    from crypto_momentum_lab.execution_account.orders.coordinator import (
+        OrderExecutionCoordinator,
+    )
+
+    class StaleCoordinator(RecordingCoordinator):
+        async def prepare_and_execute(self, plan, *, preparation):
+            self.events.append("guard")
+            OrderExecutionCoordinator._require_accepted_execution_result(
+                plan, StaleView("old", "new", "projection advanced")
+            )
+
+    repository = RecordingPreparedRepository()
+    coordinator = StaleCoordinator()
+    submission = _submission(repository=repository, state_machine=coordinator)
+    result = await submission.execute(
+        replace(_intent(), desired_notional=Decimal("20")),
+        requested_quantity=None,
+        state=_state(),
+        context=_runtime_context(),
+    )
+    assert result is None
+    assert coordinator.events == ["guard"]
+    assert repository.prepare_calls == []
+
+
 class RecordingPreparedRepository:
     def __init__(self) -> None:
         self.prepare_calls: list[dict[str, Any]] = []

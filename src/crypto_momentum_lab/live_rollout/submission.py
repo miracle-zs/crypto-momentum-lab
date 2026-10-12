@@ -38,6 +38,7 @@ from crypto_momentum_lab.domain.execution.order_state import (
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
+    OrderProjectionConflictError,
     OrderSubmissionPreparation,
 )
 from crypto_momentum_lab.domain.execution.position_batches import (
@@ -485,10 +486,20 @@ class LiveCandidateSubmission:
                 lane=lane,
                 evaluation_id=evaluation.evaluation_id,
             )
-        result = await self._state_machine.prepare_and_execute(
-            plan,
-            preparation=preparation,
-        )
+        try:
+            result = await self._state_machine.prepare_and_execute(
+                plan,
+                preparation=preparation,
+            )
+        except OrderProjectionConflictError:
+            if executable_candidate.reduce_only:
+                raise
+            log.info(
+                "live_entry_projection_refresh_required",
+                symbol=plan.symbol,
+                candidate_id=executable_candidate.candidate_id,
+            )
+            return None
         if result is None:
             log.info(
                 "live_submission_suppressed",
@@ -512,10 +523,7 @@ class LiveCandidateSubmission:
             )
             is_terminal = False
             check_failed = False
-            if (
-                barrier is not None
-                and not barrier.is_terminal(plan.client_order_id)
-            ):
+            if barrier is not None and not barrier.is_terminal(plan.client_order_id):
                 try:
                     # This identity just went to the exchange: read through the
                     # negative cache so an earlier "not terminal" verdict cannot

@@ -532,21 +532,18 @@ async def observe_evidence_transaction(
                 )
                 candidate._active_transaction = None
 
-            # Phase 3: Short lock for candidate publication & validation
-            needs_retry = False
+            # The evidence is already committed; publication must not replay it.
             async with book._mutation_lock(key):
-                current_head_rev = book._head_revisions.get(canon, 0)
-                if current_head_rev != snapshot_head_revision:
-                    needs_retry = True
-                else:
-                    book._publish_candidate(candidate, key=key)
-            if needs_retry:
-                if obs_attempt < 2:
-                    await book.reload_position(key)
-                    continue
-                raise RuntimeError(
-                    "execution head changed concurrently; restore required"
+                book._publish_candidate(candidate, key=key)
+                token = (
+                    book._ensure_book(key)
+                    .get_view(now=evidence.observed_at)
+                    .projection_version
                 )
+                if isinstance(result, Applied):
+                    result = replace(result, updated_view_token=token)
+                elif isinstance(result, Duplicate):
+                    result = replace(result, view_token=token)
             return result
         except AbortObservation as abort:
             return abort.result

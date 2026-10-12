@@ -186,7 +186,6 @@ async def test_action_transaction_blocked_when_head_revision_advances_during_io(
     from decimal import Decimal
 
     from crypto_momentum_lab.domain.execution.execution_action_models import (
-        Blocked,
         ExecutionRequest,
         TradeCommandType,
     )
@@ -259,21 +258,25 @@ async def test_action_transaction_blocked_when_head_revision_advances_during_io(
         side=StrategySide.LONG,
     )
 
-    result = await book.act(req)
+    from crypto_momentum_lab.domain.execution.order_submission import (
+        OrderProjectionConflictError,
+    )
 
-    # Invariant: Must return Blocked and must not overwrite head revision 5 with 1
-    assert isinstance(result, Blocked)
-    assert book._persistence_failed is True
+    with pytest.raises(OrderProjectionConflictError):
+        await book.act(req)
+
+    assert book._persistence_failed is False
     assert book._head_revisions[canon] == 5
+    assert book.get_outbox("entry-race-1") is None
 
 
 @pytest.mark.asyncio
-async def test_action_transaction_outbox_converges_to_rejected_on_post_commit_race():
+async def test_action_transaction_preserves_acceptance_on_post_commit_race():
     from decimal import Decimal
 
     from crypto_momentum_lab.domain.execution.command_models import DispatchState
     from crypto_momentum_lab.domain.execution.execution_action_models import (
-        Blocked,
+        Accepted,
         ExecutionRequest,
         TradeCommandType,
     )
@@ -377,19 +380,13 @@ async def test_action_transaction_outbox_converges_to_rejected_on_post_commit_ra
 
     result = await book.act(req)
 
-    assert isinstance(result, Blocked)
-    assert book._persistence_failed is True
-    # Invariant: Head revision must remain 5, not regressed to 1
+    assert isinstance(result, Accepted)
+    assert book._persistence_failed is False
     assert book._head_revisions[canon] == 5
-    # Invariant: Outbox must track the command and converge to REJECTED, not dangling
     outbox_entry = book.get_outbox("entry-race-post-commit")
     assert outbox_entry is not None
-    assert outbox_entry.state == DispatchState.REJECTED
-    # Invariant: Durable order record in database is marked REJECTED
-    assert any(
-        cid == "entry-race-post-commit"
-        for cid, _ in uow.tx.marked_rejected_orders
-    )
+    assert outbox_entry.state == DispatchState.PREPARED
+    assert uow.tx.marked_rejected_orders == []
 
 
 @pytest.mark.asyncio

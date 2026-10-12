@@ -260,7 +260,16 @@ class ExecutionBook:
             ),
             recovery_required_commands=self._recovery_required_commands,
         )
-        self._recovery_state = ExecutionRecoveryState(
+
+    @property
+    def context_revision(self) -> int:
+        """Published facts/commands generation used by operational read caches."""
+        return self._context_revision
+
+    @property
+    def recovery_state(self) -> ExecutionRecoveryState:
+        """Bind recovery to this instance's current transactional state."""
+        return ExecutionRecoveryState(
             books=self._books,
             journals=self._journals,
             stream_scopes=self._stream_scopes,
@@ -281,16 +290,6 @@ class ExecutionBook:
             ),
             coordinator=self._coordinator,
         )
-
-    @property
-    def context_revision(self) -> int:
-        """Published facts/commands generation used by operational read caches."""
-        return self._context_revision
-
-    @property
-    def recovery_state(self) -> ExecutionRecoveryState:
-        """State consumed by the recovery module during startup only."""
-        return self._recovery_state
 
     @property
     def evidence_state(self) -> EvidenceState:
@@ -516,7 +515,7 @@ class ExecutionBook:
         return cast(
             PositionView | None,
             apply_loaded_execution_position(
-                self._recovery_state,
+                self.recovery_state,
                 ReloadDependencies(
                     load_position=getattr(
                         self._execution_unit_of_work, "load_position", None
@@ -1471,12 +1470,10 @@ class ExecutionBook:
 
             # Phase 3: Short lock for candidate publication & validation
             async with self._mutation_lock(key):
-                if self._head_revisions.get(canon, 0) != base_head_revision:
-                    raise RuntimeError(
-                        "durable execution head changed concurrently; restore required"
-                    )
+                # The transaction has committed. A newer publication is not a
+                # rollback: merge monotonically and preserve any terminal winner.
                 self._publish_candidate(candidate, key=key)
-            return result
+                return self._outbox_by_command_id.get(command_id, result)
         except Exception:
             self._persistence_failed = True
             raise

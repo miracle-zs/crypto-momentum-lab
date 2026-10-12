@@ -42,6 +42,88 @@ from tests.fixtures.prepared_submission import submit_prepared
 NOW = datetime(2026, 7, 4, 0, 0, 20, tzinfo=UTC)
 
 
+async def test_durable_stale_projection_guard_defers_exit_without_crashing():
+    from contextlib import asynccontextmanager
+    from unittest.mock import AsyncMock
+
+    from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
+    from crypto_momentum_lab.domain.execution.execution_book import (
+        ExecutionBook,
+        ExecutionRequest,
+    )
+    from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
+    from crypto_momentum_lab.domain.execution.ports import ExecutionHeadSnapshot
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFactStreamScope,
+    )
+    from crypto_momentum_lab.domain.execution.trade_command import TradeCommandType
+    from crypto_momentum_lab.execution_account.orders.coordinator import (
+        OrderExecutionCoordinator,
+    )
+
+    plan = OrderExecutionPlan(
+        "exit",
+        "run",
+        "exit",
+        "BTCUSDT",
+        "SELL",
+        "MARKET",
+        Decimal("0.001"),
+        None,
+        True,
+        NOW,
+    )
+    scope = ExecutionScope("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
+    key = scope.to_position_key()
+    stream = AccountFactStreamScope.for_position_key(
+        key, stream_id="hub", stream_epoch="epoch"
+    )
+    tx = SimpleNamespace(
+        load_head=AsyncMock(
+            return_value=ExecutionHeadSnapshot(
+                2, "hub", "epoch", "pv-new", {"active_reservation_ids": []}
+            )
+        )
+    )
+
+    class Uow:
+        @asynccontextmanager
+        async def transaction(self, *args, **kwargs):
+            yield tx
+
+    book = ExecutionBook(execution_unit_of_work=Uow())
+    book._persistence_failed = False
+    book._journal_for_scope(key, stream)
+    book._head_revisions[key.canonical_id] = 1
+    view = await book.read(scope)
+    execution_request = ExecutionRequest(
+        request_id="exit",
+        scope=scope,
+        strategy_name="strategy",
+        run_id="run",
+        decision_ref="decision",
+        expected_view_token=view.projection_version,
+        action=TradeCommandType.EXIT,
+        requested_quantity=Decimal("0.001"),
+        side=StrategySide.LONG,
+    )
+
+    class StaleSubmission:
+        async def execute(self, *args, **kwargs):
+            OrderExecutionCoordinator._require_accepted_execution_result(
+                plan, await book.act(execution_request)
+            )
+
+    processor = _processor(StaleSubmission())
+    request = LiveExitOrderRequest(
+        candidate=replace(_intent(), reduce_only=True), quantity=Decimal("0.001")
+    )
+    result = await processor.process_requests(
+        (request,), state=_state(), context=_context()
+    )
+    assert result == (0, 0, "pending_live_context:BTCUSDT")
+
+
 async def test_exit_recovery_keeps_inspecting_after_previous_replacement_attempts():
     from unittest.mock import AsyncMock
 

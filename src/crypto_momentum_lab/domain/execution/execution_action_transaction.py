@@ -18,6 +18,7 @@ from crypto_momentum_lab.domain.execution.execution_action_models import (
     Blocked,
     ExecutionActResult,
     ExecutionRequest,
+    StaleView,
 )
 from crypto_momentum_lab.domain.execution.execution_head import (
     build_execution_head_payload,
@@ -75,9 +76,7 @@ async def accept_action_transaction(
 
     # Phase 2: Lock-free durable I/O and CAS commit (I2: never hold locks across I/O)
     try:
-        account_scope = (
-            f"{key.environment}:{key.account_label}:{request.strategy_name}"
-        )
+        account_scope = f"{key.environment}:{key.account_label}:{request.strategy_name}"
         async with book._execution_unit_of_work.transaction(
             key, account_scope=account_scope
         ) as tx:
@@ -109,15 +108,19 @@ async def accept_action_transaction(
                         )
                 else:
                     if base_head_revision != head.revision:
-                        return Blocked(
-                            reason="Position projection is stale; reload durable facts"
+                        return StaleView(
+                            expected_token=request.expected_view_token,
+                            current_token=head.projection_version,
+                            reason="Position projection is stale; reload durable facts",
                         )
                     if current_view.projection_version != head.projection_version:
-                        return Blocked(
+                        return StaleView(
+                            expected_token=request.expected_view_token,
+                            current_token=head.projection_version,
                             reason=(
                                 "Position projection differs from its "
                                 "durable head; reload before trading"
-                            )
+                            ),
                         )
             candidate._active_transaction = tx
             result = await candidate._act_mutating(request)
@@ -188,32 +191,16 @@ async def accept_action_transaction(
             candidate._head_revisions[canon] = next_revision
             current_head_revision = book._head_revisions.get(canon, 0)
             if current_head_revision != base_head_revision:
-                raise RuntimeError(
-                    "durable execution head changed concurrently; aborting transaction"
+                raise OrderProjectionConflictError(
+                    "position projection advanced before acceptance commit"
                 )
         candidate._active_transaction = None
 
         # Phase 3: Short lock for candidate publication & validation
-        conflict = False
         async with book._mutation_lock(key):
-            current_head_revision = book._head_revisions.get(canon, 0)
-            conflict = current_head_revision != base_head_revision
-            # Always publish candidate into book so outbox and reservations
-            # are tracked.
-            # _publish_candidate guards against regressing newer position facts
-            # if cand_head < current_head.
+            # A committed acceptance owns its identity and reservations. A
+            # later publication cannot retroactively turn it into a rejection.
             book._publish_candidate(candidate, key=key)
-
-        if conflict:
-            book._persistence_failed = True
-            await book.mark_rejected(
-                request.request_id,
-                reason="durable execution head changed concurrently; action aborted",
-                intent_id=request.intent_id,
-            )
-            return Blocked(
-                reason="durable execution head changed concurrently; restore required"
-            )
         return result
     except (OrderPreSubmissionError, OrderProjectionConflictError):
         raise
