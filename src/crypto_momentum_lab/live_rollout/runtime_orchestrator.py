@@ -7,7 +7,7 @@ module owns the runtime assembly and lifecycle of one live daemon.
 import asyncio
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -251,6 +251,26 @@ from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
 from crypto_momentum_lab.strategies.registry import build_runtime_strategy
 
 log = structlog.get_logger()
+
+
+def _order_observation_payload(
+    coordinator: OrderExecutionCoordinator,
+) -> Callable[[], Mapping[str, object]]:
+    """Publish the observation queue as a JSON-safe mapping."""
+
+    def _payload() -> Mapping[str, object]:
+        metrics = coordinator.order_observation_metrics
+        return {
+            "capacity": metrics.capacity,
+            "depth": metrics.depth,
+            "high_watermark": metrics.high_watermark,
+            "overflow_count": metrics.overflow_count,
+            "enqueued_count": metrics.enqueued_count,
+            "dequeued_count": metrics.dequeued_count,
+            "oldest_pending_age_seconds": metrics.oldest_pending_age_seconds,
+        }
+
+    return _payload
 
 
 async def run_live_daemon(
@@ -764,6 +784,13 @@ async def run_live_daemon(
             strategy=strategy_name,
             entry_universe_target_count=entry_positive_gainer_top_count,
             warmup_required_buckets=int(required_data().warmup_buckets),
+            # Queue depth and oldest pending age belong next to the gates they
+            # affect, so operators see backpressure before it overflows.
+            order_observation_metrics=(
+                None
+                if execution_coordinator is None
+                else _order_observation_payload(execution_coordinator)
+            ),
         )
         checkpoint = await checkpoint_repository.load_checkpoint(session_id)
         requires_market_recovery = checkpoint is not None and (
@@ -926,6 +953,10 @@ async def run_live_daemon(
             context_is_current=(lambda context: context_provider.is_current(context)),
             invalidate_context=invalidate_repaired_context,
             request_recovery=order_reconciliation.request_position_recovery,
+            # One backoff, owned by the recovery worker: an unchanged
+            # divergence waits for its retry deadline instead of re-running on
+            # every account cut.
+            retry_interval_seconds=order_reconciliation.interval_seconds,
         )
         order_reconciliation.repair_positions = position_repair.repair_pending
         context_provider = PostgresLiveContextProvider(

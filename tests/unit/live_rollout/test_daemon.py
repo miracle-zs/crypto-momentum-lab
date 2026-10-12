@@ -31,6 +31,7 @@ from crypto_momentum_lab.domain.execution.order_state import (
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
+    OrderRejectionOutcome,
     PreparedOrderSubmission,
 )
 from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
@@ -1889,8 +1890,8 @@ class FakeLiveRepository:
         reason: str,
         occurred_at: datetime | None = None,
         intent_id: str | None = None,
-    ) -> bool:
-        return True
+    ) -> OrderRejectionOutcome:
+        return OrderRejectionOutcome.REJECTED
 
     async def save_checkpoint(
         self,

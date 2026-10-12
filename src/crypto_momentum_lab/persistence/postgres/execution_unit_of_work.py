@@ -15,6 +15,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.execution.evidence_digest import trade_payload_digest
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
+from crypto_momentum_lab.domain.execution.order_submission import (
+    OrderRejectionOutcome,
+)
 from crypto_momentum_lab.domain.execution.ports import (
     DecisionCommitConflict as _DecisionCommitConflict,
 )
@@ -200,7 +203,7 @@ class ExecutionTransaction:
         reason: str,
         occurred_at: datetime | None = None,
         intent_id: str | None = None,
-    ) -> bool:
+    ) -> OrderRejectionOutcome:
         return await execute_order_rejection_cascade(
             self.session,
             client_order_id,

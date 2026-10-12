@@ -21,6 +21,7 @@ from crypto_momentum_lab.domain.execution.order_state import (
 from crypto_momentum_lab.domain.execution.order_submission import (
     OrderAlreadyPreparedError,
     OrderPreSubmissionError,
+    OrderRejectionOutcome,
     PreparedOrderSubmission,
 )
 from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation
@@ -471,7 +472,7 @@ class PostgresOrderSubmissionRepository:
         reason: str,
         occurred_at: datetime | None = None,
         intent_id: str | None = None,
-    ) -> bool:
+    ) -> OrderRejectionOutcome:
         async with self._session_factory() as session:
             async with session.begin():
                 return await execute_order_rejection_cascade(

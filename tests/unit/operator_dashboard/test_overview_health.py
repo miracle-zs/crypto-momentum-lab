@@ -379,3 +379,168 @@ async def test_running_tradeability_requires_verified_facts(fact_status, expecte
     assert readiness.tradeability.mode == "RUNNING"
     assert readiness.tradeability.entry_gate_open is True
     assert readiness.tradeability.entry_gate_reason == "live_entry_prerequisites_ready"
+
+
+async def _health_with_gates(entry_open: bool, exit_open: bool, reason: str = "gate"):
+    queries = Queries(strategy_state="active")
+    queries.account.runtime_observed_at = NOW
+    queries.account.runtime_tradeability = TradeabilityDetailResponse(
+        mode="RUNNING",
+        entry_gate_open=entry_open,
+        entry_gate_reason="ready" if entry_open else reason,
+        exit_gate_open=exit_open,
+        exit_gate_reason="normal" if exit_open else reason,
+        unmanaged_risk_clear=True,
+        halt_active=False,
+    )
+    view = await queries.operational_health()
+    return view, view["account_capabilities"]["primary"]
+
+
+async def test_exit_outage_degrades_the_health_dimension_by_name():
+    """An exit-only outage was previously invisible in the health dimension."""
+    view, capability = await _health_with_gates(
+        entry_open=True, exit_open=False, reason="exit_blocked"
+    )
+    dimension = next(
+        d for d in view["dimensions"] if d["name"] == "executable_capability"
+    )
+
+    assert dimension["status"] == "degraded"
+    assert "exit_blocked" in dimension["details"]
+    assert capability["entry"] == {
+        "permitted": True,
+        "state": "open",
+        "reason": "ready",
+    }
+    assert capability["exit"]["permitted"] is False
+    assert capability["exit"]["reason"] == "exit_blocked"
+
+
+async def test_blocked_entry_does_not_hide_an_open_exit():
+    view, capability = await _health_with_gates(
+        entry_open=False, exit_open=True, reason="entry_blocked"
+    )
+
+    assert view["overall_status"] == "degraded"
+    assert capability["entry"]["permitted"] is False
+    assert capability["exit"] == {
+        "permitted": True,
+        "state": "open",
+        "reason": "normal",
+    }
+
+
+async def test_unreported_capability_is_not_read_as_open():
+    """A stale/absent runtime gate must stay UNKNOWN, with the reason named."""
+    queries = Queries(strategy_state="active")
+    queries.account.runtime_observed_at = None
+    queries.account.runtime_tradeability = None
+    view = await queries.operational_health()
+    dimension = next(
+        d for d in view["dimensions"] if d["name"] == "executable_capability"
+    )
+
+    assert "runtime_readiness_missing_or_stale" in dimension["details"]
+    assert view["account_capabilities"]["primary"]["exit"]["state"] == "unknown"
+    assert (
+        view["account_capabilities"]["primary"]["exit"]["permitted"] is None
+    )
+    assert view["overall_status"] in ("degraded", "unknown")
+
+
+async def test_capability_reasons_are_isolated_per_account():
+    queries = Queries(strategy_state="active")
+    queries.account.runtime_observed_at = NOW
+    queries.account.runtime_tradeability = TradeabilityDetailResponse(
+        mode="RUNNING",
+        entry_gate_open=False,
+        entry_gate_reason="settlement_pressure",
+        exit_gate_open=True,
+        exit_gate_reason="normal",
+        unmanaged_risk_clear=True,
+        halt_active=False,
+    )
+    other = queries.account.model_copy(deep=True)
+    other.account_label = "account-2"
+    other.runtime_tradeability.entry_gate_open = True
+    other.runtime_tradeability.entry_gate_reason = "ready"
+
+    async def accounts():
+        return LiveAccountsResponse(
+            status=OperationalStatus.READY, accounts=[queries.account, other]
+        )
+
+    queries.live_accounts = accounts
+    view = await queries.operational_health()
+    capabilities = view["account_capabilities"]
+
+    assert set(capabilities) == {"primary", "account-2"}
+    assert capabilities["primary"]["entry"]["reason"] == "settlement_pressure"
+    assert capabilities["primary"]["entry"]["permitted"] is False
+    assert capabilities["account-2"]["entry"]["permitted"] is True
+    assert capabilities["account-2"]["exit"]["permitted"] is True
+
+
+async def test_live_accounts_expose_order_observation_backpressure():
+    payload = {
+        "schema_version": 1,
+        "account_label": "primary",
+        "code_commit": "commit",
+        "session_id": "run",
+        "tradeability": {
+            "mode": "RUNNING",
+            "entry_gate_open": False,
+            "entry_gate_reason": "settlement_pressure",
+            "exit_gate_open": True,
+            "exit_gate_reason": "normal",
+            "unmanaged_risk_clear": True,
+            "halt_active": False,
+        },
+        "order_observation": {
+            "capacity": 256,
+            "depth": 4,
+            "high_watermark": 19,
+            "overflow_count": 2,
+            "oldest_pending_age_seconds": 1.25,
+        },
+    }
+    process = SimpleNamespace(
+        account_label="primary",
+        environment="live",
+        state="ready_readonly",
+        occurred_at=NOW,
+    )
+    strategy = SimpleNamespace(
+        account_label="primary",
+        strategy_name="strategy",
+        state="active",
+        changed_at=NOW,
+    )
+    lease = SimpleNamespace(
+        account_label="primary",
+        strategy_name="strategy",
+        expires_at=NOW + timedelta(minutes=5),
+        code_generation="commit",
+    )
+    data = iter(([process], [strategy], [lease]))
+
+    class DataSession(Session):
+        async def scalars(self, statement):
+            rows = next(data)
+            return SimpleNamespace(all=lambda: rows)
+
+        async def scalar(self, statement):
+            return SimpleNamespace(details=payload, run_id="run", occurred_at=NOW)
+
+    queries = OverviewQueries(
+        DataSession,
+        clock=lambda: NOW,
+        stale_after_seconds=180,
+        research_collector_root="/nonexistent",
+    )
+    result = await queries.live_accounts()
+    account = result.accounts[0]
+
+    assert account.runtime_order_observation == payload["order_observation"]
+    assert account.runtime_tradeability.entry_gate_reason == "settlement_pressure"

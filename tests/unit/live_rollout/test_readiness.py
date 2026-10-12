@@ -245,3 +245,56 @@ def test_failed_telemetry_sink_does_not_prevent_local_readiness(tmp_path):
     publisher._on_publish = fail
     publisher.publish()
     assert (tmp_path / "health" / "readiness").exists()
+
+
+def test_readiness_publishes_order_observation_backpressure(tmp_path) -> None:
+    health = LocalHealthWriter.for_directory(tmp_path / "health")
+    health_payloads: list[dict] = []
+    health.write_readiness = health_payloads.append  # type: ignore[method-assign]
+    publisher = LiveReadinessPublisher(
+        health=health,
+        account_label="primary",
+        session_id="live-primary-v1",
+        strategy="orderflow_impulse",
+        entry_universe_target_count=10,
+        warmup_required_buckets=140,
+        order_observation_metrics=lambda: {
+            "capacity": 256,
+            "depth": 3,
+            "high_watermark": 17,
+            "overflow_count": 1,
+            "oldest_pending_age_seconds": 2.5,
+        },
+    )
+
+    publisher.publish()
+
+    observation = health_payloads[-1]["order_observation"]
+    assert observation["depth"] == 3
+    assert observation["high_watermark"] == 17
+    assert observation["overflow_count"] == 1
+    assert observation["oldest_pending_age_seconds"] == 2.5
+
+
+def test_readiness_survives_a_failing_observation_metric(tmp_path) -> None:
+    def _explode() -> dict:
+        raise RuntimeError("metrics unavailable")
+
+    payloads: list[object] = []
+    health = LocalHealthWriter.for_directory(tmp_path / "health")
+    publisher = LiveReadinessPublisher(
+        health=health,
+        on_publish=payloads.append,
+        account_label="primary",
+        session_id="live-primary-v1",
+        strategy="orderflow_impulse",
+        entry_universe_target_count=10,
+        warmup_required_buckets=140,
+        order_observation_metrics=_explode,
+    )
+
+    publisher.publish()
+
+    # A failing metric must not block the readiness snapshot.
+    assert payloads
+    assert payloads[-1]["order_observation"] == {}  # type: ignore[index]

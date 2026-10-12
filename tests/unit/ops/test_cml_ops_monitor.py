@@ -3093,3 +3093,101 @@ def test_trading_engine_zero_serverchan_calls() -> None:
     assert result.stdout.strip() == "", (
         f"Found ServerChan in trading src: {result.stdout}"
     )
+
+
+def _queue_alerts(**overrides):
+    kwargs = {
+        "now": datetime(2026, 8, 29, 1, 0, tzinfo=UTC),
+        "latest_checkpoint_age_seconds": 12,
+        "live_session_ready": True,
+        "pg_stat_statements_ready": True,
+        "track_io_timing": True,
+        "track_wal_io_timing": True,
+        "max_parallel_maintenance_workers": 0,
+        "stale_after_seconds": 900,
+        "account_process_state": "ready_readonly",
+        "account_process_age_seconds": 12,
+        "latest_reconciliation_status": "ready",
+        "latest_reconciliation_age_seconds": 12,
+        "latest_market_progress_age_seconds": 12,
+        "latest_market_delay_ms": 100,
+    }
+    kwargs.update(overrides)
+    return evaluate_database_state(**kwargs)
+
+
+def test_observation_queue_saturation_is_critical() -> None:
+    alerts = _queue_alerts(
+        observation_queue_depth=256,
+        observation_queue_capacity=256,
+        observation_queue_oldest_age_seconds=5.0,
+    )
+    assert [alert.name for alert in alerts] == ["live_order_observation_backpressure"]
+    assert alerts[0].severity == "critical"
+    assert alerts[0].details["depth_fraction"] == 1.0
+
+
+def test_observation_queue_pressure_warns_at_eighty_percent() -> None:
+    alerts = _queue_alerts(
+        observation_queue_depth=205,
+        observation_queue_capacity=256,
+        observation_queue_oldest_age_seconds=2.0,
+    )
+    assert [alert.name for alert in alerts] == ["live_order_observation_backpressure"]
+    assert alerts[0].severity == "warning"
+
+
+def test_observation_queue_oldest_pending_age_alerts() -> None:
+    fresh = _queue_alerts(
+        observation_queue_depth=1,
+        observation_queue_capacity=256,
+        observation_queue_oldest_age_seconds=45.0,
+    )
+    assert [alert.name for alert in fresh] == [
+        "live_order_observation_backpressure"
+    ]
+    assert fresh[0].severity == "warning"
+
+    saturated = _queue_alerts(
+        observation_queue_depth=1,
+        observation_queue_capacity=256,
+        observation_queue_oldest_age_seconds=150.0,
+    )
+    assert saturated[0].severity == "critical"
+
+
+def test_observation_queue_overflow_is_reported_separately() -> None:
+    alerts = _queue_alerts(
+        observation_queue_depth=4,
+        observation_queue_capacity=256,
+        observation_queue_oldest_age_seconds=1.0,
+        observation_queue_overflow_count=3,
+    )
+    assert [alert.name for alert in alerts] == ["live_order_observation_overflow"]
+    assert alerts[0].severity == "warning"
+    assert alerts[0].details["overflow_count"] == 3
+
+
+def test_observation_queue_without_a_fresh_snapshot_does_not_alert() -> None:
+    assert _queue_alerts() == ()
+
+    # A stale/absent snapshot is reported as None capacity, never as fullness.
+    assert (
+        _queue_alerts(
+            observation_queue_depth=None,
+            observation_queue_capacity=None,
+            observation_queue_oldest_age_seconds=None,
+        )
+        == ()
+    )
+
+
+def test_observation_queue_below_thresholds_does_not_alert() -> None:
+    assert (
+        _queue_alerts(
+            observation_queue_depth=10,
+            observation_queue_capacity=256,
+            observation_queue_oldest_age_seconds=1.0,
+        )
+        == ()
+    )

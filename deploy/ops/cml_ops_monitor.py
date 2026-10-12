@@ -556,6 +556,12 @@ class DatabaseState:
     oldest_unknown_order_age_seconds: float | None = None
     terminal_state_mismatch_count: int = 0
     oldest_terminal_mismatch_age_seconds: float | None = None
+    # Order-observation queue from the freshest runtime readiness snapshot
+    # (None/0 means "no fresh snapshot", which must not alert).
+    observation_queue_depth: int | None = None
+    observation_queue_capacity: int | None = None
+    observation_queue_oldest_age_seconds: float | None = None
+    observation_queue_overflow_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -874,6 +880,10 @@ def evaluate_database_state(
     latest_market_delay_ms: float | None = None,
     unknown_order_count: int = 0,
     oldest_unknown_order_age_seconds: float | None = None,
+    observation_queue_depth: int | None = None,
+    observation_queue_capacity: int | None = None,
+    observation_queue_oldest_age_seconds: float | None = None,
+    observation_queue_overflow_count: int = 0,
     terminal_state_mismatch_count: int = 0,
     oldest_terminal_mismatch_age_seconds: float | None = None,
 ) -> tuple[Alert, ...]:
@@ -999,6 +1009,41 @@ def evaluate_database_state(
                 },
             )
         )
+    if observation_queue_overflow_count > 0:
+        alerts.append(
+            Alert(
+                "live_order_observation_overflow",
+                "warning",
+                "Order observation queue overflowed and forced command recovery",
+                {
+                    "overflow_count": observation_queue_overflow_count,
+                    "capacity": observation_queue_capacity,
+                    "depth": observation_queue_depth,
+                },
+            )
+        )
+    if observation_queue_capacity is not None and observation_queue_capacity > 0:
+        depth_fraction = (
+            observation_queue_depth or 0
+        ) / observation_queue_capacity
+        oldest_age = observation_queue_oldest_age_seconds
+        saturated = depth_fraction >= 1.0 or (oldest_age or 0.0) >= 120.0
+        pressured = depth_fraction >= 0.8 or (oldest_age or 0.0) >= 30.0
+        if saturated or pressured:
+            alerts.append(
+                Alert(
+                    "live_order_observation_backpressure",
+                    "critical" if saturated else "warning",
+                    "Order observation queue is filling up",
+                    {
+                        "depth": observation_queue_depth,
+                        "capacity": observation_queue_capacity,
+                        "depth_fraction": round(depth_fraction, 3),
+                        "oldest_pending_age_seconds": oldest_age,
+                        "oldest_pending_age_human": _human_seconds(oldest_age),
+                    },
+                )
+            )
     if terminal_state_mismatch_count > 0:
         alerts.append(
             Alert(
@@ -2774,6 +2819,18 @@ SELECT json_build_object(
                         oldest_unknown_order_age_seconds=(
                             database_state.oldest_unknown_order_age_seconds
                         ),
+                        observation_queue_depth=(
+                            database_state.observation_queue_depth
+                        ),
+                        observation_queue_capacity=(
+                            database_state.observation_queue_capacity
+                        ),
+                        observation_queue_oldest_age_seconds=(
+                            database_state.observation_queue_oldest_age_seconds
+                        ),
+                        observation_queue_overflow_count=(
+                            database_state.observation_queue_overflow_count
+                        ),
                         terminal_state_mismatch_count=(
                             database_state.terminal_state_mismatch_count
                         ),
@@ -3685,6 +3742,50 @@ SELECT 'reconciliation_age' || E'\\t' || COALESCE(
     LIMIT 1
   ), '-1'
 );
+SELECT 'observation_queue_depth' || E'\\t' || COALESCE(
+  (
+    SELECT details->'order_observation'->>'depth'
+    FROM strategy_runtime_events
+    WHERE run_id = {run_id} AND event_type = 'runtime_readiness'
+      AND occurred_at >= clock_timestamp() - interval '180 seconds'
+      AND details ? 'order_observation'
+    ORDER BY occurred_at DESC
+    LIMIT 1
+  ), '-1'
+);
+SELECT 'observation_queue_capacity' || E'\\t' || COALESCE(
+  (
+    SELECT details->'order_observation'->>'capacity'
+    FROM strategy_runtime_events
+    WHERE run_id = {run_id} AND event_type = 'runtime_readiness'
+      AND occurred_at >= clock_timestamp() - interval '180 seconds'
+      AND details ? 'order_observation'
+    ORDER BY occurred_at DESC
+    LIMIT 1
+  ), '-1'
+);
+SELECT 'observation_queue_oldest_age' || E'\\t' || COALESCE(
+  (
+    SELECT details->'order_observation'->>'oldest_pending_age_seconds'
+    FROM strategy_runtime_events
+    WHERE run_id = {run_id} AND event_type = 'runtime_readiness'
+      AND occurred_at >= clock_timestamp() - interval '180 seconds'
+      AND details ? 'order_observation'
+    ORDER BY occurred_at DESC
+    LIMIT 1
+  ), '-1'
+);
+SELECT 'observation_queue_overflow_count' || E'\\t' || COALESCE(
+  (
+    SELECT details->'order_observation'->>'overflow_count'
+    FROM strategy_runtime_events
+    WHERE run_id = {run_id} AND event_type = 'runtime_readiness'
+      AND occurred_at >= clock_timestamp() - interval '180 seconds'
+      AND details ? 'order_observation'
+    ORDER BY occurred_at DESC
+    LIMIT 1
+  ), '-1'
+);
 SELECT 'unknown_order_count' || E'\\t' || count(*)::text
 FROM exchange_orders
 WHERE run_id = {run_id} AND state = 'unknown_pending_reconciliation';
@@ -3745,6 +3846,13 @@ COMMIT;
         oldest_terminal_mismatch_age = _parse_float(
             values.get("oldest_terminal_mismatch_age")
         )
+        observation_queue_depth = _parse_int(values.get("observation_queue_depth"))
+        observation_queue_capacity = _parse_int(
+            values.get("observation_queue_capacity")
+        )
+        observation_queue_oldest_age = _parse_float(
+            values.get("observation_queue_oldest_age")
+        )
         return DatabaseState(
             latest_checkpoint_age_seconds=None if age is None or age < 0 else age,
             live_session_ready=_parse_bool(values.get("live_ready")),
@@ -3794,6 +3902,26 @@ COMMIT;
                 if oldest_terminal_mismatch_age is None
                 or oldest_terminal_mismatch_age < 0
                 else oldest_terminal_mismatch_age
+            ),
+            observation_queue_depth=(
+                None
+                if observation_queue_depth is None or observation_queue_depth < 0
+                else observation_queue_depth
+            ),
+            observation_queue_capacity=(
+                None
+                if observation_queue_capacity is None
+                or observation_queue_capacity <= 0
+                else observation_queue_capacity
+            ),
+            observation_queue_oldest_age_seconds=(
+                None
+                if observation_queue_oldest_age is None
+                or observation_queue_oldest_age < 0
+                else observation_queue_oldest_age
+            ),
+            observation_queue_overflow_count=(
+                _parse_int(values.get("observation_queue_overflow_count")) or 0
             ),
         )
 

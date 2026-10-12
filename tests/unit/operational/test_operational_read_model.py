@@ -11,7 +11,10 @@ Tests:
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from crypto_momentum_lab.domain.operational.operational_read_model import (
+    CapabilityState,
     HealthDimension,
     HealthDimensionName,
     HealthDimensionStatus,
@@ -227,3 +230,116 @@ def test_evaluate_standard_health_dimensions_structure() -> None:
         HealthDimensionName.EXECUTABLE_CAPABILITY,
         HealthDimensionName.RECONCILIATION_CONCORDANCE,
     }
+
+
+def _capability_dimension(view):
+    return next(
+        d
+        for d in view.dimensions
+        if d.name == HealthDimensionName.EXECUTABLE_CAPABILITY
+    )
+
+
+def test_entry_and_exit_capabilities_are_expressed_separately() -> None:
+    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+    view = evaluate_standard_health(
+        scope="primary",
+        liveness_ok=True,
+        lag_seconds=0.1,
+        fact_gaps_count=0,
+        entry_capability=CapabilityState("entry", True, "ready"),
+        exit_capability=CapabilityState(
+            "exit", False, "closed_candle_stream_unavailable"
+        ),
+        reconciliation_matched=True,
+        observed_at=t0,
+    )
+
+    # An exit-only outage is a degraded capability, not a healthy one.
+    assert _capability_dimension(view).status == HealthDimensionStatus.DEGRADED
+    assert view.details["capabilities"]["entry"]["state"] == "open"
+    assert view.details["capabilities"]["exit"]["state"] == "blocked"
+    assert "closed_candle_stream_unavailable" in _capability_dimension(view).details
+
+
+def test_blocked_entry_does_not_report_the_exit_as_blocked() -> None:
+    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+    view = evaluate_standard_health(
+        scope="primary",
+        liveness_ok=True,
+        lag_seconds=0.1,
+        fact_gaps_count=0,
+        entry_capability=CapabilityState("entry", False, "settlement_pressure"),
+        exit_capability=CapabilityState("exit", True, "normal"),
+        reconciliation_matched=True,
+        observed_at=t0,
+    )
+
+    assert _capability_dimension(view).status == HealthDimensionStatus.DEGRADED
+    assert view.details["capabilities"]["entry"]["permitted"] is False
+    assert view.details["capabilities"]["exit"]["permitted"] is True
+    assert "settlement_pressure" in _capability_dimension(view).details
+
+
+def test_unreported_capability_stays_unknown_instead_of_open() -> None:
+    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+    view = evaluate_standard_health(
+        scope="primary",
+        liveness_ok=True,
+        lag_seconds=0.1,
+        fact_gaps_count=0,
+        entry_capability=CapabilityState("entry", True, "ready"),
+        exit_capability=CapabilityState("exit", None, "exit_gate_not_reported"),
+        reconciliation_matched=True,
+        observed_at=t0,
+    )
+
+    assert _capability_dimension(view).status == HealthDimensionStatus.UNKNOWN
+    assert view.overall_status == HealthDimensionStatus.UNKNOWN
+    assert view.is_execution_ready is False
+    assert view.details["capabilities"]["exit"]["permitted"] is None
+    assert "exit_gate_not_reported" in _capability_dimension(view).details
+
+
+def test_single_boolean_capability_keeps_its_previous_meaning() -> None:
+    """Legacy callers still describe both capabilities with one flag."""
+    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+    permitted = evaluate_standard_health(
+        scope="primary",
+        liveness_ok=True,
+        lag_seconds=0.1,
+        fact_gaps_count=0,
+        capability_permitted=True,
+        capability_reason="normal",
+        reconciliation_matched=True,
+        observed_at=t0,
+    )
+    blocked = evaluate_standard_health(
+        scope="primary",
+        liveness_ok=True,
+        lag_seconds=0.1,
+        fact_gaps_count=0,
+        capability_permitted=False,
+        capability_reason="runtime_readiness_missing_or_stale",
+        reconciliation_matched=True,
+        observed_at=t0,
+    )
+
+    assert permitted.overall_status == HealthDimensionStatus.HEALTHY
+    assert permitted.is_execution_ready is True
+    assert _capability_dimension(blocked).status == HealthDimensionStatus.DEGRADED
+    assert (
+        "runtime_readiness_missing_or_stale"
+        in _capability_dimension(blocked).details
+    )
+
+
+def test_capability_state_validates_and_describes() -> None:
+    assert CapabilityState("exit", None, "unreported").state == "unknown"
+    assert CapabilityState("exit", False, "blocked").describe() == (
+        "exit_blocked:blocked"
+    )
+    with pytest.raises(ValueError, match="capability name"):
+        CapabilityState("  ", True, "ready")
+    with pytest.raises(ValueError, match="capability reason"):
+        CapabilityState("entry", True, " ")

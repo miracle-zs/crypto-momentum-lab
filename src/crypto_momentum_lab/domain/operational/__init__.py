@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from crypto_momentum_lab.domain.operational.operational_read_model import (
+    CapabilityState,
     HealthDimension,
     HealthDimensionName,
     HealthDimensionStatus,
@@ -39,6 +40,7 @@ from crypto_momentum_lab.domain.operational.runtime_metadata import (
 )
 
 __all__ = [
+    "CapabilityState",
     "ConsumerDependency",
     "DependencyVersionConflictError",
     "DependencyViolationError",

@@ -58,6 +58,43 @@ class HealthDimension:
 
 
 @dataclass(frozen=True, slots=True)
+class CapabilityState:
+    """One independently reported trading capability.
+
+    ``permitted`` is tri-state on purpose: ``None`` means the capability was
+    not reported, which must stay UNKNOWN instead of being read as open.
+    """
+
+    name: str
+    permitted: bool | None
+    reason: str
+
+    def __post_init__(self) -> None:
+        if not self.name.strip():
+            raise ValueError("capability name must not be empty")
+        if not self.reason.strip():
+            raise ValueError("capability reason must not be empty")
+
+    @property
+    def state(self) -> str:
+        if self.permitted is None:
+            return "unknown"
+        return "open" if self.permitted else "blocked"
+
+    def describe(self) -> str:
+        return f"{self.name}_{self.state}:{self.reason}"
+
+
+def _capability_status(*states: CapabilityState) -> HealthDimensionStatus:
+    """A capability block needs every reported capability to be open."""
+    if any(state.permitted is False for state in states):
+        return HealthDimensionStatus.DEGRADED
+    if any(state.permitted is None for state in states):
+        return HealthDimensionStatus.UNKNOWN
+    return HealthDimensionStatus.HEALTHY
+
+
+@dataclass(frozen=True, slots=True)
 class OperationalView:
     """Authoritative composite health view for an operational scope."""
 
@@ -82,6 +119,7 @@ def read_health(
     scope: str,
     dimensions: tuple[HealthDimension, ...],
     evidence_cut: datetime | None = None,
+    details: dict[str, Any] | None = None,
 ) -> OperationalView:
     """Evaluates multi-dimensional operational health.
 
@@ -143,6 +181,7 @@ def read_health(
                 for d in dimensions
                 if d.status != HealthDimensionStatus.HEALTHY
             ],
+            **(details or {}),
         },
     )
 
@@ -239,8 +278,11 @@ def evaluate_standard_health(
     lag_seconds: float = 0.0,
     max_lag_seconds: float = 5.0,
     fact_gaps_count: int | None = 0,
+    fact_details_override: str | None = None,
     capability_permitted: bool = True,
     capability_reason: str = "normal",
+    entry_capability: CapabilityState | None = None,
+    exit_capability: CapabilityState | None = None,
     reconciliation_matched: bool = True,
     reconciliation_details: str = "ledger_matches_exchange",
     observed_at: datetime | None = None,
@@ -290,6 +332,8 @@ def evaluate_standard_health(
     else:
         fact_status = HealthDimensionStatus.CRITICAL
         fact_details = f"{fact_gaps_count}_critical_fact_gaps"
+    if fact_details_override is not None:
+        fact_details = fact_details_override
     dim_fact = HealthDimension(
         name=HealthDimensionName.FACT_INTEGRITY,
         status=fact_status,
@@ -298,16 +342,20 @@ def evaluate_standard_health(
         metric_value=(None if fact_gaps_count is None else float(fact_gaps_count)),
     )
 
-    # 4. Executable Capability
-    cap_status = (
-        HealthDimensionStatus.HEALTHY
-        if capability_permitted
-        else HealthDimensionStatus.DEGRADED
+    # 4. Executable Capability. Entry and exit are reported separately: a
+    #    blocked entry must not hide an open exit (risk reduction still works),
+    #    and an unreported capability must not be read as open.
+    entry_state = entry_capability or CapabilityState(
+        "entry", capability_permitted, capability_reason
     )
+    exit_state = exit_capability or CapabilityState(
+        "exit", capability_permitted, capability_reason
+    )
+    cap_status = _capability_status(entry_state, exit_state)
     dim_cap = HealthDimension(
         name=HealthDimensionName.EXECUTABLE_CAPABILITY,
         status=cap_status,
-        details=capability_reason,
+        details=f"{entry_state.describe()}|{exit_state.describe()}",
         observed_at=now,
     )
 
@@ -332,4 +380,18 @@ def evaluate_standard_health(
         scope=scope,
         dimensions=(dim_liveness, dim_lag, dim_fact, dim_cap, dim_rec),
         evidence_cut=now,
+        details={
+            "capabilities": {
+                "entry": {
+                    "permitted": entry_state.permitted,
+                    "state": entry_state.state,
+                    "reason": entry_state.reason,
+                },
+                "exit": {
+                    "permitted": exit_state.permitted,
+                    "state": exit_state.state,
+                    "reason": exit_state.reason,
+                },
+            }
+        },
     )

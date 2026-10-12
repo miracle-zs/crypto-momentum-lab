@@ -81,6 +81,9 @@ class LiveReadinessPublisher:
         entry_universe_target_count: int | None,
         warmup_required_buckets: int,
         on_publish: Callable[[Mapping[str, object]], None] | None = None,
+        order_observation_metrics: (
+            Callable[[], Mapping[str, object]] | None
+        ) = None,
     ) -> None:
         for value, field_name in (
             (account_label, "account_label"),
@@ -95,6 +98,7 @@ class LiveReadinessPublisher:
             raise ValueError("warmup_required_buckets must be positive")
         self._health = health
         self._on_publish = on_publish
+        self._order_observation_metrics = order_observation_metrics
         self._account_label = account_label
         self._session_id = session_id
         self._strategy = strategy
@@ -257,6 +261,19 @@ class LiveReadinessPublisher:
             (current_time - self._latest_market_state_at).total_seconds(),
         )
 
+    def _observation_payload(self) -> Mapping[str, object]:
+        """Best-effort observation-queue metrics; publishing must never fail."""
+        if self._order_observation_metrics is None:
+            return {}
+        try:
+            return dict(self._order_observation_metrics())
+        except Exception as error:
+            log.warning(
+                "live_order_observation_metrics_failed",
+                error_type=type(error).__name__,
+            )
+            return {}
+
     def publish(self) -> None:
         """Best-effort atomic publication of the current JSON snapshot."""
 
@@ -300,6 +317,7 @@ class LiveReadinessPublisher:
                 "overall": "UNKNOWN",
                 "streams": {},
             },
+            "order_observation": self._observation_payload(),
         }
         try:
             if self._health is not None:
