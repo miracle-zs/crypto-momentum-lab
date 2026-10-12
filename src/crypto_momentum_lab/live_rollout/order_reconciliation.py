@@ -85,6 +85,14 @@ class LiveOrderReconciliation:
     _last_failure: dict[RecoveryTask, str] = field(
         default_factory=dict, init=False, repr=False
     )
+    _evidence_version: dict[RecoveryTask, int] = field(
+        default_factory=lambda: {"positions": 0, "orders": 0, "exits": 0},
+        init=False,
+        repr=False,
+    )
+    _evidence_version_at_retry: dict[RecoveryTask, int] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         if self.interval_seconds <= 0:
@@ -94,6 +102,8 @@ class LiveOrderReconciliation:
 
     def request_recovery(self) -> None:
         """Discover all recovery families at startup or explicit full repair."""
+        for task in _RECOVERY_TASKS:
+            self._evidence_version[task] = self._evidence_version.get(task, 0) + 1
         self._requested_tasks.update(_RECOVERY_TASKS)
         self._requested.set()
 
@@ -104,28 +114,39 @@ class LiveOrderReconciliation:
         self._orphan_cancels.update(
             (plan.client_order_id, plan) for plan in orphan_plans
         )
+        self._evidence_version["orders"] = (
+            self._evidence_version.get("orders", 0) + 1
+        )
         self._requested_tasks.add("orders")
         self._requested.set()
 
     def request_exit_recovery(self) -> None:
         """Resume the existing exit owner without restarting order discovery."""
+        self._evidence_version["exits"] = (
+            self._evidence_version.get("exits", 0) + 1
+        )
         self._requested_tasks.add("exits")
         self._requested.set()
 
     def request_position_recovery(self) -> None:
         """Repair unmanaged exposure without restarting order discovery."""
+        self._evidence_version["positions"] = (
+            self._evidence_version.get("positions", 0) + 1
+        )
         self._requested_tasks.add("positions")
         self._requested.set()
 
     def notify_account_facts_changed(self) -> None:
         """Resume existing repairs after fact publication; idle facts need no scan."""
-        if "exits" in self._retry_at:
+        if "exits" in self._retry_at or "exits" in self._running_tasks:
+            self._evidence_version["exits"] = (
+                self._evidence_version.get("exits", 0) + 1
+            )
             self._requested_tasks.add("exits")
         now = self.time_source()
         self._requested_tasks.update(
             task for task, deadline in self._retry_at.items() if deadline <= now
         )
-        self._requested_tasks.update(self._running_tasks)
         if self._requested_tasks:
             self._requested.set()
 
@@ -366,7 +387,17 @@ class LiveOrderReconciliation:
                 for task in _RECOVERY_TASKS:
                     if task not in tasks:
                         continue
+                    now = self.time_source()
+                    deadline = self._retry_at.get(task)
+                    if (
+                        deadline is not None
+                        and now < deadline
+                        and self._evidence_version.get(task, 0)
+                        <= self._evidence_version_at_retry.get(task, 0)
+                    ):
+                        continue
                     self._retry_at.pop(task, None)
+                    current_evidence_version = self._evidence_version.get(task, 0)
                     try:
                         pending = False
                         async with asyncio.timeout(self.family_timeout_seconds):
@@ -411,6 +442,11 @@ class LiveOrderReconciliation:
                         self._retry_at[task] = (
                             self.time_source() + self.interval_seconds
                         )
+                        self._evidence_version_at_retry[task] = (
+                            current_evidence_version
+                        )
+                    else:
+                        self._evidence_version_at_retry.pop(task, None)
                     self._running_tasks.discard(task)
             finally:
                 self._running_tasks.clear()

@@ -147,6 +147,128 @@ async def test_ordinary_account_events_do_not_re_spend_an_exhausted_budget() -> 
 
 
 @pytest.mark.asyncio
+async def test_account_events_during_recovery_do_not_re_spend_budget() -> None:
+    """Same-evidence account events arriving during lookup must not bypass backoff.
+
+    When an ordinary account-fact notification arrives while a pass is actively
+    executing its lookups, the worker must not immediately schedule another pass
+    if the finished pass exhausted its budget and backed off to a future deadline.
+    """
+    clock = _Clock()
+    barrier = asyncio.Event()
+    first_lookup_started = asyncio.Event()
+    calls = 0
+
+    async def reconcile_order(_plan) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_lookup_started.set()
+            await barrier.wait()
+
+    worker = LiveOrderReconciliation(
+        order_repository=SimpleNamespace(
+            load_unresolved_orders=AsyncMock(return_value=_unresolved(4))
+        ),
+        state_machine=SimpleNamespace(
+            reconcile_order=AsyncMock(side_effect=reconcile_order)
+        ),
+        run_id="run-1",
+        max_order_lookups_per_pass=2,
+        interval_seconds=3600.0,
+        time_source=clock,
+    )
+    worker.request_recovery()
+    task = asyncio.create_task(worker.run_requested())
+    try:
+        # Wait until the first lookup is actively suspended inside the pass.
+        await asyncio.wait_for(first_lookup_started.wait(), timeout=1.0)
+        assert calls == 1
+
+        # Send same-evidence account notifications while lookup is executing.
+        for _ in range(5):
+            worker.notify_account_facts_changed()
+            await asyncio.sleep(0)
+
+        # Release the first lookup so the pass can complete its 2-order budget.
+        barrier.set()
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+        assert calls == 2, (
+            "ordinary account events arriving during lookup bypassed the backoff "
+            f"and re-spent the budget ({calls} > 2)"
+        )
+        assert not task.done()
+
+        # The worker must be parked on its low-frequency deadline.
+        status = {row["family"]: row for row in worker.recovery_status()}["orders"]
+        assert status["retry_in_seconds"] is not None
+        assert status["retry_in_seconds"] == pytest.approx(3600.0, abs=1.0)
+    finally:
+        barrier.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_material_order_evidence_during_recovery_executes_followup_pass(
+) -> None:
+    """Material order evidence during recovery executes a follow-up pass."""
+    clock = _Clock()
+    barrier = asyncio.Event()
+    first_lookup_started = asyncio.Event()
+    second_pass_started = asyncio.Event()
+    calls = 0
+
+    async def reconcile_order(_plan) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_lookup_started.set()
+            await barrier.wait()
+        elif calls >= 3:
+            second_pass_started.set()
+
+    worker = LiveOrderReconciliation(
+        order_repository=SimpleNamespace(
+            load_unresolved_orders=AsyncMock(return_value=_unresolved(4))
+        ),
+        state_machine=SimpleNamespace(
+            reconcile_order=AsyncMock(side_effect=reconcile_order)
+        ),
+        run_id="run-1",
+        max_order_lookups_per_pass=2,
+        interval_seconds=3600.0,
+        time_source=clock,
+    )
+    worker.request_recovery()
+    task = asyncio.create_task(worker.run_requested())
+    try:
+        await asyncio.wait_for(first_lookup_started.wait(), timeout=1.0)
+        assert calls == 1
+
+        # Real new order evidence arrives during the pass
+        worker.request_order_recovery(
+            orphan_plans=(
+                SimpleNamespace(
+                    client_order_id="new-orphan-1",
+                    reduce_only=False,
+                ),
+            )
+        )
+
+        barrier.set()
+        # Follow-up pass must run to process the new evidence
+        await asyncio.wait_for(second_pass_started.wait(), timeout=1.0)
+        assert calls >= 3
+    finally:
+        barrier.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_crossing_the_deadline_runs_one_more_bounded_pass() -> None:
     """Before the deadline nothing runs; crossing it runs one more bounded pass.
 
