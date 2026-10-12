@@ -203,14 +203,15 @@ async def test_real_backlog_is_reported_and_a_consumed_head_stops_counting(
 
 
 @pytest.mark.asyncio
-async def test_age_does_not_grow_for_results_already_consumed(
+async def test_age_is_not_charged_for_results_already_consumed(
     clock: _StepClock,
 ) -> None:
-    """A never-drained queue must not keep ageing results that were consumed.
+    """A long-running queue must age only the results that are still pending.
 
-    Every result in this queue is committed within four seconds of arriving, so
-    no pending item can have waited more than that. The metric must follow that
-    fact instead of growing with the runtime of the results already in flight.
+    order-1 waits a genuine 1800s and is then taken off the queue while order-2
+    is already waiting behind it, so the queue never drains. order-3 arrives
+    1810s later. Every still-pending result arrived within the last ~10s, so the
+    reported oldest wait must be ~10s; order-1's 1800s must not be charged on.
     """
     coordinator = _coordinator(capacity=8)
     release = asyncio.Event()
@@ -220,63 +221,29 @@ async def test_age_does_not_grow_for_results_already_consumed(
 
     coordinator._apply_returned_order_result = staged_apply
     coordinator._defer_order_projection(_plan("order-1"), _result("order-1"))
-    for index in (2, 3, 4):
-        coordinator._defer_order_projection(
-            _plan(f"order-{index}"), _result(f"order-{index}")
-        )
-    # Only order-1 is taken; the successors keep the queue non-empty.
-    for _ in range(3):
+    # order-2 waits behind order-1, so the queue is occupied when order-1 leaves.
+    coordinator._defer_order_projection(_plan("order-2"), _result("order-2"))
+
+    # order-1 genuinely waits 1800s, then the observer takes it off the queue
+    # and blocks on it while order-2 keeps waiting.
+    clock.advance(1800.0)
+    for _ in range(4):
         await asyncio.sleep(0)
     assert coordinator.order_observation_metrics.dequeued_count == 1
 
-    clock.advance(1800.0)
+    # order-3 arrives long after order-1 was consumed, while the queue is still
+    # occupied by order-2, whose own wait is only 10s.
+    coordinator._defer_order_projection(_plan("order-3"), _result("order-3"))
+    clock.advance(10.0)
+    await asyncio.sleep(0)
+
     metrics = coordinator.order_observation_metrics
-    assert metrics.depth == 3
+    assert metrics.dequeued_count == 1
+    assert metrics.depth >= 2
     assert metrics.oldest_pending_age_seconds is not None
     assert metrics.oldest_pending_age_seconds <= 60.0, (
-        "the wait of results that were consumed is still charged to the pending "
-        f"queue: {metrics.oldest_pending_age_seconds}"
-    )
-
-    release.set()
-    coordinator._apply_returned_order_result = AsyncMock()
-    await _join_observer(coordinator)
-
-
-@pytest.mark.asyncio
-async def test_pending_head_wait_is_anchored_to_its_own_arrival(
-    clock: _StepClock,
-) -> None:
-    """A consumed result in flight must not age the results waiting behind it."""
-    coordinator = _coordinator(capacity=8)
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    async def staged_apply(_plan: object, _result: object) -> None:
-        entered.set()
-        await release.wait()
-
-    coordinator._apply_returned_order_result = staged_apply
-    coordinator._defer_order_projection(_plan("order-1"), _result("order-1"))
-    await asyncio.wait_for(entered.wait(), timeout=1.0)
-    assert coordinator.order_observation_metrics.depth == 0
-
-    # order-1 is off the queue and its commit is blocked. An hour of runtime
-    # passes before the successors arrive, so from their arrival the queue is
-    # non-empty and their reported wait must start from that arrival.
-    clock.advance(3600.0)
-    for index in (2, 3):
-        coordinator._defer_order_projection(
-            _plan(f"order-{index}"), _result(f"order-{index}")
-        )
-    clock.advance(2.0)
-    metrics = coordinator.order_observation_metrics
-    assert metrics.depth == 2
-    assert metrics.dequeued_count == 1
-    assert metrics.oldest_pending_age_seconds is not None
-    assert metrics.oldest_pending_age_seconds <= 100.0, (
-        "the waiting results' age is anchored to a consumed result instead of "
-        f"their own arrival: {metrics.oldest_pending_age_seconds}"
+        "the wait of a result that was already consumed is still charged to the "
+        f"pending queue: {metrics.oldest_pending_age_seconds}"
     )
 
     release.set()

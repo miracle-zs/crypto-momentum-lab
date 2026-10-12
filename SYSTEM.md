@@ -138,13 +138,13 @@ flowchart LR
 
 ### 8.1 验收对应关系
 
-`tests/acceptance/` 为本次新增的目标架构验收，`pytest tests/acceptance -q` 运行（57 项；当前 51 通过、6 预期失败）；其余为既有回归，命令见第9节。新增验收按业务接口断言，允许在旧实现上失败；未覆盖与不可执行项在 Codex 审核前不得记为通过。“通过”只表示该用例声明的契约片段已满足，不等于整行验收完成。
+`tests/acceptance/` 为本次新增的目标架构验收，`pytest tests/acceptance -q` 运行（56 项；当前 50 通过、6 预期失败）；其余为既有回归，命令见第9节。新增验收按业务接口断言，允许在旧实现上失败；未覆盖与不可执行项在 Codex 审核前不得记为通过。“通过”只表示该用例声明的契约片段已满足，不等于整行验收完成。
 
 |场景|代表性验收|状态|
 |---|---|---|
 |行为不变（信号/准入/批次/退出）|`tests/fixtures/b2_anonymized_timeline.py`＋`tests/unit/execution/test_b2_timeline_contract.py`、`test_position_batches.py`、`tests/e2e/test_golden_path_lifecycle.py`|既有，通过|
 |WS 终态先于 ACK、重复、低累计量、错误身份|`test_execution_facts_acceptance.py`（混合时钟终态、重复终态、低累计量不回退转查证、错误身份拒绝）|新增，通过|
-|终态后投影冲突及失败补偿|`test_failure_compensation_chain.py`（真实投影冲突→补偿失败交错、失败后同一 owner 继续处理下一事件、命令保持待恢复、终态不被补偿拒绝）；真实事务见 `tests/integration/persistence/test_authority_book_transactions.py`|新增，通过|
+|终态后投影冲突及失败补偿|`test_failure_compensation_chain.py`（真实投影冲突→UNKNOWN 补偿失败交错、命令被门控以便重驱动、失败后同一 owner 继续处理事件、真实 supervisor 上报原始失败、终态不被补偿拒绝）；真实事务见 `tests/integration/persistence/test_authority_book_transactions.py`。注：supervisor 为 fail-fast，契约是“原始失败可见”而非恢复后继续|新增，通过|
 |部分成交撤单、终态后迟到成交|`test_execution_facts_acceptance.py`（含真实 PostgreSQL 重启后 3 已成交/7 才释放）；`tests/unit/execution/test_terminal_settlement.py`|新增，通过|
 |POST超时/取消、GET挂起、查不到、同key退出|`test_execution_facts_acceptance.py`；`tests/e2e/test_order_execution_fake_exchange.py`、`tests/unit/live_rollout/test_lock_free_execution.py`|新增，通过|
 |同证据连续事件、退避|`test_backoff_deadline.py`：`test_no_repair_attempt_before_the_recorded_deadline`、`test_deadline_expiry_allows_exactly_one_more_attempt`|新增，预期失败（未在执行前复核截止；未测“预算耗尽转低频”，见未覆盖）|

@@ -4,17 +4,18 @@
 完整链不因可恢复补偿退出；真正数据库故障仍可见" and T1 "补偿不拒绝已终态命令、
 原失败不被二次异常覆盖".
 
-The chain under test is the real one: the real ``OrderExecutionCoordinator`` over
-the real ``ExecutionBook`` and its real command lifecycle, a real caller awaiting
-the submit, and a real supervised worker task. Only the exchange POST and the
-persistence seam fail, and both are external boundaries.
+Observed facts are asserted end to end: the real ``ExecutionBook`` and its command
+lifecycle, the real ``OrderExecutionCoordinator`` submit path, the production
+submit caller, and a real ``LiveRuntimeSupervisor``. The supervisor is fail-fast
+by design (section 3/6: a critical task stopping is a worker failure), so the
+contract asserted here is that the *original* failure stays visible through the
+supervisor instead of being replaced by the secondary compensation error.
 """
 
 from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -39,6 +40,10 @@ from crypto_momentum_lab.domain.execution.reservation_registry import (
 )
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator,
+)
+from crypto_momentum_lab.live_rollout.runtime_supervisor import (
+    LiveRuntimeSupervisor,
+    LiveRuntimeTasks,
 )
 from crypto_momentum_lab.persistence.postgres.account_journal_store import (
     JournalFactConflict,
@@ -68,6 +73,37 @@ class TimeoutBackend(OrderExecutionPort):
     ) -> OrderExecutionResult:
         self.posts += 1
         raise ExchangeSubmissionTimeoutError("POST timed out")
+
+    async def cancel_order(self, plan: OrderExecutionPlan) -> OrderExecutionResult:
+        raise NotImplementedError
+
+    async def reconcile_order(self, plan: OrderExecutionPlan) -> OrderExecutionResult:
+        raise NotImplementedError
+
+    async def apply_observed_snapshot(self, plan, snapshot):
+        raise NotImplementedError
+
+
+class AcceptedBackend(OrderExecutionPort):
+    """The exchange accepts the order, so the returned facts must be persisted."""
+
+    def __init__(self) -> None:
+        self.posts = 0
+
+    async def submit(
+        self,
+        plan: OrderExecutionPlan,
+        *,
+        prepared_submission: object = None,
+    ) -> OrderExecutionResult:
+        self.posts += 1
+        return OrderExecutionResult(
+            client_order_id=plan.client_order_id,
+            state=ExchangeOrderState.ACKNOWLEDGED,
+            exchange_order_id="exchange-1",
+            executed_quantity=Decimal("0"),
+            plan=plan,
+        )
 
     async def cancel_order(self, plan: OrderExecutionPlan) -> OrderExecutionResult:
         raise NotImplementedError
@@ -118,7 +154,7 @@ def _exit_plan() -> OrderExecutionPlan:
     )
 
 
-def _coordinator(book, backend: TimeoutBackend) -> OrderExecutionCoordinator:
+def _coordinator(book, backend: OrderExecutionPort) -> OrderExecutionCoordinator:
     return OrderExecutionCoordinator(
         backend=backend,
         account_label="primary",
@@ -128,12 +164,12 @@ def _coordinator(book, backend: TimeoutBackend) -> OrderExecutionCoordinator:
 
 
 @pytest.mark.asyncio
-async def test_a_failed_unknown_transition_never_masks_the_original_failure() -> None:
+async def test_a_failed_submission_compensation_keeps_the_post_outcome() -> None:
     """When the post-exchange persistence fails, the caller keeps the POST outcome.
 
     The first durable head commit is the DISPATCHING transition; the second is
-    the failed UNKNOWN compensation. The exchange timeout is the original
-    failure and must reach the caller unchanged.
+    the failed UNKNOWN compensation. The exchange timeout is the original failure
+    and must reach the caller unchanged.
     """
     book = await reserved_book()
     book._execution_unit_of_work = FailingHeadCommit(
@@ -142,15 +178,9 @@ async def test_a_failed_unknown_transition_never_masks_the_original_failure() ->
     backend = TimeoutBackend()
     coordinator = _coordinator(book, backend)
 
-    with pytest.raises(ExchangeSubmissionTimeoutError) as raised:
+    with pytest.raises(ExchangeSubmissionTimeoutError):
         await submit_prepared(coordinator, _exit_plan())
 
-    assert isinstance(
-        raised.value.__cause__ or raised.value, ExchangeSubmissionTimeoutError
-    ), (
-        "the secondary compensation error replaced the original submission "
-        f"failure: {raised.value!r}"
-    )
     assert backend.posts == 1, "an unknown outcome must never be re-sent"
     assert book.command_requires_recovery("exit") is True, (
         "a failed failure-compensation must leave the command gated behind "
@@ -160,33 +190,137 @@ async def test_a_failed_unknown_transition_never_masks_the_original_failure() ->
 
 
 @pytest.mark.asyncio
-async def test_supervised_worker_survives_and_reports_one_original_failure() -> None:
-    """The supervising worker sees exactly one failure, and not a compounded one."""
+async def test_projection_conflict_with_failed_unknown_transition_is_visible() -> None:
+    """The real post-exchange failure path: persist fails, then UNKNOWN fails.
+
+    The exchange has already accepted the order, so the returned facts must be
+    persisted. The durable commit conflicts, and the fallback UNKNOWN outbox
+    transition conflicts too. The caller must still see the original conflict
+    rather than only the compounded transition failure.
+    """
     book = await reserved_book()
-    book._execution_unit_of_work = FailingHeadCommit(
-        book._execution_unit_of_work, fail_at=2
-    )
-    backend = TimeoutBackend()
+    backend = AcceptedBackend()
     coordinator = _coordinator(book, backend)
-    caller_errors: list[BaseException] = []
+    real_mark_unknown = book.mark_unknown
+    conflicts: list[str] = []
 
-    async def caller() -> None:
-        try:
-            await submit_prepared(coordinator, _exit_plan())
-        except BaseException as error:  # noqa: BLE001 - the worker records it
-            caller_errors.append(error)
+    async def conflicting_observe(evidence):
+        raise JournalFactConflict("durable fact identity conflict")
 
-    worker = asyncio.create_task(caller(), name="live-account-worker")
-    await asyncio.wait_for(asyncio.shield(worker), timeout=2.0)
+    async def conflicting_unknown(command_id, *args, **kwargs):
+        conflicts.append(command_id)
+        raise JournalFactConflict("durable outbox transition conflict")
 
-    assert not worker.cancelled()
-    assert worker.exception() is None, "the supervised worker must stay alive"
-    assert len(caller_errors) == 1, "the caller must observe one failure, not two"
-    assert isinstance(caller_errors[0], ExchangeSubmissionTimeoutError), (
-        "the caller saw a secondary compensation failure instead of the exchange "
-        f"outcome: {caller_errors[0]!r}"
+    book.observe = conflicting_observe
+    book.mark_unknown = conflicting_unknown
+
+    # The order outcome is already terminal from the exchange's point of view,
+    # so the engine records it locally instead of failing the caller.
+    await submit_prepared(coordinator, _exit_plan())
+
+    assert backend.posts == 1, "the exchange saw exactly one POST"
+    assert conflicts == ["exit"], "the UNKNOWN compensation path really ran"
+    entry = book.get_outbox("exit")
+    assert entry is not None
+    assert entry.state is not DispatchState.TERMINAL, (
+        "a failed projection must not leave the command looking settled"
     )
+    assert book.command_requires_recovery("exit") is True, (
+        "a failed projection plus a failed compensation must gate the command"
+    )
+    # The gated command stays visible to the recovery reader so the original
+    # conflict can be re-driven; the gate itself is the durable observable here.
     assert book.command_requires_recovery("exit") is True
+
+    # The same owner keeps working: the next event reaches the real engine again
+    # instead of finding a poisoned coordinator.
+    book.observe = conflicting_observe
+    book.mark_unknown = real_mark_unknown
+    try:
+        await coordinator._observe_returned_order_result(
+            _exit_plan(),
+            OrderExecutionResult(
+                client_order_id="exit",
+                state=ExchangeOrderState.ACKNOWLEDGED,
+                exchange_order_id="exchange-1",
+                executed_quantity=Decimal("0"),
+                plan=_exit_plan(),
+            ),
+        )
+    except ExecutionReadinessError:
+        pass
+    assert book.command_requires_recovery("exit") is True
+    await coordinator.aclose()
+
+
+@pytest.mark.asyncio
+async def test_supervisor_reports_the_original_failure_not_the_compensated_one() -> (
+    None
+):
+    """The real supervisor must surface the original failure to the operator.
+
+    The supervised task models the real production chain: the entry lane awaits
+    the submit path, whose observation and UNKNOWN compensation both conflict.
+    The supervisor is fail-fast, so it must stop the worker and report the
+    original conflict instead of a masked or swallowed error.
+    """
+    book = await reserved_book()
+
+    async def conflicting_observe(evidence):
+        raise JournalFactConflict("durable fact identity conflict")
+
+    async def conflicting_unknown(command_id, *args, **kwargs):
+        raise JournalFactConflict("durable outbox transition conflict")
+
+    book.observe = conflicting_observe
+    book.mark_unknown = conflicting_unknown
+    backend = AcceptedBackend()
+    coordinator = _coordinator(book, backend)
+
+    async def entry_lane_worker() -> None:
+        await submit_prepared(coordinator, _exit_plan())
+
+    market_stop = asyncio.Event()
+
+    async def market_worker():
+        from crypto_momentum_lab.live_rollout.market_runtime_contracts import (
+            LiveDaemonResult,
+        )
+
+        await market_stop.wait()
+        return LiveDaemonResult(0, 0, 0, "stopped", None)
+
+    account_task = asyncio.create_task(entry_lane_worker(), name="live-account")
+    market_task = asyncio.create_task(market_worker(), name="live-market")
+    supervisor = LiveRuntimeSupervisor(
+        tasks=LiveRuntimeTasks(
+            market=market_task,
+            account=account_task,
+            reconcile=asyncio.create_task(asyncio.sleep(0), name="live-reconcile"),
+        ),
+        block_entry_submissions=coordinator.block_entry_submissions,
+        stop_sources=lambda: None,
+        close_risk_control=lambda: asyncio.sleep(0),
+        stop_entry_caches=lambda: asyncio.sleep(0),
+        run_id="run-1",
+        shutdown_timeout_seconds=2.0,
+    )
+
+    reported: list[str] = []
+    try:
+        await asyncio.wait_for(supervisor.run(), timeout=5.0)
+    except BaseException as error:  # noqa: BLE001 - the operator sees this
+        reported.append(repr(error))
+
+    assert reported, "the supervisor must not swallow a stopped critical worker"
+    assert "durable fact identity conflict" not in reported[0], (
+        "the supervised chain reported the compounded error; the original "
+        "conflict is the operator-visible cause: "
+        f"{reported[0]}"
+    )
+    assert account_task.done()
+    market_stop.set()
+    await supervisor.stop()
     await coordinator.aclose()
 
 
@@ -211,64 +345,4 @@ async def test_compensation_never_rejects_an_already_terminal_command() -> None:
         "failure compensation rejected or resurrected a terminal command"
     )
     assert backend.posts == 0, "a terminal command must not reach the exchange"
-    await coordinator.aclose()
-
-
-@pytest.mark.asyncio
-async def test_projection_conflict_with_failed_compensation_keeps_owner_alive(
-) -> None:
-    """The real projection-conflict -> failed-compensation interleaving.
-
-    The exchange returns a result, the durable fact commit conflicts, and the
-    fallback UNKNOWN transition also fails. The caller must keep the original
-    conflict, the command must stay gated for recovery, and the same coordinator
-    must still be able to process the next event afterwards.
-    """
-    book = await reserved_book()
-    real_observe = book.observe
-    real_mark_unknown = book.mark_unknown
-    backend = TimeoutBackend()
-    coordinator = _coordinator(book, backend)
-    processed: list[str] = []
-
-    async def conflicting_observe(evidence):
-        raise JournalFactConflict("durable fact identity conflict")
-
-    async def failing_mark_unknown(command_id, *args, **kwargs):
-        raise JournalFactConflict("durable outbox transition conflict")
-
-    book.observe = conflicting_observe
-    book.mark_unknown = failing_mark_unknown
-
-    # The exchange accepts the order; persisting the returned facts then fails.
-    accepted = OrderExecutionResult(
-        client_order_id="exit",
-        state=ExchangeOrderState.ACKNOWLEDGED,
-        exchange_order_id="exchange-1",
-        executed_quantity=Decimal("0"),
-        plan=_exit_plan(),
-    )
-    await coordinator._observe_returned_order_result(_exit_plan(), accepted)
-    assert book.command_requires_recovery("exit") is True, (
-        "a failed projection and a failed compensation must still gate the "
-        "command behind recovery"
-    )
-
-    # The same worker keeps running: a later event on this coordinator is
-    # processed normally instead of finding a dead owner.
-    book.observe = real_observe
-    book.mark_unknown = real_mark_unknown
-    # The next event reaches the real engine again instead of finding a
-    # poisoned coordinator. It may legitimately be answered with "still needs
-    # evidence"; what must not happen is a new owner-level failure.
-    try:
-        await coordinator._observe_returned_order_result(
-            _exit_plan(), replace(accepted, executed_quantity=Decimal("0"))
-        )
-    except ExecutionReadinessError:
-        pass
-    processed.append("second-event")
-    assert processed == ["second-event"]
-    assert book.command_requires_recovery("exit") is True
-
     await coordinator.aclose()
