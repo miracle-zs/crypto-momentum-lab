@@ -153,6 +153,9 @@ async def test_crossing_the_deadline_runs_one_more_bounded_pass() -> None:
     The worker's clock is injected. It waits on its own short retry interval and
     the clock is advanced past the recorded deadline synchronously. Progress is
     observed through events, so no polling or fixed sleep decides the outcome.
+    Limitation: the injected clock is a step function, so the countdown shrinking
+    with real time is not observable through it; the case asserts the republished
+    deadline is a full interval ahead instead.
     """
     clock = _Clock()
     spend_budget = asyncio.Event()
@@ -196,10 +199,29 @@ async def test_crossing_the_deadline_runs_one_more_bounded_pass() -> None:
             f"{calls - 2} lookups"
         )
         status = {row["family"]: row for row in worker.recovery_status()}["orders"]
-        assert status["retry_in_seconds"] is not None, (
+        next_in = status["retry_in_seconds"]
+        assert next_in is not None, (
             "the responsibility and its next deadline must stay visible"
         )
-        assert not task.done()
+        assert 1.5 <= next_in <= 2.0, (
+            "the next deadline must be republished a full interval ahead, not "
+            f"left at the expired one: {next_in}"
+        )
+        assert task.done() is False
+
+        # Before the republished deadline the worker must stay parked: a stale
+        # or zero deadline would show up here as extra lookups or a hot loop.
+        await asyncio.sleep(0.05)
+        assert calls == 4, (
+            "the worker hot-looped instead of waiting for the new deadline: "
+            f"{calls - 4} extra lookups"
+        )
+        status_after = {
+            row["family"]: row for row in worker.recovery_status()
+        }["orders"]
+        assert status_after["retry_in_seconds"] is not None, (
+            "the next deadline must remain published while the worker waits"
+        )
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
