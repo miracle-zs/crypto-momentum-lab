@@ -31,7 +31,7 @@ class LiveOrderEventRuntime:
         self,
         *,
         telemetry: OrderEventSink,
-        request_recovery: Callable[[], None],
+        request_recovery: Callable[[], None] | Callable[[OrderExecutionPlan], None],
         terminal_barrier: TerminalOrderBarrier | None = None,
     ) -> None:
         self._telemetry = telemetry
@@ -54,9 +54,7 @@ class LiveOrderEventRuntime:
     ) -> None:
         self._entry_order_lifecycle = lifecycle
         if self._terminal_barrier is None:
-            self._terminal_barrier = getattr(
-                lifecycle, "terminal_barrier", None
-            )
+            self._terminal_barrier = getattr(lifecycle, "terminal_barrier", None)
 
     def set_entry_observer(
         self, observer: Callable[[OrderExecutionPlan, ExchangeOrderEvent], None]
@@ -93,8 +91,14 @@ class LiveOrderEventRuntime:
                 error_type=type(error).__name__,
             )
         finally:
-            if event.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
-                self._request_recovery()
+            if (
+                event.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+                and event.details.get("reason") != "reconciliation_order_not_found"
+            ):
+                try:
+                    self._request_recovery(plan)  # type: ignore[call-arg]
+                except TypeError:
+                    self._request_recovery()
             if self._entry_order_lifecycle is not None:
                 self._entry_order_lifecycle.observe(plan, event)
             if self._observe_entry is not None:

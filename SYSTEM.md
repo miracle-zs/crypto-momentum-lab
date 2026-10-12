@@ -165,7 +165,7 @@ flowchart LR
 - **队列最老等待时间**：无法在不替换共享 `time.monotonic` 的前提下隔离被测组件时钟；替换会同时驱动 asyncio 超时，冻结时钟后 `wait_for` 无法按真实时间退出。需要被测组件可注入单调时钟（构造参数或模块级已注入的 `time` 代理）后才能写出有界且正确的验收。
 - **完整补偿链（可恢复补偿不导致退出）**：需真实 PostgreSQL＋持续消费的生产调用方＋真实 supervisor，并验证可恢复异常后 worker 继续处理下一事件。现有用例只覆盖补偿路径、门控与原失败不被覆盖；未设 supervisor 用例，因为把一次性函数注册为常驻账户任务只会让 supervisor 正确报告“关键任务意外停止”，不构成补偿证据。
 
-已闭环：逐步真实进程崩溃恢复（`test_process_crash_recovery.py`，真实子进程 `os._exit`）；无差异核验不重查已确认订单（`test_recovery_budget_low_frequency.py`）；四账户唯一有效写入者租约、必要证据重启可恢复、重复证据身份幂等（`test_topology_and_persistence.py`）；退避截止与同证据事件（含查询期间交错）不重花预算（`test_backoff_deadline.py`、`test_recovery_budget_low_frequency.py`）。
+已闭环：逐步真实进程崩溃恢复（`test_process_crash_recovery.py`，真实子进程 `os._exit`）；无差异核验不重查已确认订单（`test_recovery_budget_low_frequency.py`）；四账户唯一有效写入者租约、必要证据重启可恢复、重复证据身份幂等（`test_topology_and_persistence.py`）；退避截止与同证据事件（含查询期间交错及真实状态机 UNKNOWN 回调）不重花预算，新证据及时处理（`test_backoff_deadline.py`、`test_recovery_budget_low_frequency.py`）。
 
 仍在覆盖边界内（不得据以宣称闭环）：目标单进程装配仅为部署清单级检查；"不重发"仅为引擎侧非重发。
 

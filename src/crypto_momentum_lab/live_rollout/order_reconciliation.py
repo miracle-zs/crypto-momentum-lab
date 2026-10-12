@@ -93,6 +93,12 @@ class LiveOrderReconciliation:
     _evidence_version_at_retry: dict[RecoveryTask, int] = field(
         default_factory=dict, init=False, repr=False
     )
+    _active_reconciliation_order: str | None = field(
+        default=None, init=False, repr=False
+    )
+    _known_unresolved_order_ids: set[str] = field(
+        default_factory=set, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         if self.interval_seconds <= 0:
@@ -108,23 +114,65 @@ class LiveOrderReconciliation:
         self._requested.set()
 
     def request_order_recovery(
-        self, orphan_plans: tuple[OrderExecutionPlan, ...] = ()
+        self,
+        orphan_plans: tuple[OrderExecutionPlan, ...] | OrderExecutionPlan = (),
+        *,
+        plan: OrderExecutionPlan | None = None,
+        client_order_id: str | None = None,
+        from_account_event: bool = False,
     ) -> None:
         """Repair order/command uncertainty without scanning exits or positions."""
-        self._orphan_cancels.update(
-            (plan.client_order_id, plan) for plan in orphan_plans
+        if isinstance(orphan_plans, OrderExecutionPlan):
+            plan = orphan_plans
+            orphan_plans = ()
+        elif isinstance(orphan_plans, (list, set)):
+            orphan_plans = tuple(orphan_plans)
+
+        target_client_id = (
+            client_order_id
+            if client_order_id is not None
+            else (plan.client_order_id if plan is not None else None)
         )
-        self._evidence_version["orders"] = (
-            self._evidence_version.get("orders", 0) + 1
-        )
-        self._requested_tasks.add("orders")
-        self._requested.set()
+
+        new_orphans = {
+            p.client_order_id: p
+            for p in orphan_plans
+            if p.client_order_id not in self._orphan_cancels
+        }
+        self._orphan_cancels.update((p.client_order_id, p) for p in orphan_plans)
+
+        # Distinguish material new evidence from:
+        # 1. Unresolved result of the currently executing query (self-triggered)
+        # 2. Duplicate evidence / repeated notification of already-known orders
+        is_material = bool(new_orphans)
+
+        if not is_material:
+            if from_account_event:
+                is_material = True
+            elif self._active_reconciliation_order is not None:
+                # Callback occurred during in-flight lookup of this order.
+                # Current query's unresolved result, not material new evidence.
+                is_material = False
+            elif target_client_id is not None:
+                if target_client_id not in self._known_unresolved_order_ids:
+                    is_material = True
+                    self._known_unresolved_order_ids.add(target_client_id)
+            elif "orders" not in self._retry_at:
+                is_material = True
+
+        if is_material:
+            self._evidence_version["orders"] = (
+                self._evidence_version.get("orders", 0) + 1
+            )
+            self._requested_tasks.add("orders")
+            self._requested.set()
+        elif "orders" not in self._retry_at:
+            self._requested_tasks.add("orders")
+            self._requested.set()
 
     def request_exit_recovery(self) -> None:
         """Resume the existing exit owner without restarting order discovery."""
-        self._evidence_version["exits"] = (
-            self._evidence_version.get("exits", 0) + 1
-        )
+        self._evidence_version["exits"] = self._evidence_version.get("exits", 0) + 1
         self._requested_tasks.add("exits")
         self._requested.set()
 
@@ -139,9 +187,7 @@ class LiveOrderReconciliation:
     def notify_account_facts_changed(self) -> None:
         """Resume existing repairs after fact publication; idle facts need no scan."""
         if "exits" in self._retry_at or "exits" in self._running_tasks:
-            self._evidence_version["exits"] = (
-                self._evidence_version.get("exits", 0) + 1
-            )
+            self._evidence_version["exits"] = self._evidence_version.get("exits", 0) + 1
             self._requested_tasks.add("exits")
         now = self.time_source()
         self._requested_tasks.update(
@@ -227,14 +273,18 @@ class LiveOrderReconciliation:
                     # Incomplete WS facts schedule the existing repair worker;
                     # account publication must never await a REST round trip.
                     self._requested_runs.add(persisted.plan.run_id)
-                    self.request_order_recovery()
+                    self.request_order_recovery(
+                        plan=persisted.plan, from_account_event=True
+                    )
                     return
             if snapshot is None:
                 await self.state_machine.mark_reconciliation_pending(
                     persisted.plan,
                 )
                 self._requested_runs.add(persisted.plan.run_id)
-                self.request_order_recovery()
+                self.request_order_recovery(
+                    plan=persisted.plan, from_account_event=True
+                )
             elif snapshot.state.terminal and not persisted.state.terminal:
                 # Valid terminal observation takes priority over non-terminal
                 # local state, even if exchange timestamp is earlier than local
@@ -242,7 +292,12 @@ class LiveOrderReconciliation:
                 if snapshot.executed_quantity < persisted.executed_quantity:
                     # Quantity conflict: preserve existing watermark and repair.
                     self._requested_runs.add(persisted.plan.run_id)
-                    self.request_order_recovery()
+                    self._known_unresolved_order_ids.discard(
+                        persisted.plan.client_order_id
+                    )
+                    self.request_order_recovery(
+                        plan=persisted.plan, from_account_event=True
+                    )
                     return
                 await self.state_machine.apply_observed_snapshot(
                     persisted.plan, snapshot
@@ -321,7 +376,8 @@ class LiveOrderReconciliation:
                     if (
                         not include_confirmed
                         and not requires_recovery
-                        and order.state in {
+                        and order.state
+                        in {
                             ExchangeOrderState.ACKNOWLEDGED,
                             ExchangeOrderState.PARTIALLY_FILLED,
                         }
@@ -341,6 +397,8 @@ class LiveOrderReconciliation:
                     plans.setdefault(order.plan.client_order_id, order.plan)
             ordered = list(plans.values())
             ids = list(plans)
+            self._known_unresolved_order_ids.update(plans.keys())
+            self._known_unresolved_order_ids.update(self._orphan_cancels.keys())
             if self._last_lookup_id in ids:
                 start = ids.index(self._last_lookup_id) + 1
                 ordered = ordered[start:] + ordered[:start]
@@ -349,7 +407,11 @@ class LiveOrderReconciliation:
                 # Move the cursor before I/O so a failing order cannot starve
                 # the remaining commands on the next requested pass.
                 self._last_lookup_id = plan.client_order_id
-                await self.state_machine.reconcile_order(plan)
+                self._active_reconciliation_order = plan.client_order_id
+                try:
+                    await self.state_machine.reconcile_order(plan)
+                finally:
+                    self._active_reconciliation_order = None
             if len(ordered) > lookup_budget:
                 self._requested_runs.update(runs)
                 pending = True
@@ -425,9 +487,7 @@ class LiveOrderReconciliation:
                         )
                     except Exception as error:
                         pending = True
-                        self._last_failure[task] = (
-                            f"error:{type(error).__name__}"
-                        )
+                        self._last_failure[task] = f"error:{type(error).__name__}"
                         log.exception(
                             "live_position_repair_failed"
                             if task == "positions"
@@ -442,9 +502,7 @@ class LiveOrderReconciliation:
                         self._retry_at[task] = (
                             self.time_source() + self.interval_seconds
                         )
-                        self._evidence_version_at_retry[task] = (
-                            current_evidence_version
-                        )
+                        self._evidence_version_at_retry[task] = current_evidence_version
                     else:
                         self._evidence_version_at_retry.pop(task, None)
                     self._running_tasks.discard(task)

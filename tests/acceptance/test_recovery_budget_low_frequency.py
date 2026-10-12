@@ -25,13 +25,22 @@ Scope and limits of what is proven here:
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
-from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
+from crypto_momentum_lab.domain.execution.order_state import (
+    ExchangeOrderEvent,
+    ExchangeOrderState,
+    OrderExecutionPlan,
+)
+from crypto_momentum_lab.execution_account.orders.state_machine import (
+    OrderExecutionStateMachine,
+)
+from crypto_momentum_lab.live_rollout.order_event_runtime import LiveOrderEventRuntime
 from crypto_momentum_lab.live_rollout.order_reconciliation import (
     LiveOrderReconciliation,
 )
@@ -212,8 +221,7 @@ async def test_account_events_during_recovery_do_not_re_spend_budget() -> None:
 
 
 @pytest.mark.asyncio
-async def test_material_order_evidence_during_recovery_executes_followup_pass(
-) -> None:
+async def test_material_order_evidence_during_recovery_executes_followup_pass() -> None:
     """Material order evidence during recovery executes a follow-up pass."""
     clock = _Clock()
     barrier = asyncio.Event()
@@ -350,9 +358,9 @@ async def test_crossing_the_deadline_runs_one_more_bounded_pass() -> None:
             "the worker hot-looped instead of waiting for the new deadline: "
             f"{calls - 4} extra lookups"
         )
-        status_after = {
-            row["family"]: row for row in worker.recovery_status()
-        }["orders"]
+        status_after = {row["family"]: row for row in worker.recovery_status()}[
+            "orders"
+        ]
         assert status_after["retry_in_seconds"] is not None, (
             "the next deadline must remain published while the worker waits"
         )
@@ -394,3 +402,137 @@ async def test_a_difference_free_pass_does_not_recheck_confirmed_orders() -> Non
     assert worker.state_machine.reconcile_order.await_count == 1, (
         "an explicit full repair must still include confirmed resting orders"
     )
+
+
+@pytest.mark.asyncio
+async def test_order_event_runtime_unknown_result_does_not_self_trigger_retry() -> None:
+    """The UNKNOWN outcome of an in-flight query must not self-trigger a retry pass.
+
+    Real callback chain:
+    GET returns not found -> State machine publishes UNKNOWN -> LiveOrderEventRuntime
+    requests recovery -> order reconciliation must recognize this as the query's own
+    unresolved result rather than a new evidence version.
+    Duplicate evidence must not bypass the backoff deadline, while material new
+    evidence must execute a follow-up pass.
+    """
+    clock = _Clock()
+    now_dt = datetime(2026, 4, 1, 12, 0, tzinfo=UTC)
+    plan = OrderExecutionPlan(
+        client_order_id="order-unknown-1",
+        symbol="BTCUSDT",
+        side="BUY",
+        position_side="LONG",
+        order_type="MARKET",
+        quantity=Decimal("1.0"),
+        price=None,
+        reduce_only=False,
+        run_id="run-1",
+        intent_id="intent-1",
+        created_at=now_dt,
+    )
+    unresolved_order = SimpleNamespace(
+        plan=plan,
+        state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+        exchange_order_id=None,
+        updated_at=now_dt,
+        executed_quantity=Decimal("0"),
+        terminal_receipt=None,
+    )
+
+    class _FakeOrderRepository:
+        def __init__(self) -> None:
+            self.events: list[ExchangeOrderEvent] = []
+
+        async def record_order_observation(self, event, fills=()) -> bool:
+            self.events.append(event)
+            return True
+
+        async def load_unresolved_orders(self, run_id: str):
+            return (unresolved_order,)
+
+        async def load_order(self, client_order_id: str):
+            return unresolved_order
+
+    repo = _FakeOrderRepository()
+    exchange = SimpleNamespace()
+    exchange.set_exchange_boundary_callbacks = lambda **kw: None
+    query_calls = 0
+    second_pass_executed = asyncio.Event()
+
+    async def query_order(*args, **kwargs):
+        nonlocal query_calls
+        query_calls += 1
+        if query_calls >= 2:
+            second_pass_executed.set()
+        await asyncio.sleep(0.001)
+        return None
+
+    exchange.query_order_by_client_id = query_order
+
+    worker: LiveOrderReconciliation | None = None
+    event_runtime = LiveOrderEventRuntime(
+        telemetry=AsyncMock(),
+        request_recovery=lambda plan=None: (
+            worker.request_order_recovery(plan=plan) if worker else None
+        ),
+    )
+
+    machine = OrderExecutionStateMachine(
+        exchange=exchange,
+        event_repository=repo,
+        live_submit_enabled=True,
+        clock=lambda: now_dt,
+        reconciliation_retry_delays=(),
+        on_event=event_runtime.handle,
+    )
+    machine.cancel_order = AsyncMock(
+        return_value=SimpleNamespace(state=ExchangeOrderState.CANCELED)
+    )
+
+    worker = LiveOrderReconciliation(
+        order_repository=repo,
+        state_machine=machine,
+        run_id="run-1",
+        max_order_lookups_per_pass=2,
+        interval_seconds=3600.0,
+        time_source=clock,
+    )
+
+    worker.request_recovery()
+    task = asyncio.create_task(worker.run_requested())
+    try:
+        await asyncio.sleep(0.02)
+        assert query_calls == 1, (
+            "UNKNOWN query result self-triggered an immediate re-query pass: "
+            f"{query_calls} > 1"
+        )
+        status = {row["family"]: row for row in worker.recovery_status()}["orders"]
+        assert status["retry_in_seconds"] == pytest.approx(3600.0, abs=1.0)
+
+        # 1. Duplicate evidence and same-evidence notifications must not re-spend budget
+        for _ in range(5):
+            worker.notify_account_facts_changed()
+            worker.request_order_recovery()
+            await asyncio.sleep(0.002)
+
+        assert query_calls == 1, (
+            "duplicate evidence notifications bypassed backoff and re-spent budget: "
+            f"{query_calls} > 1"
+        )
+
+        # 2. Material new evidence must trigger a follow-up recovery pass
+        worker.request_order_recovery(
+            orphan_plans=(
+                SimpleNamespace(
+                    client_order_id="new-orphan-1",
+                    reduce_only=False,
+                ),
+            )
+        )
+        await asyncio.wait_for(second_pass_executed.wait(), timeout=1.0)
+        assert query_calls == 2, (
+            "material new evidence did not execute a follow-up recovery pass"
+        )
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

@@ -535,8 +535,8 @@ async def run_live_daemon(
         )
         order_event_runtime = LiveOrderEventRuntime(
             telemetry=telemetry,
-            request_recovery=lambda: (
-                order_reconciliation.request_order_recovery()
+            request_recovery=lambda plan=None: (
+                order_reconciliation.request_order_recovery(plan=plan)
                 if order_reconciliation is not None
                 else None
             ),
@@ -558,7 +558,9 @@ async def run_live_daemon(
 
         def _on_projection_recovery_required(client_order_id: str) -> None:
             if order_reconciliation is not None:
-                order_reconciliation.request_order_recovery()
+                order_reconciliation.request_order_recovery(
+                    client_order_id=client_order_id
+                )
 
         execution_runtime = await build_live_execution_runtime(
             sessions=execution_factory,
