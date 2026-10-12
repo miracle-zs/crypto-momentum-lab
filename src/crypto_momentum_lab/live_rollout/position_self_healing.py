@@ -151,6 +151,7 @@ class LiveUnmanagedPositionRepair:
         # Only the snapshot timestamp advanced: the divergence and its
         # evidence are unchanged, so leave the existing retry deadline alone
         # instead of attempting the same repair again.
+        self._pending = context
         for position in context.account_snapshot.positions:
             if (
                 position.symbol in context.unmanaged_position_symbols
@@ -297,6 +298,10 @@ class LiveUnmanagedPositionRepair:
                 continue
             key = self._key_for(position)
             evidence = self._evidence(position, stream)
+            if not self._needs_attempt(key, evidence, now):
+                remaining = True
+                self._log_deferral(key)
+                continue
             try:
                 # Record before I/O: a blocked or failing attempt must not be
                 # retried until its deadline, and never twice concurrently.

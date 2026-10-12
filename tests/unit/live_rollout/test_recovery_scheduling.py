@@ -44,8 +44,9 @@ async def test_normal_account_events_do_not_start_order_or_exit_recovery() -> No
         latest_market_quotes=cache,
         order_reconciliation=recovery,
         is_transient_error=lambda _error: False,
-        # Match the runtime's account-fact publication callback.
-        on_account_snapshot=AsyncMock(side_effect=lambda _event: recovery.notify_account_facts_changed()),
+        on_account_snapshot=AsyncMock(
+            side_effect=lambda _event: recovery.notify_account_facts_changed()
+        ),
     )
     event = SimpleNamespace(
         event_type="ACCOUNT_UPDATE",
@@ -222,6 +223,7 @@ async def test_unfinished_position_repair_retries_without_more_account_events(
         uow=SimpleNamespace(),
         invalidate_context=repaired.set,
         request_recovery=recovery.request_recovery,
+        retry_interval_seconds=0.01,
     )
     recovery.repair_positions = positions.repair_pending
     context = replace(

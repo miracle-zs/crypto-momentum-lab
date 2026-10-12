@@ -119,7 +119,12 @@ class LiveOrderReconciliation:
 
     def notify_account_facts_changed(self) -> None:
         """Resume existing repairs after fact publication; idle facts need no scan."""
-        self._requested_tasks.update(self._retry_at)
+        if "exits" in self._retry_at:
+            self._requested_tasks.add("exits")
+        now = self.time_source()
+        self._requested_tasks.update(
+            task for task, deadline in self._retry_at.items() if deadline <= now
+        )
         self._requested_tasks.update(self._running_tasks)
         if self._requested_tasks:
             self._requested.set()
