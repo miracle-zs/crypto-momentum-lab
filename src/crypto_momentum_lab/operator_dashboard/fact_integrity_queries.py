@@ -1,20 +1,34 @@
 """Read verified ledger coverage, independently of process/reconciliation flags."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal
 
-from sqlalchemy import select, tuple_
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.execution.evidence_codec import (
     recovery_checkpoint_head_binding,
 )
 from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
+from crypto_momentum_lab.operator_dashboard.fact_proof import (
+    INVALID,
+    PROVEN,
+    REASON_ACTIVE_POSITION_COUNT_MISMATCH,
+    REASON_CHECKPOINT_MISSING,
+    REASON_CHECKPOINT_ROW_MISSING,
+    REASON_NO_RELEVANT_HEAD,
+    HeadFacts,
+    RecoveryCut,
+    SuffixFacts,
+    evaluate_head_proof,
+)
 from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
     ExecutionBookHeadRow,
 )
 from crypto_momentum_lab.persistence.postgres.models import AccountReconciliationHeadRow
 from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
+    PositionFactJournalEventRow,
     PositionRecoveryCheckpointRow,
 )
 from crypto_momentum_lab.persistence.postgres.recovery_relevance import (
@@ -24,8 +38,61 @@ from crypto_momentum_lab.persistence.postgres.recovery_relevance import (
 
 @dataclass(frozen=True, slots=True)
 class FactIntegritySummary:
+    """Current-risk proof for one account plus the retained historical proof.
+
+    ``gaps``/``observed_at`` describe only what still carries current risk.
+    ``reasons``/``unknown_scopes`` name the missing evidence and where, so an
+    UNKNOWN result is actionable instead of a bare flag. ``historical_*`` keeps
+    the same verdict for closed, fully resolved objects without letting their
+    staleness mark the live account unverified.
+    """
+
     gaps: int | None
     observed_at: datetime | None
+    reasons: tuple[str, ...] = ()
+    unknown_scopes: tuple[str, ...] = ()
+    historical_reasons: tuple[str, ...] = ()
+
+
+@dataclass(slots=True)
+class _AccountProof:
+    current_cuts: list[datetime] = field(default_factory=list)
+    historical_cuts: list[datetime] = field(default_factory=list)
+    reasons: list[str] = field(default_factory=list)
+    scopes: list[str] = field(default_factory=list)
+    historical_reasons: list[str] = field(default_factory=list)
+    invalid: int = 0
+    current_unknown: bool = False
+    historical_unknown: bool = False
+    active_positions: int = 0
+    saw_head: bool = False
+
+
+def _scope_label(head: ExecutionBookHeadRow) -> str:
+    return f"{head.symbol}:{head.position_side}"
+
+
+def _head_facts(
+    head: ExecutionBookHeadRow,
+    *,
+    active_quantity: Decimal,
+    reconciliation_gap: Decimal | None,
+) -> HeadFacts:
+    payload = head.state_payload or {}
+    revision = payload.get("journal_revision")
+    unresolved_work = bool(
+        payload.get("recovery_command_ids")
+        or payload.get("external_recovery_ids")
+        or payload.get("active_reservation_ids")
+    )
+    return HeadFacts(
+        scope=_scope_label(head),
+        updated_at=head.updated_at,
+        journal_revision=revision if isinstance(revision, int) else None,
+        active_quantity=active_quantity,
+        unresolved_work=unresolved_work,
+        reconciliation_gap=reconciliation_gap,
+    )
 
 
 async def load_fact_integrity(
@@ -80,79 +147,252 @@ async def load_fact_integrity(
             if bindings
             else []
         )
-    checkpoints = {
-        (
-            row.account_label,
-            row.symbol,
-            row.position_side,
-            row.stream_id,
-            row.stream_epoch,
-            row.checkpoint_id,
-        ): row
-        for row in rows
-    }
+        checkpoints = {
+            (
+                row.account_label,
+                row.symbol,
+                row.position_side,
+                row.stream_id,
+                row.stream_epoch,
+                row.checkpoint_id,
+            ): row
+            for row in rows
+        }
+        # One aggregate pass proves which journal revisions after each recovery
+        # cut are actually persisted, instead of replaying every suffix event.
+        # The join is pinned to the exact referenced checkpoints so an older
+        # checkpoint of the same scope cannot widen another scope's suffix.
+        suffix_by_scope: dict[tuple[str, str, str, str, str], SuffixFacts] = {}
+        if bindings:
+            events = PositionFactJournalEventRow
+            cuts = PositionRecoveryCheckpointRow
+            scope_keys = tuple(
+                {(b[0], b[1], b[2], b[3], b[4]) for b in bindings}
+            )
+            suffix_rows = (
+                await session.execute(
+                    select(
+                        events.account_label,
+                        events.symbol,
+                        events.position_side,
+                        events.stream_id,
+                        events.stream_epoch,
+                        func.count(func.distinct(events.source_revision)),
+                        func.max(events.source_revision),
+                        func.max(events.occurred_at),
+                    )
+                    .select_from(events)
+                    .join(
+                        cuts,
+                        (events.environment == cuts.environment)
+                        & (events.account_label == cuts.account_label)
+                        & (events.symbol == cuts.symbol)
+                        & (events.position_side == cuts.position_side)
+                        & (events.stream_id == cuts.stream_id)
+                        & (events.stream_epoch == cuts.stream_epoch)
+                        & (
+                            events.source_revision
+                            > cuts.source_revision
+                        ),
+                    )
+                    .where(
+                        events.environment == "live",
+                        tuple_(
+                            cuts.account_label,
+                            cuts.symbol,
+                            cuts.position_side,
+                            cuts.stream_id,
+                            cuts.stream_epoch,
+                            cuts.checkpoint_id,
+                        ).in_(bindings),
+                        tuple_(
+                            events.account_label,
+                            events.symbol,
+                            events.position_side,
+                            events.stream_id,
+                            events.stream_epoch,
+                        ).in_(scope_keys),
+                    )
+                    .group_by(
+                        events.account_label,
+                        events.symbol,
+                        events.position_side,
+                        events.stream_id,
+                        events.stream_epoch,
+                    )
+                )
+            ).all()
+            suffix_by_scope = {
+                (row[0], row[1], row[2], row[3], row[4]): SuffixFacts(
+                    distinct_revisions=int(row[5] or 0),
+                    max_source_revision=(
+                        int(row[6]) if row[6] is not None else None
+                    ),
+                    newest_occurred_at=row[7],
+                )
+                for row in suffix_rows
+            }
+
     grouped: dict[str, list[ExecutionBookHeadRow]] = {
         account: [] for account in accounts
     }
     for head in heads:
         grouped[head.account_label].append(head)
-    result = {}
+    result: dict[str, FactIntegritySummary] = {}
     for account, account_heads in grouped.items():
-        confirmed = []
-        invalid = 0
-        unknown = not bool(account_heads)
-        active_positions = 0
+        proof = _AccountProof(saw_head=bool(account_heads))
+        if not account_heads:
+            proof.reasons.append(REASON_NO_RELEVANT_HEAD)
         for head in account_heads:
-            binding = head.state_payload.get("recovery_checkpoint")
-            if not isinstance(binding, dict):
-                unknown = True
-                continue
-            row = checkpoints.get(
-                (
-                    account,
-                    head.symbol,
-                    head.position_side,
-                    head.stream_id,
-                    head.stream_epoch,
-                    str(binding.get("checkpoint_id")),
-                )
+            _apply_head(
+                proof,
+                account=account,
+                head=head,
+                checkpoints=checkpoints,
+                suffix_by_scope=suffix_by_scope,
+                now=now,
+                max_age_seconds=max_age_seconds,
             )
-            if row is None:
-                unknown = True
-                continue
-            checkpoint = PositionRecoveryCodec.decode_checkpoint(row.payload)
-            if (
-                checkpoint.has_conflicts
-                or checkpoint.has_synthetic_fills
-                or checkpoint.has_late_events
-                or checkpoint.integrity_issues
-                or checkpoint.projection.health_status.value != "READY"
-                or checkpoint.projection.reconciliation_gap != 0
-            ):
-                invalid += 1
-                continue
-            if (
-                checkpoint.key.environment != "live"
-                or checkpoint.key.account_label != account
-                or (checkpoint.key.symbol, checkpoint.key.position_side.value)
-                != (head.symbol, head.position_side)
-                or recovery_checkpoint_head_binding(checkpoint) != binding
-                or checkpoint.coverage is None
-                or not checkpoint.coverage.is_authoritative
-                or not checkpoint.coverage.covers(checkpoint.event_cut)
-                or checkpoint.event_cut < head.updated_at
-                or not 0
-                <= (now - checkpoint.event_cut).total_seconds()
-                <= max_age_seconds
-            ):
-                unknown = True
-                continue
-            confirmed.append(checkpoint.event_cut)
-            active_positions += checkpoint.projection.total_active_quantity != 0
-        if active_positions != accounts[account].position_count:
-            unknown = True
+        if proof.active_positions != accounts[account].position_count:
+            proof.reasons.append(REASON_ACTIVE_POSITION_COUNT_MISMATCH)
+            proof.scopes.append("*")
+            proof.current_unknown = True
+        current_reasons = tuple(dict.fromkeys(proof.reasons))
+        if proof.invalid:
+            gaps: int | None = proof.invalid
+        elif proof.current_unknown:
+            gaps = None
+        else:
+            gaps = 0
+        # The reported cut is the oldest proven fact cut backing this account's
+        # evidence, current or closed; ``gaps`` alone decides current risk.
+        proven_cuts = proof.current_cuts + proof.historical_cuts
         result[account] = FactIntegritySummary(
-            invalid if invalid else None if unknown else 0,
-            min(confirmed) if confirmed else None,
+            gaps=gaps,
+            observed_at=min(proven_cuts) if proven_cuts else None,
+            reasons=current_reasons,
+            unknown_scopes=tuple(dict.fromkeys(proof.scopes)),
+            # Integrity failures stay in ``gaps`` (a real conflict is never
+            # "historical noise"); this bucket names what closed objects are
+            # missing, and an empty tuple means their evidence is complete.
+            historical_reasons=tuple(dict.fromkeys(proof.historical_reasons)),
         )
     return result
+
+
+def _apply_head(
+    proof: _AccountProof,
+    *,
+    account: str,
+    head: ExecutionBookHeadRow,
+    checkpoints: dict[
+        tuple[str, str, str, str, str, str], PositionRecoveryCheckpointRow
+    ],
+    suffix_by_scope: dict[tuple[str, str, str, str, str], SuffixFacts],
+    now: datetime,
+    max_age_seconds: float,
+) -> None:
+    scope = _scope_label(head)
+    binding = head.state_payload.get("recovery_checkpoint")
+    # Without a decodable checkpoint the head's active quantity is unknown, so
+    # a missing binding/row is treated as current risk (fail closed).
+    if not isinstance(binding, dict):
+        _record_unknown(proof, scope, REASON_CHECKPOINT_MISSING)
+        return
+    row = checkpoints.get(
+        (
+            account,
+            head.symbol,
+            head.position_side,
+            head.stream_id,
+            head.stream_epoch,
+            str(binding.get("checkpoint_id")),
+        )
+    )
+    if row is None:
+        _record_unknown(proof, scope, REASON_CHECKPOINT_ROW_MISSING)
+        return
+    checkpoint = PositionRecoveryCodec.decode_checkpoint(row.payload)
+    facts = _head_facts(
+        head,
+        active_quantity=checkpoint.projection.total_active_quantity,
+        reconciliation_gap=checkpoint.projection.reconciliation_gap,
+    )
+    coverage = checkpoint.coverage
+    recovery = RecoveryCut(
+        event_cut=checkpoint.event_cut,
+        source_revision=row.source_revision,
+        identity_matches=(
+            checkpoint.key.environment == "live"
+            and checkpoint.key.account_label == account
+            and (checkpoint.key.symbol, checkpoint.key.position_side.value)
+            == (head.symbol, head.position_side)
+        ),
+        binding_matches=(
+            recovery_checkpoint_head_binding(checkpoint) == binding
+        ),
+        coverage_authoritative=(
+            coverage is not None and coverage.is_authoritative
+        ),
+        coverage_covers_cut=(
+            coverage is not None and coverage.covers(checkpoint.event_cut)
+        ),
+        coverage_end_at=(
+            coverage.end_at if coverage is not None else None
+        ),
+        has_conflicts=checkpoint.has_conflicts,
+        has_synthetic_fills=checkpoint.has_synthetic_fills,
+        has_late_events=checkpoint.has_late_events,
+        has_integrity_issues=bool(checkpoint.integrity_issues),
+        projection_ready=(
+            checkpoint.projection.health_status.value == "READY"
+            and checkpoint.projection.reconciliation_gap == 0
+        ),
+    )
+    verdict = evaluate_head_proof(
+        head=facts,
+        recovery=recovery,
+        suffix=suffix_by_scope.get(
+            (
+                head.account_label,
+                head.symbol,
+                head.position_side,
+                head.stream_id,
+                head.stream_epoch,
+            ),
+            SuffixFacts(),
+        ),
+        now=now,
+        max_age_seconds=max_age_seconds,
+    )
+    if verdict.status == INVALID:
+        proof.invalid += 1
+        proof.reasons.append(verdict.reason)
+        proof.scopes.append(scope)
+        return
+    if checkpoint.projection.total_active_quantity != 0:
+        proof.active_positions += 1
+    if verdict.status == PROVEN and verdict.cut is not None:
+        if verdict.current:
+            proof.current_cuts.append(verdict.cut)
+        else:
+            proof.historical_cuts.append(verdict.cut)
+        return
+    if verdict.status == PROVEN:
+        return
+    if verdict.current:
+        proof.current_unknown = True
+        proof.reasons.append(verdict.reason)
+        proof.scopes.append(scope)
+    else:
+        proof.historical_unknown = True
+        proof.historical_reasons.append(verdict.reason)
+
+
+def _record_unknown(proof: _AccountProof, scope: str, reason: str) -> None:
+    proof.current_unknown = True
+    proof.reasons.append(reason)
+    proof.scopes.append(scope)
+
+
+__all__ = ["FactIntegritySummary", "load_fact_integrity"]

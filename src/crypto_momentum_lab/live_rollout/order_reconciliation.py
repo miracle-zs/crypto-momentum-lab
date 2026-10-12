@@ -5,6 +5,7 @@ The existing repair worker reconciles incomplete events and unresolved orders.
 """
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal
@@ -62,6 +63,7 @@ class LiveOrderReconciliation:
     execution_book: ExecutionBook | None = None
     repair_positions: Callable[[], Awaitable[bool]] | None = None
     request_unknown_exit: Callable[[PersistedExchangeOrder], bool] | None = None
+    time_source: Callable[[], float] = time.monotonic
     _requested: asyncio.Event = field(
         default_factory=asyncio.Event, init=False, repr=False
     )
@@ -78,6 +80,9 @@ class LiveOrderReconciliation:
     )
     _last_lookup_id: str | None = field(default=None, init=False, repr=False)
     _orphan_cancels: dict[str, OrderExecutionPlan] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _last_failure: dict[RecoveryTask, str] = field(
         default_factory=dict, init=False, repr=False
     )
 
@@ -118,6 +123,24 @@ class LiveOrderReconciliation:
         self._requested_tasks.update(self._running_tasks)
         if self._requested_tasks:
             self._requested.set()
+
+    def recovery_status(self) -> tuple[dict[str, object], ...]:
+        """Recovery families: pending/running state, failure class, deadline."""
+        now = self.time_source()
+        return tuple(
+            {
+                "family": task,
+                "requested": task in self._requested_tasks,
+                "running": task in self._running_tasks,
+                "last_failure": self._last_failure.get(task),
+                "retry_in_seconds": (
+                    round(max(0.0, self._retry_at[task] - now), 3)
+                    if task in self._retry_at
+                    else None
+                ),
+            }
+            for task in _RECOVERY_TASKS
+        )
 
     async def reconcile_account_event(self, event: AccountEvent) -> None:
         """Reconcile the unresolved order identified by an account event."""
@@ -312,13 +335,14 @@ class LiveOrderReconciliation:
     async def run_requested(self) -> None:
         """Run requested families; retry only unfinished work on its own deadline."""
 
-        loop = asyncio.get_running_loop()
         while True:
             if self._retry_at:
                 try:
                     await asyncio.wait_for(
                         self._requested.wait(),
-                        timeout=max(0.0, min(self._retry_at.values()) - loop.time()),
+                        timeout=max(
+                            0.0, min(self._retry_at.values()) - self.time_source()
+                        ),
                     )
                 except TimeoutError:
                     pass
@@ -327,7 +351,7 @@ class LiveOrderReconciliation:
             tasks = self._requested_tasks | {
                 task
                 for task, deadline in self._retry_at.items()
-                if deadline <= loop.time()
+                if deadline <= self.time_source()
             }
             self._requested_tasks.clear()
             self._requested.clear()
@@ -354,8 +378,20 @@ class LiveOrderReconciliation:
                         self._requested_tasks.update(self._running_tasks)
                         self._requested.set()
                         raise
-                    except Exception:
+                    except TimeoutError:
                         pending = True
+                        self._last_failure[task] = "timeout"
+                        log.warning(
+                            "live_recovery_family_timed_out",
+                            run_id=self.run_id,
+                            recovery_task=task,
+                            timeout_seconds=self.family_timeout_seconds,
+                        )
+                    except Exception as error:
+                        pending = True
+                        self._last_failure[task] = (
+                            f"error:{type(error).__name__}"
+                        )
                         log.exception(
                             "live_position_repair_failed"
                             if task == "positions"
@@ -364,8 +400,12 @@ class LiveOrderReconciliation:
                             recovery_task=task,
                             interval_seconds=self.interval_seconds,
                         )
+                    else:
+                        self._last_failure.pop(task, None)
                     if pending:
-                        self._retry_at[task] = loop.time() + self.interval_seconds
+                        self._retry_at[task] = (
+                            self.time_source() + self.interval_seconds
+                        )
                     self._running_tasks.discard(task)
             finally:
                 self._running_tasks.clear()

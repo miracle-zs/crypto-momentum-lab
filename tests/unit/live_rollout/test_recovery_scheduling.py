@@ -238,3 +238,35 @@ async def test_unfinished_position_repair_retries_without_more_account_events(
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_recovery_status_reports_failure_class_and_next_attempt() -> None:
+    """A failing family must expose what failed and when it retries."""
+
+    async def exits() -> bool:
+        raise RuntimeError("exchange query failed")
+
+    recovery = LiveOrderReconciliation(
+        SimpleNamespace(load_unresolved_orders=AsyncMock(return_value=())),
+        SimpleNamespace(),
+        "run",
+        interval_seconds=30.0,
+        recover_exits=exits,
+    )
+    task = asyncio.create_task(recovery.run_requested())
+    try:
+        recovery.request_exit_recovery()
+        for _ in range(100):
+            status = {row["family"]: row for row in recovery.recovery_status()}
+            if status["exits"]["last_failure"] is not None:
+                break
+            await asyncio.sleep(0.01)
+
+        assert status["exits"]["last_failure"] == "error:RuntimeError"
+        assert status["exits"]["retry_in_seconds"] is not None
+        assert 0 < status["exits"]["retry_in_seconds"] <= 30.0
+        assert status["positions"]["retry_in_seconds"] is None
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

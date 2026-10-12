@@ -338,3 +338,169 @@ async def test_context_reads_continue_while_existing_worker_repairs(monkeypatch)
         task.cancel()
         release.set()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_repair_merges_unchanged_evidence_until_its_deadline(monkeypatch):
+    """Account-event storms must not re-run an unchanged divergence.
+
+    The WUSDT incident showed the same blocked repair repeating within one
+    second. Only a material change (quantity/price/stream), the retry deadline,
+    or success may produce a new attempt.
+    """
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from crypto_momentum_lab.domain.execution.position_repair_models import (
+        PositionRepairBlocked,
+    )
+    from crypto_momentum_lab.live_rollout.position_self_healing import (
+        LiveUnmanagedPositionRepair,
+    )
+    from tests.unit.live_rollout.test_postgres_runtime import (
+        _position,
+        _runtime_context,
+    )
+
+    calls = []
+    wakes = []
+    now = [100.0]
+
+    class RepairBook:
+        """Facts never prove this repair: the real blocked path must classify it."""
+
+        def get_active_stream(self, *_args):
+            return ("hub", "epoch")
+
+        async def repair_position(self, request, *, uow, is_current=None):
+            calls.append(request)
+            raise PositionRepairBlocked(
+                "repair projection does not match actual account exposure"
+            )
+
+    runtime = LiveUnmanagedPositionRepair(
+        account_label="account-2",
+        run_id="run-1",
+        book=RepairBook(),
+        uow=object(),
+        context_is_current=lambda context: True,
+        invalidate_context=lambda: None,
+        request_recovery=lambda: wakes.append(1),
+        clock=lambda: now[0],
+        retry_interval_seconds=60.0,
+    )
+    base = replace(
+        _runtime_context(),
+        unmanaged_position_symbols=frozenset({"WUSDT"}),
+        account_snapshot=SimpleNamespace(
+            positions=(_position(symbol="WUSDT", position_amt=Decimal("3184.7")),)
+        ),
+    )
+
+    runtime.request(base)
+    assert wakes == [1]
+    await runtime.repair_pending()
+    assert len(calls) == 1
+
+    # A storm of contexts whose only change is the snapshot timestamp.
+    for _ in range(25):
+        newer = replace(
+            base,
+            now=base.now,
+            account_snapshot=SimpleNamespace(
+                positions=(
+                    _position(
+                        symbol="WUSDT",
+                        position_amt=Decimal("3184.7"),
+                        observed_at=base.account_snapshot.positions[0].observed_at,
+                    ),
+                )
+            ),
+        )
+        runtime.request(newer)
+    assert wakes == [1], "unchanged evidence must not wake recovery again"
+    status = runtime.recovery_status()
+    assert len(status) == 1
+    assert status[0]["symbol"] == "WUSDT"
+    assert status[0]["attempts"] == 1
+    assert status[0]["last_failure"] == (
+        "repair projection does not match actual account exposure"
+    )
+    assert status[0]["next_attempt_in_seconds"] == 60.0
+
+    # Only the worker's own retry deadline re-attempts the same evidence.
+    now[0] += 60.0
+    await runtime.repair_pending()
+    assert len(calls) == 2
+    assert runtime.recovery_status()[0]["attempts"] == 2
+
+    # At the next deadline a fresh request may wake recovery again.
+    now[0] += 60.0
+    runtime.request(base)
+    assert wakes == [1, 1]
+
+    # A material change (different quantity) acts immediately.
+    changed = replace(
+        base,
+        account_snapshot=SimpleNamespace(
+            positions=(_position(symbol="WUSDT", position_amt=Decimal("3100")),)
+        ),
+    )
+    runtime.request(changed)
+    assert wakes == [1, 1, 1]
+    await runtime.repair_pending()
+    assert len(calls) == 3
+    assert calls[-1].expected_quantity == Decimal("3100")
+
+
+@pytest.mark.asyncio
+async def test_repair_records_error_classification_and_resolution(monkeypatch):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from crypto_momentum_lab.live_rollout.position_self_healing import (
+        LiveUnmanagedPositionRepair,
+    )
+    from tests.unit.live_rollout.test_postgres_runtime import (
+        _position,
+        _runtime_context,
+    )
+
+    async def failing_repair(**kwargs):
+        raise RuntimeError("durable journal unavailable")
+
+    monkeypatch.setattr(
+        "crypto_momentum_lab.live_rollout.position_self_healing"
+        ".auto_heal_unmanaged_position",
+        failing_repair,
+    )
+    runtime = LiveUnmanagedPositionRepair(
+        account_label="primary",
+        run_id="run-1",
+        book=SimpleNamespace(get_active_stream=lambda *args: ("hub", "epoch")),
+        uow=object(),
+        context_is_current=lambda context: True,
+        invalidate_context=lambda: None,
+        request_recovery=lambda: None,
+        clock=lambda: 0.0,
+        retry_interval_seconds=5.0,
+    )
+    context = replace(
+        _runtime_context(),
+        unmanaged_position_symbols=frozenset({"BTCUSDT"}),
+        account_snapshot=SimpleNamespace(
+            positions=(_position(position_amt=Decimal("1")),)
+        ),
+    )
+    runtime.request(context)
+    assert await runtime.repair_pending() is True
+    assert runtime.recovery_status()[0]["last_failure"] == "error:RuntimeError"
+
+    # Resolving the divergence clears the per-key record.
+    resolved = replace(
+        context,
+        unmanaged_position_symbols=frozenset(),
+        account_snapshot=SimpleNamespace(positions=()),
+    )
+    runtime.request(resolved)
+    assert runtime.recovery_status() == ()
