@@ -634,3 +634,39 @@ async def test_historical_short_terminal_releases_without_replaying_position():
     assert book.coordinator.get_reservation("reservation").released_quantity == Decimal(
         "1"
     )
+
+
+async def test_duplicate_historical_receipt_can_complete_pending_settlement():
+    book = await reserved_book()
+    await book.observe(terminal_report("1"))
+    uow = book._execution_unit_of_work
+
+    class DuplicateTransaction(ObservationTransaction):
+        async def record_evidence(self, **kwargs):
+            return False
+
+    class DuplicateUow:
+        @asynccontextmanager
+        async def transaction(self, key):
+            tx = DuplicateTransaction(uow.head)
+            yield tx
+            uow.head = tx.head
+
+    book._execution_unit_of_work = DuplicateUow()
+    replay = replace(
+        terminal_report("1"),
+        observed_at=NOW + timedelta(seconds=2),
+        settlement_fills=(fill("historical-close", "1"),),
+    )
+    result = await book.observe(replay)
+    assert isinstance(result, Applied)
+    assert result.released_quantity == Decimal("1")
+    assert not book.command_requires_recovery("exit")
+    assert (await book.read(SCOPE)).total_quantity == Decimal("5")
+    repeated = await book.observe(replay)
+    from crypto_momentum_lab.domain.execution.observation_models import Duplicate
+
+    assert isinstance(repeated, Duplicate)
+    assert book.coordinator.get_reservation("reservation").released_quantity == Decimal(
+        "1"
+    )

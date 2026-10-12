@@ -21,6 +21,7 @@ from crypto_momentum_lab.domain.execution.evidence_grouping import (
 )
 from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
 from crypto_momentum_lab.domain.execution.execution_evidence_processor import (
+    is_terminal_settlement_recovery,
     is_unfilled_terminal_order,
 )
 from crypto_momentum_lab.domain.execution.execution_evidence_state import (
@@ -320,7 +321,9 @@ async def observe_evidence_transaction(
                             reason=str(err),
                         )
                     ) from err
-                if not accepted:
+                if not accepted and not is_terminal_settlement_recovery(
+                    candidate.evidence_state, evidence
+                ):
                     return Duplicate(
                         evidence_id=evidence.evidence_id,
                         view_token=candidate._ensure_book(key)
@@ -334,7 +337,8 @@ async def observe_evidence_transaction(
                 # at that sequence is still rejected below.
                 previous_sequence = candidate._last_sequences.get(canon)
                 if (
-                    not adopting_epoch
+                    accepted
+                    and not adopting_epoch
                     and evidence.sequence is not None
                     and previous_sequence is not None
                     and evidence.sequence <= previous_sequence
@@ -488,7 +492,10 @@ async def observe_evidence_transaction(
                     )
                 candidate._journal_revisions[canon] = persist_result.revision
                 if evidence.sequence is not None:
-                    candidate._last_sequences[canon] = evidence.sequence
+                    candidate._last_sequences[canon] = max(
+                        candidate._last_sequences.get(canon, evidence.sequence),
+                        evidence.sequence,
+                    )
 
                 watermarks = changed_order_watermarks(
                     key,

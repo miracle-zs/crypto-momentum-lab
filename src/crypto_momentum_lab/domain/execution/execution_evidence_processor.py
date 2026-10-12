@@ -7,7 +7,10 @@ from dataclasses import dataclass, replace
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
-from crypto_momentum_lab.domain.execution.command_models import OutboxEntry
+from crypto_momentum_lab.domain.execution.command_models import (
+    DispatchState,
+    OutboxEntry,
+)
 from crypto_momentum_lab.domain.execution.cumulative_report import (
     plan_cumulative_report,
     plan_watermark_publication,
@@ -33,6 +36,7 @@ from crypto_momentum_lab.domain.execution.observation_models import (
     ExecutionObserveResult,
     WaitingForEvidence,
 )
+from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.domain.execution.position_book import PositionBook
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
@@ -92,6 +96,33 @@ def reservations_held_by_terminal_order(
     )
 
 
+def is_terminal_settlement_recovery(
+    state: EvidenceState, evidence: ExecutionEvidence
+) -> bool:
+    """An exact terminal retry may prove settlement without replaying facts."""
+    event = evidence.order_event
+    if event is None or event.state is not ExchangeOrderState.FILLED:
+        return False
+    pending = state.outbox_by_command_id.get(event.client_order_id)
+    return bool(
+        pending is not None
+        and pending.state is DispatchState.TERMINAL
+        and pending.scope == evidence.scope
+        and event.client_order_id in state.recovery_required_commands
+        and evidence.settlement_fills
+        and evidence.cumulative_order is not None
+        and not evidence.fill
+        and not evidence.fills
+        and evidence.snapshot is None
+        and evidence.source_anchor_snapshot is None
+        and evidence.boundary is None
+        and evidence.coverage is None
+        and evidence.coverage_evidence is None
+        and evidence.fill_load_provenance is None
+        and evidence.stream_checkpoint_adoption is None
+    )
+
+
 async def mutate_evidence(
     state: EvidenceState,
     dependencies: EvidenceMutationDependencies,
@@ -99,7 +130,9 @@ async def mutate_evidence(
 ) -> ExecutionObserveResult:
     """Idempotently ingest exchange evidence and settle allocations."""
     identity = _evidence_identity(evidence)
-    if identity in state.seen_evidence_ids:
+    if identity in state.seen_evidence_ids and not is_terminal_settlement_recovery(
+        state, evidence
+    ):
         key = evidence.scope.to_position_key()
         book = dependencies.ensure_book(key)
         return Duplicate(
