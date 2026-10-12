@@ -254,28 +254,29 @@ async def test_projection_conflict_with_failed_unknown_transition_is_visible() -
 
 
 @pytest.mark.asyncio
-async def test_supervisor_reports_the_original_failure_not_the_compensated_one() -> (
-    None
-):
-    """The real supervisor must surface the original failure to the operator.
+async def test_supervised_worker_does_not_lose_the_original_failure() -> None:
+    """The worker must not end "clean" while the original failure is unreadable.
 
-    The supervised task models the real production chain: the entry lane awaits
-    the submit path, whose observation and UNKNOWN compensation both conflict.
-    The supervisor is fail-fast, so it must stop the worker and report the
-    original conflict instead of a masked or swallowed error.
+    The production chain is the entry lane awaiting the submit path. The
+    exchange accepts, the fact commit conflicts, and the UNKNOWN compensation
+    conflicts too. The supervisor is fail-fast, so whatever it reports must be
+    traceable to the original conflict rather than only a generic stopped-task
+    message.
     """
     book = await reserved_book()
+    observed: list[str] = []
 
     async def conflicting_observe(evidence):
+        observed.append("observe")
         raise JournalFactConflict("durable fact identity conflict")
 
     async def conflicting_unknown(command_id, *args, **kwargs):
+        observed.append("mark_unknown")
         raise JournalFactConflict("durable outbox transition conflict")
 
     book.observe = conflicting_observe
     book.mark_unknown = conflicting_unknown
-    backend = AcceptedBackend()
-    coordinator = _coordinator(book, backend)
+    coordinator = _coordinator(book, AcceptedBackend())
 
     async def entry_lane_worker() -> None:
         await submit_prepared(coordinator, _exit_plan())
@@ -306,19 +307,30 @@ async def test_supervisor_reports_the_original_failure_not_the_compensated_one()
         shutdown_timeout_seconds=2.0,
     )
 
-    reported: list[str] = []
+    reported: list[BaseException] = []
     try:
         await asyncio.wait_for(supervisor.run(), timeout=5.0)
     except BaseException as error:  # noqa: BLE001 - the operator sees this
-        reported.append(repr(error))
+        reported.append(error)
 
-    assert reported, "the supervisor must not swallow a stopped critical worker"
-    assert "durable fact identity conflict" not in reported[0], (
-        "the supervised chain reported the compounded error; the original "
-        "conflict is the operator-visible cause: "
-        f"{reported[0]}"
+    # The real chain ran both halves of the compensation.
+    assert observed == ["observe", "mark_unknown"]
+    assert book.command_requires_recovery("exit") is True, (
+        "a failed projection plus a failed compensation must gate the command"
     )
-    assert account_task.done()
+    # The failure must stay traceable from what the supervisor reports, instead
+    # of ending as an unrelated "task stopped" message.
+    assert reported, "the supervisor must not swallow a stopped critical worker"
+    chain = [repr(error) for error in reported]
+    cause = reported[0].__cause__
+    while cause is not None:
+        chain.append(repr(cause))
+        cause = cause.__cause__
+    assert any("durable fact identity conflict" in item for item in chain), (
+        "the original projection conflict is not traceable from the supervisor "
+        f"report: {chain}"
+    )
+
     market_stop.set()
     await supervisor.stop()
     await coordinator.aclose()

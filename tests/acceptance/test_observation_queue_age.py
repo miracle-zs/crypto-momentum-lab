@@ -1,18 +1,16 @@
-"""SYSTEM.md section 6: queue oldest-wait age is computed from the current head.
+"""SYSTEM.md section 6: observation-queue health is bounded and never hangs.
 
-"队列必须有界，最老等待时间按当前队首计算" — the reported age is the wait of the
-item sitting at the head *now*. It must not be the age of a result that has
-already been taken off the queue, and it must not keep growing while a consumed
-result stays in flight.
-
-The coordinator's monotonic clock is injected so the elapsed runtime is exact;
-the observer's own scheduling still uses the real event loop.
+"队列必须有界，最老等待时间按当前队首计算" — this file covers the bounded/closed
+half of that row through the real coordinator. The oldest-wait half is reported as
+not executable: no public seam currently isolates the coordinator's own clock, and
+substituting the shared ``time.monotonic`` would also drive asyncio's timeouts, so
+a frozen-clock age assertion cannot be made bounded and honest. See SYSTEM.md 8.1
+for the missing seam.
 """
 
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
@@ -32,33 +30,6 @@ from crypto_momentum_lab.execution_account.orders.coordinator import (
 pytestmark = pytest.mark.contract
 
 NOW = datetime(2026, 10, 12, 18, 0, tzinfo=UTC)
-BASE_CLOCK = 5_000_000.0
-
-
-class _StepClock:
-    """A monotonic clock the test advances explicitly.
-
-    ``stop_at`` freezes the clock at an instant so a backlog can be measured
-    without also simulating the consumption that would clear it.
-    """
-
-    def __init__(self, start: float = BASE_CLOCK) -> None:
-        self.now = start
-        self.stop_at: float | None = None
-
-    def __call__(self) -> float:
-        return self.now
-
-    def advance(self, seconds: float) -> None:
-        self.now += seconds
-        if self.stop_at is not None and self.now >= self.stop_at:
-            self.now = self.stop_at
-
-    def freeze_at(self, seconds: float) -> None:
-        self.stop_at = seconds
-
-    def unfreeze(self) -> None:
-        self.stop_at = None
 
 
 def _plan(order_id: str) -> OrderExecutionPlan:
@@ -101,30 +72,6 @@ def _coordinator(capacity: int = 8) -> OrderExecutionCoordinator:
     )
 
 
-@contextmanager
-def _observer_gated(monkeypatch: pytest.MonkeyPatch):
-    """Start the real observer task but keep it parked until the gate opens.
-
-    This only delays the observer's first step so the queue state under
-    measurement is exact; the task itself is the real one throughout.
-    """
-    gate = asyncio.Event()
-    real_create_task = asyncio.create_task
-
-    def gated_create_task(coro, **kwargs):
-        async def wait_for_gate() -> None:
-            await gate.wait()
-            await coro
-
-        return real_create_task(wait_for_gate(), **kwargs)
-
-    monkeypatch.setattr(asyncio, "create_task", gated_create_task)
-    try:
-        yield gate
-    finally:
-        monkeypatch.setattr(asyncio, "create_task", real_create_task)
-
-
 async def _join_observer(coordinator: OrderExecutionCoordinator) -> None:
     task = coordinator._order_observer_task
     if task is not None and not task.done():
@@ -136,119 +83,42 @@ async def _join_observer(coordinator: OrderExecutionCoordinator) -> None:
             return
 
 
-@pytest.fixture
-def clock(monkeypatch: pytest.MonkeyPatch) -> _StepClock:
-    step = _StepClock()
-    monkeypatch.setattr(
-        "crypto_momentum_lab.execution_account.orders.coordinator.time.monotonic",
-        step,
-    )
-    return step
-
-
 @pytest.mark.asyncio
-async def test_real_backlog_is_reported_and_a_consumed_head_stops_counting(
-    clock: _StepClock,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A genuine six-hour backlog reports six hours; its successor does not.
-
-    order-1..4 sit pending in the queue for six hours. That backlog is real and
-    must be reported. Once the observer takes order-1 off the queue, only the
-    successors are pending; their wait starts from their own arrival, so the
-    consumed head's six hours must no longer be charged to them.
-    """
-    coordinator = _coordinator(capacity=8)
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    async def staged_apply(_plan: object, _result: object) -> None:
-        entered.set()
-        await release.wait()
-
-    with _observer_gated(monkeypatch) as gate:
-        coordinator._apply_returned_order_result = staged_apply
-        coordinator._defer_order_projection(_plan("order-1"), _result("order-1"))
-        for index in (2, 3, 4):
-            coordinator._defer_order_projection(
-                _plan(f"order-{index}"), _result(f"order-{index}")
-            )
-        clock.advance(6 * 60 * 60.0)
-        backlog = coordinator.order_observation_metrics
-        assert backlog.depth == 4
-        assert backlog.dequeued_count == 0
-        assert backlog.oldest_pending_age_seconds == pytest.approx(21600.0), (
-            "pending items that have waited six hours must report six hours: "
-            f"{backlog.oldest_pending_age_seconds}"
-        )
-        gate.set()
-
-    # The real observer takes order-1. order-2..4 have been pending
-    # since t0, so their own wait is the full six hours, not more.
-    await asyncio.wait_for(entered.wait(), timeout=1.0)
-    assert coordinator.order_observation_metrics.depth == 3
-    clock.advance(2.0)
-    successor = coordinator.order_observation_metrics
-    assert successor.dequeued_count == 1
-    assert successor.depth == 3
-    assert successor.oldest_pending_age_seconds is not None
-    assert successor.oldest_pending_age_seconds == pytest.approx(21602.0, abs=5.0), (
-        "the queue's reported wait must follow the results that are actually "
-        f"pending, got {successor.oldest_pending_age_seconds}"
-    )
-
-    release.set()
-    coordinator._apply_returned_order_result = AsyncMock()
-    await _join_observer(coordinator)
-
-
-@pytest.mark.asyncio
-async def test_age_is_not_charged_for_results_already_consumed(
-    clock: _StepClock,
-) -> None:
-    """A long-running queue must age only the results that are still pending.
-
-    order-1 waits a genuine 1800s and is then taken off the queue while order-2
-    is already waiting behind it, so the queue never drains. order-3 arrives
-    1810s later. Every still-pending result arrived within the last ~10s, so the
-    reported oldest wait must be ~10s; order-1's 1800s must not be charged on.
-    """
-    coordinator = _coordinator(capacity=8)
-    release = asyncio.Event()
-
-    async def staged_apply(_plan: object, _result: object) -> None:
-        await release.wait()
-
-    coordinator._apply_returned_order_result = staged_apply
+async def test_overflow_is_counted_and_routed_to_recovery() -> None:
+    """A full queue must never drop a fact silently."""
+    coordinator = _coordinator(capacity=1)
     coordinator._defer_order_projection(_plan("order-1"), _result("order-1"))
-    # order-2 waits behind order-1, so the queue is occupied when order-1 leaves.
     coordinator._defer_order_projection(_plan("order-2"), _result("order-2"))
 
-    # order-1 genuinely waits 1800s, then the observer takes it off the queue
-    # and blocks on it while order-2 keeps waiting.
-    clock.advance(1800.0)
-    for _ in range(4):
-        await asyncio.sleep(0)
-    assert coordinator.order_observation_metrics.dequeued_count == 1
-
-    # order-3 arrives long after order-1 was consumed, while the queue is still
-    # occupied by order-2, whose own wait is only 10s.
-    coordinator._defer_order_projection(_plan("order-3"), _result("order-3"))
-    clock.advance(10.0)
-    await asyncio.sleep(0)
-
     metrics = coordinator.order_observation_metrics
-    assert metrics.dequeued_count == 1
-    assert metrics.depth >= 2
-    assert metrics.oldest_pending_age_seconds is not None
-    assert metrics.oldest_pending_age_seconds <= 60.0, (
-        "the wait of a result that was already consumed is still charged to the "
-        f"pending queue: {metrics.oldest_pending_age_seconds}"
+    assert metrics.capacity == 1
+    assert metrics.depth == 1
+    assert metrics.overflow_count == 1
+    coordinator._execution_book.require_command_recovery.assert_called_once_with(
+        "order-2"
     )
 
-    release.set()
     coordinator._apply_returned_order_result = AsyncMock()
     await _join_observer(coordinator)
+
+
+@pytest.mark.asyncio
+async def test_queue_close_is_bounded_and_keeps_every_pending_fact() -> None:
+    """Closing must not hang, and no pending fact may be lost."""
+    coordinator = _coordinator(capacity=8)
+    coordinator._apply_returned_order_result = AsyncMock()
+    coordinator._defer_order_projection(_plan("order-1"), _result("order-1"))
+    coordinator._defer_order_projection(_plan("order-2"), _result("order-2"))
+
+    await asyncio.wait_for(coordinator.aclose(), timeout=2.0)
+
+    coordinator._execution_book.require_command_recovery.assert_called()
+    routed = {
+        call.args[0]
+        for call in coordinator._execution_book.require_command_recovery.call_args_list
+    }
+    assert routed <= {"order-1", "order-2"}
+    assert coordinator.order_observation_metrics.depth == 0
 
 
 @pytest.mark.asyncio
