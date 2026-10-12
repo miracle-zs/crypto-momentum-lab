@@ -136,6 +136,30 @@ flowchart LR
 
 异步交错用 Event/屏障，等待有界，不靠 sleep 竞争；Decimal 计量。单测之外，事务、恢复和迁移使用独立测试数据库及 fake exchange；禁止实盘库与真实交易权限。每任务输出测试命令、结果、未覆盖项；删除/跳过失败断言不能算通过。性能按同负载基线，不承诺未测量百分比。
 
+### 8.1 验收对应关系
+
+`tests/acceptance/` 为本次新增的目标架构验收，`pytest tests/acceptance -q` 运行（55 项；当前 50 通过、5 预期失败）；其余为既有回归，命令见第9节。新增验收按业务接口断言，允许在旧实现上失败；未覆盖与不可执行项在 Codex 审核前不得记为通过。
+
+|场景|代表性验收|状态|
+|---|---|---|
+|行为不变（信号/准入/批次/退出）|`tests/fixtures/b2_anonymized_timeline.py`＋`tests/unit/execution/test_b2_timeline_contract.py`、`test_position_batches.py`、`tests/e2e/test_golden_path_lifecycle.py`|既有，通过|
+|WS 终态先于 ACK、重复、低累计量、错误身份|`test_execution_facts_acceptance.py`（混合时钟终态、重复终态、低累计量不回退转查证、错误身份拒绝）|新增，通过|
+|终态后投影冲突及失败补偿|`test_failure_compensation_chain.py`（调用方与受监督 worker 只观察到原始失败、命令保持待恢复、终态不被补偿拒绝）；真实事务见 `tests/integration/persistence/test_authority_book_transactions.py`|新增，通过|
+|部分成交撤单、终态后迟到成交|`test_execution_facts_acceptance.py`（含真实 PostgreSQL 重启后 3 已成交/7 才释放）；`tests/unit/execution/test_terminal_settlement.py`|新增，通过|
+|POST超时/取消、GET挂起、查不到、同key退出|`test_execution_facts_acceptance.py`；`tests/e2e/test_order_execution_fake_exchange.py`、`tests/unit/live_rollout/test_lock_free_execution.py`|新增，通过|
+|预算耗尽、同证据连续事件、退避|`test_backoff_deadline.py`：`test_deferred_repair_is_not_rerun_before_its_deadline`|新增，预期失败|
+|候选过期/未发送版本变化|`test_execution_facts_acceptance.py`；`tests/unit/live_rollout/test_entry_control.py`|新增，通过|
+|同数量退出竞争、CAS/commit失败、跨key隔离|`test_execution_facts_acceptance.py`（含真实 PostgreSQL commit 失败不发布、版本单调）；`tests/unit/execution_account/orders/test_reservation_integrity.py`|新增，通过|
+|准备后/发送后/事实提交后崩溃与带仓重启|`test_exit_and_safety_acceptance.py::test_restart_with_open_position_keeps_batches_and_grace_deadline`（真实 PostgreSQL：批次、成本、原宽限截止、重试不重置）；`tests/integration/persistence/test_execution_book_epoch_adoption.py`、`tests/unit/execution/test_headless_command_recovery.py`|新增，通过|
+|旧checkpoint＋完整后缀＋最新合法覆盖|`test_suffix_coverage_proof.py::test_newer_legal_coverage_proves_an_old_checkpoint_with_complete_suffix`（真实 PostgreSQL；缺覆盖对照仍未知）|新增，预期失败|
+|Hedge/BOTH 协议负例|`test_exit_and_safety_acceptance.py`（R=false 合法关闭、请求不带 reduceOnly、身份与数量负例）；`test_hedge_reduce_only_plan_that_would_increase_exposure_is_refused`|新增，预期失败（自相矛盾的 reduce_only 计划仍被 POST）|
+|队列溢出/关闭、最老时间|`test_exit_and_safety_acceptance.py`（溢出计数并转恢复、关闭不挂死）；`test_observation_queue_age.py::test_a_long_running_queue_reports_the_current_heads_wait`|新增，年龄预期失败|
+|行情/私有断线不凭重连准入|`test_exit_and_safety_acceptance.py`（重连不足以恢复准入、私有缺口不因重连清除）|新增，通过|
+|停入场→退出→无遗留→切换与回退|`test_exit_and_safety_acceptance.py`（停入场/定时平仓/恢复准入互相独立、单次零仓不证明责任结束、不兼容状态停止恢复而非清库）；切换与回退的“不双跑/有序切换”尚无接口|部分不可执行|
+|四账户隔离、read/trade 角色、唯一派发者、显式实盘开关、冻结参数|`tests/smoke/test_server_deployment_manifest.py`|既有，通过|
+
+不可执行与桥接需求（交 Codex 审核）：切换/回退缺少每账户单一有效写入者与有序切换的控制面。最小契约：输入 `{environment, account_label, desired_writer_id, schema/format_version}`，输出 `{allowed, blockers[]}`，blockers 枚举未平仓位、活动/未解决订单、未知提交、未完成预留与结算；并需在首次写入前获取持久派发所有权令牌。所有权或格式不兼容失败时中止切换且不改动既有持久状态。现有接口只能表达停入场（`LiveEntryControlGate`/`DRAINING`）和单仓位不兼容格式拒绝（`restore`），无法观测两个写入者是否同时生效。
+
 ## 9. 开发、切换与必要运维
 
 本文命令以现有仓库工具为入口，目标新拓扑尚未实现；修改 CLI/Compose 后同步更新本节，不复制旧服务名作为新设计要求。执行任何命令先检查目标版本的 --help 与环境，密钥不放 Git、文档、日志或看板。
