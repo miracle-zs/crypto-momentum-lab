@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "crypto-momentum-lab"
 version = "0.1.0"
 description = "Short-horizon cryptocurrency momentum research and trading infrastructure"
-readme = "README.md"
+readme = "SYSTEM.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
   "alembic>=1.14,<2",
