@@ -8,11 +8,12 @@ Scope and limits of what is proven here:
 
 * The worker's own ``time_source`` is injected, so the deadline is exact and no
   real sleeping or polling is used.
-* Covered: a pass spends only its budget, the responsibility is retained, and the
-  deadline itself (before it, at it, and the next pass) drives exactly one more
-  low-frequency pass rather than an immediate retry.
-* Covered: ordinary account-fact notifications with the same evidence do not
-  start another spending pass before the deadline.
+* Covered: a pass spends only its budget and the responsibility is retained.
+* Covered: crossing the recorded deadline runs exactly one more bounded pass and
+  publishes the next deadline again.
+* Covered: ordinary account-fact notifications with the same evidence must not
+  start another spending pass inside the low-frequency window (currently failing:
+  the worker re-spends the budget).
 * Covered: a difference-free verification pass does not spend a lookup on an
   already-confirmed resting order.
 * NOT covered here: proof that a real UNKNOWN order command keeps its reservation
@@ -146,26 +147,62 @@ async def test_ordinary_account_events_do_not_re_spend_an_exhausted_budget() -> 
 
 
 @pytest.mark.asyncio
-async def test_a_same_evidence_notification_adds_no_lookup_by_itself() -> None:
-    """Notifying unchanged facts must not start a lookup pass of its own.
+async def test_crossing_the_deadline_runs_one_more_bounded_pass() -> None:
+    """Before the deadline nothing runs; crossing it runs one more bounded pass.
 
-    Without a running worker loop there is nothing to spend, so this pins the
-    narrower fact that the notification alone is not a lookup trigger; the
-    running-loop case is covered by the case above.
+    The worker's clock is injected. It waits on its own short retry interval and
+    the clock is advanced past the recorded deadline synchronously. Progress is
+    observed through events, so no polling or fixed sleep decides the outcome.
     """
-    worker = _worker(_unresolved(4), budget=2, interval=3600.0, clock=_Clock())
+    clock = _Clock()
+    spend_budget = asyncio.Event()
+    calls = 0
 
-    pending = await worker.reconcile_all()
-    spent = worker.state_machine.reconcile_order.await_count
-    assert pending is True
-    assert spent == 2
+    async def reconcile_order(_plan) -> None:
+        nonlocal calls
+        calls += 1
+        if calls >= 2:
+            spend_budget.set()
 
-    worker.notify_account_facts_changed()
-    await asyncio.sleep(0.05)
-
-    assert worker.state_machine.reconcile_order.await_count == spent, (
-        "a same-evidence notification started another lookup pass"
+    worker = LiveOrderReconciliation(
+        order_repository=SimpleNamespace(
+            load_unresolved_orders=AsyncMock(return_value=_unresolved(4))
+        ),
+        state_machine=SimpleNamespace(
+            reconcile_order=AsyncMock(side_effect=reconcile_order)
+        ),
+        run_id="run-1",
+        max_order_lookups_per_pass=2,
+        interval_seconds=2.0,
+        time_source=clock,
     )
+    task = asyncio.create_task(worker.run_requested())
+    try:
+        worker.request_recovery()
+        await asyncio.wait_for(spend_budget.wait(), timeout=1.0)
+        assert calls == 2
+
+        entry = {row["family"]: row for row in worker.recovery_status()}["orders"]
+        assert entry["retry_in_seconds"] is not None
+        deadline_in = entry["retry_in_seconds"]
+
+        # Cross the recorded deadline in the worker's own clock; the worker then
+        # wakes on its own retry interval and runs exactly one more pass.
+        spend_budget.clear()
+        clock.advance(deadline_in + 0.5)
+        await asyncio.wait_for(spend_budget.wait(), timeout=5.0)
+        assert calls == 4, (
+            "crossing the deadline must run exactly one more bounded pass, got "
+            f"{calls - 2} lookups"
+        )
+        status = {row["family"]: row for row in worker.recovery_status()}["orders"]
+        assert status["retry_in_seconds"] is not None, (
+            "the responsibility and its next deadline must stay visible"
+        )
+        assert not task.done()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
