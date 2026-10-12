@@ -298,7 +298,7 @@ services:
       start_interval: 5s
       timeout: 15s
       retries: 2
-      start_period: 2m
+      start_period: 5m
     stop_grace_period: 60s
     mem_limit: 160m
     memswap_limit: 320m
@@ -422,7 +422,7 @@ services:
       start_interval: 5s
       timeout: 10s
       retries: 3
-      start_period: 2m
+      start_period: 5m
     stop_grace_period: 90s
     # Startup observed below 200 MiB, so this was trimmed to 512 MiB.  In
     # steady state the working set now sits near 400 MiB (77% of that budget),

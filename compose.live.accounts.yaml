@@ -104,7 +104,7 @@ services:
       start_interval: 5s
       timeout: 15s
       retries: 2
-      start_period: 2m
+      start_period: 5m
     mem_limit: 160m
     memswap_limit: 320m
 
@@ -129,7 +129,7 @@ services:
       start_interval: 5s
       timeout: 15s
       retries: 2
-      start_period: 2m
+      start_period: 5m
     mem_limit: 160m
     memswap_limit: 320m
 
@@ -154,7 +154,7 @@ services:
       start_interval: 5s
       timeout: 15s
       retries: 2
-      start_period: 2m
+      start_period: 5m
     mem_limit: 160m
     memswap_limit: 320m
 
@@ -196,6 +196,7 @@ services:
       CML_LIVE_TARGET_NOTIONAL: ${CML_LIVE_TARGET_NOTIONAL_ACCOUNT_2:-${CML_LIVE_TARGET_NOTIONAL:-100.00}}
       CML_LIVE_ENTRY_LEVERAGE: ${CML_LIVE_ENTRY_LEVERAGE_ACCOUNT_2:-5}
       CML_LIVE_MARGIN_TYPE: ${CML_LIVE_MARGIN_TYPE_ACCOUNT_2:-CROSSED}
+      CML_LIVE_EXIT_MODE: ${CML_LIVE_EXIT_MODE_ACCOUNT_2:-candle_15m}
       CML_LIVE_PERSIST_EXCHANGE_OPERATIONS: ${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS_ACCOUNT_2:-submit,cancel}
       CML_LIVE_CANDLE_GRACE_BARS: ${CML_LIVE_CANDLE_GRACE_BARS_ACCOUNT_2:-${CML_LIVE_CANDLE_GRACE_BARS:-8}}
       CML_LIVE_CANDLE_GRACE_BARS_ACCOUNT_2: ${CML_LIVE_CANDLE_GRACE_BARS_ACCOUNT_2:-${CML_LIVE_CANDLE_GRACE_BARS:-8}}
@@ -283,7 +284,7 @@ services:
       start_interval: 5s
       timeout: 10s
       retries: 3
-      start_period: 2m
+      start_period: 5m
     # 512m: peak measured at ~296 MiB per account.
     mem_limit: 512m
     memswap_limit: 1024m
@@ -414,7 +415,7 @@ services:
       start_interval: 5s
       timeout: 10s
       retries: 3
-      start_period: 2m
+      start_period: 5m
     # 512m: peak measured at ~296 MiB per account.
     mem_limit: 512m
     memswap_limit: 1024m
@@ -545,7 +546,7 @@ services:
       start_interval: 5s
       timeout: 10s
       retries: 3
-      start_period: 2m
+      start_period: 5m
     # 512m: peak measured at ~296 MiB per account.
     mem_limit: 512m
     memswap_limit: 1024m
