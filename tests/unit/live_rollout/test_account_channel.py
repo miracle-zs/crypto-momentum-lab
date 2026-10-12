@@ -10,6 +10,8 @@ from crypto_momentum_lab.live_rollout.account_channel import (
     LiveAccountEventRuntime,
 )
 
+pytestmark = pytest.mark.transition
+
 NOW = datetime(2026, 9, 12, 12, 0, tzinfo=UTC)
 
 

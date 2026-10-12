@@ -1,10 +1,15 @@
+
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+
+import pytest
 
 from crypto_momentum_lab.domain.execution.position_batches import (
     ManagedLivePositionBatch,
     count_active_symbol_batch_concurrency,
 )
+
+pytestmark = pytest.mark.contract
 
 NOW = datetime(2026, 9, 10, 0, 0, tzinfo=UTC)
 

@@ -6,6 +6,8 @@ import pytest
 from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
 from crypto_momentum_lab.live_rollout.checkpoint_writer import CheckpointWriter
 
+pytestmark = pytest.mark.transition
+
 
 def _checkpoint(value: str) -> StrategyCheckpoint:
     return StrategyCheckpoint(

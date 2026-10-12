@@ -35,6 +35,8 @@ from crypto_momentum_lab.domain.execution.trade_command import (
 )
 from crypto_momentum_lab.domain.strategy import EntryType
 
+pytestmark = pytest.mark.contract
+
 NOW = datetime(2026, 10, 1, tzinfo=UTC)
 SCOPE = ExecutionScope("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
 

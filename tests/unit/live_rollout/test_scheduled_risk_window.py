@@ -7,6 +7,8 @@ from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
     ScheduledRiskWindowPhase,
 )
 
+pytestmark = pytest.mark.contract
+
 
 def test_default_schedule_uses_agreed_asia_shanghai_boundaries() -> None:
     schedule = ScheduledRiskWindowConfig()

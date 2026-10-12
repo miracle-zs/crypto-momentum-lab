@@ -34,7 +34,7 @@ def _recovery(**overrides: object) -> RecoveryCut:
         "binding_matches": True,
         "coverage_authoritative": True,
         "coverage_covers_cut": True,
-        "coverage_end_at": NOW,
+        "coverage_end_at": CHECKPOINT_CUT,
         "has_conflicts": False,
         "has_synthetic_fills": False,
         "has_late_events": False,
@@ -42,6 +42,7 @@ def _recovery(**overrides: object) -> RecoveryCut:
         "projection_ready": True,
     }
     values.update(overrides)
+    assert values["coverage_end_at"] <= values["event_cut"]
     return RecoveryCut(**values)  # type: ignore[arg-type]
 
 
@@ -58,11 +59,14 @@ def _head(**overrides: object) -> HeadFacts:
     return HeadFacts(**values)  # type: ignore[arg-type]
 
 
-def test_checkpoint_plus_complete_suffix_proves_a_newer_head() -> None:
-    """The head may be newer than its checkpoint: the suffix carries the proof."""
+def test_complete_suffix_within_verified_cut_proves_a_newer_publication() -> None:
+    """Publication time is not a fact cut; do not fake future coverage."""
     proof = evaluate_head_proof(
         head=_head(),
-        recovery=_recovery(coverage_end_at=NOW),
+        recovery=_recovery(
+            event_cut=NOW - timedelta(seconds=30),
+            coverage_end_at=NOW - timedelta(seconds=30),
+        ),
         suffix=SuffixFacts(
             distinct_revisions=3,
             max_source_revision=13,
@@ -199,7 +203,7 @@ def test_legacy_head_without_revision_needs_checkpoint_coverage() -> None:
     fresh_cut = NOW - timedelta(seconds=30)
     covered = evaluate_head_proof(
         head=_head(journal_revision=None, updated_at=fresh_cut),
-        recovery=_recovery(event_cut=fresh_cut),
+        recovery=_recovery(event_cut=fresh_cut, coverage_end_at=fresh_cut),
         suffix=SuffixFacts(),
         now=NOW,
         max_age_seconds=180.0,

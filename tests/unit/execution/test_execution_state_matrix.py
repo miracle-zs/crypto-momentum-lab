@@ -1,7 +1,10 @@
+
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import Mock
+
+import pytest
 
 from crypto_momentum_lab.domain.execution.command_models import (
     CommandExecutionState,
@@ -32,6 +35,8 @@ from crypto_momentum_lab.live_rollout.entry_control import (
     LiveEntryControlGate,
     TradingGateState,
 )
+
+pytestmark = pytest.mark.contract
 
 NOW = datetime(2026, 10, 10, 12, 0, tzinfo=UTC)
 

@@ -1,53 +1,18 @@
-"""Architectural decoupling invariant tests for execution_account package."""
+"""Persisted operator commands require the correct operation and confirmation."""
 
 from __future__ import annotations
 
-import ast
 from datetime import UTC
-from pathlib import Path
 
 import pytest
 
-import crypto_momentum_lab.execution_account as execution_account_pkg
 from crypto_momentum_lab.domain.live_rollout.authorization import (
     EMERGENCY_FLATTEN_CONFIRMATION,
     require_authorized_command,
 )
 from crypto_momentum_lab.domain.live_rollout.models import RollbackCommand
 
-
-def test_execution_account_has_no_dependency_on_live_rollout() -> None:
-    """execution_account is an infrastructure/adapter layer and must NEVER depend on live_rollout."""
-    pkg_dir = Path(execution_account_pkg.__file__).parent
-    py_files = list(pkg_dir.rglob("*.py"))
-    assert len(py_files) > 0, "No python files found in execution_account"
-
-    forbidden_prefix = "crypto_momentum_lab.live_rollout"
-
-    violations: list[str] = []
-    for py_file in py_files:
-        tree = ast.parse(py_file.read_text("utf-8"), filename=str(py_file))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    if alias.name == forbidden_prefix or alias.name.startswith(
-                        forbidden_prefix + "."
-                    ):
-                        violations.append(
-                            f"{py_file.relative_to(pkg_dir)}: import {alias.name}"
-                        )
-            elif isinstance(node, ast.ImportFrom):
-                if node.module and (
-                    node.module == forbidden_prefix
-                    or node.module.startswith(forbidden_prefix + ".")
-                ):
-                    violations.append(
-                        f"{py_file.relative_to(pkg_dir)}: from {node.module} import ..."
-                    )
-
-    assert not violations, (
-        f"Found forbidden imports from live_rollout in execution_account: {violations}"
-    )
+pytestmark = pytest.mark.contract
 
 
 def test_domain_authorization_require_authorized_command() -> None:

@@ -84,7 +84,7 @@ from tests.fixtures.order_rows import (
 from tests.unit.execution_account.orders.test_state_machine import FakeExchange
 from tests.unit.live_rollout.test_gates import _context as gate_context
 
-pytestmark = pytest.mark.e2e
+pytestmark = [pytest.mark.contract, pytest.mark.e2e]
 
 NOW = datetime(2026, 7, 4, 0, 0, 20, tzinfo=UTC)
 

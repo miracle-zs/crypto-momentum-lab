@@ -37,6 +37,8 @@ from crypto_momentum_lab.execution_account.snapshot_changes import (
     diff_account_snapshots,
 )
 
+pytestmark = pytest.mark.transition
+
 
 def _event() -> AccountEvent:
     observed_at = datetime(2026, 8, 21, 9, 0, tzinfo=UTC)

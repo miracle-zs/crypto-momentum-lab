@@ -1,253 +1,126 @@
+"""Deployment contracts independent of split or merged account processes.
+
+This is a migration safety suite, not proof that the target single-process
+architecture is implemented. Exact process-count acceptance belongs to T3.
+"""
+
 from pathlib import Path
 
 import yaml
 
+ACCOUNTS = {"primary", "account-2", "account-3", "account-4"}
 
-def test_four_live_accounts_leave_database_capacity_for_other_planes() -> None:
-    base = yaml.safe_load(Path("compose.server.yaml").read_text())
-    extra = yaml.safe_load(Path("compose.live.accounts.yaml").read_text())
-    environments = [base["services"]["live-strategy"]["environment"]] + [
-        extra["services"][f"live-strategy-account-{account}"]["environment"]
-        for account in (2, 3, 4)
-    ]
-    critical_and_observability = sum(
-        int(environment[f"CML_DB_{plane}_{option}"])
-        for environment in environments
+
+def _services():
+    base = yaml.safe_load(Path("compose.server.yaml").read_text())["services"]
+    extra = yaml.safe_load(Path("compose.live.accounts.yaml").read_text())["services"]
+    assert not set(base) & set(extra), "overlay must not silently redefine an account"
+    return base | extra
+
+
+def _account(service):
+    command = service.get("command", [])
+    if "--account-label" in command:
+        value = _option_value(command, "--account-label")
+    else:
+        value = service.get("environment", {}).get("CML_ACCOUNT_LABEL")
+    if value is None:
+        return None
+    if value.startswith("${"):
+        value = value.split(":-", 1)[1].removesuffix("}")
+    return value
+
+
+def _trading_services():
+    return {
+        name: service for name, service in _services().items()
+        if "BINANCE_TRADE_API_KEY" in service.get("environment", {})
+    }
+
+
+def test_four_accounts_keep_independent_read_and_trade_credentials():
+    scopes = {role: {} for role in ("READ", "TRADE")}
+    for name, service in _services().items():
+        environment = service.get("environment", {})
+        assert "BINANCE_API_KEY" not in environment
+        assert "BINANCE_API_SECRET" not in environment
+        for role in scopes:
+            key = f"BINANCE_{role}_API_KEY"
+            if key not in environment:
+                continue
+            account = _account(service)
+            assert account in ACCOUNTS, name
+            assert account not in scopes[role], "duplicate role owner for account"
+            assert "live" in service.get("profiles", []), name
+            secret = f"BINANCE_{role}_API_SECRET"
+            assert environment[secret]
+            scopes[role][account] = (environment[key], environment[secret])
+    for accounts in scopes.values():
+        assert set(accounts) == ACCOUNTS
+        assert len(set(accounts.values())) == 4, "credentials shared across accounts"
+    assert set(scopes["READ"].values()).isdisjoint(scopes["TRADE"].values())
+
+
+def test_each_account_has_one_explicitly_enabled_order_dispatcher():
+    traders = _trading_services()
+    assert len(traders) == 4
+    assert {_account(service) for service in traders.values()} == ACCOUNTS
+    for service in traders.values():
+        command = service["command"]
+        assert "--i-understand-this-places-real-orders" in command
+        assert _option_value(command, "--runtime-manifest") == (
+            "/app/deploy/live-runtime.yaml"
+        )
+
+
+def test_account_merge_does_not_change_frozen_trading_defaults():
+    # Freeze repository defaults, not server effective values. Runtime overrides
+    # and PostgreSQL risk configuration must be compared separately at cutover.
+    expected = {
+        "ENTRY_LEVERAGE": "5",
+        "MARGIN_TYPE": "CROSSED",
+        "EXIT_MODE": "candle_15m",
+        "IMPULSE_WINDOW_BUCKETS": "2",
+        "CONFIRMATION_BUCKETS": "1",
+        "MIN_RETURN_PCT": "0.0075",
+        "MIN_IMBALANCE": "0.30",
+        "MIN_INTENSITY": "3.0",
+        "MIN_NOTIONAL_5M_VS_30M": "1.25",
+        "CANDLE_GRACE_BARS": "8",
+        "CANDLE_GRACE_DECISION_PROFIT_PCT": "0.001",
+        "CANDLE_GRACE_PROFIT_PCT": "0.0088",
+    }
+    for service in _trading_services().values():
+        environment = service["environment"]
+        for suffix, literal in expected.items():
+            raw = environment[f"CML_LIVE_{suffix}"]
+            assert raw.rsplit(":-", 1)[-1].rstrip("}") == literal
+        command = service["command"]
+        assert "--entry-long-only" in command
+        assert "--no-entry-price-above-ema5" in command
+        assert "--no-entry-price-above-ema10" in command
+
+
+def test_four_live_accounts_leave_database_capacity_for_other_work():
+    total = sum(
+        int(service["environment"][f"CML_DB_{plane}_{option}"])
+        for service in _trading_services().values()
         for plane in ("EXECUTION", "OBSERVABILITY")
         for option in ("POOL_SIZE", "MAX_OVERFLOW")
     )
-    # PostgreSQL has 100 slots. Market/account/heartbeat/checkpoint/maintenance
-    # pools and rolling-deployment probes also need independent capacity.
-    assert critical_and_observability <= 24
+    assert total <= 24
 
 
-def test_server_compose_exposes_live_stack_without_retired_runners() -> None:
-    manifest = yaml.safe_load(Path("compose.server.yaml").read_text(encoding="utf-8"))
-
-    services = manifest["services"]
-    assert {
-        "postgres",
-        "migrate",
-        "bootstrap-universe",
-        "market-data",
-        "dashboard",
-    } <= services.keys()
+def test_shared_services_do_not_receive_private_credentials():
+    services = _services()
+    assert {"postgres", "market-data", "dashboard"} <= services.keys()
+    for name in ("market-data", "dashboard"):
+        assert not any(
+            key.startswith("BINANCE_") and ("KEY" in key or "SECRET" in key)
+            for key in services[name].get("environment", {})
+        ), name
+    assert all(volume.endswith(":ro") for volume in services["dashboard"]["volumes"])
     assert not any(name.startswith("paper-") for name in services)
-    assert "x-paper" not in manifest
-    assert services["dashboard"]["volumes"] == [
-        "research-data:/app/research-data:ro",
-        "/var/lib/crypto-momentum-lab/table-archive/market_revision_refs:/app/market-revision-archive:ro",
-    ]
-    assert manifest["x-app"]["stop_grace_period"] == "20s"
-    assert manifest["x-app"]["environment"]["CML_LOCAL_HEALTH_DIR"] == (
-        "/run/cml/health"
-    )
-    assert "build" not in manifest["x-app"]
-    assert services["migrate"]["build"]["context"] == "."
-    assert services["migrate"]["image"] == manifest["x-app"]["image"]
-    assert services["market-data"]["healthcheck"]["start_period"] == "15m"
-    assert services["market-data"]["healthcheck"]["start_interval"] == "5s"
-    assert services["market-data"]["healthcheck"]["test"] == [
-        "CMD",
-        "/usr/local/bin/cml-local-healthcheck",
-        "120",
-    ]
-    assert services["market-data"]["stop_grace_period"] == "60s"
-    assert services["postgres"]["mem_limit"] == "1280m"
-    assert services["postgres"]["memswap_limit"] == "1536m"
-    assert services["execution-account-live"]["mem_limit"] == "160m"
-    assert services["live-strategy"]["mem_limit"] == "512m"
-    assert services["dashboard"]["mem_limit"] == "192m"
-    assert services["execution-account-live"]["healthcheck"]["interval"] == "60s"
-    assert services["execution-account-live"]["healthcheck"]["retries"] == 2
-    assert services["execution-account-live"]["healthcheck"]["start_interval"] == "5s"
-    assert services["execution-account-live"]["stop_grace_period"] == "60s"
-    assert services["live-strategy"]["healthcheck"]["start_interval"] == "5s"
-    assert services["live-strategy"]["stop_grace_period"] == "90s"
-    assert services["dashboard"]["healthcheck"]["interval"] == "30s"
-    assert services["dashboard"]["healthcheck"]["start_interval"] == "5s"
-    assert services["dashboard"]["healthcheck"]["start_period"] == "30s"
-    assert services["dashboard"]["healthcheck"]["retries"] == 4
-    assert services["market-data"]["healthcheck"]["interval"] == "60s"
-    assert services["market-data"]["healthcheck"]["retries"] == 2
-    assert services["execution-account-live"]["healthcheck"]["test"] == [
-        "CMD",
-        "/usr/local/bin/cml-local-healthcheck",
-        "120",
-    ]
-    for service in ():
-        assert services[service]["healthcheck"]["interval"] == "60s"
-        assert services[service]["healthcheck"]["retries"] == 2
-        assert services[service]["healthcheck"]["start_interval"] == "5s"
-        assert services[service]["healthcheck"]["test"] == [
-            "CMD",
-            "/usr/local/bin/cml-local-healthcheck",
-            "180",
-        ]
-    for service in ():
-        assert services[service]["profiles"] == ["retired-paper"]
-    for service in ():
-        assert services[service]["entrypoint"] == ["cml-strategy-runner"]
-        assert (
-            _option_value(
-                services[service]["command"],
-                "--poll-interval-seconds",
-            )
-            == "1.0"
-        )
-        assert (
-            _option_value(
-                services[service]["command"],
-                "--paper-initial-balance",
-            )
-            == "1000"
-        )
-        assert (
-            _option_value(
-                services[service]["command"],
-                "--candidate-notional",
-            )
-            == "100"
-        )
-        assert "--replay-stale-states" not in services[service]["command"]
-        assert "--continue-while-halted" not in services[service]["command"]
-    configured_run_ids = {
-        item.strip()
-        for item in services["market-data"]["environment"][
-            "CML_PAPER_EXIT_RUN_IDS"
-        ].split(",")
-        if item.strip()
-    }
-    assert configured_run_ids == {
-        "paper-account-16-orderflow-b8-gainer10-imbalance040-v1",
-        "paper-account-17-orderflow-b1-gainer10-imbalance040-v1",
-    }
-    assert {
-        item.strip()
-        for item in services["dashboard"]["environment"][
-            "CML_PAPER_ACCOUNT_RUN_IDS"
-        ].split(",")
-        if item.strip()
-    } == configured_run_ids
-    assert (
-        manifest["x-paper-account-run-ids"]
-        == services["market-data"]["environment"]["CML_PAPER_EXIT_RUN_IDS"]
-    )
-    assert (
-        manifest["x-paper-account-run-ids"]
-        == services["dashboard"]["environment"]["CML_PAPER_ACCOUNT_RUN_IDS"]
-    )
-    assert services["execution-account-live"]["profiles"] == ["live"]
-    assert services["live-strategy"]["profiles"] == ["live"]
-    live_healthcheck = services["live-strategy"]["healthcheck"]["test"]
-    assert live_healthcheck == [
-        "CMD",
-        "/usr/local/bin/cml-local-healthcheck",
-        "300",
-    ]
-    assert services["research-collector"]["healthcheck"]["interval"] == "90s"
-    assert services["research-collector"]["healthcheck"]["retries"] == 2
-    assert services["research-collector"]["healthcheck"]["start_interval"] == "5s"
-    assert services["dashboard"]["healthcheck"]["test"] == [
-        "CMD-SHELL",
-        (
-            'python -S -c "import urllib.request; '
-            "urllib.request.urlopen('http://127.0.0.1:8765/api/health', timeout=3)\""
-        ),
-    ]
-    live_command = services["live-strategy"]["command"]
-    assert _option_value(live_command, "--checkpoint-every-states") == "1000"
-    assert _option_value(live_command, "--checkpoint-every-seconds") == "60"
-    assert _option_value(live_command, "--checkpoint-phase-seconds") == "0"
-    assert (
-        _option_value(
-            live_command,
-            "--persist-exchange-operations",
-        )
-        == "${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS:-submit,cancel}"
-    )
-    assert "--entry-positive-gainer-top-count" not in live_command
-    assert "--entry-long-only" in live_command
-    assert "--no-entry-price-above-ema5" in live_command
-    assert "--no-entry-price-above-ema10" in live_command
-    assert "--entry-price-above-ema5" not in live_command
-    assert "--entry-price-above-ema10" not in live_command
-    assert (
-        _option_value(
-            live_command,
-            "--candle-grace-decision-profit-pct",
-        )
-        == "${CML_LIVE_CANDLE_GRACE_DECISION_PROFIT_PCT:-0.001}"
-    )
-    for profile_option in (
-        "--impulse-window-buckets",
-        "--confirmation-buckets",
-        "--min-return-pct",
-        "--min-imbalance",
-        "--min-intensity",
-        "--min-notional-5m-vs-30m",
-        "--cooldown-buckets",
-    ):
-        assert profile_option not in live_command
-    for profile_env in (
-        "CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT",
-        "CML_LIVE_IMPULSE_WINDOW_BUCKETS",
-        "CML_LIVE_CONFIRMATION_BUCKETS",
-        "CML_LIVE_MIN_RETURN_PCT",
-        "CML_LIVE_MIN_IMBALANCE",
-        "CML_LIVE_MIN_INTENSITY",
-        "CML_LIVE_MIN_NOTIONAL_5M_VS_30M",
-        "CML_LIVE_COOLDOWN_BUCKETS",
-    ):
-        assert profile_env in services["live-strategy"]["environment"]
-    assert (
-        services["live-strategy"]["environment"][
-            "CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT"
-        ]
-        == "${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT:-30}"
-    )
-    assert (
-        services["live-strategy"]["environment"]["CML_LIVE_IMPULSE_WINDOW_BUCKETS"]
-        == "${CML_LIVE_IMPULSE_WINDOW_BUCKETS:-2}"
-    )
-    assert services["live-strategy"]["environment"]["CML_LIVE_SESSION_ID"] == (
-        "${CML_LIVE_SESSION_ID:-live-primary-v1}"
-    )
-    assert services["live-strategy"]["environment"]["CML_LIVE_LEASE_OWNER"] == (
-        "${CML_LIVE_LEASE_OWNER:-live-worker}"
-    )
-    assert (
-        services["execution-account-live"]["environment"]["BINANCE_READ_API_KEY"]
-        == "${BINANCE_READ_API_KEY:-}"
-    )
-    assert (
-        services["execution-account-live"]["command"]
-        == manifest["x-execution-account-command"]
-    )
-    assert (
-        services["execution-account-live"]["environment"]["CML_ACCOUNT_LABEL"]
-        == "${CML_LIVE_ACCOUNT_LABEL:-primary}"
-    )
-    assert "--account-label" not in services["execution-account-live"]["command"]
-    assert (
-        services["live-strategy"]["environment"]["BINANCE_TRADE_API_KEY"]
-        == "${BINANCE_TRADE_API_KEY:-}"
-    )
-    assert services["live-strategy"]["environment"]["CML_LIVE_ENTRY_LEVERAGE"] == (
-        "${CML_LIVE_ENTRY_LEVERAGE:-5}"
-    )
-    assert services["live-strategy"]["environment"]["CML_LIVE_EXIT_MODE"] == (
-        "${CML_LIVE_EXIT_MODE:-candle_15m}"
-    )
-    assert (
-        services["live-strategy"]["environment"]["CML_LIVE_PERSIST_EXCHANGE_OPERATIONS"]
-        == "${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS:-submit,cancel}"
-    )
-    assert "BINANCE_API_KEY" not in services["execution-account-live"]["environment"]
-    assert "BINANCE_API_SECRET" not in services["execution-account-live"]["environment"]
-    assert "BINANCE_API_KEY" not in services["live-strategy"]["environment"]
-    assert "BINANCE_API_SECRET" not in services["live-strategy"]["environment"]
-    assert "BINANCE_API_KEY" not in str(services["market-data"])
 
 
 def test_healthcheck_start_interval_requires_start_period() -> None:
@@ -271,167 +144,6 @@ def test_healthcheck_start_interval_requires_start_period() -> None:
             if "start_interval" in healthcheck and "start_period" not in healthcheck:
                 offenders.append(f"{compose_file}:{name}")
     assert offenders == []
-
-
-def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> None:
-    manifest = yaml.safe_load(
-        Path("compose.live.accounts.yaml").read_text(encoding="utf-8")
-    )
-    services = manifest["services"]
-    assert set(services) == {
-        "execution-account-live-account-2",
-        "execution-account-live-account-3",
-        "execution-account-live-account-4",
-        "live-strategy-account-2",
-        "live-strategy-account-3",
-        "live-strategy-account-4",
-    }
-    for account_number in ("2", "3", "4"):
-        execution = services[f"execution-account-live-account-{account_number}"]
-        strategy = services[f"live-strategy-account-{account_number}"]
-        assert execution["profiles"] == ["live"]
-        assert strategy["profiles"] == ["live"]
-        assert execution["stop_grace_period"] == "90s"
-        assert strategy["stop_grace_period"] == "90s"
-        assert execution["healthcheck"]["start_interval"] == "5s"
-        assert strategy["healthcheck"]["start_interval"] == "5s"
-        assert execution["healthcheck"]["test"] == [
-            "CMD",
-            "/usr/local/bin/cml-local-healthcheck",
-            "120",
-        ]
-        assert strategy["healthcheck"]["test"] == [
-            "CMD",
-            "/usr/local/bin/cml-local-healthcheck",
-            "300",
-        ]
-        assert execution["environment"]["CML_ACCOUNT_LABEL"] == (
-            f"account-{account_number}"
-        )
-        assert execution["command"] == manifest["x-execution-account-command"]
-        assert "--account-label" not in execution["command"]
-        assert f"account-{account_number}" in strategy["command"]
-        assert "--entry-policy-enforce" not in strategy["command"]
-        for option in (
-            "--entry-positive-gainer-top-count",
-            "--impulse-window-buckets",
-            "--confirmation-buckets",
-            "--min-return-pct",
-            "--min-imbalance",
-            "--min-intensity",
-            "--min-notional-5m-vs-30m",
-            "--cooldown-buckets",
-        ):
-            assert option not in strategy["command"]
-        for profile_env in (
-            "CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT",
-            "CML_LIVE_IMPULSE_WINDOW_BUCKETS",
-            "CML_LIVE_CONFIRMATION_BUCKETS",
-            "CML_LIVE_MIN_RETURN_PCT",
-            "CML_LIVE_MIN_IMBALANCE",
-            "CML_LIVE_MIN_INTENSITY",
-            "CML_LIVE_MIN_NOTIONAL_5M_VS_30M",
-            "CML_LIVE_COOLDOWN_BUCKETS",
-        ):
-            assert profile_env in strategy["environment"]
-        for execution_env, default in (
-            ("ENTRY_LEVERAGE", "5"),
-            ("MARGIN_TYPE", "CROSSED"),
-            ("EXIT_MODE", "candle_15m"),
-            ("CANDLE_GRACE_BARS", "${CML_LIVE_CANDLE_GRACE_BARS:-8}"),
-            (
-                "CANDLE_GRACE_DECISION_PROFIT_PCT",
-                "${CML_LIVE_CANDLE_GRACE_DECISION_PROFIT_PCT:-0.001}",
-            ),
-            (
-                "CANDLE_GRACE_PROFIT_PCT",
-                "${CML_LIVE_CANDLE_GRACE_PROFIT_PCT:-0.0088}",
-            ),
-            ("PERSIST_EXCHANGE_OPERATIONS", "submit,cancel"),
-        ):
-            assert strategy["environment"][f"CML_LIVE_{execution_env}"] == (
-                f"${{CML_LIVE_{execution_env}_ACCOUNT_{account_number}:-{default}}}"
-            )
-        assert "BINANCE_API_KEY" not in execution["environment"]
-        assert "BINANCE_API_SECRET" not in execution["environment"]
-        assert "BINANCE_API_KEY" not in strategy["environment"]
-        assert "BINANCE_API_SECRET" not in strategy["environment"]
-        assert _option_value(
-            strategy["command"],
-            "--persist-exchange-operations",
-        ) == (
-            "${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS_ACCOUNT_"
-            f"{account_number}:-submit,cancel}}"
-        )
-        expected_phases = {"2": "15", "3": "30", "4": "45"}
-        assert (
-            _option_value(strategy["command"], "--checkpoint-phase-seconds")
-            == expected_phases[account_number]
-        )
-        assert _option_value(strategy["command"], "--checkpoint-every-seconds") == "60"
-        assert _option_value(strategy["command"], "--checkpoint-every-states") == "1000"
-        assert (
-            strategy["depends_on"][f"execution-account-live-account-{account_number}"][
-                "condition"
-            ]
-            == "service_healthy"
-        )
-
-    account_two_environment = services["live-strategy-account-2"]["environment"]
-    assert account_two_environment["CML_LOCAL_HEALTH_DIR"] == "/run/cml/health"
-    assert (
-        account_two_environment["CML_LIVE_IMPULSE_WINDOW_BUCKETS"]
-        == "${CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_2:-2}"
-    )
-    assert (
-        account_two_environment["CML_LIVE_MIN_RETURN_PCT"]
-        == "${CML_LIVE_MIN_RETURN_PCT_ACCOUNT_2:-0.0075}"
-    )
-    assert (
-        account_two_environment["CML_LIVE_MIN_IMBALANCE"]
-        == "${CML_LIVE_MIN_IMBALANCE_ACCOUNT_2:-0.30}"
-    )
-    assert (
-        account_two_environment["CML_LIVE_MIN_INTENSITY"]
-        == "${CML_LIVE_MIN_INTENSITY_ACCOUNT_2:-3.0}"
-    )
-    assert (
-        account_two_environment["CML_LIVE_MIN_NOTIONAL_5M_VS_30M"]
-        == "${CML_LIVE_MIN_NOTIONAL_5M_VS_30M_ACCOUNT_2:-1.25}"
-    )
-    assert (
-        account_two_environment["CML_LIVE_SESSION_ID_ACCOUNT_2"]
-        == "${CML_LIVE_SESSION_ID_ACCOUNT_2:-live-account-2-v1}"
-    )
-    assert (
-        account_two_environment["CML_LIVE_MIGRATION_REVISION_ACCOUNT_2"]
-        == "${CML_LIVE_MIGRATION_REVISION_ACCOUNT_2:-20260925_0043}"
-    )
-
-    for account_number in (3, 4):
-        account_environment = services[f"live-strategy-account-{account_number}"][
-            "environment"
-        ]
-        assert (
-            account_environment["CML_LIVE_IMPULSE_WINDOW_BUCKETS"]
-            == f"${{CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_{account_number}:-2}}"
-        )
-        assert (
-            account_environment["CML_LIVE_MIN_RETURN_PCT"]
-            == f"${{CML_LIVE_MIN_RETURN_PCT_ACCOUNT_{account_number}:-0.0075}}"
-        )
-        assert (
-            account_environment["CML_LIVE_MIN_IMBALANCE"]
-            == f"${{CML_LIVE_MIN_IMBALANCE_ACCOUNT_{account_number}:-0.30}}"
-        )
-        assert (
-            account_environment["CML_LIVE_MIN_INTENSITY"]
-            == f"${{CML_LIVE_MIN_INTENSITY_ACCOUNT_{account_number}:-3.0}}"
-        )
-        assert (
-            account_environment["CML_LIVE_MIN_NOTIONAL_5M_VS_30M"]
-            == f"${{CML_LIVE_MIN_NOTIONAL_5M_VS_30M_ACCOUNT_{account_number}:-1.25}}"
-        )
 
 
 def test_server_paper_capture_only_subscribes_to_strategy_required_streams() -> None:

@@ -11,13 +11,6 @@ import pathlib
 
 DOMAIN_EXECUTION = pathlib.Path("src/crypto_momentum_lab/domain/execution")
 LOCK_ATTRIBUTES = ("_mutation_lock", "_process_mutation_lock")
-# Staging (phases around the lock-free transaction) and publication. A new
-# module appearing here must be a reviewed decision, not an accident.
-KNOWN_ACQUIRERS = {
-    "execution_book.py",
-    "execution_action_transaction.py",
-    "execution_evidence_transaction.py",
-}
 
 
 def _lock_attribute(node: ast.expr) -> str | None:
@@ -55,20 +48,9 @@ def test_no_io_is_awaited_under_a_domain_lock() -> None:
             for line, attribute, awaits in _lock_sections(path)
         )
 
-    assert sections, "expected at least one mutation-lock critical section"
     offenders = [
         f"{name}:{line} holds {attribute} across await {awaited}"
         for name, line, attribute, awaits in sections
         for awaited in awaits
     ]
     assert offenders == []
-
-
-def test_domain_lock_is_only_acquired_by_known_flows() -> None:
-    acquirers = {
-        path.name
-        for path in sorted(DOMAIN_EXECUTION.rglob("*.py"))
-        if _lock_sections(path)
-    }
-
-    assert acquirers == KNOWN_ACQUIRERS

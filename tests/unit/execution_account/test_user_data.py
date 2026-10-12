@@ -39,6 +39,8 @@ from crypto_momentum_lab.execution_account.user_data_sync import (
     AccountUserDataState,
 )
 
+pytestmark = pytest.mark.contract
+
 
 def test_parse_user_data_event_is_deterministic_and_preserves_payload() -> None:
     payload = {

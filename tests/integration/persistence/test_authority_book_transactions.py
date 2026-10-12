@@ -51,6 +51,8 @@ from crypto_momentum_lab.persistence.postgres.session import (
     create_async_database_engine,
 )
 
+pytestmark = pytest.mark.contract
+
 
 def _book(factory, uow_type=AsyncPostgresExecutionUnitOfWork):
     commands = PostgresCommandRepository(factory)

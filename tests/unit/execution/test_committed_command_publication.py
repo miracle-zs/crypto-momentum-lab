@@ -13,6 +13,8 @@ from tests.unit.execution.test_terminal_settlement import (
     reserved_book,
 )
 
+pytestmark = pytest.mark.contract
+
 
 @pytest.mark.parametrize("terminal_wins", [False, True])
 async def test_committed_command_publishes_without_rejecting_newer_head(terminal_wins):

@@ -1,7 +1,10 @@
+
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
+
+import pytest
 
 from crypto_momentum_lab.domain.execution.order_read_models import (
     PersistedExchangeOrder,
@@ -17,6 +20,8 @@ from crypto_momentum_lab.live_rollout.pending_entries import (
     LivePendingEntryRegistry,
     TerminalOrderBarrier,
 )
+
+pytestmark = pytest.mark.contract
 
 NOW = datetime(2026, 10, 3, tzinfo=UTC)
 

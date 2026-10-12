@@ -1,7 +1,10 @@
+
 import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import patch
+
+import pytest
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
@@ -9,6 +12,8 @@ from crypto_momentum_lab.live_rollout.checkpoint_coordinator import (
     LiveCheckpointCoordinator,
 )
 from crypto_momentum_lab.live_rollout.checkpoint_writer import CheckpointWriter
+
+pytestmark = pytest.mark.transition
 
 NOW = datetime(2026, 7, 3, 23, 59, tzinfo=UTC)
 

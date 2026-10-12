@@ -1,6 +1,8 @@
+
 from urllib.parse import parse_qs
 
 import httpx
+import pytest
 
 from crypto_momentum_lab.domain.execution.exchange_contract import (
     ExchangeSubmissionTimeoutError,
@@ -14,6 +16,8 @@ from tests.unit.execution_account.orders.test_state_machine import (
     _machine,
     _plan,
 )
+
+pytestmark = pytest.mark.contract
 
 
 async def test_timeout_then_not_found_is_durable_unknown_state() -> None:

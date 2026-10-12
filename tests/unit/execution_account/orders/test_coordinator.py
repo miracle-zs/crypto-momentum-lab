@@ -32,6 +32,8 @@ from tests.fixtures.async_reservations import (
 )
 from tests.fixtures.prepared_submission import submit_prepared
 
+pytestmark = pytest.mark.contract
+
 NOW = datetime(2026, 8, 22, tzinfo=UTC)
 
 

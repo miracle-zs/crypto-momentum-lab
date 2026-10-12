@@ -56,8 +56,8 @@ class _Coverage:
     def is_authoritative(self) -> bool:
         return True
 
-    def covers(self, _cut: datetime) -> bool:
-        return True
+    def covers(self, cut: datetime) -> bool:
+        return cut <= self.end_at
 
 
 def _checkpoint(
@@ -81,7 +81,7 @@ def _checkpoint(
             reconciliation_gap=Decimal("0"),
             health_status=SimpleNamespace(value="READY"),
         ),
-        coverage=_Coverage(NOW),
+        coverage=_Coverage(NOW - timedelta(seconds=30)),
         has_conflicts=False,
         has_synthetic_fills=False,
         has_late_events=False,
@@ -182,7 +182,7 @@ def test_closed_historical_object_does_not_unknown_current_health() -> None:
     assert summary.historical_reasons == ("journal_suffix_incomplete",)
 
 
-def test_open_position_with_complete_suffix_is_proven() -> None:
+def test_open_position_suffix_inside_verified_cut_is_proven() -> None:
     heads = [
         _head(
             account="primary",
@@ -195,7 +195,10 @@ def test_open_position_with_complete_suffix_is_proven() -> None:
     ]
     checkpoints = [_checkpoint_row("primary", "WUSDT", "LONG")]
     suffix_rows = [
-        ("primary", "WUSDT", "LONG", "account_event_hub", "epoch-1", 3, 13, NOW)
+        (
+            "primary", "WUSDT", "LONG", "account_event_hub", "epoch-1",
+            3, 13, NOW - timedelta(seconds=30),
+        )
     ]
     integrity = _run(
         heads=heads,
@@ -212,7 +215,7 @@ def test_open_position_with_complete_suffix_is_proven() -> None:
 
     summary = integrity["primary"]
     assert summary.gaps == 0
-    assert summary.observed_at == NOW
+    assert summary.observed_at == NOW - timedelta(seconds=30)
     assert summary.reasons == ()
 
 

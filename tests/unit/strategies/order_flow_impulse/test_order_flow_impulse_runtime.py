@@ -20,6 +20,8 @@ from crypto_momentum_lab.strategies.order_flow_impulse import (
     event_study,
 )
 
+pytestmark = pytest.mark.contract
+
 
 def test_orderflow_impulse_emits_long_signal_on_buy_imbalance() -> None:
     strategy = _strategy()

@@ -19,6 +19,8 @@ from crypto_momentum_lab.execution_account.risk_control_hub import (
     encode_risk_control_event,
 )
 
+pytestmark = pytest.mark.transition
+
 
 def _event(
     *,
