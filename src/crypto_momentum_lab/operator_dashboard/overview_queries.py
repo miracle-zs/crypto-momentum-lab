@@ -500,6 +500,20 @@ class OverviewQueries:
             entry_gate_open = exit_gate_open = unmanaged_risk_clear = False
             entry_gate_reason = exit_gate_reason = "halt_active"
 
+        if status == OperationalStatus.READY:
+            # Runtime gates describe available actions; they cannot establish
+            # ledger integrity. Reuse the same proof reader as operational health.
+            integrity = await self.operational_health()
+            facts = [
+                dimension.get("status")
+                for dimension in integrity.get("dimensions", [])
+                if dimension.get("name") == "fact_integrity"
+            ]
+            if not facts or any(fact == "unknown" for fact in facts):
+                status = OperationalStatus.UNKNOWN
+            if any(fact not in ("healthy", "unknown") for fact in facts):
+                status = OperationalStatus.DEGRADED
+
         stream_overall = (
             "READY"
             if streams_all_ready and bool(accounts_resp.accounts)

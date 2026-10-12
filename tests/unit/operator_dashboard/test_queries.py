@@ -1426,6 +1426,9 @@ async def test_readiness_allows_fully_tradeable_when_services_include_database_r
                 research_collector_root=Path("/tmp"),
             )
 
+        async def operational_health(self):
+            return {"dimensions": [{"name": "fact_integrity", "status": "healthy"}]}
+
         async def health(self) -> dict[str, str]:
             return {"app_status": "UP", "database_status": "UP"}
 

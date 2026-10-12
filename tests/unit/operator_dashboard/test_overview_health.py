@@ -346,7 +346,15 @@ def test_live_account_status_accepts_running():
     )
 
 
-async def test_running_tradeability_reports_ready():
+@pytest.mark.parametrize(
+    "fact_status, expected",
+    [
+        ("unknown", OperationalStatus.UNKNOWN),
+        ("healthy", OperationalStatus.READY),
+        ("degraded", OperationalStatus.DEGRADED),
+    ],
+)
+async def test_running_tradeability_requires_verified_facts(fact_status, expected):
     queries = Queries(strategy_state="active")
     queries.account.runtime_observed_at = NOW
     queries.account.runtime_tradeability = TradeabilityDetailResponse(
@@ -358,8 +366,16 @@ async def test_running_tradeability_reports_ready():
         unmanaged_risk_clear=True,
         halt_active=False,
     )
+    if fact_status != "unknown":
+        from unittest.mock import AsyncMock
+
+        queries.operational_health = AsyncMock(
+            return_value={
+                "dimensions": [{"name": "fact_integrity", "status": fact_status}],
+            }
+        )
     readiness = await queries.readiness()
-    assert readiness.status == OperationalStatus.READY
+    assert readiness.status == expected
     assert readiness.tradeability.mode == "RUNNING"
     assert readiness.tradeability.entry_gate_open is True
     assert readiness.tradeability.entry_gate_reason == "live_entry_prerequisites_ready"
