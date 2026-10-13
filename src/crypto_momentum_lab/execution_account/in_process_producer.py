@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
@@ -55,7 +56,9 @@ log = structlog.get_logger(__name__)
 
 # Persisting a merged observation is a durable side effect, not a transport
 # step; a slow database must not stall the private stream reader.
-BaselinePublisher = Callable[[AccountSnapshot, AccountEvent], Awaitable[None]]
+BaselinePublisher = Callable[
+    [AccountSnapshot, AccountEvent], Awaitable[AccountSnapshot | None]
+]
 SnapshotPersister = Callable[[AccountSnapshot, AccountEvent], Awaitable[None]]
 
 
@@ -331,8 +334,8 @@ class InProcessAccountStreamProducer:
                 self._state.replace_snapshot(snapshot)
             if epoch != self._stream_epoch:
                 raise RuntimeError("account connection changed during baseline load")
-            await self._accept_baseline(snapshot, stream_epoch=epoch)
-            self._baseline_observed_at = account_config.observed_at
+            snapshot = await self._accept_baseline(snapshot, stream_epoch=epoch)
+            self._baseline_observed_at = snapshot.config.observed_at
             self._require_baseline = False
             return snapshot
 
@@ -344,7 +347,7 @@ class InProcessAccountStreamProducer:
 
     async def _accept_baseline(
         self, snapshot: AccountSnapshot, *, stream_epoch: str
-    ) -> None:
+    ) -> AccountSnapshot:
         self._account_state = ExecutionAccountStatus.RUNNING
         # The baseline is itself a frame on the new epoch and consumes a
         # sequence number, so the first business frame after it is sequence 2
@@ -360,11 +363,16 @@ class InProcessAccountStreamProducer:
             account_state=self._account_state,
         )
         if self._publish_baseline is not None:
-            await self._publish_baseline(snapshot, event)
+            accepted = await self._publish_baseline(snapshot, event)
+            if accepted is not None:
+                snapshot = accepted
+                event = replace(event, account_snapshot=snapshot)
         if stream_epoch != self._stream_epoch or (
             self._stream is not None and not self._stream_connected
         ):
             raise RuntimeError("account connection changed during baseline acceptance")
+        if self._state is not None:
+            self._state.replace_snapshot(snapshot)
         self._source.clear_fact_gap()
         self._source.mark_continuity_verified(
             stream_epoch=stream_epoch,
@@ -372,6 +380,7 @@ class InProcessAccountStreamProducer:
         )
         if self._persist_snapshot is not None:
             await self._schedule_persistence(snapshot, event)
+        return snapshot
 
     def _on_stream_connection_change(
         self,

@@ -647,3 +647,44 @@ async def test_baseline_consumer_failure_does_not_confirm_continuity():
     assert not source.continuity_verified
     assert not source.is_risk_allowed()
     source.stop()
+
+
+@pytest.mark.asyncio
+async def test_refreshed_baseline_is_the_projection_persisted_and_merged():
+    from dataclasses import replace
+
+    account = "baseline-refreshed"
+    source = InProcessAccountEventSource(environment="live", account_label=account)
+    registry = AccountPositionExpectationRegistry(
+        environment="live", account_label=account
+    )
+    accepted = []
+    persisted = []
+
+    async def refresh(snapshot, event):
+        fresh = replace(snapshot, positions=())
+        accepted.append(fresh)
+        return fresh
+
+    async def persist(snapshot, event):
+        assert event.account_snapshot is snapshot
+        persisted.append(snapshot)
+
+    producer = InProcessAccountStreamProducer(
+        client=_NoopListenKeyClient(),
+        read_client=_FakeReadClient(account=account),
+        registry=registry,
+        source=source,
+        environment="live",
+        account_label=account,
+        expected_multi_assets_mode=True,
+        expected_hedge_mode=True,
+        publish_baseline=refresh,
+        persist_snapshot=persist,
+    )
+    result = await producer.baseline()
+    assert result is accepted[0]
+    assert producer.account_snapshot.positions == result.positions
+    await producer.aclose()
+    assert persisted == [result]
+    source.stop()

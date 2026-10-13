@@ -217,7 +217,7 @@ def create_verified_recovery_checkpoint(
         and snapshot.position_side == key.position_side.value
     )
     if provenance.source_anchor_kind == "zero_snapshot":
-        if provenance.source_anchor_event_cut != proof.fill_load_start or not any(
+        if proof.fill_load_start > provenance.source_anchor_event_cut or not any(
             snapshot.position_amt == Decimal("0") for snapshot in anchor_snapshots
         ):
             return None

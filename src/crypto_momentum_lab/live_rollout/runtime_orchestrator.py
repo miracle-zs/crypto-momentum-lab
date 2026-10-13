@@ -101,7 +101,13 @@ from crypto_momentum_lab.domain.account import (
     ExecutionAccountStatus,
 )
 from crypto_momentum_lab.domain.account.snapshot_models import AccountSnapshot
-from crypto_momentum_lab.domain.account.models import AccountFillLoadScan
+from crypto_momentum_lab.domain.account.models import (
+    AccountFillLoadScan,
+    AccountFillSourceAnchor,
+)
+from crypto_momentum_lab.domain.execution.snapshot_encoding import (
+    stable_snapshot_anchor_id,
+)
 from crypto_momentum_lab.execution_account.fill_scan_plan import plan_fill_scan
 from crypto_momentum_lab.persistence.postgres.fill_recovery_sources import (
     load_fill_recovery_sources,
@@ -836,7 +842,7 @@ async def run_live_daemon(
             async def _publish_in_process_baseline(
                 snapshot: AccountSnapshot,
                 event: AccountEvent,
-            ) -> None:
+            ) -> AccountSnapshot:
                 """Expose the merged account projection to the live context.
 
                 The startup/refresh baseline is published through the same
@@ -877,25 +883,78 @@ async def run_live_daemon(
                             for position in selected
                         ),
                     )
-                    scans = []
-                    fills = {}
-                    for position in selected:
-                        plan = plan_fill_scan(
-                            position,
-                            anchors.get(
+                    missing = tuple(
+                        position
+                        for position in selected
+                        if position.position_amt == 0
+                        and anchors.get(
+                            (position.symbol, position.position_side.upper())
+                        )
+                        is None
+                    )
+                    if missing:
+                        for position in missing:
+                            anchors[
                                 (position.symbol, position.position_side.upper())
+                            ] = AccountFillSourceAnchor(
+                                symbol=position.symbol,
+                                position_side=position.position_side.upper(),
+                                checkpoint_id=stable_snapshot_anchor_id(position),
+                                event_cut=position.observed_at,
+                                stream_id="exchange_snapshot",
+                                stream_epoch=event.stream_epoch,
+                                zero_snapshot=position,
+                            )
+                        snapshot = replace(
+                            snapshot,
+                            positions=await read_client.fetch_positions(
+                                include_flat=True
                             ),
                         )
+                        event = replace(event, account_snapshot=snapshot)
+                        selected = tuple(
+                            position
+                            for position in snapshot.positions
+                            if position.position_amt != 0
+                            or symbols is None
+                            or position.symbol in symbols
+                            or position.symbol in ordered_symbols
+                        )
+                    scans = []
+                    fills = {}
+                    plans = tuple(
+                        (
+                            position,
+                            plan_fill_scan(
+                                position,
+                                anchors.get(
+                                    (position.symbol, position.position_side.upper())
+                                ),
+                            ),
+                        )
+                        for position in selected
+                    )
+                    ranges = {}
+                    for _, plan in plans:
+                        if plan is not None:
+                            previous = ranges.get(plan.symbol)
+                            ranges[plan.symbol] = (
+                                plan.start_time_ms
+                                if previous is None
+                                else min(previous[0], plan.start_time_ms),
+                                plan.checked_through
+                                if previous is None
+                                else max(previous[1], plan.checked_through),
+                            )
+                    loaded = {}
+                    for symbol, (start, end) in ranges.items():
+                        loaded[symbol] = await read_client.fetch_fills_with_provenance(
+                            symbol, start_time_ms=start, checked_through=end
+                        )
+                    for position, plan in plans:
                         if plan is None:
                             continue
-                        (
-                            loaded_fills,
-                            page,
-                        ) = await read_client.fetch_fills_with_provenance(
-                            position.symbol,
-                            start_time_ms=plan.start_time_ms,
-                            checked_through=plan.checked_through,
-                        )
+                        loaded_fills, page = loaded[plan.symbol]
                         for fill in loaded_fills:
                             if plan.includes_fill(fill):
                                 fills[(fill.symbol, fill.trade_id)] = fill
@@ -920,6 +979,7 @@ async def run_live_daemon(
                     )
                     execution_snapshot = replace(snapshot, positions=selected)
                 await account_baseline_listener[0](event, execution_snapshot)
+                return snapshot
 
             async def _persist_in_process_snapshot(
                 snapshot: AccountSnapshot,

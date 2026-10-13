@@ -114,8 +114,6 @@ def _coverage_for_scope(
         start = (
             evidence.fill_load_provenance.source_anchor_event_cut
             if evidence.fill_load_provenance is not None
-            and evidence.fill_load_provenance.source_anchor_kind
-            == "recovery_checkpoint"
             else fill_start
         )
         end = checkpoint_cut

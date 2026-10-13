@@ -61,13 +61,16 @@ from crypto_momentum_lab.persistence.postgres.session import (
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cold", [False, True])
 async def test_flat_baseline_scan_adopts_restored_head_without_business_event(
     async_database_url,
+    cold,
 ):
     from dataclasses import replace
     from crypto_momentum_lab.domain.account.models import (
         AccountFillLoadScan,
         AccountFillPageScan,
+        AccountFillSourceAnchor,
     )
     from crypto_momentum_lab.execution_account.fill_scan_plan import plan_fill_scan
     from crypto_momentum_lab.execution_account.orders.fill_scan_evidence import (
@@ -80,7 +83,9 @@ async def test_flat_baseline_scan_adopts_restored_head_without_business_event(
     engine = create_async_database_engine(async_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     key = PositionKey("live", f"baseline-{uuid4().hex}", "BTCUSDT")
-    at = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=1)
+    at = datetime.now(UTC).replace(microsecond=123456 if cold else 0) - timedelta(
+        minutes=1
+    )
     scope = AccountFactStreamScope.for_position_key(
         key, stream_id="account_event_hub", stream_epoch="old"
     )
@@ -106,7 +111,8 @@ async def test_flat_baseline_scan_adopts_restored_head_without_business_event(
             snapshot=first,
             proof=proof,
         )
-        assert isinstance(await book.observe(evidence), Applied)
+        if not cold:
+            assert isinstance(await book.observe(evidence), Applied)
         book = _book(factory)
         await book.restore(account_label=key.account_label)
         current = _snapshot(key, at + timedelta(minutes=1), "0", "0")
@@ -119,6 +125,17 @@ async def test_flat_baseline_scan_adopts_restored_head_without_business_event(
             account_label=key.account_label,
             position_keys=((key.symbol, key.position_side.value),),
         )
+        if cold:
+            assert anchors[(key.symbol, key.position_side.value)] is None
+            anchors[(key.symbol, key.position_side.value)] = AccountFillSourceAnchor(
+                key.symbol,
+                key.position_side.value,
+                stable_snapshot_anchor_id(first),
+                first.observed_at,
+                "exchange_snapshot",
+                "first-real-read",
+                zero_snapshot=first,
+            )
         plan = plan_fill_scan(current, anchors[(key.symbol, key.position_side.value)])
         assert plan is not None
         page = AccountFillPageScan(
