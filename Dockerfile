@@ -17,7 +17,7 @@ COPY pyproject.toml ./
 RUN --mount=type=cache,target=/root/.cache/pip \
     python -c "import subprocess,sys,tomllib; deps=tomllib.load(open('pyproject.toml','rb'))['project']['dependencies']; subprocess.check_call([sys.executable,'-m','pip','install','hatchling>=1.27,<2',*deps])"
 
-COPY README.md ./
+COPY SYSTEM.md ./
 COPY src ./src
 COPY configs ./configs
 COPY alembic.ini ./
