@@ -569,7 +569,7 @@ async def run_live_daemon(
     # persisted for the dashboard; both sinks are created later in the
     # assembly, so the producer writes through stable one-slot holders.
     account_baseline_listener: list[
-        Callable[[AccountEvent], Awaitable[None]] | None
+        Callable[[AccountEvent, AccountSnapshot], Awaitable[None]] | None
     ] = [None]
     account_facts_status_holder: list[Callable[[], Mapping[str, object]]] = [
         lambda: {"ready": None, "reason": "account_facts_unreported"}
@@ -847,6 +847,7 @@ async def run_live_daemon(
 
                 if account_baseline_listener[0] is None:
                     raise RuntimeError("account baseline consumer is not assembled")
+                execution_snapshot = snapshot
                 if snapshot.positions:
                     loader = (
                         None
@@ -896,7 +897,7 @@ async def run_live_daemon(
                             checked_through=plan.checked_through,
                         )
                         for fill in loaded_fills:
-                            if fill.trade_at <= position.observed_at:
+                            if plan.includes_fill(fill):
                                 fills[(fill.symbol, fill.trade_id)] = fill
                         scans.append(
                             AccountFillLoadScan(
@@ -917,7 +918,8 @@ async def run_live_daemon(
                     event = replace(
                         event, fills=tuple(fills.values()), fill_load_scans=tuple(scans)
                     )
-                await account_baseline_listener[0](event)
+                    execution_snapshot = replace(snapshot, positions=selected)
+                await account_baseline_listener[0](event, execution_snapshot)
 
             async def _persist_in_process_snapshot(
                 snapshot: AccountSnapshot,
@@ -1971,14 +1973,18 @@ async def run_live_daemon(
             on_order_identity_conflict=daemon.note_order_identity_conflict,
         )
 
-        async def _on_account_snapshot_combined(event: AccountEvent) -> None:
+        async def _on_account_snapshot_combined(
+            event: AccountEvent, execution_snapshot: AccountSnapshot | None = None
+        ) -> None:
             # The account channel owns and awaits fact ingestion. Publish the
             # ready context only after the execution projection has accepted it.
             if execution_coordinator is not None and (
                 event.account_snapshot is not None or event.fills
             ):
                 await execution_coordinator.observe_account_snapshot(
-                    event.account_snapshot,
+                    execution_snapshot
+                    if execution_snapshot is not None
+                    else event.account_snapshot,
                     fills=event.fills,
                     fill_load_scans=event.fill_load_scans,
                     stream_id="account_event_hub",

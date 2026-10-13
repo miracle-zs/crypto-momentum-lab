@@ -5,6 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.account.models import (
+    AccountFillEvent,
     AccountFillSourceAnchor,
     AccountPositionSnapshot,
 )
@@ -25,6 +26,17 @@ class FillScanPlan:
     source_stream_id: str | None
     source_stream_epoch: str | None
     source_anchor_snapshot: AccountPositionSnapshot | None = None
+
+    def includes_fill(self, fill: AccountFillEvent) -> bool:
+        """Select this side's suffix; REST startTime includes the parent cut."""
+        side = fill.raw_position_side
+        if side is None:
+            raise ValueError("baseline fill is missing explicit position side")
+        return (
+            fill.symbol.strip().upper() == self.symbol
+            and side.strip().upper() == self.position_side
+            and self.source_anchor_event_cut < fill.trade_at <= self.checked_through
+        )
 
 
 def plan_fill_scan(

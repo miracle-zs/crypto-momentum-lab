@@ -134,3 +134,38 @@ def test_loaded_zero_baseline_constructs_actual_transport_scan():
     )
     assert scan.source_stream_id is None and scan.source_stream_epoch is None
     assert scan.source_anchor_snapshot is baseline
+
+
+@pytest.mark.parametrize(
+    "side,offset,accepted",
+    [
+        ("LONG", -1, False),
+        ("LONG", 0, False),
+        ("LONG", 1, True),
+        ("SHORT", 1, False),
+        ("LONG", 2000000, False),
+    ],
+)
+def test_baseline_scan_excludes_parent_cut_and_other_position_side(
+    side, offset, accepted
+):
+    from crypto_momentum_lab.domain.account.models import AccountFillEvent
+
+    cut = OBSERVED_AT - timedelta(seconds=1)
+    plan = plan_fill_scan(position(), anchor(cut))
+    fill = AccountFillEvent(
+        "live",
+        "primary",
+        "BTCUSDT",
+        "trade",
+        "order",
+        "BUY",
+        Decimal("10"),
+        Decimal("1"),
+        Decimal("0"),
+        Decimal("0"),
+        "USDT",
+        cut + timedelta(microseconds=offset),
+        {"positionSide": side},
+    )
+    assert plan.includes_fill(fill) is accepted
