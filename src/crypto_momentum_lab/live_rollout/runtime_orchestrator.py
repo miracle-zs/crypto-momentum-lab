@@ -860,7 +860,7 @@ async def run_live_daemon(
                 sync_config = ExecutionAccountSyncConfig(
                     environment="live",
                     account_label=account_label,
-                    expected_multi_assets_mode=True,
+                    expected_multi_assets_mode=account_config.multi_assets_mode,
                     expected_hedge_mode=hedge_mode,
                     observed_at=observed_at,
                 )
@@ -926,7 +926,7 @@ async def run_live_daemon(
                 require_live_stream=True,
                 on_unverified_position=_on_unverified_position,
                 read_client=read_client,
-                expected_multi_assets_mode=True,
+                expected_multi_assets_mode=account_config.multi_assets_mode,
                 expected_hedge_mode=hedge_mode,
                 publish_baseline=_publish_in_process_baseline,
                 persist_snapshot=_persist_in_process_snapshot,
@@ -1746,6 +1746,10 @@ async def run_live_daemon(
         account_facts_status_holder[0] = control_plane_runtime.account_facts_status
         account_facts_ready_holder[0] = lambda: (
             control_plane_runtime.account_snapshot_available
+            and (
+                in_process_account_source is None
+                or in_process_account_source.is_risk_allowed()
+            )
         )
         order_reconciliation.on_unknown_order = (
             control_plane_runtime.on_account_snapshot_recovery

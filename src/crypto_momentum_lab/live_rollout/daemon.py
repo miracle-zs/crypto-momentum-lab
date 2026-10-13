@@ -688,9 +688,9 @@ class LiveStrategyDaemon:
 
     async def request_flatten(
         self,
+        identity_at: datetime | None = None,
         *,
         now: datetime | None = None,
-        identity_at: datetime | None = None,
     ) -> str | None:
         """Request a reduce-only flatten through the live exit processor."""
 

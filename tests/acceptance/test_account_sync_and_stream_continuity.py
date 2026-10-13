@@ -222,6 +222,7 @@ def _make_producer(
     on_unverified: object = None,
     persisted: list[AccountSnapshot] | None = None,
     published: list[AccountEvent] | None = None,
+    expected_multi_assets_mode: bool = True,
 ) -> InProcessAccountStreamProducer:
     async def _persist(snapshot: AccountSnapshot, event: AccountEvent) -> None:
         if persisted is not None:
@@ -238,7 +239,7 @@ def _make_producer(
         environment="live",
         account_label=account,
         read_client=read_client,
-        expected_multi_assets_mode=True,
+        expected_multi_assets_mode=expected_multi_assets_mode,
         expected_hedge_mode=True,
         on_unverified_position=on_unverified,  # type: ignore[arg-type]
         publish_baseline=_publish,
@@ -471,7 +472,8 @@ async def test_source_without_verified_connection_never_admits_new_risk() -> Non
 
 
 @pytest.mark.asyncio
-async def test_reconnect_blocks_account_until_the_new_baseline_is_accepted() -> None:
+@pytest.mark.parametrize("multi_assets_mode", [True, False])
+async def test_reconnect_blocks_account_until_the_new_baseline_is_accepted(multi_assets_mode) -> None:
     """A transport break blocks every symbol until a baseline re-anchors the epoch."""
 
     account = "acct-reconnect"
@@ -480,11 +482,15 @@ async def test_reconnect_blocks_account_until_the_new_baseline_is_accepted() -> 
         environment="live", account_label=account
     )
     read_client = _FakeReadClient(account=account)
+    from dataclasses import replace
+    from unittest.mock import AsyncMock
+    read_client.fetch_account_config = AsyncMock(return_value=replace(_config(account), multi_assets_mode=multi_assets_mode))
     producer = _make_producer(
         account=account,
         source=source,
         registry=registry,
         read_client=read_client,
+        expected_multi_assets_mode=multi_assets_mode,
     )
     await producer.baseline()
     assert source.is_risk_allowed("BTCUSDT") is True
