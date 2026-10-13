@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from crypto_momentum_lab.domain.execution.command_lifecycle import (
     plan_command_transition,
@@ -19,12 +20,8 @@ from crypto_momentum_lab.domain.execution.command_models import (
 from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
 from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
 
-
-@dataclass(slots=True)
-class CommandLifecycleState:
-    outbox_by_command_id: dict[str, OutboxEntry]
-    dispatch_reconciliation_required_commands: set[str]
-    recovery_required_commands: set[str]
+if TYPE_CHECKING:
+    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,13 +37,13 @@ class CommandPersistenceDependencies:
 
 
 async def persist_command_transition(
-    state: CommandLifecycleState,
+    book: ExecutionBook,
     dependencies: CommandPersistenceDependencies,
     updated: OutboxEntry,
 ) -> None:
     """Persist and publish exactly one outbox state transition."""
     await dependencies.persist_outbox(updated)
-    state.outbox_by_command_id[updated.command_id] = updated
+    book._outbox_by_command_id[updated.command_id] = updated
     dependencies.advance_context_revision()
 
 
@@ -66,7 +63,7 @@ async def release_command_reservations(
 
 
 async def settle_command_reservations(
-    state: CommandLifecycleState,
+    book: ExecutionBook,
     dependencies: CommandPersistenceDependencies,
     order_id: str,
     quantity: Decimal,
@@ -84,17 +81,17 @@ async def settle_command_reservations(
     for reservation in plan.updates:
         await dependencies.persist_reservation(reservation, None)
     if plan.recovery_required:
-        if order_id in state.outbox_by_command_id:
-            state.recovery_required_commands.add(order_id)
+        if order_id in book._outbox_by_command_id:
+            book._recovery_required_commands.add(order_id)
         else:
             identity = f"external:{dependencies.order_watermark_key(key, order_id)}"
             dependencies.external_recovery_positions[identity] = key
-            state.recovery_required_commands.add(identity)
+            book._recovery_required_commands.add(identity)
     return plan.consumed_quantity, plan.recovery_required, plan.diagnostic
 
 
 async def apply_command_transition(
-    state: CommandLifecycleState,
+    book: ExecutionBook,
     command_id: str,
     target: DispatchState,
     *,
@@ -106,7 +103,7 @@ async def apply_command_transition(
     seal_persistence: Callable[[], None],
 ) -> OutboxEntry:
     """Apply one planned command transition through the book's durable hooks."""
-    entry = state.outbox_by_command_id.get(command_id)
+    entry = book._outbox_by_command_id.get(command_id)
     if entry is None:
         raise KeyError(f"Outbox entry {command_id} not found")
     plan = plan_command_transition(
@@ -119,21 +116,21 @@ async def apply_command_transition(
     if plan.updated is entry:
         return entry
     if plan.requires_reconciliation:
-        state.dispatch_reconciliation_required_commands.add(command_id)
+        book._dispatch_reconciliation_required_commands.add(command_id)
     elif target in (DispatchState.REJECTED, DispatchState.TERMINAL):
-        state.dispatch_reconciliation_required_commands.discard(command_id)
-        state.recovery_required_commands.discard(command_id)
+        book._dispatch_reconciliation_required_commands.discard(command_id)
+        book._recovery_required_commands.discard(command_id)
         if entry.external_order_id:
-            state.recovery_required_commands.discard(entry.external_order_id)
+            book._recovery_required_commands.discard(entry.external_order_id)
     try:
         await persist_transition(plan.updated)
     except Exception:
         if plan.requires_reconciliation:
             # A submit may have reached the exchange. Seal against resubmit even
             # if persisting its UNKNOWN state failed.
-            state.outbox_by_command_id[command_id] = plan.updated
+            book._outbox_by_command_id[command_id] = plan.updated
             seal_persistence()
         raise
     if plan.release_reason is not None:
         await release_reservations(command_id, plan.release_reason)
-    return state.outbox_by_command_id[command_id]
+    return book._outbox_by_command_id[command_id]

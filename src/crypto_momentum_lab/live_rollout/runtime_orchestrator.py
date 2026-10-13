@@ -8,11 +8,13 @@ import asyncio
 import json
 import os
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
+from uuid import uuid4
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -60,13 +62,33 @@ from crypto_momentum_lab.domain.strategy.position_exit import (
 )
 from crypto_momentum_lab.domain.strategy.sizing import SymbolLotRules
 from crypto_momentum_lab.execution_account.binance.client import (
+    BinanceUsdMPrivateReadClient,
     BinanceUsdMTradeClient,
+)
+from crypto_momentum_lab.execution_account.binance.user_data import (
+    DEFAULT_BINANCE_USDM_USER_DATA_WEBSOCKET_URL,
+)
+from crypto_momentum_lab.execution_account.expectations import (
+    AccountPositionExpectationRegistry,
 )
 from crypto_momentum_lab.execution_account.hub import (
     AccountEvent,
+    InProcessAccountEventSource,
     WebSocketAccountPositionExpectationPublisher,
 )
+from crypto_momentum_lab.execution_account.in_process_producer import (
+    InProcessAccountStreamProducer,
+)
+from crypto_momentum_lab.domain.live_rollout.authorization import (
+    CANCEL_ALL_OPEN_ENTRIES_COMMAND,
+    EMERGENCY_FLATTEN_COMMAND,
+)
+from crypto_momentum_lab.execution_account.risk_control_hub import (
+    RiskControlAction,
+    RiskControlEvent,
+)
 from crypto_momentum_lab.execution_account.orders.coordinator import (
+    DispatchOwnership,
     OrderExecutionCoordinator,
 )
 from crypto_momentum_lab.health.resources import ProcessResourceSampler
@@ -74,10 +96,32 @@ from crypto_momentum_lab.live_rollout.account_channel import LiveAccountEventRun
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     BinanceClosedCandle15mFeed,
 )
+from crypto_momentum_lab.domain.account import (
+    ExecutionAccountProcessState,
+    ExecutionAccountStatus,
+)
+from crypto_momentum_lab.domain.account.snapshot_models import AccountSnapshot
+from crypto_momentum_lab.execution_account.balance_history import (
+    BalanceValue,
+    balance_value,
+    select_balance_history,
+)
+from crypto_momentum_lab.execution_account.reconciliation_records import (
+    position_state_details,
+    reconciliation_run,
+    user_data_reconciliation_id,
+)
+from crypto_momentum_lab.execution_account.sync_models import (
+    ExecutionAccountSyncConfig,
+)
+from crypto_momentum_lab.persistence.postgres.account_repository import (
+    PostgresAccountRepository,
+)
 from crypto_momentum_lab.live_rollout.control_plane import LiveControlPlaneRuntime
 from crypto_momentum_lab.live_rollout.daemon import LiveDaemonConfig, LiveStrategyDaemon
 from crypto_momentum_lab.live_rollout.decision_facts import LiveDecisionFactSource
 from crypto_momentum_lab.live_rollout.entry_expectations import (
+    DirectPositionExpectationPublisher,
     LiveEntryExpectationRegistrar,
 )
 from crypto_momentum_lab.live_rollout.entry_order_cancellation import (
@@ -129,6 +173,7 @@ from crypto_momentum_lab.live_rollout.market_runtime_contracts import (
 from crypto_momentum_lab.live_rollout.order_event_runtime import LiveOrderEventRuntime
 from crypto_momentum_lab.live_rollout.order_reconciliation import (
     LiveOrderReconciliation,
+    ReconciliationPassResult,
 )
 from crypto_momentum_lab.live_rollout.pending_entries import TerminalOrderBarrier
 from crypto_momentum_lab.live_rollout.position_self_healing import (
@@ -202,6 +247,9 @@ from crypto_momentum_lab.live_rollout.startup_recovery import (
     warm_live_strategy_then_start_fresh as _warm_live_strategy_then_start_fresh,
 )
 from crypto_momentum_lab.live_rollout.startup_resilience import (
+    LiveStartupRetryableError,
+)
+from crypto_momentum_lab.live_rollout.startup_resilience import (
     LiveStartupRetryableError as _LiveStartupRetryableError,
 )
 from crypto_momentum_lab.live_rollout.startup_resilience import (
@@ -223,6 +271,13 @@ from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
 )
 from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
     PostgresLiveRolloutRepository,
+)
+from crypto_momentum_lab.persistence.postgres.risk_repository import (
+    DispatchLeaseToken,
+    LeaseAlreadyHeldError,
+    PostgresRiskRepository,
+    TradingLease,
+    TradingLeaseState,
 )
 from crypto_momentum_lab.persistence.postgres.live_runtime_assembly import (
     assemble_live_persistence,
@@ -253,6 +308,172 @@ from crypto_momentum_lab.strategies.registry import build_runtime_strategy
 log = structlog.get_logger()
 
 
+def _positions_for_persistence(
+    positions: tuple[Any, ...],
+    previous_amounts: Mapping[tuple[str, str], Decimal],
+) -> tuple[Any, ...]:
+    """Keep non-zero rows and the row that closes a previously held position."""
+
+    persisted: list[Any] = []
+    for position in positions:
+        identity = (position.symbol, position.position_side)
+        if position.position_amt != Decimal("0") or previous_amounts.get(
+            identity, Decimal("0")
+        ) != Decimal("0"):
+            persisted.append(position)
+    return tuple(persisted)
+
+
+_DISPATCH_LEASE_TTL_SECONDS = 300.0
+# Account facts (private-stream continuity plus an accepted account baseline)
+# start from the same bounded startup budget the account stream already uses.
+_ACCOUNT_FACTS_STARTUP_TIMEOUT_SECONDS = 30.0
+
+
+@dataclass(slots=True)
+class DispatchOwnershipState:
+    """This process's dispatch authority and the last unconfirmed renewal.
+
+    ``ownership_lost`` is True after a renewal failure or an unconfirmable
+    ownership check, and is cleared only by a successful renewal.  It is the one
+    extra fact the verifier needs beyond the durable lease row: a lease row can
+    still be unexpired while this process must no longer dispatch.
+    """
+
+    token: DispatchLeaseToken
+    renewal_failure_reason: str | None = None
+    confirmed_at: datetime | None = None
+
+    @property
+    def ownership_lost(self) -> bool:
+        return self.renewal_failure_reason is not None
+
+
+async def refresh_dispatch_lease_authority(
+    repository: PostgresRiskRepository,
+    *,
+    state: DispatchOwnershipState,
+    environment: str,
+    account_label: str,
+    ttl_seconds: float,
+) -> bool:
+    """Renew this process's lease, recording loss of authority on any failure.
+
+    Returns True when authority is confirmed and False when it was lost.  The
+    durable lease is re-read first so a replaced or expired lease is detected
+    before any renewal attempt.
+    """
+
+    now = datetime.now(tz=UTC)
+    token = state.token
+    live = await repository.load_dispatch_lease(
+        environment, account_label, now, token=token
+    )
+    if live is None:
+        state.renewal_failure_reason = "dispatch_lease_not_held"
+        log.error(
+            "trading_lease_ownership_lost",
+            expected_owner=token.owner,
+            lease_id=token.lease_id,
+            reason=state.renewal_failure_reason,
+        )
+        return False
+    try:
+        await repository.renew_lease(
+            lease_id=token.lease_id,
+            owner=token.owner,
+            expires_at=now + timedelta(seconds=ttl_seconds),
+            token=token,
+            now=now,
+        )
+    except Exception as renew_err:
+        # A failed renewal must stop NEW requests immediately; the in-flight
+        # responsibility stays recorded and queryable.
+        state.renewal_failure_reason = f"renew_failed:{type(renew_err).__name__}"
+        log.warning(
+            "trading_lease_renew_failed",
+            error=str(renew_err),
+            expected_owner=token.owner,
+            lease_id=token.lease_id,
+        )
+        return False
+    state.renewal_failure_reason = None
+    state.confirmed_at = now
+    return True
+
+
+async def _acquire_dispatch_lease(
+    repository: PostgresRiskRepository,
+    *,
+    account_label: str,
+    owner: str,
+    strategy_name: str,
+    code_generation: str,
+    ttl_seconds: float,
+) -> TradingLease:
+    """Acquire this account's single active dispatch lease for this process.
+
+    Existing authorisation is the ``prepare`` command's risk configuration, not
+    a lease handed to the run process.  The run process obtains the lease
+    itself: while another lease is active and unexpired the acquisition fails,
+    which is the "one dispatcher per account" guarantee.  Replacing a still
+    valid lease is a deliberate operator action (``CML_LIVE_TAKE_OVER_LEASE``),
+    never an automatic inheritance of another process's identity.
+    """
+
+    now = datetime.now(tz=UTC)
+    takeover = os.environ.get("CML_LIVE_TAKE_OVER_LEASE", "").strip() == "1"
+    lease = TradingLease(
+        lease_id=f"lease-{uuid4()}",
+        environment="live",
+        account_label=account_label,
+        strategy_name=strategy_name,
+        owner=owner,
+        code_generation=code_generation or "live-unknown",
+        state=TradingLeaseState.ACTIVE,
+        acquired_at=now,
+        expires_at=now + timedelta(seconds=ttl_seconds),
+    )
+    try:
+        await repository.acquire_lease(lease, takeover=takeover)
+    except LeaseAlreadyHeldError:
+        raise LiveStartupRetryableError(
+            "another process holds this account's active dispatch lease; "
+            "stop it and confirm its responsibility before taking over"
+        ) from None
+    return lease
+
+
+def resolve_live_read_credentials(
+    config: LiveRuntimeConfig,
+) -> tuple[str, str]:
+    """Resolve the read-only account credentials required by live execution.
+
+    The live process owns the private account stream, so it always needs the
+    read credential role.  There is deliberately no fallback to the trade
+    key/secret: a trade credential with wider authority must never silently
+    stand in for a read credential, and a missing read credential must stop the
+    process at startup rather than degrade into a different role.
+    """
+
+    read_api_key = (config.credentials.read_api_key or "").strip()
+    read_api_secret = (config.credentials.read_api_secret or "").strip()
+    missing = [
+        name
+        for name, value in (
+            ("BINANCE_READ_API_KEY", read_api_key),
+            ("BINANCE_READ_API_SECRET", read_api_secret),
+        )
+        if not value
+    ]
+    if missing:
+        raise ValueError(
+            "Missing required read credentials for live execution: "
+            + ", ".join(missing)
+        )
+    return read_api_key, read_api_secret
+
+
 def _order_observation_payload(
     coordinator: OrderExecutionCoordinator,
 ) -> Callable[[], Mapping[str, object]]:
@@ -279,6 +500,10 @@ async def run_live_daemon(
     shutdown_requested: asyncio.Event | None = None,
 ) -> LiveDaemonResult:
     validate_live_runtime_endpoints(config)
+    # Read credentials are an account-capability requirement of the live
+    # execution process (it owns the private account stream), never a function
+    # of where market data happens to come from.
+    read_api_key, read_api_secret = resolve_live_read_credentials(config)
     execution_database_url = config.databases.execution_database_url
     market_database_url = config.databases.market_database_url
     observability_database_url = config.databases.observability_database_url
@@ -327,9 +552,7 @@ async def run_live_daemon(
     api_key = config.credentials.api_key
     api_secret = config.credentials.api_secret
 
-    risk_control_enabled = bool(
-        risk_control_hub_url is not None and risk_control_hub_url.strip()
-    )
+    risk_control_enabled = True
     startup_status = LiveRuntimeStartupStatus.from_environment()
     health = startup_status.health
     live_readiness: LiveReadinessPublisher | None = None
@@ -337,6 +560,18 @@ async def run_live_daemon(
 
     now = datetime.now(tz=UTC)
     ownership_registry = ResourceOwnershipRegistry(run_id=session_id)
+    # The merged account projection is published to the control plane and
+    # persisted for the dashboard; both sinks are created later in the
+    # assembly, so the producer writes through stable one-slot holders.
+    control_plane_listener: list[Callable[[AccountEvent], None] | None] = [None]
+    account_facts_status_holder: list[Callable[[], Mapping[str, object]]] = [
+        lambda: {"ready": None, "reason": "account_facts_unreported"}
+    ]
+    account_facts_ready_holder: list[Callable[[], bool]] = [lambda: False]
+    account_facts_budget_tasks: list[asyncio.Task[bool]] = []
+    account_repository_holder: list[PostgresAccountRepository | None] = [None]
+    last_balance_values: dict[str, BalanceValue] = {}
+    last_position_amounts: dict[tuple[str, str], Decimal] = {}
     execution_engine: AsyncEngine | None = None
     market_engine: AsyncEngine | None = None
     observability_engine: AsyncEngine | None = None
@@ -384,6 +619,7 @@ async def run_live_daemon(
         heartbeat_engine = persistence.engines.heartbeat_engine
 
         execution_factory = persistence.factories.execution_factory
+        account_repository_holder[0] = PostgresAccountRepository(execution_factory)
         market_factory = persistence.factories.market_factory
         observability_factory = persistence.factories.observability_factory
 
@@ -523,15 +759,182 @@ async def run_live_daemon(
             raise RuntimeError(
                 f"position mode mismatch: expected {expected}, got {actual}"
             )
-        if not account_event_hub_url.strip():
-            raise ValueError("account_event_hub_url must not be empty")
-        register_expected_entry = LiveEntryExpectationRegistrar(
-            account_label=account_label,
-            publisher=WebSocketAccountPositionExpectationPublisher(
+        in_process_account_source: InProcessAccountEventSource | None = None
+        in_process_producer: InProcessAccountStreamProducer | None = None
+        if account_event_hub_url and account_event_hub_url.strip():
+            expectation_publisher: Any = WebSocketAccountPositionExpectationPublisher(
                 url=account_event_hub_url,
                 environment="live",
                 account_label=account_label,
-            ),
+            )
+        else:
+            in_process_registry = AccountPositionExpectationRegistry(
+                environment="live",
+                account_label=account_label,
+            )
+            expectation_publisher = DirectPositionExpectationPublisher(
+                in_process_registry
+            )
+            in_process_account_source = InProcessAccountEventSource(
+                environment="live",
+                account_label=account_label,
+            )
+            read_client = BinanceUsdMPrivateReadClient(
+                api_key=read_api_key,
+                api_secret=read_api_secret,
+                environment="live",
+                account_label=account_label,
+                base_url=base_url,
+                shared_request_pacer_path=(
+                    os.environ.get(_BINANCE_SHARED_REQUEST_PACER_PATH_ENV, "").strip()
+                    or None
+                ),
+                shared_command_request_pacer_path=(
+                    os.environ.get(
+                        _BINANCE_SHARED_COMMAND_PACER_PATH_ENV,
+                        "",
+                    ).strip()
+                    or None
+                ),
+            )
+            ownership_registry.register("read_client", read_client.aclose)
+            user_data_websocket_url = (
+                config.market.user_data_websocket_url
+                or os.environ.get("CML_BINANCE_USER_DATA_WEBSOCKET_URL", "").strip()
+                or os.environ.get("CML_USER_DATA_WEBSOCKET_URL", "").strip()
+                or DEFAULT_BINANCE_USDM_USER_DATA_WEBSOCKET_URL
+            )
+            if not user_data_websocket_url:
+                # The live account stream is not a market-data concern: it is
+                # always required by the execution process.
+                raise ValueError(
+                    "Missing required user_data_websocket_url for the "
+                    "in-process account stream"
+                )
+
+            def _on_unverified_position(
+                symbol: str, position_side: str, quantity: Decimal
+            ) -> None:
+                log.warning(
+                    "in_process_unverified_position_detected",
+                    symbol=symbol,
+                    position_side=position_side,
+                    quantity=str(quantity),
+                )
+                if in_process_account_source is not None:
+                    in_process_account_source._set_fact_gap((symbol,))
+                if order_reconciliation is not None:
+                    order_reconciliation.request_order_recovery()
+
+            async def _publish_in_process_baseline(
+                snapshot: AccountSnapshot,
+                event: AccountEvent,
+            ) -> None:
+                """Expose the merged account projection to the live context.
+
+                The startup/refresh baseline is published through the same
+                control-plane seam as every later frame, so the live context,
+                risk limits and the dashboard read one account projection
+                instead of the retired execution-account sync process.
+                """
+
+                if control_plane_listener[0] is not None:
+                    control_plane_listener[0](event)
+
+            async def _persist_in_process_snapshot(
+                snapshot: AccountSnapshot,
+                event: AccountEvent,
+            ) -> None:
+                """Persist the merged account observation, not just the execution book.
+
+                Kept deliberately narrow: the execution book owns trade/fill
+                persistence, while this callback keeps the account projection
+                (balances, positions, open orders, process state) that the
+                dashboard and restart readers consume.
+                """
+
+                account_repository = account_repository_holder[0]
+                if account_repository is None:
+                    return
+                observed_at = snapshot.config.observed_at
+                sync_config = ExecutionAccountSyncConfig(
+                    environment="live",
+                    account_label=account_label,
+                    expected_multi_assets_mode=True,
+                    expected_hedge_mode=hedge_mode,
+                    observed_at=observed_at,
+                )
+                persisted_balances = select_balance_history(
+                    snapshot.balances, last_balance_values
+                )
+                persisted_positions = _positions_for_persistence(
+                    snapshot.positions, last_position_amounts
+                )
+                await account_repository.save_reconciliation_snapshot(
+                    config=snapshot.config,
+                    balances=persisted_balances,
+                    positions=persisted_positions,
+                    open_orders=snapshot.open_orders,
+                    fills=(),
+                    run=reconciliation_run(
+                        sync_config,
+                        reconciliation_id=user_data_reconciliation_id(
+                            sync_config, event.event_id
+                        ),
+                        status="ready",
+                        mismatch_count=0,
+                        details={
+                            "source": "in_process_user_data_stream",
+                            "event_id": event.event_id,
+                            "event_type": event.event_type,
+                            "event_at": event.event_at.isoformat(),
+                            **position_state_details(snapshot.positions),
+                        },
+                        balance_count=len(persisted_balances),
+                        position_count=sum(
+                            1
+                            for position in snapshot.positions
+                            if position.position_amt != Decimal("0")
+                        ),
+                        open_order_count=len(snapshot.open_orders),
+                        fill_count=0,
+                    ),
+                )
+                for balance in snapshot.balances:
+                    last_balance_values[balance.asset] = balance_value(balance)
+                for position in snapshot.positions:
+                    last_position_amounts[(position.symbol, position.position_side)] = (
+                        position.position_amt
+                    )
+                await account_repository.save_process_state(
+                    ExecutionAccountProcessState(
+                        environment="live",
+                        account_label=account_label,
+                        state=event.account_state
+                        or ExecutionAccountStatus.RUNNING,
+                        occurred_at=observed_at,
+                        reason=None,
+                    )
+                )
+
+            in_process_producer = InProcessAccountStreamProducer(
+                client=read_client,
+                registry=in_process_registry,
+                source=in_process_account_source,
+                environment="live",
+                account_label=account_label,
+                websocket_url=user_data_websocket_url,
+                require_live_stream=True,
+                on_unverified_position=_on_unverified_position,
+                read_client=read_client,
+                expected_multi_assets_mode=True,
+                expected_hedge_mode=hedge_mode,
+                publish_baseline=_publish_in_process_baseline,
+                persist_snapshot=_persist_in_process_snapshot,
+            )
+        register_expected_entry = LiveEntryExpectationRegistrar(
+            account_label=account_label,
+            publisher=expectation_publisher,
         )
         order_event_runtime = LiveOrderEventRuntime(
             telemetry=telemetry,
@@ -580,6 +983,97 @@ async def run_live_daemon(
         ownership_registry.register(
             "execution_coordinator", execution_coordinator.aclose
         )
+        risk_repository = PostgresRiskRepository(execution_factory)
+        # Dispatch identity is the account's single active lease.  This process
+        # acquires it here, before its first execution write, and then holds
+        # that exact lease generation; a competing process fails to acquire
+        # while this lease is active and unexpired.
+        lease_owner = config.identity.lease_owner.strip()
+        if not lease_owner:
+            raise ValueError(
+                "runtime identity is missing lease_owner; dispatch ownership "
+                "cannot be verified"
+            )
+        dispatch_lease = await _acquire_dispatch_lease(
+            risk_repository,
+            account_label=account_label,
+            owner=lease_owner,
+            strategy_name=strategy_name,
+            code_generation=git_commit_hash,
+            ttl_seconds=_DISPATCH_LEASE_TTL_SECONDS,
+        )
+        lease_token = DispatchLeaseToken(
+            owner=dispatch_lease.owner,
+            lease_id=dispatch_lease.lease_id,
+            code_generation=dispatch_lease.code_generation,
+        )
+        startup_status.log_phase("dispatch_lease_acquired")
+        # Minimal loss-of-authority state for this process.  It is set by a
+        # failed or unconfirmable renewal and cleared only by a successful
+        # renewal, so dispatch stops even while the durable lease row is still
+        # unexpired and readable.
+        ownership_state = DispatchOwnershipState(
+            token=lease_token,
+            renewal_failure_reason=None,
+        )
+
+        async def _verify_dispatcher_lease() -> DispatchOwnership | None:
+            """Re-read the durable lease for *this* lease generation.
+
+            A non-empty cached token is never sufficient, and a readable
+            unexpired lease is not sufficient either once this process has
+            recorded a renewal failure: the lease may have been replaced, or its
+            validity may no longer be confirmed by this process.
+            """
+
+            if ownership_state.ownership_lost:
+                return None
+            now = datetime.now(tz=UTC)
+            lease = await risk_repository.load_dispatch_lease(
+                "live", account_label, now, token=lease_token
+            )
+            if lease is None:
+                return None
+            return DispatchOwnership(
+                owner=lease.owner,
+                lease_id=lease.lease_id,
+                code_generation=lease.code_generation,
+            )
+
+        execution_coordinator.set_lease_verifier(_verify_dispatcher_lease)
+
+        async def _refresh_verified_lease() -> None:
+            """Renew this process's lease, or stop new dispatch authority.
+
+            A failed or unconfirmable renewal stops new open/close/cancel
+            requests immediately, even though the durable lease row may still be
+            unexpired and readable.  A later successful renewal restores
+            authority.  In-flight and UNKNOWN responsibility is never released.
+            """
+
+            await refresh_dispatch_lease_authority(
+                risk_repository,
+                state=ownership_state,
+                environment="live",
+                account_label=account_label,
+                ttl_seconds=_DISPATCH_LEASE_TTL_SECONDS,
+            )
+
+        async def _run_lease_renewal() -> None:
+            while True:
+                try:
+                    await _refresh_verified_lease()
+                except asyncio.CancelledError:
+                    break
+                except Exception as err:
+                    log.warning("trading_lease_check_failed", error=str(err))
+                await asyncio.sleep(15.0)
+
+        lease_renewal_task = asyncio.create_task(
+            _run_lease_renewal(),
+            name=f"live-lease-renewal:{session_id}",
+        )
+        ownership_registry.register("lease_renewal", lease_renewal_task.cancel)
         fact_source.set_execution_book(
             execution_book,
             register_account_stream=execution_book.register_active_stream,
@@ -793,6 +1287,7 @@ async def run_live_daemon(
                 if execution_coordinator is None
                 else _order_observation_payload(execution_coordinator)
             ),
+            account_facts_status=lambda: account_facts_status_holder[0](),
         )
         checkpoint = await checkpoint_repository.load_checkpoint(session_id)
         requires_market_recovery = checkpoint is not None and (
@@ -1096,6 +1591,14 @@ async def run_live_daemon(
             hub_cursor_provider=(hub_cursor_state.snapshot),
             commit_market_state_cursor=hub_cursor_state.acknowledge_state,
             entered_symbol_lookup=hub_cursor_state.consume_entered_symbol,
+            is_symbol_fact_ready=(
+                in_process_account_source.is_risk_allowed
+                if in_process_account_source is not None
+                else None
+            ),
+            # Account facts (private-stream continuity plus an accepted account
+            # baseline) are a separate prerequisite from one symbol's range.
+            is_account_facts_ready=lambda: account_facts_ready_holder[0](),
         )
         order_event_runtime.set_entry_observer(
             daemon.pending_entries.observe_order_event
@@ -1124,6 +1627,39 @@ async def run_live_daemon(
         def invalidate_live_contexts() -> None:
             context_provider.invalidate()
 
+        def _enforce_account_facts_budget() -> None:
+            """Keep entry closed and report the reason while account facts are missing.
+
+            Synchronous-on-purpose: the readiness refresh is called from the
+            entry-gate path, which must never await network I/O.
+            """
+
+            if control_plane_runtime is None:
+                return
+            if control_plane_runtime.account_snapshot_available:
+                return
+            if control_plane_runtime.account_facts_degraded:
+                return
+            observed_at = control_plane_runtime.account_facts_observed_at
+            if observed_at is None:
+                # No account evidence has been expected yet; the stream's own
+                # failure path owns the reason in that window.
+                return
+            elapsed = (datetime.now(tz=UTC) - observed_at).total_seconds()
+            if elapsed < control_plane_runtime.account_facts_timeout_seconds:
+                return
+            startup_status.mark_account_facts_timeout(
+                control_plane_runtime.account_facts_reason
+                or "account_facts_pending"
+            )
+            _request_account_facts_budget_check()
+
+        def _request_account_facts_budget_check() -> None:
+            task = asyncio.get_running_loop().create_task(
+                control_plane_runtime.observe_account_facts_budget()
+            )
+            account_facts_budget_tasks.append(task)
+
         def refresh_entry_enabled() -> None:
             if (
                 risk_control_runtime is None
@@ -1131,7 +1667,18 @@ async def run_live_daemon(
                 or entry_runtime is None
             ):
                 return
+            _enforce_account_facts_budget()
             risk_blocked, risk_reason = risk_control_runtime.entry_gate()
+            if (
+                in_process_account_source is not None
+                and in_process_account_source.has_account_wide_gap
+            ):
+                # Only an account-wide (transport continuity) gap blocks every
+                # symbol.  A symbol-scoped gap is enforced per symbol by the
+                # entry gate's is_symbol_fact_ready check.
+                risk_blocked = True
+                gap_symbols_str = ",".join(sorted(in_process_account_source.gap_symbols))
+                risk_reason = f"account_event_fact_gap:{gap_symbols_str}"
             daemon.set_risk_control_entry_blocked(
                 risk_blocked,
                 reason=risk_reason,
@@ -1172,13 +1719,89 @@ async def run_live_daemon(
             refresh_entry_gate=refresh_entry_enabled,
             telemetry=telemetry,
             clock=lambda: datetime.now(tz=UTC),
+            # Reuse the account stream's existing startup budget rather than
+            # inventing a second startup policy.
+            account_facts_timeout_seconds=_ACCOUNT_FACTS_STARTUP_TIMEOUT_SECONDS,
+            # Account facts are asserted only once the account runtime has
+            # accepted a baseline; a fresh process starts with them unknown.
+            account_facts_ready=(
+                in_process_producer is not None
+                and in_process_producer.account_state
+                is ExecutionAccountStatus.RUNNING
+            ),
         )
         startup_market_assembly.set_control_plane_listener(
             control_plane_runtime.on_market_connection_change
         )
+        # The merged producer writes the account projection through this
+        # listener, so startup baselines and WS deltas reach the live context
+        # exactly like Hub frames used to.
+        control_plane_listener[0] = control_plane_runtime.on_account_snapshot
+        account_facts_status_holder[0] = control_plane_runtime.account_facts_status
+        account_facts_ready_holder[0] = (
+            lambda: control_plane_runtime.account_snapshot_available
+        )
         order_reconciliation.on_unknown_order = (
             control_plane_runtime.on_account_snapshot_recovery
         )
+
+        def _on_overflow_reconcile(affected_symbols: tuple[str, ...]) -> None:
+            log.warning(
+                "in_process_account_source_overflow_triggered_recovery",
+                symbols=affected_symbols,
+            )
+            if order_reconciliation is not None:
+                order_reconciliation.request_order_recovery()
+            refresh_entry_enabled()
+
+        if in_process_account_source is not None:
+            in_process_account_source.set_on_overflow_reconcile(_on_overflow_reconcile)
+
+        def _on_reconciliation_pass_completed(
+            result: ReconciliationPassResult | None = None,
+        ) -> None:
+            if in_process_account_source is None or not in_process_account_source.has_fact_gap:
+                return
+            if result is None:
+                return
+            if (
+                result.has_exception
+                or "positions" in result.failed_tasks
+                or "orders" in result.failed_tasks
+            ):
+                log.warning(
+                    "reconciliation_pass_infrastructure_failed_retaining_fact_gaps",
+                    failed_tasks=list(result.failed_tasks),
+                    failed_symbols=list(result.failed_symbols),
+                )
+                return
+
+            if in_process_account_source.has_account_wide_gap:
+                if (
+                    result.success
+                    and not result.failed_symbols
+                    and not result.has_unknown
+                    and not result.has_pending_work
+                ):
+                    in_process_account_source.clear_fact_gap()
+                    refresh_entry_enabled()
+                else:
+                    log.warning(
+                        "reconciliation_pass_wildcard_retained",
+                        has_unknown=result.has_unknown,
+                        has_pending_work=result.has_pending_work,
+                        failed_symbols=list(result.failed_symbols),
+                    )
+            else:
+                cleared_any = False
+                for sym in result.verified_symbols:
+                    if sym not in result.failed_symbols and sym != "*":
+                        in_process_account_source.clear_fact_gap(sym)
+                        cleared_any = True
+                if cleared_any:
+                    refresh_entry_enabled()
+
+        order_reconciliation.on_reconcile_pass_completed = _on_reconciliation_pass_completed
 
         risk_control_runtime = LiveRiskControlRuntime(
             enabled=risk_control_enabled,
@@ -1189,6 +1812,7 @@ async def run_live_daemon(
             refresh_entry_gate=refresh_entry_enabled,
             telemetry=telemetry,
             clock=lambda: datetime.now(tz=UTC),
+            database_mode=(not risk_control_hub_url or not risk_control_hub_url.strip()),
         )
 
         def on_exit_failure(symbol: str, failure: str | None) -> None:
@@ -1238,6 +1862,7 @@ async def run_live_daemon(
                 if risk_control_runtime is not None
                 else None
             ),
+            in_process_account_source=in_process_account_source,
         )
         exit_channel_runtime = LiveExitChannelRuntime(
             daemon=daemon,
@@ -1360,6 +1985,60 @@ async def run_live_daemon(
             account_event_runtime.run(channel_sources.account_source),
             name=f"live-account-events:{session_id}",
         )
+        account_producer_task: asyncio.Task[None] | None = None
+        if in_process_producer is not None:
+            ownership_registry.register("in_process_producer", in_process_producer.stop)
+            account_producer_task = in_process_producer.start()
+
+        async def _run_durable_risk_control_poller() -> None:
+            if risk_control_runtime is not None:
+                await risk_control_runtime.reconcile()
+            while True:
+                try:
+                    if risk_control_runtime is not None:
+                        await risk_control_runtime.reconcile()
+                    pending_commands = await live_repository.load_pending_requested_commands(
+                        account_label=account_label,
+                        strategy_name=strategy_name,
+                        session_id=session_id,
+                        limit=16,
+                    )
+                    if risk_control_dispatcher is not None:
+                        # Operator work claimed before a restart is not
+                        # "requested" any more; continue its responsibility
+                        # explicitly instead of stranding it.
+                        await risk_control_dispatcher.recover_executing_commands(
+                            limit=16
+                        )
+                    for cmd in pending_commands:
+                        action: RiskControlAction | None = None
+                        if cmd.command_type == CANCEL_ALL_OPEN_ENTRIES_COMMAND:
+                            action = RiskControlAction.CANCEL_ALL_OPEN_ENTRIES
+                        elif cmd.command_type == EMERGENCY_FLATTEN_COMMAND:
+                            action = RiskControlAction.REQUEST_FLATTEN
+                        if action is not None:
+                            evt = RiskControlEvent(
+                                environment="live",
+                                account_label=account_label,
+                                strategy_name=strategy_name,
+                                session_id=session_id,
+                                action=action,
+                                event_id=f"evt-{cmd.command_id}",
+                                command_id=cmd.command_id,
+                                reason="durable_poller",
+                                issued_at=cmd.requested_at,
+                                details={"command_type": cmd.command_type},
+                            )
+                            await risk_control_runtime.on_event(evt)
+                except asyncio.CancelledError:
+                    break
+                except Exception as err:
+                    log.warning("durable_risk_control_poller_error", error=str(err))
+                    if risk_control_runtime is not None:
+                        risk_control_runtime.mark_database_failed()
+                await asyncio.sleep(1.0)
+
+        risk_control_task: asyncio.Task[None] | None = None
         if (
             channel_sources.risk_control_source is not None
             and risk_control_runtime is not None
@@ -1370,6 +2049,11 @@ async def run_live_daemon(
                     on_event=risk_control_runtime.on_event,
                 ),
                 name=f"live-risk-control:{session_id}",
+            )
+        elif risk_control_runtime is not None:
+            risk_control_task = asyncio.create_task(
+                _run_durable_risk_control_poller(),
+                name=f"live-durable-risk-control:{session_id}",
             )
         (
             entry_filter_cache_task,
@@ -1440,6 +2124,8 @@ async def run_live_daemon(
             )
 
         async def close_risk_control() -> None:
+            if not lease_renewal_task.done():
+                lease_renewal_task.cancel()
             if risk_control_runtime is not None:
                 await risk_control_runtime.close()
 
@@ -1465,6 +2151,7 @@ async def run_live_daemon(
                 entry_filter_cache=entry_filter_cache_task,
                 entry_symbol_cache=entry_symbol_cache_task,
                 local_health=local_health_task,
+                account_producer=account_producer_task,
                 shutdown=shutdown_task,
             ),
             block_entry_submissions=(

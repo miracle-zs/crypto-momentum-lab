@@ -296,7 +296,14 @@ async def test_a5_scheduled_controller_separates_entry_stop_and_flatten() -> Non
 
     class MockExitManager:
         async def requests_for_scheduled_flatten(
-            self, positions, *, now, symbol=None, reference_prices=None, attempt=1
+            self,
+            positions,
+            *,
+            now,
+            symbol=None,
+            reference_prices=None,
+            attempt=1,
+            identity_at=None,
         ):
             flatten_calls.append(now)
             return ()

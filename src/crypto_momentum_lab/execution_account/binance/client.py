@@ -39,6 +39,7 @@ from crypto_momentum_lab.domain.execution.exit_recovery import (
 )
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderSnapshot,
+    FuturesPositionSide,
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
@@ -1103,6 +1104,20 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         if plan.position_side.value == "BOTH":
             params["reduceOnly"] = str(plan.reduce_only).lower()
         else:
+            # Hedge mode: reduceOnly is absent, so the exchange classifies
+            # purely from side + positionSide.  A reduce_only plan whose
+            # side agrees with its position side would increase exposure.
+            if plan.reduce_only:
+                _closing_side = {
+                    FuturesPositionSide.LONG: "SELL",
+                    FuturesPositionSide.SHORT: "BUY",
+                }
+                if plan.side != _closing_side.get(plan.position_side):
+                    raise OrderPreSubmissionError(
+                        f"Hedge reduce_only plan {plan.client_order_id} "
+                        f"side={plan.side} position_side={plan.position_side.value} "
+                        "would increase exposure instead of closing"
+                    )
             params["positionSide"] = plan.position_side.value
         if plan.price is not None:
             params["price"] = format(plan.price, "f")

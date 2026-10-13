@@ -16,7 +16,9 @@ from typing import Protocol
 
 import structlog
 
-from crypto_momentum_lab.domain.live_rollout import RollbackCommand
+from crypto_momentum_lab.domain.live_rollout import (
+    RollbackCommand,
+)
 from crypto_momentum_lab.domain.live_rollout.authorization import (
     CANCEL_ALL_OPEN_ENTRIES_COMMAND,
     CANCEL_ALL_OPEN_ENTRIES_CONFIRMATION,
@@ -54,12 +56,30 @@ class RiskControlCommandRepository(Protocol):
         failure_reason: str | None,
     ) -> bool: ...
 
+    async def load_executing_commands_for_recovery(
+        self,
+        *,
+        account_label: str,
+        strategy_name: str,
+        limit: int = 16,
+    ) -> tuple[RollbackCommand, ...]: ...
+
+    async def claim_executing_command_for_recovery(
+        self,
+        command_id: str,
+        *,
+        account_label: str,
+        strategy_name: str,
+        session_id: str,
+    ) -> RollbackCommand | None: ...
+
+
 
 @dataclass(frozen=True, slots=True)
 class _RiskControlCommandSpec:
     command_type: str
     confirmation_text: str
-    execute: Callable[[], Awaitable[str | None]]
+    execute: Callable[[datetime], Awaitable[str | None]]
 
 
 class RiskControlCommandDispatcher:
@@ -72,8 +92,8 @@ class RiskControlCommandDispatcher:
         account_label: str,
         strategy_name: str,
         session_id: str,
-        cancel_all_open_entries: Callable[[], Awaitable[str | None]],
-        request_flatten: Callable[[], Awaitable[str | None]],
+        cancel_all_open_entries: Callable[[datetime], Awaitable[str | None]],
+        request_flatten: Callable[[datetime], Awaitable[str | None]],
         clock: Callable[[], datetime],
     ) -> None:
         self._repository = repository
@@ -81,6 +101,7 @@ class RiskControlCommandDispatcher:
         self._strategy_name = strategy_name
         self._session_id = session_id
         self._clock = clock
+        self._recovered_command_ids: set[str] = set()
         self._specs = {
             RiskControlAction.CANCEL_ALL_OPEN_ENTRIES: _RiskControlCommandSpec(
                 command_type=CANCEL_ALL_OPEN_ENTRIES_COMMAND,
@@ -122,13 +143,17 @@ class RiskControlCommandDispatcher:
             return "risk_control_command_already_claimed"
 
         failure: str | None = None
+        # The action identity is stable for the command, so an action that is
+        # resumed after a crash continues the same order identity instead of
+        # creating a second flatten at a new time.
+        identity_at = command.requested_at
         try:
             require_authorized_command(
                 command,
                 command_type=spec.command_type,
                 confirmation_text=spec.confirmation_text,
             )
-            failure = await spec.execute()
+            failure = await spec.execute(identity_at)
         except Exception as error:
             failure = f"risk_control_action_failed:{type(error).__name__}"
             log.exception(
@@ -157,6 +182,105 @@ class RiskControlCommandDispatcher:
         if not completed:
             return failure or "risk_control_command_completion_not_recorded"
         return failure
+
+    async def recover_executing_commands(self, *, limit: int = 16) -> int:
+        """Continue operator work stranded in ``executing`` by a restart.
+
+        A command is claimed (``executing``) before its action runs.  If the
+        process dies anywhere between the claim and the completion record, the
+        responsibility still exists: cancel-all and flatten are idempotent
+        operator intents, so recovery re-verifies authorization, re-issues the
+        action against the *current* durable state (never blindly re-executing a
+        logged order plan) and then records the outcome.
+
+        Returns the number of commands whose responsibility was concluded.  A
+        command that is already completed between the load and the recovery is
+        counted as concluded without repeating the action.
+        """
+
+        recovered = 0
+        for command in await self._repository.load_executing_commands_for_recovery(
+            account_label=self._account_label,
+            strategy_name=self._strategy_name,
+            limit=limit,
+        ):
+            if command.command_id in self._recovered_command_ids:
+                continue
+            spec = next(
+                (
+                    candidate
+                    for candidate in self._specs.values()
+                    if candidate.command_type == command.command_type
+                ),
+                None,
+            )
+            if spec is None:
+                # Unknown operator responsibility: leave the row untouched and
+                # visible instead of guessing an action.
+                log.error(
+                    "live_risk_control_executing_command_unsupported",
+                    command_id=command.command_id,
+                    command_type=command.command_type,
+                )
+                continue
+            current = await self._repository.load_command(command.command_id)
+            if current is None:
+                continue
+            if current.status != "executing":
+                # Another worker concluded it while we were loading.
+                self._recovered_command_ids.add(command.command_id)
+                recovered += 1
+                continue
+            # Serialize recovery on the command record itself: only the
+            # recoverer that takes the row over may continue its action.
+            claimed = await self._repository.claim_executing_command_for_recovery(
+                command.command_id,
+                account_label=self._account_label,
+                strategy_name=self._strategy_name,
+                session_id=self._session_id,
+            )
+            if claimed is None:
+                log.warning(
+                    "live_risk_control_recovery_already_owned",
+                    command_id=command.command_id,
+                )
+                continue
+            failure: str | None = None
+            try:
+                require_authorized_command(
+                    claimed,
+                    command_type=spec.command_type,
+                    confirmation_text=spec.confirmation_text,
+                )
+                # The command record is the recovery record: the stable
+                # command_id plus the stable action identity continue the same
+                # action instead of creating another flatten.  `complete_command`
+                # only succeeds from `executing`, so exactly one consumer can
+                # conclude it.
+                failure = await spec.execute(claimed.requested_at)
+            except Exception as error:
+                failure = f"risk_control_action_failed:{type(error).__name__}"
+                log.exception(
+                    "live_risk_control_recovery_failed",
+                    command_id=command.command_id,
+                    error_type=type(error).__name__,
+                )
+            completed = await self._repository.complete_command(
+                command.command_id,
+                status="failed" if failure is not None else "completed",
+                completed_at=self._clock(),
+                failure_reason=failure,
+            )
+            if completed:
+                self._recovered_command_ids.add(command.command_id)
+                recovered += 1
+            else:
+                log.warning(
+                    "live_risk_control_recovery_not_recorded",
+                    command_id=command.command_id,
+                    failure=failure,
+                )
+        return recovered
 
 
 class LiveRiskControlRuntime:
@@ -191,6 +315,7 @@ class LiveRiskControlRuntime:
         clock: Callable[[], datetime],
         reconcile_retry_initial_seconds: float = 1.0,
         reconcile_retry_max_seconds: float = 30.0,
+        database_mode: bool = False,
     ) -> None:
         if not session_id.strip():
             raise ValueError("session_id must not be empty")
@@ -211,15 +336,29 @@ class LiveRiskControlRuntime:
         self._refresh_entry_gate = refresh_entry_gate
         self._telemetry = telemetry
         self._clock = clock
-        self._stream_available = not enabled
+        self._database_mode = database_mode
+        self._database_available = False if (enabled and database_mode) else True
+        self._stream_available = True if database_mode else not enabled
         self._state_ready = not enabled
         self._entry_blocked = False
-        self._entry_block_reason = "risk_control_clear"
+        self._entry_block_reason = (
+            "risk_control_database_initializing"
+            if (enabled and database_mode)
+            else "risk_control_clear"
+        )
         self._reconcile_task: asyncio.Task[None] | None = None
         self._retry_task: asyncio.Task[None] | None = None
         self._reconcile_lock = asyncio.Lock()
         self._reconcile_retry_initial_seconds = reconcile_retry_initial_seconds
         self._reconcile_retry_max_seconds = reconcile_retry_max_seconds
+
+    @property
+    def database_mode(self) -> bool:
+        return self._database_mode
+
+    @property
+    def database_available(self) -> bool:
+        return self._database_available
 
     @property
     def state_ready(self) -> bool:
@@ -229,9 +368,30 @@ class LiveRiskControlRuntime:
     def entry_block_reason(self) -> str:
         return self._entry_block_reason
 
+    def mark_database_failed(
+        self, reason: str = "risk_control_database_unavailable"
+    ) -> None:
+        """Explicitly record a database polling failure and block new entries fail-closed."""
+        if not self._enabled:
+            return
+        self._database_available = False
+        self._state_ready = False
+        self._entry_blocked = True
+        self._entry_block_reason = reason
+        self._refresh_entry_gate()
+
     def entry_gate(self) -> tuple[bool, str]:
         if not self._enabled:
             return False, "risk_control_disabled"
+        if self._database_mode:
+            if not self._database_available or not self._state_ready:
+                return (
+                    True,
+                    "risk_control_database_unavailable"
+                    if not self._database_available
+                    else "risk_control_state_recovering",
+                )
+            return self._entry_blocked, self._entry_block_reason
         if not self._stream_available or not self._state_ready:
             return (
                 True,
@@ -330,7 +490,11 @@ class LiveRiskControlRuntime:
             except Exception as error:
                 self._state_ready = False
                 self._entry_blocked = True
-                self._entry_block_reason = "risk_control_state_reload_failed"
+                if self._database_mode:
+                    self._database_available = False
+                    self._entry_block_reason = "risk_control_database_unavailable"
+                else:
+                    self._entry_block_reason = "risk_control_state_reload_failed"
                 log.warning(
                     "live_risk_control_state_reload_failed",
                     session_id=self._session_id,
@@ -338,6 +502,8 @@ class LiveRiskControlRuntime:
                 )
                 self._schedule_retry()
             else:
+                if self._database_mode:
+                    self._database_available = True
                 self._entry_blocked = draining or active_halt
                 self._entry_block_reason = (
                     "session_draining"

@@ -1793,7 +1793,6 @@ def test_build_config_discovers_live_accounts_from_compose_files(
         "services:\n"
         "  postgres:\n"
         "  market-data:\n"
-        "  execution-account-live:\n"
         "  live-strategy:\n"
         "volumes:\n"
         "  postgres-data:\n",
@@ -1801,9 +1800,7 @@ def test_build_config_discovers_live_accounts_from_compose_files(
     )
     overlay_file.write_text(
         "services:\n"
-        "  execution-account-live-account-2:\n"
         "  live-strategy-account-2:\n"
-        "  execution-account-live-account-4:\n"
         "  live-strategy-account-4:\n",
         encoding="utf-8",
     )
@@ -1842,11 +1839,8 @@ def test_build_config_discovers_live_accounts_from_compose_files(
     assert config.services == (
         "postgres",
         "market-data",
-        "execution-account-live",
         "live-strategy",
-        "execution-account-live-account-2",
         "live-strategy-account-2",
-        "execution-account-live-account-4",
         "live-strategy-account-4",
     )
 

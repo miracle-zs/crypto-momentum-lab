@@ -9,16 +9,20 @@ from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from crypto_momentum_lab.domain.account.models import AccountFillReconciliationCursor
+from crypto_momentum_lab.domain.account.models import (
+    AccountFillReconciliationCursor,
+    AccountPositionSnapshot,
+)
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactConflict,
     AccountFactStreamScope,
     AccountFillLoadProvenance,
+    ExitOrderSubmissionFact,
     JournalFactDelta,
     PositionKey,
 )
@@ -44,6 +48,99 @@ class JournalFactConflict(RuntimeError):
 
 class PostgresAccountJournalStore:
     """Persists and restores journal facts using only the caller's transaction."""
+
+    async def filter_known_facts_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        scope: AccountFactStreamScope,
+        delta: JournalFactDelta,
+    ) -> JournalFactDelta:
+        snapshot_identities: dict[str, AccountPositionSnapshot] = {}
+        for s in delta.snapshots:
+            snap_id = f"{s.position_side}:{s.observed_at.isoformat()}"
+            if snap_id in snapshot_identities:
+                if snapshot_identities[snap_id] != s:
+                    raise JournalFactConflict(
+                        f"duplicate snapshot identity {snap_id} has conflicting payload"
+                    )
+            else:
+                snapshot_identities[snap_id] = s
+
+        boundary_identities: dict[str, ExitOrderSubmissionFact] = {}
+        for b in delta.exit_boundaries:
+            bound_id = f"{b.order_id}:{b.submitted_at.isoformat()}"
+            if bound_id in boundary_identities:
+                if boundary_identities[bound_id] != b:
+                    raise JournalFactConflict(
+                        f"duplicate boundary identity {bound_id} "
+                        "has conflicting payload"
+                    )
+            else:
+                boundary_identities[bound_id] = b
+
+        target_ids: list[tuple[str, str]] = [
+            ("snapshot", nid) for nid in snapshot_identities
+        ] + [("boundary", nid) for nid in boundary_identities]
+        if not target_ids:
+            return delta
+
+        statement = select(PositionFactJournalEventRow).where(
+            *_scope_conditions(PositionFactJournalEventRow, scope),
+            tuple_(
+                PositionFactJournalEventRow.event_kind,
+                PositionFactJournalEventRow.event_id,
+            ).in_(target_ids),
+        )
+        rows = list((await session.scalars(statement)).all())
+
+        known_snapshots = set()
+        known_boundaries = set()
+        codec = PositionRecoveryCodec
+
+        for row in rows:
+            if _json_digest(row.payload) != row.payload_hash:
+                raise RecoverySchemaError(
+                    f"stored {row.event_kind} payload checksum mismatch"
+                )
+            if row.event_kind == "snapshot":
+                candidate_snap = snapshot_identities.get(row.event_id)
+                if candidate_snap is not None:
+                    decoded_snap = codec.decode_snapshot(row.payload)
+                    if decoded_snap == candidate_snap:
+                        known_snapshots.add(row.event_id)
+                    else:
+                        raise JournalFactConflict(
+                            f"stored snapshot identity {row.event_id} "
+                            "conflicts with candidate"
+                        )
+            elif row.event_kind == "boundary":
+                candidate_bound = boundary_identities.get(row.event_id)
+                if candidate_bound is not None:
+                    decoded_bound = codec.decode_boundary(row.payload)
+                    if decoded_bound == candidate_bound:
+                        known_boundaries.add(row.event_id)
+                    else:
+                        raise JournalFactConflict(
+                            f"stored boundary identity {row.event_id} "
+                            "conflicts with candidate"
+                        )
+
+        retained_snapshots = tuple(
+            s
+            for s in delta.snapshots
+            if f"{s.position_side}:{s.observed_at.isoformat()}" not in known_snapshots
+        )
+        retained_boundaries = tuple(
+            b
+            for b in delta.exit_boundaries
+            if f"{b.order_id}:{b.submitted_at.isoformat()}" not in known_boundaries
+        )
+        return replace(
+            delta,
+            snapshots=retained_snapshots,
+            exit_boundaries=retained_boundaries,
+        )
 
     async def persist_facts_in_session(
         self,
@@ -253,12 +350,33 @@ class PostgresAccountJournalStore:
         as_of: datetime,
     ) -> PositionRecoveryCheckpoint | None:
         _require_aware(as_of, "as_of")
+        latest_target_subquery = (
+            select(
+                PositionRecoveryCheckpointRow.event_cut,
+                PositionRecoveryCheckpointRow.source_revision,
+            )
+            .where(
+                *_scope_conditions(PositionRecoveryCheckpointRow, scope),
+                PositionRecoveryCheckpointRow.event_cut <= as_of,
+                PositionRecoveryCheckpointRow.recorded_at <= as_of,
+            )
+            .order_by(
+                PositionRecoveryCheckpointRow.event_cut.desc(),
+                PositionRecoveryCheckpointRow.source_revision.desc(),
+            )
+            .limit(1)
+            .subquery()
+        )
         statement = (
             select(PositionRecoveryCheckpointRow)
             .where(
                 *_scope_conditions(PositionRecoveryCheckpointRow, scope),
                 PositionRecoveryCheckpointRow.event_cut <= as_of,
                 PositionRecoveryCheckpointRow.recorded_at <= as_of,
+                tuple_(
+                    PositionRecoveryCheckpointRow.event_cut,
+                    PositionRecoveryCheckpointRow.source_revision,
+                ).in_(select(latest_target_subquery)),
             )
             .order_by(
                 PositionRecoveryCheckpointRow.event_cut.desc(),
@@ -271,12 +389,7 @@ class PostgresAccountJournalStore:
         if not rows:
             return None
         latest = rows[0]
-        same_revision = [
-            row
-            for row in rows
-            if row.event_cut == latest.event_cut
-            and row.source_revision == latest.source_revision
-        ]
+        same_revision = rows
         semantic_payloads: set[str] = set()
         for row in same_revision:
             if _json_digest(row.payload) != row.payload_hash:
@@ -343,24 +456,61 @@ class PostgresAccountJournalStore:
         include_checkpoint_prefix: bool = False,
     ) -> DurableJournalCut:
         _require_aware(as_of, "as_of")
-        statement = (
-            select(PositionFactJournalEventRow)
-            .where(
-                *_scope_conditions(PositionFactJournalEventRow, scope),
-                PositionFactJournalEventRow.occurred_at <= as_of,
-                PositionFactJournalEventRow.recorded_at <= as_of,
-            )
-            .order_by(
-                PositionFactJournalEventRow.recorded_at,
-                PositionFactJournalEventRow.event_kind,
-                PositionFactJournalEventRow.event_id,
-                PositionFactJournalEventRow.payload_hash,
-            )
-        )
-        rows = list((await session.scalars(statement)).all())
         checkpoint = await self.load_checkpoint_in_session(
             session, scope=scope, as_of=as_of
         )
+        statement = select(PositionFactJournalEventRow).where(
+            *_scope_conditions(PositionFactJournalEventRow, scope),
+            PositionFactJournalEventRow.occurred_at <= as_of,
+            PositionFactJournalEventRow.recorded_at <= as_of,
+        )
+        if checkpoint is not None and not include_checkpoint_prefix:
+            late_snapshot_subquery = (
+                select(PositionFactJournalEventRow.event_id)
+                .where(
+                    *_scope_conditions(PositionFactJournalEventRow, scope),
+                    PositionFactJournalEventRow.event_kind == "snapshot",
+                    PositionFactJournalEventRow.occurred_at <= as_of,
+                    PositionFactJournalEventRow.recorded_at <= as_of,
+                    PositionFactJournalEventRow.occurred_at <= checkpoint.event_cut,
+                    PositionFactJournalEventRow.source_revision
+                    > checkpoint.source_revision,
+                )
+                .scalar_subquery()
+            )
+            active_batch_ids = [
+                batch.batch_id
+                for batch in checkpoint.projection.active_batches
+                if batch.quantity > 0
+            ]
+            statement = statement.where(
+                (PositionFactJournalEventRow.occurred_at > checkpoint.event_cut)
+                | (
+                    PositionFactJournalEventRow.source_revision
+                    > checkpoint.source_revision
+                )
+                | (
+                    (PositionFactJournalEventRow.event_kind == "boundary")
+                    & (
+                        PositionFactJournalEventRow.payload[
+                            "target_batch_id"
+                        ].astext.in_(active_batch_ids)
+                        if active_batch_ids
+                        else False
+                    )
+                )
+                | (
+                    (PositionFactJournalEventRow.event_kind == "snapshot")
+                    & PositionFactJournalEventRow.event_id.in_(late_snapshot_subquery)
+                )
+            )
+        statement = statement.order_by(
+            PositionFactJournalEventRow.recorded_at,
+            PositionFactJournalEventRow.event_kind,
+            PositionFactJournalEventRow.event_id,
+            PositionFactJournalEventRow.payload_hash,
+        )
+        rows = list((await session.scalars(statement)).all())
         if checkpoint is not None and not include_checkpoint_prefix:
             # Retain the original of a queued snapshot if it was covered by
             # the checkpoint, so suffix filtering cannot hide a divergent

@@ -31,8 +31,11 @@ def validate_live_runtime_endpoints(config: LiveRuntimeConfig) -> None:
         raise ValueError(
             "market_quote_volume_hub_url must not be empty in hub mode"
         )
-    if not market.account_event_hub_url.strip():
-        raise ValueError("account_event_hub_url must not be empty")
+    if (
+        market.account_event_hub_url is not None
+        and not market.account_event_hub_url.strip()
+    ):
+        raise ValueError("account_event_hub_url must not be empty when configured")
 
 
 class LiveRuntimeStartupStatus:
@@ -71,6 +74,28 @@ class LiveRuntimeStartupStatus:
             self.health.database_ok()
         except Exception:
             self._logger.exception("live_health_database_marker_failed")
+
+    def mark_account_facts_timeout(self, reason: str) -> None:
+        """Report that account facts did not arrive inside the startup budget.
+
+        The process status becomes ``degraded`` with a concrete reason instead
+        of advertising readiness; local health publication is best-effort and
+        must never change trading behaviour.
+        """
+
+        if not reason.strip():
+            raise ValueError("reason must not be empty")
+        self._logger.error(
+            "live_startup_account_facts_timeout",
+            reason=reason,
+            total_elapsed_ms=round((perf_counter() - self._started_at) * 1000, 3),
+        )
+        if self.health is None:
+            return
+        try:
+            self.health.degraded()
+        except Exception:
+            self._logger.exception("live_health_degrade_marker_failed")
 
     def mark_ready(self) -> None:
         if self.health is None:

@@ -38,9 +38,6 @@ from tests.unit.execution.test_terminal_settlement import (
 )
 from tests.unit.execution_account.orders.test_coordinator import _plan, _result
 from tests.unit.execution_account.orders.test_fill_scan_ingestion import (
-    coordinator as scan_coordinator,
-)
-from tests.unit.execution_account.orders.test_fill_scan_ingestion import (
     scan,
 )
 from tests.unit.execution_account.orders.test_fill_scan_ingestion import (
@@ -253,10 +250,35 @@ async def test_true_conflict_still_reports_error_and_never_confirms_flat(monkeyp
 async def test_missing_parent_waits_but_mismatched_parent_remains_conflict(
     monkeypatch, parent_id
 ):
-    coordinator, book = scan_coordinator()
-    book.drain = AsyncMock()
-    book.load_recovery_checkpoint.return_value = (
-        None if parent_id is None else SimpleNamespace(checkpoint_id=parent_id)
+    key = SCOPE.to_position_key()
+    old_scope = AccountFactStreamScope.for_position_key(
+        key, stream_id="hub", stream_epoch="old"
+    )
+    checkpoints = {}
+    if parent_id is not None:
+        checkpoints[(old_scope, "expected-parent")] = SimpleNamespace(
+            checkpoint_id=parent_id
+        )
+    uow = ObservationUnitOfWork(checkpoints=checkpoints)
+    book = ExecutionBook(execution_unit_of_work=uow)
+    book._persistence_failed = False
+    assert isinstance(
+        await book.observe(
+            replace(
+                evidence(
+                    "init-old",
+                    fill=fill("p1", "5", entry=True),
+                ),
+                stream_epoch="old",
+            )
+        ),
+        Applied,
+    )
+    coordinator = OrderExecutionCoordinator(
+        backend=SimpleNamespace(),
+        environment="live",
+        account_label="primary",
+        execution_book=book,
     )
     source = replace(
         scan(),
@@ -279,7 +301,6 @@ async def test_missing_parent_waits_but_mismatched_parent_remains_conflict(
                 sequence=sequence,
                 fill_load_scans=(source,),
             )
-        book.observe.assert_not_awaited()
         assert SCOPE.to_position_key() not in coordinator._confirmed_flat_streams
         if parent_id is None:
             logger.error.assert_not_called()

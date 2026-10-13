@@ -68,6 +68,8 @@ async def _prepare_submission(repository, **values):
         OrderAlreadyPreparedError,
     )
 
+    # These slices exercise submission persistence, not lease acquisition.
+    values.setdefault("lease_required", False)
     try:
         async with repository._session_factory() as session:
             async with session.begin():
@@ -228,9 +230,6 @@ async def test_restored_unknown_with_terminal_order_replays_through_real_postgre
     from crypto_momentum_lab.live_rollout.command_receipt_recovery import (
         recover_restored_commands,
     )
-    from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
-        ExecutionBookHeadRow,
-    )
     from tests.integration.persistence.test_authority_book_transactions import _book
 
     plans, _, reads, events, submissions, factory = order_repository
@@ -285,12 +284,6 @@ async def test_restored_unknown_with_terminal_order_replays_through_real_postgre
         scope,
     )
     await book.mark_dispatching(plan.client_order_id)
-    async with factory.begin() as session:
-        await session.execute(
-            delete(ExecutionBookHeadRow).where(
-                ExecutionBookHeadRow.account_label == account
-            )
-        )
     restored = _book(factory)
     await restored.restore(account_label=account)
     assert restored.command_requires_recovery(plan.client_order_id)

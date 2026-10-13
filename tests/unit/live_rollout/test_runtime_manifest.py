@@ -21,10 +21,7 @@ def test_checked_in_live_runtime_manifest_resolves_account_identity() -> None:
     assert primary.strategy == "orderflow_impulse"
     assert primary.image_commit == "a" * 40
     assert primary.migration_revision == "20260925_0043"
-    assert primary.services == (
-        "execution-account-live",
-        "live-strategy",
-    )
+    assert primary.services == ("live-strategy",)
     assert account_3.session_id == "live-account-3-v1"
     assert account_3.lease_owner == "live-worker-account-3"
     assert account_3.migration_revision == "20260925_0043"

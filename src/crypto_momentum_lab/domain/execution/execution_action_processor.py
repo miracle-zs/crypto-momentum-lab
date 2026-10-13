@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from crypto_momentum_lab.domain.execution.command_models import OutboxEntry
 from crypto_momentum_lab.domain.execution.execution_action_models import (
@@ -22,7 +22,6 @@ from crypto_momentum_lab.domain.execution.execution_action_models import (
     StaleView,
 )
 from crypto_momentum_lab.domain.execution.execution_action_state import (
-    ExecutionActionState,
     register_prepared_outbox,
 )
 from crypto_momentum_lab.domain.execution.order_state import ExitAllocation
@@ -43,6 +42,9 @@ from crypto_momentum_lab.domain.execution.trade_command import (
 )
 from crypto_momentum_lab.domain.trading import OrderType as EntryType
 
+if TYPE_CHECKING:
+    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+
 
 @dataclass(frozen=True, slots=True)
 class ExecutionActionDependencies:
@@ -58,7 +60,7 @@ class ExecutionActionDependencies:
 
 
 async def accept_execution_command(
-    state: ExecutionActionState,
+    book: ExecutionBook,
     dependencies: ExecutionActionDependencies,
     request: ExecutionRequest,
     *,
@@ -69,8 +71,8 @@ async def accept_execution_command(
         return Blocked(reason="Initial durable restore is required before trading")
     key = request.scope.to_position_key()
     if request.request_id in (
-        state.recovery_required_commands
-        | state.dispatch_reconciliation_required_commands
+        book._recovery_required_commands
+        | book._dispatch_reconciliation_required_commands
     ):
         return ExecutionRecoveryPending(
             reason="This execution command requires reconciliation",
@@ -78,16 +80,16 @@ async def accept_execution_command(
         )
     view = dependencies.book_for_key(key).get_view()
     effective_view_token = view.projection_version
-    existing_request = state.requests_by_id.get(request.request_id)
+    existing_request = book._requests_by_id.get(request.request_id)
     if existing_request is not None:
         if _same_execution_request_payload(existing_request, request):
-            receipt = state.receipts_by_id[request.request_id]
+            receipt = book._receipts_by_id[request.request_id]
             return AlreadyAccepted(receipt)  # type: ignore[arg-type]
         return CommandConflict(
             request_id=request.request_id,
             reason="Conflicting payload for identical request_id",
         )
-    restored_entry = state.outbox_by_command_id.get(request.request_id)
+    restored_entry = book._outbox_by_command_id.get(request.request_id)
     if restored_entry is not None:
         # A previous attempt already owns this identity. This is a recovery
         # condition, not a pre-submission failure: the caller must neither post
@@ -190,7 +192,7 @@ async def accept_execution_command(
                 dependencies.coordinator.register_reservation(reservation)
         repository_result = await _save_new_reservations(
             dependencies,
-            state,
+            book,
             command,
             reservations,
             {
@@ -216,7 +218,7 @@ async def accept_execution_command(
 
     committed_at = datetime.now(UTC)
     outbox = register_prepared_outbox(
-        state,
+        book,
         request_id=request.request_id,
         scope=request.scope,
         command=command,
@@ -228,7 +230,7 @@ async def accept_execution_command(
         await dependencies.persist_outbox(outbox)
     except Exception as error:
         rollback_errors = await _rollback_outbox_acceptance(
-            dependencies, state, command, reservations
+            dependencies, book, command, reservations
         )
         diagnostics = [f"outbox persistence failed: {error}"]
         if rollback_errors:
@@ -248,8 +250,8 @@ async def accept_execution_command(
         view_token=effective_view_token,
         outbox_entry=outbox,
     )
-    state.requests_by_id[request.request_id] = request
-    state.receipts_by_id[request.request_id] = receipt
+    book._requests_by_id[request.request_id] = request
+    book._receipts_by_id[request.request_id] = receipt
     dependencies.advance_context_revision()
     return Accepted(receipt)
 
@@ -265,7 +267,7 @@ def _same_execution_request_payload(
 
 async def _save_new_reservations(
     dependencies: ExecutionActionDependencies,
-    state: ExecutionActionState,
+    book: ExecutionBook,
     command: TradeCommand,
     reservations: tuple[PositionReservation, ...],
     batch_quantities: dict[str, Decimal],
@@ -281,7 +283,7 @@ async def _save_new_reservations(
             raise
         except Exception as error:
             dependencies.mark_persistence_failed()
-            state.recovery_required_commands.add(command.command_id)
+            book._recovery_required_commands.add(command.command_id)
             return Blocked(
                 reason="Reservation identity lookup failed; restore is required",
                 diagnostics=(str(error),),
@@ -315,12 +317,12 @@ async def _save_new_reservations(
 
 async def _rollback_outbox_acceptance(
     dependencies: ExecutionActionDependencies,
-    state: ExecutionActionState,
+    book: ExecutionBook,
     command: TradeCommand,
     reservations: tuple[PositionReservation, ...],
 ) -> list[str]:
-    state.outbox_by_command_id.pop(command.command_id, None)
-    state.command_reservations.pop(command.command_id, None)
+    book._outbox_by_command_id.pop(command.command_id, None)
+    book._command_reservations.pop(command.command_id, None)
     errors: list[str] = []
     for reservation in reservations:
         current = dependencies.coordinator.get_reservation(reservation.reservation_id)

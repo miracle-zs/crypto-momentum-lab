@@ -10,6 +10,7 @@ from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
 from crypto_momentum_lab.domain.execution.evidence_digest import view_projection_digest
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.ports import (
+    DecisionCommitConflict,
     DurableExecutionPositionState,
     ExecutionHeadSnapshot,
 )
@@ -83,19 +84,15 @@ def test_recovery_returns_candidate_without_mutating_durable_input(state):
 
 
 @pytest.mark.parametrize(
-    "field", ["facts_hash", "projection_digest", "view_digest", "recovery_checkpoint"]
+    "field", ["facts_hash", "projection_digest", "view_digest"]
 )
 def test_existing_migration_policy_returns_diagnostic_and_recomputed_digest(
     state, field
 ):
     payload = dict(state.head.state_payload, **{field: "old-codec-value"})
     changed = replace(state, head=replace(state.head, state_payload=payload))
-    recovered = recover_durable_position(changed)
-    assert len(recovered.diagnostics) == 1
-    assert recovered.diagnostics[0][0].endswith("_migrated")
-    assert recovered.reservation_ids == frozenset({"existing-reservation"})
-    assert recovered.projection_digest == state.head.state_payload["projection_digest"]
-    assert changed.head.state_payload[field] == "old-codec-value"
+    with pytest.raises(DecisionCommitConflict):
+        recover_durable_position(changed)
 
 
 @pytest.mark.parametrize(

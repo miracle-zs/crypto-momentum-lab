@@ -16,7 +16,10 @@ from crypto_momentum_lab.domain.execution.evidence_digest import (
     trade_payload_digest,
     view_projection_digest,
 )
-from crypto_momentum_lab.domain.execution.ports import DurableExecutionPositionState
+from crypto_momentum_lab.domain.execution.ports import (
+    DecisionCommitConflict,
+    DurableExecutionPositionState,
+)
 from crypto_momentum_lab.domain.execution.position_book import PositionBook
 from crypto_momentum_lab.domain.execution.position_ledger import (
     PositionLedger,
@@ -371,67 +374,81 @@ def recover_durable_position(state: DurableExecutionPositionState) -> RecoveredP
                 )
             )
         if (
+            # Historical + suffix digests differ by construction when a
+            # checkpoint folds the prefix, so this comparison only applies to a
+            # fully-loaded fact set.  The checkpoint branch is covered instead
+            # by the load-time identity audit against durable trade identities
+            # (persistence/postgres/execution_unit_of_work.py), which does not
+            # depend on the payload's own digest.
             facts.prefix_facts_complete
+            and payload.get("facts_hash")
             and payload["facts_hash"] != facts.compute_facts_hash()
         ):
-            diagnostics.append(
-                (
-                    "execution_head_facts_migrated",
-                    {
-                        "account_label": key.account_label,
-                        "symbol": key.symbol,
-                        "position_side": key.position_side.value,
-                        "old_facts_hash": payload["facts_hash"],
-                        "new_facts_hash": facts.compute_facts_hash(),
-                        "has_active_reservations": bool(
-                            payload.get("active_reservation_ids")
-                        ),
-                    },
-                )
+            raise DecisionCommitConflict(
+                f"execution head facts digest mismatch for {key.canonical_id}: "
+                f"stored={payload['facts_hash']} computed={facts.compute_facts_hash()}"
             )
-        projection = PositionLedger(key).project(facts)
-        projection_digest = PositionRecoveryCodec.compute_projection_digest(projection)
-        if payload["projection_digest"] != projection_digest:
-            diagnostics.append(
-                (
-                    "execution_head_projection_migrated",
-                    {
-                        "account_label": key.account_label,
-                        "symbol": key.symbol,
-                        "position_side": key.position_side.value,
-                        "old_projection_digest": payload["projection_digest"],
-                        "new_projection_digest": projection_digest,
-                        "has_active_reservations": bool(
-                            payload.get("active_reservation_ids")
-                        ),
-                    },
-                )
+        if "projection" in payload:
+            projection = PositionRecoveryCodec.decode_projection(payload["projection"])
+            coverage = (
+                PositionRecoveryCodec.decode_coverage(payload["coverage"])
+                if payload.get("coverage")
+                else None
             )
-        view = book.get_view()
-        if payload["view_digest"] != view_projection_digest(view):
-            diagnostics.append(
-                (
-                    "execution_head_view_migrated",
-                    {
-                        "account_label": key.account_label,
-                        "symbol": key.symbol,
-                        "position_side": key.position_side.value,
-                        "old_view_digest": payload["view_digest"],
-                        "new_view_digest": view_projection_digest(view),
-                        "has_active_reservations": bool(
-                            payload.get("active_reservation_ids")
-                        ),
-                    },
-                )
+            zero_confirmed = bool(
+                payload.get("zero_position_snapshot_confirmed", False)
             )
-        projection_version = (
-            head.projection_version.strip()
-            if head.projection_version and head.projection_version.strip()
-            else view.projection_version
-        )
-        book.use_durable_projection_version(
-            projection_version, event_cut=view.event_cut
-        )
+            projection_version = (
+                head.projection_version.strip()
+                if head.projection_version and head.projection_version.strip()
+                else (projection.projection_version or "v1")
+            )
+            book.seed_durable_view(
+                projection=projection,
+                view_coverage=coverage,
+                zero_confirmed=zero_confirmed,
+                stream_scope=scope,
+                projection_version=projection_version,
+                event_cut=projection.event_cut,
+            )
+            projection_digest = PositionRecoveryCodec.compute_projection_digest(
+                projection
+            )
+            if payload.get("projection_digest") != projection_digest:
+                raise DecisionCommitConflict(
+                    f"execution head projection digest mismatch for {key.canonical_id}: "
+                    f"stored={payload.get('projection_digest')} computed={projection_digest}"
+                )
+            view = book.get_view()
+            if payload.get("view_digest") != view_projection_digest(view):
+                raise DecisionCommitConflict(
+                    f"execution head view digest mismatch for {key.canonical_id}: "
+                    f"stored={payload.get('view_digest')} computed={view_projection_digest(view)}"
+                )
+        else:
+            projection = PositionLedger(key).project(facts)
+            projection_digest = PositionRecoveryCodec.compute_projection_digest(
+                projection
+            )
+            if payload["projection_digest"] != projection_digest:
+                raise DecisionCommitConflict(
+                    f"execution head projection digest mismatch for {key.canonical_id}: "
+                    f"stored={payload['projection_digest']} computed={projection_digest}"
+                )
+            view = book.get_view()
+            if payload["view_digest"] != view_projection_digest(view):
+                raise DecisionCommitConflict(
+                    f"execution head view digest mismatch for {key.canonical_id}: "
+                    f"stored={payload['view_digest']} computed={view_projection_digest(view)}"
+                )
+            projection_version = (
+                head.projection_version.strip()
+                if head.projection_version and head.projection_version.strip()
+                else view.projection_version
+            )
+            book.use_durable_projection_version(
+                projection_version, event_cut=view.event_cut
+            )
         last_sequence = payload["last_sequence"]
         head_revision = head.revision
         reservation_ids = set(stored_reservations)

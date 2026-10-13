@@ -118,11 +118,6 @@ def _issue_one_shot_risk_control_command(
         risk_control_hub_url.strip()
         or os.environ.get("CML_RISK_CONTROL_HUB_URL", "").strip()
     )
-    if not resolved_url:
-        raise typer.BadParameter(
-            "--risk-control-hub-url or CML_RISK_CONTROL_HUB_URL is required"
-        )
-
     command = asyncio.run(
         _load_or_save_risk_control_command(
             database_url=_execution_database_url(database_url),
@@ -135,10 +130,11 @@ def _issue_one_shot_risk_control_command(
             session_id=session_id,
         )
     )
-    if command.status != "requested":
+    if not resolved_url or command.status != "requested":
         typer.echo(
             json.dumps(
                 {
+                    "action": action.value,
                     "command_id": command.command_id,
                     "status": command.status,
                     "idempotency_key": command.idempotency_key,

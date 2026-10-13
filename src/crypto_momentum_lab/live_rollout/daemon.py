@@ -190,6 +190,8 @@ class LiveStrategyDaemon:
         ],
         is_symbol_warmed: Callable[[str], bool] | None = None,
         on_unwarmed_symbol: Callable[[str], None] | None = None,
+        is_symbol_fact_ready: Callable[[str], bool] | None = None,
+        is_account_facts_ready: Callable[[], bool] | None = None,
     ) -> None:
         self._strategy = strategy
         self._risk_gateway = risk_gateway
@@ -203,6 +205,8 @@ class LiveStrategyDaemon:
             is_symbol_warmed=is_symbol_warmed,
             on_unwarmed_symbol=on_unwarmed_symbol,
             is_exit_enabled=lambda: self._exit_enabled,
+            is_symbol_fact_ready=is_symbol_fact_ready,
+            is_account_facts_ready=is_account_facts_ready,
         )
         self._context_provider = context_provider
         self._config = config
@@ -670,13 +674,30 @@ class LiveStrategyDaemon:
         """Run the scheduled-risk controller for one observation."""
         return await self._scheduled_controller.process(now=now)
 
-    async def cancel_all_open_entries(self) -> str | None:
-        """Cancel open entry orders through the live coordinator seam."""
+    async def cancel_all_open_entries(
+        self,
+        identity_at: datetime | None = None,
+    ) -> str | None:
+        """Cancel open entry orders through the live coordinator seam.
+
+        Cancellation is idempotent, so the operator identity is informational;
+        the durable action claim still records that this process owns it.
+        """
+
         return await self._scheduled_controller.cancel_all_open_entries()
 
-    async def request_flatten(self, *, now: datetime | None = None) -> str | None:
+    async def request_flatten(
+        self,
+        *,
+        now: datetime | None = None,
+        identity_at: datetime | None = None,
+    ) -> str | None:
         """Request a reduce-only flatten through the live exit processor."""
-        return await self._scheduled_controller.request_flatten(now=now)
+
+        return await self._scheduled_controller.request_flatten(
+            now=now,
+            identity_at=identity_at,
+        )
 
     def _record_signal_candidate(
         self,

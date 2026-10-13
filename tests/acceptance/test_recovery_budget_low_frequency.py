@@ -536,3 +536,158 @@ async def test_order_event_runtime_unknown_result_does_not_self_trigger_retry() 
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_new_order_during_active_lookup_is_not_suppressed() -> None:
+    """A genuinely new order B arriving during query A's lookup must not be
+    suppressed by the ``_active_reconciliation_order`` guard.
+
+    The guard exists to prevent the current query's own UNKNOWN result from
+    self-triggering a retry.  It must NOT suppress a different order that
+    arrives from an independent source (e.g., a new WS UNKNOWN callback).
+    """
+    clock = _Clock()
+    release_lookup = asyncio.Event()
+    first_lookup_started = asyncio.Event()
+    followup_pass = asyncio.Event()
+    calls = 0
+    reconciled_plans: list[str] = []
+    # Use 2 base orders with budget=2 so the first pass exhausts base,
+    # and the follow-up pass has budget for the new order.
+    base_orders = _unresolved(2)
+
+    class _DynamicRepo:
+        """Returns base orders plus any newly registered orders."""
+
+        def __init__(self) -> None:
+            self.extra: list[SimpleNamespace] = []
+
+        async def load_unresolved_orders(self, run_id: str):
+            return base_orders + tuple(self.extra)
+
+    repo = _DynamicRepo()
+
+    async def reconcile_order(plan) -> None:
+        nonlocal calls
+        calls += 1
+        reconciled_plans.append(plan.client_order_id)
+        if calls <= 2:
+            # First pass: each lookup blocks so only budget=2 are processed.
+            if calls == 1:
+                first_lookup_started.set()
+            await release_lookup.wait()
+        if calls >= 3:
+            # Follow-up pass.
+            followup_pass.set()
+
+    worker = LiveOrderReconciliation(
+        order_repository=repo,
+        state_machine=SimpleNamespace(
+            reconcile_order=AsyncMock(side_effect=reconcile_order)
+        ),
+        run_id="run-1",
+        max_order_lookups_per_pass=2,
+        interval_seconds=3600.0,
+        time_source=clock,
+    )
+    worker.request_recovery()
+    task = asyncio.create_task(worker.run_requested())
+    try:
+        # Wait until the first lookup is actively suspended.
+        await asyncio.wait_for(first_lookup_started.wait(), timeout=1.0)
+        assert calls == 1
+
+        # A genuinely NEW order arrives during the active lookup.
+        new_plan = OrderExecutionPlan(
+            client_order_id="new-B",
+            symbol="ETHUSDT",
+            side="BUY",
+            position_side="LONG",
+            order_type="MARKET",
+            quantity=Decimal("1.0"),
+            price=None,
+            reduce_only=False,
+            run_id="run-1",
+            intent_id="intent-new-B",
+            created_at=datetime(2026, 4, 1, 12, 0, tzinfo=UTC),
+        )
+        # In production the order is persisted before recovery is requested.
+        repo.extra.append(
+            SimpleNamespace(
+                plan=new_plan,
+                state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+            )
+        )
+        worker.request_order_recovery(plan=new_plan)
+
+        # Release lookups so the first pass completes its budget (2 orders).
+        release_lookup.set()
+        # Wait for the follow-up pass to execute.
+        await asyncio.wait_for(followup_pass.wait(), timeout=2.0)
+
+        assert calls >= 3, (
+            "new order B during active lookup was suppressed by the "
+            f"_active_reconciliation_order guard: only {calls} lookups"
+        )
+        assert "new-B" in reconciled_plans, (
+            "new order B was never reconciled"
+        )
+    finally:
+        release_lookup.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_generic_callback_during_active_lookup_is_suppressed() -> None:
+    """A generic callback (no specific order) during an active lookup must
+    not self-trigger a new pass.  Only specific different orders are material.
+    """
+    clock = _Clock()
+    barrier = asyncio.Event()
+    started = asyncio.Event()
+    calls = 0
+
+    async def reconcile_order(_plan) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            await barrier.wait()
+
+    worker = LiveOrderReconciliation(
+        order_repository=SimpleNamespace(
+            load_unresolved_orders=AsyncMock(return_value=_unresolved(4))
+        ),
+        state_machine=SimpleNamespace(
+            reconcile_order=AsyncMock(side_effect=reconcile_order)
+        ),
+        run_id="run-1",
+        max_order_lookups_per_pass=2,
+        interval_seconds=3600.0,
+        time_source=clock,
+    )
+    worker.request_recovery()
+    task = asyncio.create_task(worker.run_requested())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        assert calls == 1
+
+        # Generic callback (no specific order) during active lookup.
+        for _ in range(5):
+            worker.request_order_recovery()
+            await asyncio.sleep(0)
+
+        barrier.set()
+        await asyncio.sleep(0.2)
+
+        assert calls == 2, (
+            "generic callback during active lookup self-triggered extra "
+            f"lookups: {calls} > 2"
+        )
+        assert not task.done()
+    finally:
+        barrier.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

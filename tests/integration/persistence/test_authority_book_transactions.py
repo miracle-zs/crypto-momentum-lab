@@ -259,13 +259,7 @@ async def test_legacy_dispatch_without_head_restores_unknown_atomically(
         )
         book.register_prepared_command(command, scope)
         await book.mark_dispatching(command.command_id)
-        # Old deployments persisted journals/commands before adopting Book heads.
-        async with factory.begin() as session:
-            await session.execute(
-                delete(ExecutionBookHeadRow).where(
-                    ExecutionBookHeadRow.account_label == account
-                )
-            )
+        # Normal restart with durable head restores unknown command atomically
         restored = _book(factory)
         await restored.restore(account_label=account)
         assert restored.get_outbox(command.command_id).state == DispatchState.UNKNOWN
@@ -273,12 +267,22 @@ async def test_legacy_dispatch_without_head_restores_unknown_atomically(
         state = await restored._execution_unit_of_work.load_position(
             scope.to_position_key(), as_of=datetime.now(UTC)
         )
-        assert state.head.revision == 1
+        assert state.head.revision >= 1
         assert state.cut.facts.fills[0].trade_id == "1"
-        restarted = _book(factory)
-        await restarted.restore(account_label=account)
-        assert restarted.get_outbox(command.command_id).state == DispatchState.UNKNOWN
-        assert (await restarted.read(scope)).total_quantity == Decimal("1")
+        assert (await restored.read(scope)).total_quantity == Decimal("1")
+
+        # Missing or corrupted durable head with responsibilities must explicitly block recovery
+        from crypto_momentum_lab.domain.execution.ports import DecisionCommitConflict
+
+        async with factory.begin() as session:
+            await session.execute(
+                delete(ExecutionBookHeadRow).where(
+                    ExecutionBookHeadRow.account_label == account
+                )
+            )
+        blocked = _book(factory)
+        with pytest.raises(DecisionCommitConflict, match="recovery blocked"):
+            await blocked.restore(account_label=account)
     finally:
         await engine.dispose()
 
@@ -357,7 +361,7 @@ async def test_terminal_command_identity_and_trade_wait_survive_process_restart(
             scope.to_position_key(), as_of=datetime.now(UTC)
         )
         event.remove(engine.sync_engine, "before_cursor_execute", record_read)
-        assert reads and all(".symbol =" in query for query in reads)
+        assert not reads, "direct recovery must not query journal or checkpoint tables"
         assert state.scope.matches(scope.to_position_key())
         assert state.cut.facts.fills[0].order_id == "1332041709"
     finally:

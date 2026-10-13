@@ -43,6 +43,7 @@ class LiveEntryControlGate:
         on_unwarmed_symbol: Callable[[str], None] | None = None,
         is_exit_enabled: Callable[[], bool] | None = None,
         is_symbol_fact_ready: Callable[[str], bool] | None = None,
+        is_account_facts_ready: Callable[[], bool] | None = None,
     ) -> None:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
@@ -54,6 +55,7 @@ class LiveEntryControlGate:
         self._on_unwarmed_symbol = on_unwarmed_symbol
         self._is_exit_enabled = is_exit_enabled
         self._is_symbol_fact_ready = is_symbol_fact_ready
+        self._is_account_facts_ready = is_account_facts_ready
         self._entry_enabled = True
         self._entry_enabled_reason = "initializing"
         self._risk_control_entry_blocked = False
@@ -122,6 +124,13 @@ class LiveEntryControlGate:
         """Check whether entry is allowed for a specific symbol."""
         if self.trading_gate_state != TradingGateState.ACTIVE:
             return False, self.entry_enabled_reason
+        if self._is_account_facts_ready is not None and not (
+            self._is_account_facts_ready()
+        ):
+            # Account-level facts (private stream continuity plus an accepted
+            # account baseline) are a prerequisite for any symbol, not only for
+            # the symbol whose per-range gap is known.
+            return False, "account_facts_pending"
         if self._is_symbol_fact_ready is not None and not self._is_symbol_fact_ready(
             symbol
         ):

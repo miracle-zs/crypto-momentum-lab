@@ -860,11 +860,8 @@ has_running_compose_service() {
 live_overlay_required=0
 if [[ "$live_update" == 1 ]]; then
   for service in \
-    execution-account-live-account-2 \
     live-strategy-account-2 \
-    execution-account-live-account-3 \
     live-strategy-account-3 \
-    execution-account-live-account-4 \
     live-strategy-account-4; do
     if has_running_compose_service "$service"; then
       live_overlay_required=1
@@ -1030,7 +1027,7 @@ print_failure_context() {
   "${compose[@]}" ps >&2 || true
   echo "failure_container_status:" >&2
   docker ps --format '{{.Names}}|{{.Image}}|{{.Status}}' \
-    | grep -E 'crypto-momentum-lab-(dashboard|market-data|research-collector|paper-|execution-account-live|live-strategy)' \
+    | grep -E 'crypto-momentum-lab-(dashboard|market-data|research-collector|paper-|live-strategy)' \
     | sort >&2 || true
   if [[ -n "$failure_service" ]]; then
     print_service_logs "$failure_service"
@@ -1188,7 +1185,6 @@ service_requires_target_image() {
     market-data) [[ "$market_changed" == 1 ]] ;;
     research-collector) [[ "$research_changed" == 1 ]] ;;
     paper-*) [[ "$paper_changed" == 1 ]] ;;
-    execution-account-live*) [[ "$execution_account_changed" == 1 ]] ;;
     live-strategy*) [[ "$strategy_changed" == 1 ]] ;;
     *) return 0 ;;
   esac
@@ -1467,10 +1463,10 @@ verify_service_target_timed() {
 
 if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   live_pairs=(
-    "primary:execution-account-live:live-strategy"
-    "account-2:execution-account-live-account-2:live-strategy-account-2"
-    "account-3:execution-account-live-account-3:live-strategy-account-3"
-    "account-4:execution-account-live-account-4:live-strategy-account-4"
+    "primary:live-strategy"
+    "account-2:live-strategy-account-2"
+    "account-3:live-strategy-account-3"
+    "account-4:live-strategy-account-4"
   )
 
   if ! [[ "$live_concurrency" =~ ^[1-4]$ ]]; then
@@ -1583,13 +1579,79 @@ print(
     done
   }
 
+  stop_legacy_writers_for_services() {
+    local svc legacy_pattern
+    for svc in "$@"; do
+      case "$svc" in
+        live-strategy)
+          legacy_pattern="execution-account-live"
+          ;;
+        live-strategy-account-2)
+          legacy_pattern="execution-account-live-account-2"
+          ;;
+        live-strategy-account-3)
+          legacy_pattern="execution-account-live-account-3"
+          ;;
+        live-strategy-account-4)
+          legacy_pattern="execution-account-live-account-4"
+          ;;
+        *)
+          continue
+          ;;
+      esac
+      local query_err=0 raw_ps
+      raw_ps="$(docker ps --format '{{.ID}} {{.Names}} {{.Label "com.docker.compose.service"}}' 2>&1)" || query_err=$?
+      if (( query_err != 0 )); then
+        echo "phase=live-stop service=$svc failed to query docker containers: $raw_ps" >&2
+        return 1
+      fi
+      local running_ids=()
+      while IFS=' ' read -r cid cname cservice; do
+        [[ -z "$cid" ]] && continue
+        if [[ "$cservice" == "$legacy_pattern" ]] || [[ "$cname" == "$legacy_pattern" ]] || [[ "$cname" =~ ^/?${legacy_pattern}(-[0-9]+|_[0-9]+)$ ]]; then
+          running_ids+=("$cid")
+        fi
+      done <<< "$raw_ps"
+
+      if (( ${#running_ids[@]} > 0 )); then
+        echo "phase=live-stop service=$svc detected legacy writer $legacy_pattern (${running_ids[*]}); stopping to prevent split-brain"
+        for cid in "${running_ids[@]}"; do
+          if ! docker stop -t "$live_stop_timeout" "$cid" >/dev/null 2>&1; then
+            echo "phase=live-stop service=$svc failed to stop legacy writer container $cid" >&2
+            return 1
+          fi
+        done
+        local verify_err=0 verify_ps
+        verify_ps="$(docker ps --format '{{.ID}} {{.Names}} {{.Label "com.docker.compose.service"}}' 2>&1)" || verify_err=$?
+        if (( verify_err != 0 )); then
+          echo "phase=live-stop service=$svc failed to verify stopped containers: $verify_ps" >&2
+          return 1
+        fi
+        while IFS=' ' read -r cid cname cservice; do
+          [[ -z "$cid" ]] && continue
+          if [[ "$cservice" == "$legacy_pattern" ]] || [[ "$cname" == "$legacy_pattern" ]] || [[ "$cname" =~ ^/?${legacy_pattern}(-[0-9]+|_[0-9]+)$ ]]; then
+            echo "phase=live-stop service=$svc legacy writer $legacy_pattern ($cid) still running; aborting" >&2
+            return 1
+          fi
+        done <<< "$verify_ps"
+        echo "phase=live-stop service=$svc legacy writer $legacy_pattern stopped successfully"
+      fi
+    done
+    return 0
+  }
+
   stop_live_services() {
     if (( $# == 0 )); then
       return 0
     fi
-    local stop_started_at operation_status
+    local stop_started_at operation_status=0
     capture_live_container_ids "$@"
     stop_started_at="$(date +%s)"
+    stop_legacy_writers_for_services "$@" || operation_status=$?
+    if (( operation_status != 0 )); then
+      log_service_timings "graceful-stop" "$stop_started_at" failed "$@"
+      return "$operation_status"
+    fi
     if run_with_timeout "compose-stop:$*" "$deploy_operation_timeout" \
       "${compose[@]}" stop --timeout "$live_stop_timeout" "$@"; then
       :
@@ -1668,12 +1730,11 @@ print(
 
   collect_active_live_pairs() {
     active_pairs=()
-    local pair account execution_service strategy_service
+    local pair account strategy_service
     for pair in "${live_pairs[@]}"; do
-      IFS=: read -r account execution_service strategy_service <<<"$pair"
+      IFS=: read -r account strategy_service <<<"$pair"
       if is_live_service_active "$strategy_service"; then
         if [[ "$recovery_run" != 1 ]] \
-          && service_is_converged "$execution_service" \
           && service_is_converged "$strategy_service"; then
           echo "phase=live account=$account skipped converged=1"
         else
@@ -1782,9 +1843,9 @@ fi
 if [[ "$execution_accounts_only" == 1 ]]; then
   execution_account_services=()
   for pair in "${live_pairs[@]}"; do
-    IFS=: read -r _account execution_service _strategy_service <<<"$pair"
-    if is_live_service_active "$execution_service"; then
-      execution_account_services+=("$execution_service")
+    IFS=: read -r _account strategy_service <<<"$pair"
+    if is_live_service_active "$strategy_service"; then
+      execution_account_services+=("$strategy_service")
     fi
   done
   if (( ${#execution_account_services[@]} == 0 )); then
@@ -2006,32 +2067,10 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   # bound. Re-check strategy processes before the second wave so a service that
   # drained during execution restarts is not accidentally enabled.
   live_started_at="$(date +%s)"
-  execution_candidates=()
-  execution_services=()
-  for pair in "${active_pairs[@]}"; do
-    IFS=: read -r account execution_service strategy_service <<<"$pair"
-    if is_live_service_active "$strategy_service"; then
-      execution_candidates+=("$execution_service")
-      if service_is_converged "$execution_service"; then
-        echo "phase=execution service=$execution_service skipped converged=1"
-      else
-        execution_services+=("$execution_service")
-      fi
-    fi
-  done
-  if [[ "$execution_account_changed" == 1 ]] && (( ${#execution_services[@]} > 0 )); then
-    execution_started_at="$(date +%s)"
-    echo "update execution wave (${#execution_services[@]} services)"
-    live_up_and_wait_canary "$live_wait_timeout" "$live_concurrency" "${execution_services[@]}"
-    echo "phase=execution elapsed_seconds=$(( $(date +%s) - execution_started_at ))"
-  else
-    echo "phase=execution skipped no_active_services=1"
-  fi
-
   strategy_candidates=()
   strategy_services=()
   for pair in "${active_pairs[@]}"; do
-    IFS=: read -r account execution_service strategy_service <<<"$pair"
+    IFS=: read -r account strategy_service <<<"$pair"
     if is_live_service_active "$strategy_service"; then
       strategy_candidates+=("$strategy_service")
       if service_is_converged "$strategy_service"; then
@@ -2052,16 +2091,13 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   if [[ "$strategy_changed" == 1 ]]; then
     live_readiness_started_at="$(date +%s)"
     for pair in "${live_pairs[@]}"; do
-      IFS=: read -r account execution_service strategy_service <<<"$pair"
+      IFS=: read -r account strategy_service <<<"$pair"
       if is_live_service_active "$strategy_service"; then
         verify_live_readiness "$strategy_service" "$account"
       fi
     done
     echo "phase=live-readiness elapsed_seconds=$(( $(date +%s) - live_readiness_started_at ))"
     verification_services+=("${strategy_candidates[@]}")
-  fi
-  if [[ "$execution_account_changed" == 1 ]]; then
-    verification_services+=("${execution_candidates[@]}")
   fi
   echo "phase=live elapsed_seconds=$(( $(date +%s) - live_started_at ))"
 fi
@@ -2093,7 +2129,7 @@ echo "deployed_checkout=$target_commit"
 echo "deployed_runtime=$runtime_commit"
 echo "deployed_image=$runtime_image_commit"
 docker ps --format '{{.Names}}|{{.Image}}|{{.Status}}' \
-  | grep -E 'crypto-momentum-lab-(dashboard|market-data|research-collector|paper-|execution-account-live|live-strategy)' \
+  | grep -E 'crypto-momentum-lab-(dashboard|market-data|research-collector|paper-|live-strategy)' \
   | sort
 REMOTE_SCRIPT
 then

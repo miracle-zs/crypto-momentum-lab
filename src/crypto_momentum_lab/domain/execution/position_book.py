@@ -99,6 +99,43 @@ class PositionBook:
         self._durable_projection_version = token
         self._durable_projection_event_cut = event_cut
 
+    def seed_durable_view(
+        self,
+        *,
+        projection: PositionLedgerProjection,
+        view_coverage: FactCoverageInterval | None = None,
+        zero_confirmed: bool = False,
+        stream_scope: AccountFactStreamScope | None = None,
+        projection_version: str | None = None,
+        event_cut: datetime | None = None,
+    ) -> None:
+        """Seed authoritative view directly from durable head without ledger replay."""
+        version_id = projection_version or projection.projection_version or "v1"
+        self._durable_projection_version = version_id
+        self._durable_projection_event_cut = event_cut or projection.event_cut
+        self._durable_execution_state_version = version_id
+
+        cached = _CachedBaseView(
+            projection=projection,
+            version_id=version_id,
+            input_revision=self._journal.revision,
+            base_health_status=projection.health_status,
+            is_comparable=projection.is_comparable,
+            base_diagnostics=tuple(projection.diagnostics),
+            view_coverage=view_coverage,
+            zero_confirmed=zero_confirmed,
+            stream_scope=stream_scope or self._journal.stream_scope,
+        )
+        cache_key = (
+            self._journal.revision,
+            self._journal.facts_generation,
+            None,
+            self._policy_version,
+            self._schema_version,
+            version_id,
+        )
+        self._view_cache[cache_key] = cached
+
     def get_historical_view(
         self,
         durable_cut: DurableJournalCut,
@@ -180,7 +217,8 @@ class PositionBook:
                 health_status = PositionHealthStatus.INCOMPLETE
                 is_comparable = False
                 diagnostics.append(
-                    "Coverage source anchor is missing or does not match this position cut"
+                    "Coverage source anchor is missing or does not match this "
+                    "position cut"
                 )
 
             latest_snapshot = max(

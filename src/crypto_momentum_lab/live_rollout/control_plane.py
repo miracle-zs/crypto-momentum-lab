@@ -80,18 +80,34 @@ class LiveControlPlaneRuntime:
         telemetry: ConsumerHealthSink | None = None,
         clock: Clock = lambda: datetime.now(UTC),
         strategy_warmup_ready: bool = False,
+        account_facts_timeout_seconds: float = 30.0,
+        account_facts_ready: bool = False,
     ) -> None:
         if not session_id.strip():
             raise ValueError("session_id must not be empty")
         if not isinstance(strategy_warmup_ready, bool):
             raise TypeError("strategy_warmup_ready must be a bool")
+        if account_facts_timeout_seconds <= 0:
+            raise ValueError("account_facts_timeout_seconds must be positive")
+        if not isinstance(account_facts_ready, bool):
+            raise TypeError("account_facts_ready must be a bool")
+        self._account_facts_timeout_seconds = account_facts_timeout_seconds
+        self._account_facts_reason: str | None = "account_facts_pending"
+        self._account_facts_timeout_reason: str | None = None
+        # The startup budget starts when the process starts, not when the last
+        # evidence happened to arrive.  ``_clock`` is assigned below.
+        self._account_facts_observed_at: datetime | None = None
+        self._account_facts_degraded = False
         self._session_id = session_id
         self._context_provider = context_provider
         self._notify_market_state_gap = notify_market_state_gap
         self._refresh_entry_gate = refresh_entry_gate
         self._telemetry = telemetry
         self._clock = clock
-        self._account_snapshot_available = True
+        # Account facts start unknown: no baseline has been accepted yet, so
+        # readiness must not be advertised until one arrives (or the startup
+        # budget expires and reports the concrete reason).
+        self._account_snapshot_available = account_facts_ready
         self._market_state_available = market_state_available
         self._market_state_unavailable_reason = (
             "market_state_hub_ready"
@@ -104,10 +120,92 @@ class LiveControlPlaneRuntime:
             if strategy_warmup_ready
             else "strategy_warmup_incomplete"
         )
+        if not account_facts_ready:
+            # The startup budget starts when the process starts, not when the
+            # last evidence happened to arrive.
+            self._account_facts_observed_at = self._clock()
 
     @property
     def account_snapshot_available(self) -> bool:
         return self._account_snapshot_available
+
+    @property
+    def account_facts_reason(self) -> str | None:
+        if self._account_snapshot_available:
+            return None
+        return self._account_facts_reason
+
+    @property
+    def account_facts_degraded(self) -> bool:
+        return self._account_facts_degraded
+
+    @property
+    def account_facts_timeout_reason(self) -> str | None:
+        return self._account_facts_timeout_reason
+
+    @property
+    def account_facts_observed_at(self) -> datetime | None:
+        return self._account_facts_observed_at
+
+    @property
+    def account_facts_timeout_seconds(self) -> float:
+        return self._account_facts_timeout_seconds
+
+    async def observe_account_facts_budget(self) -> bool:
+        """Enforce the existing startup budget for account facts.
+
+        Readiness must not be advertised while no accepted account baseline has
+        arrived.  When the stream's own startup budget expires, the process is
+        marked degraded with the concrete reason and entry stays closed; the
+        trusted exit path is untouched.
+        """
+
+        if self._account_snapshot_available:
+            self._account_facts_reason = None
+            return True
+        self._account_facts_reason = self._account_facts_reason or (
+            "account_facts_pending"
+        )
+        if self._account_facts_observed_at is not None:
+            elapsed = (
+                self._clock() - self._account_facts_observed_at
+            ).total_seconds()
+            if elapsed >= self._account_facts_timeout_seconds:
+                reason = (
+                    f"account_facts_startup_timeout:{self._account_facts_reason}"
+                )
+                if not self._account_facts_degraded:
+                    self._account_facts_degraded = True
+                    self._account_facts_timeout_reason = reason
+                    log.error(
+                        "live_account_facts_startup_timeout",
+                        reason=reason,
+                        session_id=self._session_id,
+                    )
+                    if self._telemetry is not None:
+                        self._telemetry.consumer_health(
+                            consumer="account_event_hub",
+                            available=False,
+                            occurred_at=self._clock(),
+                            reason=reason,
+                        )
+                self._refresh_entry_gate()
+                return False
+        return False
+
+    def account_facts_status(self) -> dict[str, object]:
+        return {
+            "ready": self._account_snapshot_available,
+            "reason": (
+                None
+                if self._account_snapshot_available
+                else (
+                    self._account_facts_timeout_reason
+                    or self._account_facts_reason
+                )
+            ),
+            "degraded": self._account_facts_degraded,
+        }
 
     @property
     def market_state_available(self) -> bool:
@@ -195,6 +293,10 @@ class LiveControlPlaneRuntime:
             account_state=account_state,
         )
         self._account_snapshot_available = True
+        self._account_facts_reason = None
+        self._account_facts_timeout_reason = None
+        self._account_facts_degraded = False
+        self._account_facts_observed_at = None
         if self._telemetry is not None and event.snapshot_kind == "full":
             self._telemetry.consumer_health(
                 consumer="account_event_hub",
@@ -210,6 +312,9 @@ class LiveControlPlaneRuntime:
         """Fail closed while the account-event consumer rebuilds its snapshot."""
 
         self._account_snapshot_available = False
+        self._account_facts_reason = reason or "account_facts_pending"
+        if self._account_facts_observed_at is None:
+            self._account_facts_observed_at = self._clock()
         self._context_provider.invalidate_account_snapshot()
         if self._telemetry is not None:
             self._telemetry.consumer_health(

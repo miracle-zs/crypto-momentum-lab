@@ -257,7 +257,7 @@ class _RestoredOutboxBook:
         self.mark_rejected = AsyncMock()
 
     def get_outbox(self, client_order_id: str):
-        return self._state.outbox_by_command_id.get(client_order_id)
+        return self._state._outbox_by_command_id.get(client_order_id)
 
     async def act(self, request, prepare_submission=None):
         from crypto_momentum_lab.domain.execution.execution_action_processor import (
@@ -283,20 +283,19 @@ class _RestoredOutboxBook:
         )
 
 
-def _restored_command_state(client_order_id: str, state_value) -> SimpleNamespace:
-    from crypto_momentum_lab.domain.execution.execution_action_state import (
-        ExecutionActionState,
-    )
+def _restored_command_state(client_order_id: str, state_value):
+    """Build the single execution state owner with one restored outbox entry.
 
-    entry = SimpleNamespace(state=state_value)
-    return ExecutionActionState(
-        requests_by_id={},
-        receipts_by_id={},
-        outbox_by_command_id={client_order_id: entry},
-        command_reservations={},
-        recovery_required_commands=set(),
-        dispatch_reconciliation_required_commands=set(),
-    )
+    The former ``ExecutionActionState`` wrapper was removed when the Book
+    became the only mutable owner, so the test now restores into a real
+    ``ExecutionBook`` exactly like the recovery path does.
+    """
+
+    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+
+    book = ExecutionBook()
+    book._outbox_by_command_id[client_order_id] = SimpleNamespace(state=state_value)
+    return book
 
 
 def _replay_preparation(plan):
@@ -377,7 +376,7 @@ async def test_restored_outbox_command_is_not_rejected_on_replay(
     book.mark_rejected.assert_not_awaited()
     sub_repo.mark_submission_rejected.assert_not_awaited()
     assert (
-        state.outbox_by_command_id[plan.client_order_id].state
+        state._outbox_by_command_id[plan.client_order_id].state
         is DispatchState.ACKNOWLEDGED
     )
 
@@ -428,7 +427,7 @@ async def test_conflicting_retry_does_not_reject_the_owning_command() -> None:
     )
     coordinator.configure_submission(sub_repo, clock=lambda: NOW)
     # The owning command was accepted earlier with its own payload.
-    state.requests_by_id[plan_client_id] = coordinator._execution_request(
+    state._requests_by_id[plan_client_id] = coordinator._execution_request(
         original, strategy_name=_intent().strategy_name
     )
 
@@ -444,7 +443,7 @@ async def test_conflicting_retry_does_not_reject_the_owning_command() -> None:
     book.mark_rejected.assert_not_awaited()
     sub_repo.mark_submission_rejected.assert_not_awaited()
     assert (
-        state.outbox_by_command_id[plan_client_id].state
+        state._outbox_by_command_id[plan_client_id].state
         is DispatchState.ACKNOWLEDGED
     )
 

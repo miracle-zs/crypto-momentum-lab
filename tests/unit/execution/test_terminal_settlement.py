@@ -1,5 +1,3 @@
-from crypto_momentum_lab.domain.strategy import StrategySide
-
 """Real Book settlement when an order report precedes its account trades."""
 
 from contextlib import asynccontextmanager
@@ -20,7 +18,7 @@ from crypto_momentum_lab.domain.execution.execution_book import (
     ExecutionBook,
     ExecutionRequest,
 )
-from crypto_momentum_lab.domain.execution.observation_models import Applied
+from crypto_momentum_lab.domain.execution.observation_models import Applied, Duplicate
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
     ExchangeOrderSnapshot,
@@ -33,7 +31,7 @@ from crypto_momentum_lab.domain.execution.trade_command import (
     TradeCommand,
     TradeCommandType,
 )
-from crypto_momentum_lab.domain.strategy import EntryType
+from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 
 pytestmark = pytest.mark.contract
 
@@ -44,11 +42,15 @@ SCOPE = ExecutionScope("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
 class ObservationTransaction:
     """Persistence seam only; all observation and settlement use the real Book."""
 
-    def __init__(self, head):
+    def __init__(self, head, checkpoints=None):
         self.head = head
+        self.checkpoints = checkpoints or {}
 
     async def load_head(self, key):
         return self.head
+
+    async def load_checkpoint_by_id(self, scope, checkpoint_id):
+        return self.checkpoints.get((scope, checkpoint_id))
 
     async def record_evidence(self, **kwargs):
         return True
@@ -80,13 +82,14 @@ class ObservationTransaction:
 
 
 class ObservationUnitOfWork:
-    def __init__(self):
+    def __init__(self, checkpoints=None):
         self.head = None
         self.fail_commit = False
+        self.checkpoints = dict(checkpoints or {})
 
     @asynccontextmanager
     async def transaction(self, key, account_scope=None):
-        transaction = ObservationTransaction(self.head)
+        transaction = ObservationTransaction(self.head, checkpoints=self.checkpoints)
         yield transaction
         if self.fail_commit:
             raise RuntimeError("injected commit failure")
@@ -281,7 +284,7 @@ async def test_filled_entry_exchange_identity_clears_trade_wait(report_first):
 
 
 @pytest.mark.asyncio
-async def test_verified_partial_receipt_resolves_unknown_dispatch_without_releasing_remaining_capacity():
+async def test_verified_partial_receipt_resolves_unknown_dispatch_without_release():
     from crypto_momentum_lab.domain.execution.command_models import DispatchState
 
     book = await reserved_book()
@@ -631,8 +634,12 @@ async def test_historical_short_terminal_releases_without_replaying_position():
     assert result.released_quantity == Decimal("1")
     assert not book.command_requires_recovery("exit")
     assert (await book.read(SCOPE)).total_quantity == Decimal("5")
+    reservations_before = book.get_active_reservations(SCOPE.to_position_key())
     repeated = await book.observe(replace(replay, evidence_id="historical-again"))
-    assert repeated.released_quantity == 0
+    assert isinstance(repeated, Duplicate)
+    assert book.get_active_reservations(SCOPE.to_position_key()) == reservations_before
+    assert (await book.read(SCOPE)).total_quantity == Decimal("5")
+    assert not book.command_requires_recovery("exit")
     assert book.coordinator.get_reservation("reservation").released_quantity == Decimal(
         "1"
     )

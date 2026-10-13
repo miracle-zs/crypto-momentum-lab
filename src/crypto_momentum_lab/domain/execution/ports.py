@@ -76,6 +76,7 @@ class DurableExecutionPositionState:
     trade_ids: tuple[str, ...]
     evidence_ids: tuple[str, ...]
     watermarks: tuple[ExecutionWatermark, ...]
+    latest_evidence_sequence: int | None = None
 
 
 class ExecutionTransactionPort(Protocol):
@@ -90,6 +91,13 @@ class ExecutionTransactionPort(Protocol):
         checkpoint: PositionRecoveryCheckpoint | None = None,
         delta: JournalFactDelta | None = None,
     ) -> JournalPersistResult: ...
+
+    async def filter_known_facts(
+        self,
+        *,
+        scope: AccountFactStreamScope,
+        delta: JournalFactDelta,
+    ) -> JournalFactDelta: ...
 
     async def load_recovery(
         self,

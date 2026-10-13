@@ -813,3 +813,166 @@ def test_exit_quantity_and_identity_use_current_position_capacity(target_batch):
     assert oversized.quantity == capacity
     assert oversized.candidate.features["quantity"] == str(capacity)
     assert oversized.candidate.candidate_id == exact.candidate.candidate_id
+
+
+async def test_scheduled_flatten_identity_is_stable_across_recovery_attempts() -> None:
+    """A resumed operator flatten reuses its identity instead of a new time."""
+
+    manager = LiveExitManager(config=_config(PositionExitMode.CANDLE_15M))
+    command_requested_at = datetime(2026, 7, 3, 23, 40, tzinfo=UTC)
+
+    first = await manager.requests_for_scheduled_flatten(
+        (_long_position(),),
+        now=datetime(2026, 7, 3, 23, 45, tzinfo=UTC),
+        reference_prices={"BTCUSDT": Decimal("99")},
+        identity_at=command_requested_at,
+    )
+    # The retry happens later on the wall clock but for the same command.
+    second = await manager.requests_for_scheduled_flatten(
+        (_long_position(),),
+        now=datetime(2026, 7, 3, 23, 52, tzinfo=UTC),
+        reference_prices={"BTCUSDT": Decimal("99")},
+        identity_at=command_requested_at,
+    )
+
+    assert len(first) == 1 and len(second) == 1
+    # The candidate identity (which becomes the client order id) is derived from
+    # the stable identity instant, not from the retry's wall clock, so a resumed
+    # recovery continues the same order instead of creating another flatten.
+    assert first[0].candidate.candidate_id == second[0].candidate.candidate_id
+    assert first[0].candidate.signal_id == second[0].candidate.signal_id
+    # Without the stable identity the same retry mints a different order.
+    third = await manager.requests_for_scheduled_flatten(
+        (_long_position(),),
+        now=datetime(2026, 7, 3, 23, 52, tzinfo=UTC),
+        reference_prices={"BTCUSDT": Decimal("99")},
+    )
+    assert third[0].candidate.candidate_id != first[0].candidate.candidate_id
+
+
+async def test_scheduled_flatten_skips_a_position_whose_close_is_already_filled() -> None:
+    """An existing full close is not re-flattened, so recovery cannot double it."""
+
+    manager = LiveExitManager(config=_config(PositionExitMode.CANDLE_15M))
+    closed = replace(_long_position(), closing_order_filled=True)
+
+    requests = await manager.requests_for_scheduled_flatten(
+        (closed,),
+        now=datetime(2026, 7, 3, 23, 45, tzinfo=UTC),
+        identity_at=datetime(2026, 7, 3, 23, 40, tzinfo=UTC),
+    )
+
+    assert requests == ()
+
+
+def _blocked_recovery_position(recovery_plan) -> ManagedLivePosition:
+    """A position whose recovery order blocks the current episode.
+
+    This is the post-cancellation branch: the scheduled flatten must cancel the
+    recovery order and submit a fallback that replaces it.
+    """
+
+    return replace(
+        _long_position(),
+        quantity=Decimal("0.75"),
+        opened_at=datetime(2026, 7, 3, 23, 20, tzinfo=UTC),
+        recovery_order_client_id=recovery_plan.client_order_id,
+        recovery_exit_started_at=recovery_plan.created_at,
+        recovery_order_created_at=recovery_plan.created_at,
+        recovery_order_plan=recovery_plan,
+    )
+
+
+def _partial_recovery_plan(*, order_id: str, created_at: datetime) -> OrderExecutionPlan:
+    return OrderExecutionPlan(
+        intent_id="recovery-intent",
+        run_id="run-1",
+        client_order_id=order_id,
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="LIMIT",
+        quantity=Decimal("0.50"),
+        price=Decimal("100.88"),
+        reduce_only=True,
+        created_at=created_at,
+        position_side=FuturesPositionSide.LONG,
+        quantized=True,
+    )
+
+
+async def test_post_cancellation_flatten_keeps_identity_across_managers() -> None:
+    """A new session and a new exit manager must resume the same order identity.
+
+    Reproduces the post-cancellation branch: after a partial fill the recovery
+    order is cancelled and a fallback replaces it.  Restarting the process (new
+    manager, later clock) must not mint a different identity for the same
+    operator command.
+    """
+
+    identity_at = datetime(2026, 7, 3, 23, 40, tzinfo=UTC)
+    recovery_plan = _partial_recovery_plan(
+        order_id="recovery-client",
+        created_at=datetime(2026, 7, 3, 23, 30, tzinfo=UTC),
+    )
+    position = _blocked_recovery_position(recovery_plan)
+
+    # First process.
+    first_manager = LiveExitManager(config=_config(PositionExitMode.CANDLE_15M))
+    first = await first_manager.requests_for_scheduled_flatten(
+        (position,),
+        now=datetime(2026, 7, 3, 23, 45, tzinfo=UTC),
+        reference_prices={"BTCUSDT": Decimal("99")},
+        identity_at=identity_at,
+    )
+
+    # Restart: a brand new manager and session resume the same command later.
+    second_manager = LiveExitManager(config=_config(PositionExitMode.CANDLE_15M))
+    second = await second_manager.requests_for_scheduled_flatten(
+        (position,),
+        now=datetime(2026, 7, 3, 23, 58, tzinfo=UTC),
+        reference_prices={"BTCUSDT": Decimal("99")},
+        identity_at=identity_at,
+    )
+
+    assert len(first) == 1 and len(second) == 1
+    assert isinstance(first[0], LiveExitCancellationRequest)
+    assert isinstance(second[0], LiveExitCancellationRequest)
+    # The original recovery order is cancelled by identity, not re-created.
+    assert first[0].cancel_plan.client_order_id == "recovery-client"
+    assert second[0].cancel_plan.client_order_id == "recovery-client"
+    # The replacing fallback keeps the same client identity across the restart.
+    assert (
+        first[0].fallback_candidate.candidate_id
+        == second[0].fallback_candidate.candidate_id
+    )
+    # Quantity comes from the real remaining position, not a fresh decision.
+    assert first[0].fallback_quantity == Decimal("0.75")
+    assert second[0].fallback_quantity == Decimal("0.75")
+
+
+async def test_post_cancellation_flatten_without_identity_is_not_stable() -> None:
+    """The stable identity is what prevents a rebuilt second order."""
+
+    recovery_plan = _partial_recovery_plan(
+        order_id="recovery-client",
+        created_at=datetime(2026, 7, 3, 23, 30, tzinfo=UTC),
+    )
+    position = _blocked_recovery_position(recovery_plan)
+    manager = LiveExitManager(config=_config(PositionExitMode.CANDLE_15M))
+
+    first = await manager.requests_for_scheduled_flatten(
+        (position,),
+        now=datetime(2026, 7, 3, 23, 45, tzinfo=UTC),
+        reference_prices={"BTCUSDT": Decimal("99")},
+        identity_at=datetime(2026, 7, 3, 23, 40, tzinfo=UTC),
+    )
+    rebuilt = await manager.requests_for_scheduled_flatten(
+        (position,),
+        now=datetime(2026, 7, 3, 23, 58, tzinfo=UTC),
+        reference_prices={"BTCUSDT": Decimal("99")},
+    )
+
+    assert (
+        rebuilt[0].fallback_candidate.candidate_id
+        != first[0].fallback_candidate.candidate_id
+    )

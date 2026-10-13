@@ -16,6 +16,7 @@ from collections.abc import (
 )
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 import structlog
 
@@ -24,6 +25,7 @@ from crypto_momentum_lab.domain.market.runtime_state_models import RuntimeStateC
 from crypto_momentum_lab.domain.strategy.position_exit import PositionExitMode
 from crypto_momentum_lab.domain.strategy.runtime import RuntimeStrategy
 from crypto_momentum_lab.execution_account.hub import (
+    InProcessAccountEventSource,
     WebSocketAccountEventSource,
 )
 from crypto_momentum_lab.execution_account.risk_control_hub import (
@@ -117,7 +119,7 @@ class LiveChannelSources:
 
     hub_source: WebSocketMarketStateSource | None
     quote_source: WebSocketMarketQuoteSource | None
-    account_source: WebSocketAccountEventSource
+    account_source: Any
     risk_control_source: WebSocketRiskControlSource | None
 
     def stop_all(self) -> None:
@@ -297,10 +299,10 @@ def assemble_live_channel_sources(
     market_state_source: str,
     market_quote_hub_url: str,
     market_environment: str,
-    account_event_hub_url: str,
-    account_label: str,
-    session_id: str,
-    on_account_recovery: Callable[[str], None],
+    account_event_hub_url: str | None = None,
+    account_label: str = "primary",
+    session_id: str = "live",
+    on_account_recovery: Callable[[str], None] | None = None,
     hub_source: WebSocketMarketStateSource | None = None,
     risk_control_enabled: bool = False,
     risk_control_hub_url: str | None = None,
@@ -308,6 +310,7 @@ def assemble_live_channel_sources(
     on_risk_control_connection_change: (
         Callable[[bool, str | None], None] | None
     ) = None,
+    in_process_account_source: Any = None,
 ) -> LiveChannelSources:
     """Assemble all real-time WebSocket sources for live channels."""
     quote_source: WebSocketMarketQuoteSource | None = None
@@ -318,13 +321,21 @@ def assemble_live_channel_sources(
             consumer_id=f"live-exit-quotes:{session_id}",
         )
 
-    account_source = WebSocketAccountEventSource(
-        url=account_event_hub_url,
-        environment="live",
-        account_label=account_label,
-        consumer_id=f"live-exit:{session_id}",
-        on_recovery=on_account_recovery,
-    )
+    if account_event_hub_url and account_event_hub_url.strip():
+        account_source: Any = WebSocketAccountEventSource(
+            url=account_event_hub_url,
+            environment="live",
+            account_label=account_label,
+            consumer_id=f"live-exit:{session_id}",
+            on_recovery=on_account_recovery,
+        )
+    elif in_process_account_source is not None:
+        account_source = in_process_account_source
+    else:
+        account_source = InProcessAccountEventSource(
+            environment="live",
+            account_label=account_label,
+        )
 
     risk_control_source: WebSocketRiskControlSource | None = None
     if risk_control_enabled and risk_control_hub_url:

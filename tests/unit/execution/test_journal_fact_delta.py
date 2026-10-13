@@ -1,6 +1,7 @@
 """Incremental journal persistence: only append-only facts are re-sent."""
 
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -17,10 +18,13 @@ from crypto_momentum_lab.domain.execution.execution_book import (
 )
 from crypto_momentum_lab.domain.execution.observation_models import (
     Applied,
+    Duplicate,
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
+from crypto_momentum_lab.domain.execution.ports import ExecutionHeadSnapshot
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
+    ExitOrderSubmissionFact,
     PositionKey,
 )
 from crypto_momentum_lab.domain.execution.recovery_models import JournalPersistResult
@@ -231,9 +235,10 @@ class _FakeTx:
 
     def __init__(self) -> None:
         self.persist_calls: list[dict[str, Any]] = []
+        self.head: ExecutionHeadSnapshot | None = None
 
-    async def load_head(self, key: Any) -> None:
-        return None
+    async def load_head(self, key: Any) -> ExecutionHeadSnapshot | None:
+        return self.head
 
     async def load_checkpoint_by_id(self, **kwargs: Any) -> None:
         return None
@@ -248,7 +253,15 @@ class _FakeTx:
         return None
 
     async def persist_head(self, **kwargs: Any) -> int:
-        return int(kwargs.get("revision") or 0)
+        revision = kwargs["expected_revision"] + 1
+        self.head = ExecutionHeadSnapshot(
+            revision=revision,
+            stream_id=kwargs["stream_id"],
+            stream_epoch=kwargs["stream_epoch"],
+            projection_version=kwargs["projection_version"],
+            state_payload=kwargs["state_payload"],
+        )
+        return revision
 
     async def persist_facts(self, **kwargs: Any) -> JournalPersistResult:
         self.persist_calls.append(kwargs)
@@ -308,8 +321,168 @@ async def test_observe_persists_only_facts_recorded_since_the_last_commit() -> N
     # cleared by _publish_candidate and only the new fill is re-sent.
     deltas = [call["delta"].fills for call in uow.tx.persist_calls]
     assert deltas == [(_fill(1),), (_fill(2),)]
-    await book.observe(ExecutionEvidence(
-        evidence_id="ev-3", scope=scope, observed_at=START + timedelta(seconds=2),
-        fill=_fill(2), stream_id="trade-source", stream_epoch="one", sequence=3,
-    ))
-    assert uow.tx.persist_calls[-1]["delta"].fills == ()
+    calls_before = len(uow.tx.persist_calls)
+    dup = await book.observe(
+        ExecutionEvidence(
+            evidence_id="ev-3",
+            scope=scope,
+            observed_at=START + timedelta(seconds=2),
+            fill=_fill(2),
+            stream_id="trade-source",
+            stream_epoch="one",
+            sequence=3,
+        )
+    )
+    assert isinstance(dup, Duplicate)
+    assert len(uow.tx.persist_calls) == calls_before
+    assert [call["delta"].fills for call in uow.tx.persist_calls] == deltas
+
+
+def test_duplicate_snapshot_is_idempotent_and_different_payload_is_not_ignored() -> (
+    None
+):
+    _, journal = _journal()
+    snap = _snapshot(1)
+
+    journal.record_snapshot(snap)
+    assert journal.revision == 1
+    assert journal.pending_fact_delta().snapshots == (snap,)
+    assert len(journal.read_cut().snapshots) == 1
+
+    # Equal value in distinct instance: revision does not increase, delta does not grow
+    journal.record_snapshot(replace(snap))
+    assert journal.revision == 1
+    assert journal.pending_fact_delta().snapshots == (snap,)
+    assert len(journal.read_cut().snapshots) == 1
+
+    # Different payload: not treated as duplicate, appended
+    different = replace(snap, position_amt=Decimal("2"))
+    journal.record_snapshot(different)
+    assert journal.revision == 2
+    assert journal.pending_fact_delta().snapshots == (snap, different)
+    assert len(journal.read_cut().snapshots) == 2
+
+
+def test_duplicate_boundary_is_idempotent_and_different_payload_is_not_ignored() -> (
+    None
+):
+    _, journal = _journal()
+    boundary = ExitOrderSubmissionFact(
+        order_id="boundary-1",
+        submitted_at=START + timedelta(seconds=1),
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.BOTH,
+        client_order_id="client-1",
+        target_batch_id="batch-1",
+    )
+
+    journal.record_boundary(boundary)
+    assert journal.revision == 1
+    assert journal.pending_fact_delta().exit_boundaries == (boundary,)
+    assert len(journal.read_cut().exit_boundaries) == 1
+
+    # Equal value in distinct instance: revision does not increase, delta does not grow
+    journal.record_boundary(replace(boundary))
+    assert journal.revision == 1
+    assert journal.pending_fact_delta().exit_boundaries == (boundary,)
+    assert len(journal.read_cut().exit_boundaries) == 1
+
+    # Different payload: not treated as duplicate, appended
+    different = replace(boundary, target_batch_id="batch-2")
+    journal.record_boundary(different)
+    assert journal.revision == 2
+    assert journal.pending_fact_delta().exit_boundaries == (boundary, different)
+    assert len(journal.read_cut().exit_boundaries) == 2
+
+
+def test_restoring_cut_rebuilds_indices_and_exact_distinct_instance_repeat_noops() -> (
+    None
+):
+    _, journal = _journal()
+    snap = _snapshot(1)
+    boundary = ExitOrderSubmissionFact(
+        order_id="boundary-1",
+        submitted_at=START + timedelta(seconds=1),
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.BOTH,
+        client_order_id="client-1",
+        target_batch_id="batch-1",
+    )
+
+    journal.record_snapshot(snap)
+    journal.record_boundary(boundary)
+
+    # Package into a durable cut and restore to a fresh journal instance
+    facts = journal.read_cut()
+    from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
+
+    cut = DurableJournalCut(
+        scope=journal.stream_scope,
+        as_of=START + timedelta(seconds=2),
+        revision=journal.revision,
+        facts=facts,
+    )
+    restored = AccountJournal.from_durable_cut(cut)
+
+    # Distinct instance with exact equality is a no-op against rebuilt indices
+    rev_before = restored.revision
+    restored.record_snapshot(replace(snap))
+    restored.record_boundary(replace(boundary))
+
+    assert restored.revision == rev_before
+    assert restored.pending_fact_delta().snapshots == ()
+    assert restored.pending_fact_delta().exit_boundaries == ()
+    assert len(restored.read_cut().snapshots) == 1
+    assert len(restored.read_cut().exit_boundaries) == 1
+
+
+def test_candidate_rollback_leaves_original_indices_and_delta_unaffected() -> None:
+    _, journal = _journal()
+    snap = _snapshot(1)
+    boundary = ExitOrderSubmissionFact(
+        order_id="boundary-1",
+        submitted_at=START + timedelta(seconds=1),
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.BOTH,
+        client_order_id="client-1",
+        target_batch_id="batch-1",
+    )
+    journal.record_snapshot(snap)
+    journal.record_boundary(boundary)
+    journal.mark_facts_persisted()
+
+    original_rev = journal.revision
+    candidate = journal.copy_for_transaction()
+
+    # Candidate adds a new payload variant for the same keys
+    candidate_snap_var = replace(snap, position_amt=Decimal("5"))
+    candidate_boundary_var = replace(boundary, target_batch_id="candidate-batch")
+    candidate.record_snapshot(candidate_snap_var)
+    candidate.record_boundary(candidate_boundary_var)
+
+    assert candidate.revision == original_rev + 2
+    assert candidate.pending_fact_delta().snapshots == (candidate_snap_var,)
+    assert candidate.pending_fact_delta().exit_boundaries == (candidate_boundary_var,)
+
+    # Rollback discard: original was untouched and contains no candidate variants
+    assert journal.revision == original_rev
+    assert journal.pending_fact_delta().snapshots == ()
+    assert journal.pending_fact_delta().exit_boundaries == ()
+    assert snap.observed_at in journal._snapshots_by_key
+    assert len(journal._snapshots_by_key[snap.observed_at]) == 1
+    assert boundary.order_id in journal._boundaries_by_key
+    assert len(journal._boundaries_by_key[boundary.order_id]) == 1
+
+    # Later, original independently appends a distinct new payload variant
+    orig_snap_var = replace(snap, position_amt=Decimal("9"))
+    orig_boundary_var = replace(boundary, target_batch_id="orig-batch")
+    journal.record_snapshot(orig_snap_var)
+    journal.record_boundary(orig_boundary_var)
+
+    assert journal.revision == original_rev + 2
+    assert journal.pending_fact_delta().snapshots == (orig_snap_var,)
+    assert journal.pending_fact_delta().exit_boundaries == (orig_boundary_var,)
+    assert len(journal.read_cut().snapshots) == 2
+    assert len(journal.read_cut().exit_boundaries) == 2
+    assert len(journal._snapshots_by_key[snap.observed_at]) == 2
+    assert len(journal._boundaries_by_key[boundary.order_id]) == 2

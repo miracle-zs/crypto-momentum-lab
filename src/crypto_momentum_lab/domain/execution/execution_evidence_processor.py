@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
 from crypto_momentum_lab.domain.execution.command_models import (
@@ -23,11 +24,13 @@ from crypto_momentum_lab.domain.execution.evidence_lifecycle import (
 from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
 from crypto_momentum_lab.domain.execution.evidence_rules import _evidence_identity
 from crypto_momentum_lab.domain.execution.evidence_settlement import account_trade_delta
-from crypto_momentum_lab.domain.execution.execution_evidence_state import EvidenceState
 from crypto_momentum_lab.domain.execution.fill_attribution import (
     is_exit_fill,
     plan_fill_observation,
 )
+
+if TYPE_CHECKING:
+    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 from crypto_momentum_lab.domain.execution.observation_models import (
     Applied,
     Duplicate,
@@ -97,18 +100,18 @@ def reservations_held_by_terminal_order(
 
 
 def is_terminal_settlement_recovery(
-    state: EvidenceState, evidence: ExecutionEvidence
+    execution_book: ExecutionBook, evidence: ExecutionEvidence
 ) -> bool:
     """An exact terminal retry may prove settlement without replaying facts."""
     event = evidence.order_event
     if event is None or event.state is not ExchangeOrderState.FILLED:
         return False
-    pending = state.outbox_by_command_id.get(event.client_order_id)
+    pending = execution_book._outbox_by_command_id.get(event.client_order_id)
     return bool(
         pending is not None
         and pending.state is DispatchState.TERMINAL
         and pending.scope == evidence.scope
-        and event.client_order_id in state.recovery_required_commands
+        and event.client_order_id in execution_book._recovery_required_commands
         and evidence.settlement_fills
         and evidence.cumulative_order is not None
         and not evidence.fill
@@ -124,14 +127,14 @@ def is_terminal_settlement_recovery(
 
 
 async def mutate_evidence(
-    state: EvidenceState,
+    execution_book: ExecutionBook,
     dependencies: EvidenceMutationDependencies,
     evidence: ExecutionEvidence,
 ) -> ExecutionObserveResult:
     """Idempotently ingest exchange evidence and settle allocations."""
     identity = _evidence_identity(evidence)
-    if identity in state.seen_evidence_ids and not is_terminal_settlement_recovery(
-        state, evidence
+    if identity in execution_book._seen_evidence_ids and not is_terminal_settlement_recovery(
+        execution_book, evidence
     ):
         key = evidence.scope.to_position_key()
         book = dependencies.ensure_book(key)
@@ -148,9 +151,9 @@ async def mutate_evidence(
             stream_id=evidence.stream_id,
             stream_epoch=evidence.stream_epoch,
         )
-        current_scope = state.stream_scopes.get(key.canonical_id)
+        current_scope = execution_book._stream_scopes.get(key.canonical_id)
         if current_scope is not None and current_scope != scope:
-            current_book = state.books.get(key.canonical_id)
+            current_book = execution_book._books.get(key.canonical_id)
             active_res = dependencies.active_reservations(key)
             res_held_by_order = reservations_held_by_terminal_order(
                 evidence, active_res
@@ -175,11 +178,11 @@ async def mutate_evidence(
                 and not has_blocking_reservations
             )
             if can_rollover:
-                state.stream_scopes[key.canonical_id] = scope
-                journal = state.journals.get(key.canonical_id)
+                execution_book._stream_scopes[key.canonical_id] = scope
+                journal = execution_book._journals.get(key.canonical_id)
                 if journal is not None:
                     journal.adopt_stream_scope(scope)
-                state.last_sequences.pop(key.canonical_id, None)
+                execution_book._last_sequences.pop(key.canonical_id, None)
             elif terminal_without_fill:
                 pass
             else:
@@ -212,7 +215,7 @@ async def mutate_evidence(
     # rewrite the true order_id of an account trade.
     if evidence.order_event is not None:
         event = evidence.order_event
-        entry = state.outbox_by_command_id.get(event.client_order_id)
+        entry = execution_book._outbox_by_command_id.get(event.client_order_id)
         if entry is not None and event.exchange_order_id is not None:
             if entry.scope.to_position_key() != key or entry.external_order_id not in (
                 None,
@@ -232,10 +235,10 @@ async def mutate_evidence(
                 watermark_key = dependencies.order_watermark_key(key, entry.command_id)
                 trade_delta = account_trade_delta(
                     entry.command_id,
-                    previous_quantity=state.order_cumulative_fills.get(
+                    previous_quantity=execution_book._order_cumulative_fills.get(
                         watermark_key, Decimal("0")
                     ),
-                    previous_quote=state.order_cumulative_quotes.get(
+                    previous_quote=execution_book._order_cumulative_quotes.get(
                         watermark_key, Decimal("0")
                     ),
                     account_fills=journal.read_cut().fills,
@@ -261,8 +264,8 @@ async def mutate_evidence(
                     # These real trades predate the identity receipt. Their
                     # canonical watermark prevents the report counting them
                     # a second time in this same transaction.
-                    state.order_cumulative_fills[watermark_key] = quantity
-                    state.order_cumulative_quotes[watermark_key] = quote
+                    execution_book._order_cumulative_fills[watermark_key] = quantity
+                    execution_book._order_cumulative_quotes[watermark_key] = quote
                     pending_watermark = (watermark_key, quantity, quote)
 
     # 1. Process Fill
@@ -279,16 +282,16 @@ async def mutate_evidence(
             fill_plan = plan_fill_observation(
                 fill,
                 existing_trade=existing_trade,
-                trade_seen=trade_id in state.seen_trade_ids,
-                previous_quantity=state.order_cumulative_fills.get(
+                trade_seen=trade_id in execution_book._seen_trade_ids,
+                previous_quantity=execution_book._order_cumulative_fills.get(
                     watermark_key, Decimal("0")
                 ),
-                previous_quote=state.order_cumulative_quotes.get(
+                previous_quote=execution_book._order_cumulative_quotes.get(
                     watermark_key, Decimal("0")
                 ),
                 can_adopt_prefix=(
                     dependencies.in_transaction
-                    and state.recovery_adoption_scope == journal.stream_scope
+                    and execution_book._recovery_adoption_scope == journal.stream_scope
                     and journal.stream_scope is not None
                 ),
             )
@@ -316,16 +319,16 @@ async def mutate_evidence(
                         ),
                     )
                 if not adopted_prefix_trade:
-                    state.seen_trade_ids.add(trade_id)
+                    execution_book._seen_trade_ids.add(trade_id)
             elif not is_cumulative:
-                state.seen_trade_ids.add(trade_id)
+                execution_book._seen_trade_ids.add(trade_id)
 
         if not is_cumulative and is_new_trade and not adopted_prefix_trade:
             watermark_key = dependencies.order_watermark_key(key, order_id)
-            previous_quantity = state.order_cumulative_fills.get(
+            previous_quantity = execution_book._order_cumulative_fills.get(
                 watermark_key, Decimal("0")
             )
-            previous_quote = state.order_cumulative_quotes.get(
+            previous_quote = execution_book._order_cumulative_quotes.get(
                 watermark_key, Decimal("0")
             )
             try:
@@ -384,16 +387,16 @@ async def mutate_evidence(
             report, order_id=dependencies.command_order_id(key, report.order_id)
         )
         watermark_key = dependencies.order_watermark_key(key, report.order_id)
-        previous_quantity = state.order_cumulative_fills.get(
+        previous_quantity = execution_book._order_cumulative_fills.get(
             watermark_key, Decimal("0")
         )
-        previous_quote = state.order_cumulative_quotes.get(watermark_key, Decimal("0"))
+        previous_quote = execution_book._order_cumulative_quotes.get(watermark_key, Decimal("0"))
         try:
             report_plan = plan_cumulative_report(
                 report,
                 previous_watermark=(previous_quantity, previous_quote),
                 account_fills=settlement_facts,
-                outbox=state.outbox_by_command_id.get(report.order_id),
+                outbox=execution_book._outbox_by_command_id.get(report.order_id),
                 has_active_reservations=bool(
                     dependencies.active_reservations_for_command(report.order_id)
                 ),
@@ -435,7 +438,7 @@ async def mutate_evidence(
     # 4. Process Order Event
     if evidence.order_event is not None:
         cmd_id = evidence.order_event.client_order_id
-        outbox = state.outbox_by_command_id.get(cmd_id)
+        outbox = execution_book._outbox_by_command_id.get(cmd_id)
         event_plan = plan_order_event(
             outbox,
             evidence.order_event,
@@ -449,7 +452,7 @@ async def mutate_evidence(
         if event_plan.updated is not None:
             assert outbox is not None
             if event_plan.requires_dispatch_reconciliation:
-                state.dispatch_reconciliation_required_commands.add(cmd_id)
+                execution_book._dispatch_reconciliation_required_commands.add(cmd_id)
             await dependencies.persist_transition(event_plan.updated)
             if event_plan.release_reason is not None:
                 released_qty += await dependencies.release_command_reservations(
@@ -459,11 +462,11 @@ async def mutate_evidence(
             if event_plan.pending_trade_diagnostic is not None:
                 # Keep admission closed while real position facts lag, but
                 # let the account consumer continue receiving those facts.
-                state.recovery_required_commands.add(cmd_id)
+                execution_book._recovery_required_commands.add(cmd_id)
                 if not diagnostics:
                     diagnostics = (event_plan.pending_trade_diagnostic,)
             if event_plan.recovery_diagnostic is not None:
-                state.recovery_required_commands.add(cmd_id)
+                execution_book._recovery_required_commands.add(cmd_id)
                 settlement_recovery_required = True
                 diagnostics = (event_plan.recovery_diagnostic,)
             if event_plan.dispatch_reconciled:
@@ -471,47 +474,47 @@ async def mutate_evidence(
 
     if pending_watermark is not None:
         watermark_key, cumulative_qty, cumulative_quote = pending_watermark
-        state.order_cumulative_fills[watermark_key] = cumulative_qty
-        state.order_cumulative_quotes[watermark_key] = cumulative_quote
+        execution_book._order_cumulative_fills[watermark_key] = cumulative_qty
+        execution_book._order_cumulative_quotes[watermark_key] = cumulative_quote
         publication = plan_watermark_publication(
             evidence,
-            outbox_by_command_id=state.outbox_by_command_id,
+            outbox_by_command_id=execution_book._outbox_by_command_id,
         )
         if publication.outbox is not None:
             await dependencies.persist_outbox_state(publication.outbox)
         elif publication.recovery_diagnostic is not None:
-            state.recovery_required_commands.add(publication.command_id)
+            execution_book._recovery_required_commands.add(publication.command_id)
             settlement_recovery_required = True
             diagnostics = (publication.recovery_diagnostic,)
 
     if dispatch_reconciled_command_id is not None:
-        state.dispatch_reconciliation_required_commands.discard(
+        execution_book._dispatch_reconciliation_required_commands.discard(
             dispatch_reconciled_command_id
         )
 
-    recovery_commands = state.recovery_required_commands | {
+    recovery_commands = execution_book._recovery_required_commands | {
         entry.command_id
-        for entry in state.outbox_by_command_id.values()
+        for entry in execution_book._outbox_by_command_id.values()
         if entry.scope.to_position_key() == key
         and (
-            entry.external_order_id in state.recovery_required_commands
+            entry.external_order_id in execution_book._recovery_required_commands
             or "external:"
             + dependencies.order_watermark_key(key, entry.external_order_id)
-            in state.recovery_required_commands
+            in execution_book._recovery_required_commands
         )
     }
     for command_id in recovery_commands:
-        pending = state.outbox_by_command_id.get(command_id)
+        pending = execution_book._outbox_by_command_id.get(command_id)
         if pending is None or pending.scope.to_position_key() != key:
             continue
         reservations = tuple(
-            state.coordinator.get_reservation(reservation_id)
-            for reservation_id in state.command_reservations.get(command_id, ())
+            execution_book._coordinator.get_reservation(reservation_id)
+            for reservation_id in execution_book._command_reservations.get(command_id, ())
         )
         if terminal_settlement_is_confirmed(
             pending,
             account_fills=settlement_facts,
-            cumulative_quantity=state.order_cumulative_fills.get(
+            cumulative_quantity=execution_book._order_cumulative_fills.get(
                 dependencies.order_watermark_key(key, command_id), Decimal("0")
             ),
             reservations=reservations,
@@ -524,17 +527,17 @@ async def mutate_evidence(
                 released_qty += await dependencies.release_command_reservations(
                     command_id, reason="terminal_quantity_confirmed"
                 )
-            state.recovery_required_commands.discard(command_id)
+            execution_book._recovery_required_commands.discard(command_id)
             if pending.external_order_id is not None:
-                state.recovery_required_commands.discard(pending.external_order_id)
+                execution_book._recovery_required_commands.discard(pending.external_order_id)
                 watermark = dependencies.order_watermark_key(
                     key, pending.external_order_id
                 )
                 external_identity = f"external:{watermark}"
-                state.recovery_required_commands.discard(external_identity)
-                state.external_recovery_positions.pop(external_identity, None)
+                execution_book._recovery_required_commands.discard(external_identity)
+                execution_book._external_recovery_positions.pop(external_identity, None)
 
-    state.seen_evidence_ids.add(identity)
+    execution_book._seen_evidence_ids.add(identity)
     updated_view = book.get_view(now=evidence.observed_at)
 
     # An external exit has no command or reservation lifecycle. Resolve
@@ -555,10 +558,10 @@ async def mutate_evidence(
         and coverage.is_authoritative
         and coverage.end_at >= latest_trade_at
     ):
-        for identity, position in tuple(state.external_recovery_positions.items()):
+        for identity, position in tuple(execution_book._external_recovery_positions.items()):
             if position == key:
-                state.external_recovery_positions.pop(identity)
-                state.recovery_required_commands.discard(identity)
+                execution_book._external_recovery_positions.pop(identity)
+                execution_book._recovery_required_commands.discard(identity)
 
     return Applied(
         evidence_id=evidence.evidence_id,

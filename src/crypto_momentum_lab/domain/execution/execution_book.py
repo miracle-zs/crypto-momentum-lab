@@ -22,6 +22,10 @@ from crypto_momentum_lab.domain.execution.command_models import (
 from crypto_momentum_lab.domain.execution.evidence_models import (
     ExecutionEvidence,
 )
+from crypto_momentum_lab.domain.execution.exchange_contract import (
+    ExchangeOrderRejectedError,
+    LiveSubmissionDisabledError,
+)
 from crypto_momentum_lab.domain.execution.execution_action_models import (
     Accepted,
     AlreadyAccepted,
@@ -37,14 +41,12 @@ from crypto_momentum_lab.domain.execution.execution_action_processor import (
     accept_execution_command,
 )
 from crypto_momentum_lab.domain.execution.execution_action_state import (
-    ExecutionActionState,
     register_prepared_outbox,
 )
 from crypto_momentum_lab.domain.execution.execution_action_transaction import (
     accept_action_transaction,
 )
 from crypto_momentum_lab.domain.execution.execution_book_commands import (
-    CommandLifecycleState,
     CommandPersistenceDependencies,
     apply_command_transition,
     persist_command_transition,
@@ -52,7 +54,6 @@ from crypto_momentum_lab.domain.execution.execution_book_commands import (
     settle_command_reservations,
 )
 from crypto_momentum_lab.domain.execution.execution_book_recovery import (
-    ExecutionRecoveryState,
     RecoveryDependencies,
     ReloadDependencies,
     apply_loaded_execution_position,
@@ -64,9 +65,6 @@ from crypto_momentum_lab.domain.execution.execution_checkpoint_reader import (
 from crypto_momentum_lab.domain.execution.execution_evidence_processor import (
     EvidenceMutationDependencies,
     mutate_evidence,
-)
-from crypto_momentum_lab.domain.execution.execution_evidence_state import (
-    EvidenceState,
 )
 from crypto_momentum_lab.domain.execution.execution_evidence_transaction import (
     observe_evidence_transaction,
@@ -84,6 +82,9 @@ from crypto_momentum_lab.domain.execution.observation_models import (
     WaitingForEvidence,
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
+    OrderAlreadyPreparedError,
+    OrderCommandConflictError,
+    OrderPreSubmissionError,
     PreparedOrderSubmission,
     blocks_local_rejection,
 )
@@ -189,45 +190,6 @@ class ExecutionBook:
         self._staged_dispatch_reconciliation_required_commands: set[str] = set()
         self._staged_external_recovery_positions: dict[str, PositionKey] = {}
         self._context_revision = 0
-        self._action_state = ExecutionActionState(
-            requests_by_id=self._requests_by_id,
-            receipts_by_id=self._receipts_by_id,
-            outbox_by_command_id=self._outbox_by_command_id,
-            command_reservations=self._command_reservations,
-            recovery_required_commands=self._recovery_required_commands,
-            dispatch_reconciliation_required_commands=(
-                self._dispatch_reconciliation_required_commands
-            ),
-        )
-        self._evidence_state = EvidenceState(
-            books=self._books,
-            journals=self._journals,
-            stream_scopes=self._stream_scopes,
-            active_streams=self._active_streams,
-            head_revisions=self._head_revisions,
-            journal_revisions=self._journal_revisions,
-            last_sequences=self._last_sequences,
-            seen_evidence_ids=self._seen_evidence_ids,
-            seen_trade_ids=self._seen_trade_ids,
-            outbox_by_command_id=self._outbox_by_command_id,
-            command_reservations=self._command_reservations,
-            order_cumulative_fills=self._order_cumulative_fills,
-            order_cumulative_quotes=self._order_cumulative_quotes,
-            recovery_required_commands=self._recovery_required_commands,
-            external_recovery_positions=self._external_recovery_positions,
-            dispatch_reconciliation_required_commands=(
-                self._dispatch_reconciliation_required_commands
-            ),
-            coordinator=self._coordinator,
-            recovery_adoption_scope=self._recovery_adoption_scope,
-        )
-        self._command_state = CommandLifecycleState(
-            outbox_by_command_id=self._outbox_by_command_id,
-            dispatch_reconciliation_required_commands=(
-                self._dispatch_reconciliation_required_commands
-            ),
-            recovery_required_commands=self._recovery_required_commands,
-        )
 
     @property
     def context_revision(self) -> int:
@@ -235,46 +197,65 @@ class ExecutionBook:
         return self._context_revision
 
     @property
-    def recovery_state(self) -> ExecutionRecoveryState:
-        """Bind recovery to this instance's current transactional state."""
-        return ExecutionRecoveryState(
-            books=self._books,
-            journals=self._journals,
-            stream_scopes=self._stream_scopes,
-            head_revisions=self._head_revisions,
-            head_expected_reservation_ids=self._head_expected_reservation_ids,
-            journal_revisions=self._journal_revisions,
-            last_sequences=self._last_sequences,
-            seen_evidence_ids=self._seen_evidence_ids,
-            seen_trade_ids=self._seen_trade_ids,
-            order_cumulative_fills=self._order_cumulative_fills,
-            order_cumulative_quotes=self._order_cumulative_quotes,
-            outbox_by_command_id=self._outbox_by_command_id,
-            command_reservations=self._command_reservations,
-            recovery_required_commands=self._recovery_required_commands,
-            external_recovery_positions=self._external_recovery_positions,
-            dispatch_reconciliation_required_commands=(
-                self._dispatch_reconciliation_required_commands
-            ),
-            coordinator=self._coordinator,
-        )
+    def coordinator(self) -> ReservationRegistry:
+        return self._coordinator
 
     @property
-    def evidence_state(self) -> EvidenceState:
-        """State consumed by the evidence processor inside one transaction."""
-        return self._evidence_state
+    def recovery_adoption_scope(self) -> AccountFactStreamScope | None:
+        return self._recovery_adoption_scope
+
+    @recovery_adoption_scope.setter
+    def recovery_adoption_scope(self, value: AccountFactStreamScope | None) -> None:
+        self._recovery_adoption_scope = value
+
+    def clear(self, *, clear_requests: Callable[[], None] | None = None) -> None:
+        for values in (
+            self._books,
+            self._journals,
+            self._stream_scopes,
+            self._head_revisions,
+            self._head_expected_reservation_ids,
+            self._journal_revisions,
+            self._last_sequences,
+            self._seen_evidence_ids,
+            self._seen_trade_ids,
+            self._order_cumulative_fills,
+            self._order_cumulative_quotes,
+            self._outbox_by_command_id,
+            self._command_reservations,
+            self._recovery_required_commands,
+            self._external_recovery_positions,
+            self._dispatch_reconciliation_required_commands,
+        ):
+            values.clear()
+        if clear_requests is not None:
+            clear_requests()
+        self._coordinator.clear_reservations()
 
     def register_active_stream(
         self,
+        evidence: ExecutionEvidence | None = None,
         *,
-        environment: str,
-        account_label: str,
-        stream_id: str,
-        stream_epoch: str,
+        environment: str | None = None,
+        account_label: str | None = None,
+        stream_id: str | None = None,
+        stream_epoch: str | None = None,
     ) -> None:
         """Register an authoritative account fact stream as active for this book."""
+        if evidence is not None:
+            if evidence.stream_id and evidence.stream_epoch:
+                self._active_streams.add(
+                    (
+                        evidence.scope.environment,
+                        evidence.scope.account_label,
+                        evidence.stream_id,
+                        evidence.stream_epoch,
+                    )
+                )
+            return
         if not stream_id or not stream_epoch:
             return
+        assert environment is not None and account_label is not None
         self._active_streams.add((environment, account_label, stream_id, stream_epoch))
         self._latest_active_streams[(environment, account_label)] = (
             stream_id,
@@ -483,7 +464,7 @@ class ExecutionBook:
         return cast(
             PositionView | None,
             apply_loaded_execution_position(
-                self.recovery_state,
+                self,
                 ReloadDependencies(
                     load_position=getattr(
                         self._execution_unit_of_work, "load_position", None
@@ -500,10 +481,6 @@ class ExecutionBook:
                 expected_quantity=expected_quantity,
             ),
         )
-
-    @property
-    def coordinator(self) -> ReservationRegistry:
-        return self._coordinator
 
     @property
     def has_reservation_repository(self) -> bool:
@@ -598,15 +575,6 @@ class ExecutionBook:
             self._external_recovery_positions
         )
         candidate._coordinator = self._coordinator.copy_for_transaction()
-        candidate._command_state = CommandLifecycleState(
-            outbox_by_command_id=candidate._outbox_by_command_id,
-            dispatch_reconciliation_required_commands=(
-                candidate._dispatch_reconciliation_required_commands
-            ),
-            recovery_required_commands=candidate._recovery_required_commands,
-        )
-        candidate._refresh_action_state()
-        candidate._refresh_evidence_state()
         candidate._reservation_repo = None
         candidate._command_repo = None
         candidate._active_transaction = None
@@ -849,16 +817,6 @@ class ExecutionBook:
             )
 
         self._coordinator.publish_from(candidate._coordinator, key=key)
-        self._command_state = CommandLifecycleState(
-            outbox_by_command_id=self._outbox_by_command_id,
-            dispatch_reconciliation_required_commands=(
-                self._dispatch_reconciliation_required_commands
-            ),
-            recovery_required_commands=self._recovery_required_commands,
-        )
-        self._refresh_action_state()
-
-        self._refresh_evidence_state()
         self._context_revision += 1
         # The candidate's append-only delta is now durable, so it must not be
         # re-sent by the next observation. A candidate that rolled back is
@@ -867,41 +825,6 @@ class ExecutionBook:
             journal = self._journals.get(canon)
             if journal is not None:
                 journal.mark_facts_persisted()
-
-    def _refresh_evidence_state(self) -> None:
-        self._evidence_state = EvidenceState(
-            books=self._books,
-            journals=self._journals,
-            stream_scopes=self._stream_scopes,
-            active_streams=self._active_streams,
-            head_revisions=self._head_revisions,
-            journal_revisions=self._journal_revisions,
-            last_sequences=self._last_sequences,
-            seen_evidence_ids=self._seen_evidence_ids,
-            seen_trade_ids=self._seen_trade_ids,
-            outbox_by_command_id=self._outbox_by_command_id,
-            command_reservations=self._command_reservations,
-            order_cumulative_fills=self._order_cumulative_fills,
-            order_cumulative_quotes=self._order_cumulative_quotes,
-            recovery_required_commands=self._recovery_required_commands,
-            external_recovery_positions=self._external_recovery_positions,
-            dispatch_reconciliation_required_commands=(
-                self._dispatch_reconciliation_required_commands
-            ),
-            coordinator=self._coordinator,
-        )
-
-    def _refresh_action_state(self) -> None:
-        self._action_state = ExecutionActionState(
-            requests_by_id=self._requests_by_id,
-            receipts_by_id=self._receipts_by_id,
-            outbox_by_command_id=self._outbox_by_command_id,
-            command_reservations=self._command_reservations,
-            recovery_required_commands=self._recovery_required_commands,
-            dispatch_reconciliation_required_commands=(
-                self._dispatch_reconciliation_required_commands
-            ),
-        )
 
     def _journal_for_scope(
         self,
@@ -995,7 +918,7 @@ class ExecutionBook:
         misconfigured process trade without its recovery evidence.
         """
         await restore_execution_state(
-            self.recovery_state,
+            self,
             RecoveryDependencies(
                 command_repository=self._command_repo,
                 reservation_repository=self._reservation_repo,
@@ -1298,7 +1221,7 @@ class ExecutionBook:
     ) -> ExecutionActResult:
         """Delegate command rules; this facade owns only transaction orchestration."""
         return await accept_execution_command(
-            self._action_state,
+            self,
             ExecutionActionDependencies(
                 book_for_key=self._ensure_book,
                 coordinator=self._coordinator,
@@ -1324,7 +1247,7 @@ class ExecutionBook:
     ) -> OutboxEntry:
         """Registers a prepared command into the outbox and links reservations."""
         entry = register_prepared_outbox(
-            self._action_state,
+            self,
             request_id=command.command_id,
             scope=scope,
             command=command,
@@ -1350,6 +1273,14 @@ class ExecutionBook:
             command_id in self._recovery_required_commands
             or command_id in self._dispatch_reconciliation_required_commands
         )
+
+    def flag_projection_divergence(
+        self, command_id: str, *, reason: str = ""
+    ) -> None:
+        """Domain API: record that command projection diverged from external state
+        and requires recovery.
+        """
+        self.require_command_recovery(command_id)
 
     def list_outbox(
         self,
@@ -1447,7 +1378,7 @@ class ExecutionBook:
                     )
                 facts = candidate._ensure_journal(key).read_cut()
                 head_payload = build_execution_head_payload(
-                    candidate.evidence_state,
+                    candidate,
                     key,
                     facts.compute_facts_hash(),
                     ensure_book=candidate._ensure_book,
@@ -1545,6 +1476,145 @@ class ExecutionBook:
             at=terminal_at,
         )
 
+    async def record_dispatch(
+        self, command_id: str, *, at: datetime | None = None
+    ) -> OutboxEntry:
+        """Domain API: record that an accepted command is entering network dispatch."""
+        return await self._transition_command(
+            command_id, DispatchState.DISPATCHING, at=at
+        )
+
+    async def abort_prepared_command(
+        self,
+        command_id: str,
+        *,
+        reason: str = "cancelled_before_submission",
+        intent_id: str | None = None,
+        at: datetime | None = None,
+    ) -> OutboxEntry:
+        """Domain API: abort a prepared command before network dispatch,
+        releasing reservations.
+        """
+        return await self._transition_command(
+            command_id,
+            DispatchState.REJECTED,
+            reason=reason,
+            intent_id=intent_id,
+            at=at,
+        )
+
+    async def compensate_submission_failure(
+        self,
+        command_id: str,
+        error: BaseException,
+        *,
+        before_exchange_post: bool,
+        intent_id: str | None = None,
+        occurred_at: datetime | None = None,
+        submission_repository: object | None = None,
+    ) -> None:
+        """Compensate a submission failure within the engine boundary."""
+        def _is_identity_collision(err: BaseException | None) -> bool:
+            if err is None:
+                return False
+            if isinstance(err, (OrderAlreadyPreparedError, OrderCommandConflictError)):
+                return True
+            if "client order ID is already bound" in str(err):
+                return True
+            cause = getattr(err, "__cause__", None)
+            return bool(cause and _is_identity_collision(cause))
+
+        try:
+            if _is_identity_collision(error):
+                return
+
+            if self.get_outbox(command_id) is None:
+                if self.has_command_repository or self.has_reservation_repository:
+                    try:
+                        await self.mark_rejected(
+                            command_id,
+                            reason=str(error),
+                            rejected_at=occurred_at,
+                            intent_id=intent_id,
+                        )
+                    except Exception:
+                        pass
+                if before_exchange_post and submission_repository is not None:
+                    if hasattr(submission_repository, "mark_submission_rejected"):
+                        try:
+                            await submission_repository.mark_submission_rejected(
+                                command_id,
+                                reason=str(error),
+                                occurred_at=occurred_at,
+                                intent_id=intent_id,
+                            )
+                        except Exception:
+                            pass
+                return
+
+            if before_exchange_post or isinstance(
+                error,
+                (
+                    OrderAlreadyPreparedError,
+                    OrderPreSubmissionError,
+                    ExchangeOrderRejectedError,
+                    LiveSubmissionDisabledError,
+                    ValueError,
+                ),
+            ):
+                await self.mark_rejected(
+                    command_id,
+                    reason=str(error),
+                    rejected_at=occurred_at,
+                    intent_id=intent_id,
+                )
+                if before_exchange_post and submission_repository is not None:
+                    if hasattr(submission_repository, "mark_submission_rejected"):
+                        try:
+                            await submission_repository.mark_submission_rejected(
+                                command_id,
+                                reason=str(error),
+                                occurred_at=occurred_at,
+                                intent_id=intent_id,
+                            )
+                        except Exception:
+                            pass
+                return
+
+            await self.mark_unknown(
+                command_id,
+                reason=str(error) or "submission outcome unknown",
+                unknown_at=occurred_at,
+            )
+        except Exception as compensation_err:
+            try:
+                self.require_command_recovery(command_id)
+            except Exception:
+                pass
+            raise compensation_err
+
+    async def record_indeterminate_observation(
+        self,
+        command_id: str,
+        *,
+        error: BaseException,
+        occurred_at: datetime | None = None,
+    ) -> None:
+        """Domain API: handle observation persistence failure by marking UNKNOWN."""
+        if self.get_outbox(command_id) is not None:
+            try:
+                await self.mark_unknown(
+                    command_id,
+                    reason=f"exchange result could not be persisted: {error}",
+                    unknown_at=occurred_at,
+                )
+            except Exception as transition_err:
+                raise RuntimeError(
+                    "exchange returned a result, fact persistence failed, and "
+                    "the UNKNOWN outbox transition also failed: "
+                    f"{transition_err}"
+                ) from transition_err
+
     async def _transition_command(
         self,
         command_id: str,
@@ -1583,7 +1653,7 @@ class ExecutionBook:
         reason: str = "",
     ) -> OutboxEntry:
         return await apply_command_transition(
-            self._command_state,
+            self,
             command_id,
             target,
             at=at,
@@ -1620,7 +1690,7 @@ class ExecutionBook:
         updated: OutboxEntry,
     ) -> None:
         await persist_command_transition(
-            self._command_state,
+            self,
             self._command_persistence_dependencies(),
             updated,
         )
@@ -1667,7 +1737,7 @@ class ExecutionBook:
         key: PositionKey,
     ) -> tuple[Decimal, bool, str | None]:
         return await settle_command_reservations(
-            self._command_state,
+            self,
             self._command_persistence_dependencies(),
             order_id,
             quantity,
@@ -1676,7 +1746,33 @@ class ExecutionBook:
         )
 
     async def observe(self, evidence: ExecutionEvidence) -> ExecutionObserveResult:
-        return await observe_evidence_transaction(self, evidence)
+        try:
+            result = await observe_evidence_transaction(self, evidence)
+        except Exception as err:
+            if (
+                evidence.order_event is not None
+                and self.get_outbox(evidence.order_event.client_order_id) is not None
+            ):
+                try:
+                    await self.mark_unknown(
+                        evidence.order_event.client_order_id,
+                        reason=f"exchange result could not be persisted: {err}",
+                        unknown_at=evidence.observed_at,
+                    )
+                except Exception as transition_err:
+                    raise RuntimeError(
+                        "exchange returned a result, fact persistence failed, and "
+                        "the UNKNOWN outbox transition also failed: "
+                        f"{transition_err}"
+                    ) from transition_err
+            raise
+        if (
+            isinstance(result, WaitingForEvidence)
+            and evidence.order_event is not None
+            and evidence.order_event.state.terminal
+        ):
+            self.require_command_recovery(evidence.order_event.client_order_id)
+        return result
 
     async def _observe_mutating(
         self,
@@ -1684,7 +1780,7 @@ class ExecutionBook:
     ) -> ExecutionObserveResult:
         """Delegate evidence rules; this facade owns transaction and publication."""
         return await mutate_evidence(
-            self._evidence_state,
+            self,
             EvidenceMutationDependencies(
                 ensure_book=self._ensure_book,
                 ensure_journal=self._ensure_journal,

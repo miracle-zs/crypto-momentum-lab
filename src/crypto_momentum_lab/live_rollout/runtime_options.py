@@ -73,8 +73,6 @@ class LiveRunOptions:
     market_quote_hub_url: str
     market_quote_volume_hub_url: str
     market_websocket_url: str
-    account_event_hub_url: str
-    risk_control_hub_url: str | None
     session_id: str | None
     operator: str
     strategy_config_hash: str
@@ -101,6 +99,8 @@ class LiveRunOptions:
     persist_exchange_operations: str | None
     target_notional: str | None = None
     max_concurrency_per_symbol: int | None = None
+    account_event_hub_url: str | None = None
+    risk_control_hub_url: str | None = None
 
 
 def runtime_manifest_account_for_cli(
@@ -319,6 +319,7 @@ def resolve_live_runtime_config(
     )
 
     session_id = options.session_id
+    lease_owner = ""
     strategy = options.strategy
     profile: LiveOrderFlowImpulseProfile
     entry_positive_gainer_top_count: int | None
@@ -341,6 +342,9 @@ def resolve_live_runtime_config(
 
     if manifest_account is None:
         session_id = session_id or "live-manual"
+        # Without a manifest the runtime keeps the same default owner the
+        # `prepare` command writes, so ownership verification can match.
+        lease_owner = lease_owner or "live-worker"
         hedge_mode = True if hedge_mode is None else hedge_mode
         entry_long_only = True if entry_long_only is None else entry_long_only
         entry_price_above_ema5 = (
@@ -403,6 +407,7 @@ def resolve_live_runtime_config(
                 "session id does not match the runtime manifest"
             )
         session_id = manifest_account.session_id
+        lease_owner = manifest_account.lease_owner
         strategy_inputs = manifest_account.strategy_inputs
         profile = strategy_inputs.profile
         entry_positive_gainer_top_count = (
@@ -522,6 +527,7 @@ def resolve_live_runtime_config(
             strategy_name=strategy,
             session_id=session_id,
             operator=options.operator,
+            lease_owner=lease_owner,
             strategy_config_hash=strategy_config_hash,
             git_commit_hash=git_commit_hash,
         ),
@@ -534,6 +540,11 @@ def resolve_live_runtime_config(
             market_websocket_url=options.market_websocket_url,
             account_event_hub_url=options.account_event_hub_url,
             risk_control_hub_url=options.risk_control_hub_url,
+            user_data_websocket_url=(
+                values.get("CML_BINANCE_USER_DATA_WEBSOCKET_URL", "").strip()
+                or values.get("CML_USER_DATA_WEBSOCKET_URL", "").strip()
+                or None
+            ),
         ),
         strategy=LiveRuntimeStrategy(
             profile=profile,
@@ -577,6 +588,8 @@ def resolve_live_runtime_config(
             base_url=options.base_url,
             api_key=credentials.api_key,
             api_secret=credentials.api_secret,
+            read_api_key=values.get("BINANCE_READ_API_KEY", "").strip() or None,
+            read_api_secret=values.get("BINANCE_READ_API_SECRET", "").strip() or None,
         ),
     )
 

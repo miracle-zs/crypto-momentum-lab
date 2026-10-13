@@ -60,43 +60,6 @@ x-retired-strategy-run-ids: &retired-strategy-run-ids >-
   paper-account-15-orderflow-b1-gainer100-ema-v1,
   paper-account-17-orderflow-b1-gainer10-imbalance040-v1,
   paper-account-16-orderflow-b8-gainer10-imbalance040-v1
-
-x-execution-account-command: &execution-account-command
-  - sync
-  - --environment
-  - live
-  - --hedge-mode
-  - --historical-fill-reconciliation-interval-seconds
-  - ${CML_ACCOUNT_HISTORICAL_FILL_RECONCILIATION_INTERVAL_SECONDS:-21600}
-  - --historical-fill-reconciliation-batch-size
-  - ${CML_ACCOUNT_HISTORICAL_FILL_RECONCILIATION_BATCH_SIZE:-10}
-  - --request-interval-seconds
-  - ${CML_ACCOUNT_REQUEST_INTERVAL_SECONDS:-0.5}
-  - --shared-request-pacer-path
-  - /run/cml/binance-rest-pacer/private-read.lock
-  - --shared-command-request-pacer-path
-  - /run/cml/binance-rest-pacer/private-command.lock
-  - --snapshot-retention-days
-  - ${CML_ACCOUNT_SNAPSHOT_RETENTION_DAYS:-7}
-  - --equity-retention-days
-  - ${CML_ACCOUNT_EQUITY_RETENTION_DAYS:-370}
-  - --snapshot-retention-interval-seconds
-  - ${CML_ACCOUNT_SNAPSHOT_RETENTION_INTERVAL_SECONDS:-3600}
-  - --snapshot-retention-batch-size
-  - ${CML_ACCOUNT_SNAPSHOT_RETENTION_BATCH_SIZE:-250}
-  - --snapshot-retention-max-rows-per-table
-  - ${CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_ROWS_PER_TABLE:-5000}
-  - --snapshot-retention-max-runtime-seconds
-  - ${CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_RUNTIME_SECONDS:-45}
-  - --account-event-hub-host
-  - ${CML_ACCOUNT_EVENT_HUB_HOST:-0.0.0.0}
-  - --account-event-hub-port
-  - ${CML_ACCOUNT_EVENT_HUB_PORT:-8767}
-  - --risk-control-hub-host
-  - ${CML_RISK_CONTROL_HUB_HOST:-0.0.0.0}
-  - --risk-control-hub-port
-  - ${CML_RISK_CONTROL_HUB_PORT:-8769}
-
 services:
   postgres:
     image: postgres:16-alpine
@@ -272,42 +235,13 @@ services:
       start_period: 2m
     mem_limit: 192m
 
-  execution-account-live:
+  live-strategy:
     <<: *app
     profiles: ["live"]
     environment:
       <<: *app-environment
       BINANCE_READ_API_KEY: ${BINANCE_READ_API_KEY:-}
       BINANCE_READ_API_SECRET: ${BINANCE_READ_API_SECRET:-}
-      CML_ACCOUNT_LABEL: ${CML_LIVE_ACCOUNT_LABEL:-primary}
-      CML_ACCOUNT_EVENT_HUB_HOST: ${CML_ACCOUNT_EVENT_HUB_HOST:-0.0.0.0}
-      CML_ACCOUNT_EVENT_HUB_PORT: ${CML_ACCOUNT_EVENT_HUB_PORT:-8767}
-      CML_RISK_CONTROL_HUB_TOKEN: ${CML_RISK_CONTROL_HUB_TOKEN:-}
-    entrypoint: ["cml-execution-account"]
-    command: *execution-account-command
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-      volume-init:
-        condition: service_completed_successfully
-    volumes:
-      - binance-rest-pacer:/run/cml/binance-rest-pacer
-    healthcheck:
-      test: ["CMD", "/usr/local/bin/cml-local-healthcheck", "120"]
-      interval: 60s
-      start_interval: 5s
-      timeout: 15s
-      retries: 2
-      start_period: 5m
-    stop_grace_period: 60s
-    mem_limit: 160m
-    memswap_limit: 320m
-
-  live-strategy:
-    <<: *app
-    profiles: ["live"]
-    environment:
-      <<: *app-environment
       BINANCE_TRADE_API_KEY: ${BINANCE_TRADE_API_KEY:-}
       BINANCE_TRADE_API_SECRET: ${BINANCE_TRADE_API_SECRET:-}
       CML_LIVE_STRATEGY: ${CML_LIVE_STRATEGY:-orderflow_impulse}
@@ -338,9 +272,6 @@ services:
       CML_MARKET_QUOTE_VOLUME_HUB_URL: ${CML_MARKET_QUOTE_VOLUME_HUB_URL:-ws://market-data:8768}
       CML_BINANCE_SHARED_REQUEST_PACER_PATH: ${CML_BINANCE_SHARED_REQUEST_PACER_PATH:-/run/cml/binance-rest-pacer/private-read.lock}
       CML_BINANCE_SHARED_COMMAND_REQUEST_PACER_PATH: ${CML_BINANCE_SHARED_COMMAND_REQUEST_PACER_PATH:-/run/cml/binance-rest-pacer/private-command.lock}
-      CML_ACCOUNT_EVENT_HUB_URL: ${CML_ACCOUNT_EVENT_HUB_URL:-ws://execution-account-live:8767}
-      CML_RISK_CONTROL_HUB_URL: ${CML_RISK_CONTROL_HUB_URL:-ws://execution-account-live:8769}
-      CML_RISK_CONTROL_HUB_TOKEN: ${CML_RISK_CONTROL_HUB_TOKEN:-}
     entrypoint: ["cml-live-rollout"]
     command:
       - run
@@ -360,10 +291,6 @@ services:
       - ${CML_MARKET_QUOTE_HUB_URL:-ws://market-data:8768}
       - --market-quote-volume-hub-url
       - ${CML_MARKET_QUOTE_VOLUME_HUB_URL:-ws://market-data:8768}
-      - --account-event-hub-url
-      - ${CML_ACCOUNT_EVENT_HUB_URL:-ws://execution-account-live:8767}
-      - --risk-control-hub-url
-      - ${CML_RISK_CONTROL_HUB_URL:-ws://execution-account-live:8769}
       - --session-id
       - ${CML_LIVE_SESSION_ID:-live-primary-v1}
       - --operator
@@ -410,8 +337,6 @@ services:
       market-data:
         # Live starts with the feed process; no hidden freshness gate.
         condition: service_started
-      execution-account-live:
-        condition: service_healthy
     volumes:
       - binance-rest-pacer:/run/cml/binance-rest-pacer
     healthcheck:

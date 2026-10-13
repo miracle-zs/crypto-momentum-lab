@@ -32,6 +32,7 @@ from crypto_momentum_lab.domain.execution.ports import ExecutionTransactionPort
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     ExitOrderSubmissionFact,
 )
+from crypto_momentum_lab.domain.execution.trade_command import TradeCommandType
 
 log = structlog.get_logger(__name__)
 
@@ -135,9 +136,13 @@ async def accept_action_transaction(
                     batch_quantities=batch_capacities,
                     proven_position_quantity=current_view.total_quantity,
                 )
+            prepared = None
             if prepare_submission is not None:
                 prepared = await prepare_submission(tx)
-                if prepared.plan.reduce_only and request.target_batch_ids:
+                if (
+                    prepared.plan.reduce_only
+                    or request.action is TradeCommandType.EXIT
+                ) and request.target_batch_ids:
                     journal = candidate._ensure_journal(key)
                     for batch_id in dict.fromkeys(request.target_batch_ids):
                         journal.record_boundary(
@@ -169,7 +174,7 @@ async def accept_action_transaction(
                 result = replace(result, prepared_submission=prepared)
             facts = candidate._ensure_journal(key).read_cut()
             head_payload = build_execution_head_payload(
-                candidate.evidence_state,
+                candidate,
                 key,
                 facts.compute_facts_hash(),
                 ensure_book=candidate._ensure_book,

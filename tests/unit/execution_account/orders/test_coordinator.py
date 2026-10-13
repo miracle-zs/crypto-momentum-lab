@@ -39,12 +39,19 @@ NOW = datetime(2026, 8, 22, tzinfo=UTC)
 
 class OrderExecutionCoordinator(_RealOrderExecutionCoordinator):
     def __init__(self, *args: Any, environment: str = "live", **kwargs: Any) -> None:
+        # These tests exercise scheduling and reservation semantics, not
+        # dispatch ownership; the live wiring tests own the fail-closed path.
+        kwargs.setdefault("lease_required", False)
         super().__init__(*args, environment=environment, **kwargs)
 
-    async def _atomic_prepare_submission(self, plan, preparation):
+    async def _atomic_prepare_submission(self, plan, preparation, ownership=None):
         """Memory repositories have no SQL session; production must use a UoW."""
+        if ownership is None:
+            ownership = await self._current_ownership()
         if self.execution_book.has_execution_unit_of_work:
-            return await super()._atomic_prepare_submission(plan, preparation)
+            return await super()._atomic_prepare_submission(
+                plan, preparation, ownership
+            )
         from dataclasses import fields
 
         values = {
@@ -69,7 +76,9 @@ class OrderExecutionCoordinator(_RealOrderExecutionCoordinator):
         self._require_accepted_execution_result(plan, result)
         return result.prepared_submission
 
-    async def _ensure_reservation(self, plan: OrderExecutionPlan) -> None:
+    async def _ensure_reservation(
+        self, plan: OrderExecutionPlan, **kwargs: Any
+    ) -> None:
         if plan.projection_version is None and self._execution_book is not None:
             from crypto_momentum_lab.domain.execution.command_models import (
                 ExecutionScope,
@@ -87,7 +96,7 @@ class OrderExecutionCoordinator(_RealOrderExecutionCoordinator):
             object.__setattr__(plan, "strategy_name", "orderflow_impulse")
         if plan.strategy_version is None:
             object.__setattr__(plan, "strategy_version", "v1")
-        await super()._ensure_reservation(plan)
+        await super()._ensure_reservation(plan, **kwargs)
 
 
 def _register_execution_command_with_reservations(
@@ -837,6 +846,7 @@ async def test_reservation_creation_failure_fails_closed() -> None:
         environment="live",
         account_label="primary",
         execution_book=ExecutionBook(),
+        lease_required=False,
     )
     raw.configure_submission(AsyncMock())
     with pytest.raises(
@@ -2898,6 +2908,7 @@ async def test_execution_rejects_missing_projection_without_mutating_plan(
         environment="live",
         account_label="primary",
         execution_book=book,
+        lease_required=False,
     )
     plan = replace(_plan("BTCUSDT", reduce_only=False), projection_version=version)
     try:
@@ -3083,6 +3094,7 @@ async def test_submission_checks_projection_without_an_extra_book_read(stale):
         environment="live",
         account_label="primary",
         execution_book=book,
+        lease_required=False,
     )
     try:
         if stale:
@@ -3113,6 +3125,7 @@ async def test_entry_ack_returns_before_projection_and_shutdown_drains_in_order(
         account_label="primary",
         environment="live",
         execution_book=ExecutionBook(),
+        lease_required=False,
     )
     first = _plan("BTCUSDT", reduce_only=False)
     second = replace(first, client_order_id="second-entry", intent_id="second-intent")

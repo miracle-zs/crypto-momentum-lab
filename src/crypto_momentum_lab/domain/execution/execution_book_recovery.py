@@ -23,6 +23,7 @@ from crypto_momentum_lab.domain.execution.command_models import OutboxEntry
 from crypto_momentum_lab.domain.execution.evidence_rules import (
     _scoped_evidence_identity,
 )
+from crypto_momentum_lab.domain.execution.ports import DecisionCommitConflict
 from crypto_momentum_lab.domain.execution.position_book import PositionBook
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
@@ -34,61 +35,12 @@ from crypto_momentum_lab.domain.execution.position_recovery import (
 from crypto_momentum_lab.domain.execution.position_repair import (
     validate_repaired_position,
 )
-from crypto_momentum_lab.domain.execution.reservation_registry import (
-    ReservationRegistry,
-)
 
 if TYPE_CHECKING:
-    pass
+    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 
 
 log = structlog.get_logger(__name__)
-
-
-@dataclass(slots=True)
-class ExecutionRecoveryState:
-    """Mutable state owned by recovery, separate from the book façade."""
-
-    books: dict[str, PositionBook]
-    journals: dict[str, AccountJournal]
-    stream_scopes: dict[str, AccountFactStreamScope]
-    head_revisions: dict[str, int]
-    head_expected_reservation_ids: dict[str, set[str]]
-    journal_revisions: dict[str, int]
-    last_sequences: dict[str, int]
-    seen_evidence_ids: set[str]
-    seen_trade_ids: set[str]
-    order_cumulative_fills: dict[str, Decimal]
-    order_cumulative_quotes: dict[str, Decimal]
-    outbox_by_command_id: dict[str, OutboxEntry]
-    command_reservations: dict[str, list[str]]
-    recovery_required_commands: set[str]
-    external_recovery_positions: dict[str, PositionKey]
-    dispatch_reconciliation_required_commands: set[str]
-    coordinator: ReservationRegistry
-
-    def clear(self, *, clear_requests: Callable[[], None]) -> None:
-        for values in (
-            self.books,
-            self.journals,
-            self.stream_scopes,
-            self.head_revisions,
-            self.head_expected_reservation_ids,
-            self.journal_revisions,
-            self.last_sequences,
-            self.seen_evidence_ids,
-            self.seen_trade_ids,
-            self.order_cumulative_fills,
-            self.order_cumulative_quotes,
-            self.outbox_by_command_id,
-            self.command_reservations,
-            self.recovery_required_commands,
-            self.external_recovery_positions,
-            self.dispatch_reconciliation_required_commands,
-        ):
-            values.clear()
-        clear_requests()
-        self.coordinator.clear_reservations()
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,7 +58,7 @@ class RecoveryDependencies:
 
 
 async def restore_execution_state(
-    state: ExecutionRecoveryState,
+    book: ExecutionBook,
     dependencies: RecoveryDependencies,
     account_label: str | None = None,
     *,
@@ -126,35 +78,13 @@ async def restore_execution_state(
     if not account_label:
         raise ValueError("durable restore requires an account_label")
     if command_repository is None:
-        raise RuntimeError(
-            "durable execution restore requires a command repository"
-        )
+        raise RuntimeError("durable execution restore requires a command repository")
     as_of = as_of or datetime.now(UTC)
     if as_of.tzinfo is None or as_of.utcoffset() is None:
         raise ValueError("restore as_of must be timezone-aware")
-    for values in (
-        state.books,
-        state.journals,
-        state.stream_scopes,
-        state.head_revisions,
-        state.head_expected_reservation_ids,
-        state.journal_revisions,
-        state.last_sequences,
-        state.seen_evidence_ids,
-        state.seen_trade_ids,
-        state.order_cumulative_fills,
-        state.order_cumulative_quotes,
-        state.outbox_by_command_id,
-        state.command_reservations,
-        state.recovery_required_commands,
-        state.external_recovery_positions,
-        state.dispatch_reconciliation_required_commands,
-    ):
-        values.clear()
-    dependencies.clear_requests()
-    state.coordinator.clear_reservations()
+    book.clear(clear_requests=dependencies.clear_requests)
     await restore_durable_positions(
-        state,
+        book,
         unit_of_work=unit_of_work,
         account_label=account_label,
         environment=environment,
@@ -173,12 +103,39 @@ async def restore_execution_state(
             for recovered in parsed_commands:
                 entry = recovered.entry
                 command_id = entry.command_id
-                state.outbox_by_command_id[command_id] = entry
-                state.command_reservations[command_id] = list(recovered.reservation_ids)
+                book._outbox_by_command_id[command_id] = entry
+                book._command_reservations[command_id] = list(recovered.reservation_ids)
                 if recovered.requires_reconciliation:
-                    state.dispatch_reconciliation_required_commands.add(command_id)
+                    book._dispatch_reconciliation_required_commands.add(command_id)
                 if recovered.needs_unknown_write:
                     deferred_unknown_commands.append(command_id)
+                pos_key = entry.scope.to_position_key()
+                canon = pos_key.canonical_id
+                if canon not in book._books:
+                    acc_scope = next(
+                        (
+                            s
+                            for s in book._stream_scopes.values()
+                            if s.account_label == pos_key.account_label
+                        ),
+                        None,
+                    )
+                    stream_scope = (
+                        AccountFactStreamScope.for_position_key(
+                            pos_key,
+                            stream_id=acc_scope.stream_id,
+                            stream_epoch=acc_scope.stream_epoch,
+                        )
+                        if acc_scope is not None
+                        else None
+                    )
+                    journal = AccountJournal(pos_key, stream_scope=stream_scope)
+                    book._books[canon] = PositionBook(journal)
+                    book._journals[canon] = journal
+                    book._head_revisions[canon] = 0
+                    book._journal_revisions[canon] = 0
+                    if stream_scope is not None:
+                        book._stream_scopes[canon] = stream_scope
         except Exception as err:
             log.error("restore_active_commands_failed", error=str(err))
             raise RuntimeError("Failed to restore active execution commands") from err
@@ -193,11 +150,38 @@ async def restore_execution_state(
                     account_label is None
                     or reservation.position_key.account_label == account_label
                 ):
-                    state.coordinator.register_reservation(reservation)
-            for command_id, reservation_ids in state.command_reservations.items():
-                entry = state.outbox_by_command_id[command_id]
+                    book._coordinator.register_reservation(reservation)
+                    pos_key = reservation.position_key
+                    canon = pos_key.canonical_id
+                    if canon not in book._books:
+                        acc_scope = next(
+                            (
+                                s
+                                for s in book._stream_scopes.values()
+                                if s.account_label == pos_key.account_label
+                            ),
+                            None,
+                        )
+                        stream_scope = (
+                            AccountFactStreamScope.for_position_key(
+                                pos_key,
+                                stream_id=acc_scope.stream_id,
+                                stream_epoch=acc_scope.stream_epoch,
+                            )
+                            if acc_scope is not None
+                            else None
+                        )
+                        journal = AccountJournal(pos_key, stream_scope=stream_scope)
+                        book._books[canon] = PositionBook(journal)
+                        book._journals[canon] = journal
+                        book._head_revisions[canon] = 0
+                        book._journal_revisions[canon] = 0
+                        if stream_scope is not None:
+                            book._stream_scopes[canon] = stream_scope
+            for command_id, reservation_ids in book._command_reservations.items():
+                entry = book._outbox_by_command_id[command_id]
                 for reservation_id in reservation_ids:
-                    if state.coordinator.get_reservation(reservation_id) is not None:
+                    if book._coordinator.get_reservation(reservation_id) is not None:
                         continue
                     reservation = (
                         await dependencies.reservation_repository.load_reservation(
@@ -211,19 +195,19 @@ async def restore_execution_state(
                         or reservation.position_key != entry.scope.to_position_key()
                     ):
                         raise ValueError("restored command reservation scope mismatch")
-                    state.coordinator.register_reservation(reservation)
+                    book._coordinator.register_reservation(reservation)
         except Exception as err:
             raise RuntimeError("Failed to restore command reservations") from err
 
     diverged_canons: set[str] = set()
-    for canon, expected_ids in state.head_expected_reservation_ids.items():
-        journal = state.journals.get(canon)
+    for canon, expected_ids in book._head_expected_reservation_ids.items():
+        journal = book._journals.get(canon)
         if journal is None:
             log.warning("restored_reservation_head_has_no_journal", canonical_id=canon)
             continue
         actual_ids = {
             reservation.reservation_id
-            for reservation in state.coordinator.get_active_reservations(
+            for reservation in book._coordinator.get_active_reservations(
                 journal.position_key
             )
         }
@@ -236,11 +220,11 @@ async def restore_execution_state(
             )
             diverged_canons.add(canon)
             identity = f"reservation_divergence:{canon}"
-            state.external_recovery_positions[identity] = journal.position_key
-            state.recovery_required_commands.add(identity)
-    for canon in tuple(state.head_expected_reservation_ids):
+            book._external_recovery_positions[identity] = journal.position_key
+            book._recovery_required_commands.add(identity)
+    for canon in tuple(book._head_expected_reservation_ids):
         if canon not in diverged_canons:
-            state.head_expected_reservation_ids.pop(canon, None)
+            book._head_expected_reservation_ids.pop(canon, None)
     dependencies.set_persistence_failed(False)
     if unit_of_work is not None:
         for command_id in deferred_unknown_commands:
@@ -252,7 +236,7 @@ async def restore_execution_state(
 
 
 async def restore_durable_positions(
-    state: ExecutionRecoveryState,
+    book: ExecutionBook,
     *,
     unit_of_work: object,
     account_label: str,
@@ -276,45 +260,53 @@ async def restore_durable_positions(
         canon = key.canonical_id
         recovered = recover_durable_position(durable_state)
         for event, values in recovered.diagnostics:
-            if (
-                event == "execution_head_facts_migrated"
-                and not values.get("has_active_reservations")
+            if event in (
+                "execution_head_projection_migrated",
+                "execution_head_view_migrated",
+            ):
+                raise DecisionCommitConflict(
+                    f"execution head digest mismatch for {canon}: {event} {values}"
+                )
+            if event == "execution_head_facts_migrated" and not values.get(
+                "has_active_reservations"
             ):
                 benign_facts_migration_count += 1
                 continue
-            if event == "execution_head_view_migrated" and not values.get(
-                "has_active_reservations"
-            ):
-                log.info(event, **values)
-            else:
-                log.warning(event, **values)
-        state.head_revisions[canon] = recovered.head_revision
+            log.warning(event, **values)
+        book._head_revisions[canon] = recovered.head_revision
         if durable_state.head is not None:
             recovery_ids = (
                 durable_state.head.state_payload.get("recovery_command_ids") or ()
             )
-            state.recovery_required_commands.update(recovery_ids)
+            book._recovery_required_commands.update(recovery_ids)
             for identity in (
                 durable_state.head.state_payload.get("external_recovery_ids") or ()
             ):
-                state.external_recovery_positions[identity] = key
-                state.recovery_required_commands.add(identity)
-            state.head_expected_reservation_ids[canon] = set(recovered.reservation_ids)
-            if recovered.last_sequence is not None:
-                state.last_sequences[canon] = recovered.last_sequence
-        state.journals[canon] = recovered.journal
-        state.books[canon] = recovered.book
-        state.stream_scopes[canon] = scope
-        state.journal_revisions[canon] = durable_state.cut.revision
-        state.seen_trade_ids.update(durable_state.trade_ids)
-        state.seen_evidence_ids.update(
+                book._external_recovery_positions[identity] = key
+                book._recovery_required_commands.add(identity)
+            book._head_expected_reservation_ids[canon] = set(recovered.reservation_ids)
+            eff_seq = max(
+                filter(
+                    lambda s: s is not None,
+                    (recovered.last_sequence, durable_state.latest_evidence_sequence),
+                ),
+                default=None,
+            )
+            if eff_seq is not None:
+                book._last_sequences[canon] = eff_seq
+        book._journals[canon] = recovered.journal
+        book._books[canon] = recovered.book
+        book._stream_scopes[canon] = scope
+        book._journal_revisions[canon] = durable_state.cut.revision
+        book._seen_trade_ids.update(durable_state.trade_ids)
+        book._seen_evidence_ids.update(
             _scoped_evidence_identity(scope, evidence_id)
             for evidence_id in durable_state.evidence_ids
         )
         for watermark in durable_state.watermarks:
             key_for_order = watermark_key(key, watermark.order_id)
-            state.order_cumulative_fills[key_for_order] = watermark.cumulative_quantity
-            state.order_cumulative_quotes[key_for_order] = watermark.cumulative_quote
+            book._order_cumulative_fills[key_for_order] = watermark.cumulative_quantity
+            book._order_cumulative_quotes[key_for_order] = watermark.cumulative_quote
     if benign_facts_migration_count:
         log.info(
             "execution_head_facts_migrations_recovered",
@@ -332,7 +324,7 @@ class ReloadDependencies:
 
 
 def apply_loaded_execution_position(
-    state: ExecutionRecoveryState,
+    execution_book: ExecutionBook,
     dependencies: ReloadDependencies,
     key: PositionKey,
     target_state: object | None,
@@ -343,12 +335,8 @@ def apply_loaded_execution_position(
     if target_state is None:
         return None
     canon = key.canonical_id
-    current_head_rev = state.head_revisions.get(canon, 0)
-    target_head_rev = (
-        target_state.head.revision
-        if target_state.head is not None
-        else 0
-    )
+    current_head_rev = execution_book._head_revisions.get(canon, 0)
+    target_head_rev = target_state.head.revision if target_state.head is not None else 0
     if target_head_rev < current_head_rev:
         log.warning(
             "ignoring_stale_loaded_position_regression",
@@ -356,7 +344,7 @@ def apply_loaded_execution_position(
             current_revision=current_head_rev,
             stale_loaded_revision=target_head_rev,
         )
-        existing = state.books.get(canon)
+        existing = execution_book._books.get(canon)
         return existing.get_view() if existing is not None else None
     journal = AccountJournal.from_durable_cut(target_state.cut)
     book = PositionBook(journal)
@@ -390,46 +378,53 @@ def apply_loaded_execution_position(
             head.projection_version,
             event_cut=view.event_cut,
         )
-        state.head_revisions[canon] = head.revision
+        execution_book._head_revisions[canon] = head.revision
         expected_res_set = set(active_res)
-        state.head_expected_reservation_ids[canon] = expected_res_set
+        execution_book._head_expected_reservation_ids[canon] = expected_res_set
         divergence_identity = f"reservation_divergence:{canon}"
         actual_res_ids = {
             r.reservation_id for r in dependencies.active_reservations(key)
         }
         if (
             actual_res_ids == expected_res_set
-            and divergence_identity in state.recovery_required_commands
+            and divergence_identity in execution_book._recovery_required_commands
         ):
-            state.recovery_required_commands.discard(divergence_identity)
-            state.external_recovery_positions.pop(divergence_identity, None)
-            state.head_expected_reservation_ids.pop(canon, None)
-        if last_sequence is not None:
-            state.last_sequences[canon] = last_sequence
+            execution_book._recovery_required_commands.discard(divergence_identity)
+            execution_book._external_recovery_positions.pop(divergence_identity, None)
+            execution_book._head_expected_reservation_ids.pop(canon, None)
+        eff_seq = max(
+            filter(
+                lambda s: s is not None,
+                (last_sequence, target_state.latest_evidence_sequence),
+            ),
+            default=None,
+        )
+        if eff_seq is not None:
+            execution_book._last_sequences[canon] = eff_seq
         else:
-            state.last_sequences.pop(canon, None)
+            execution_book._last_sequences.pop(canon, None)
     else:
-        state.head_revisions[canon] = 0
+        execution_book._head_revisions[canon] = 0
 
-    state.journals[canon] = journal
-    state.books[canon] = book
+    execution_book._journals[canon] = journal
+    execution_book._books[canon] = book
     dependencies.advance_context_revision()
-    state.stream_scopes[canon] = scope
-    state.journal_revisions[canon] = target_state.cut.revision
-    state.seen_trade_ids.update(target_state.trade_ids)
-    state.seen_evidence_ids.update(
+    execution_book._stream_scopes[canon] = scope
+    execution_book._journal_revisions[canon] = target_state.cut.revision
+    execution_book._seen_trade_ids.update(target_state.trade_ids)
+    execution_book._seen_evidence_ids.update(
         _scoped_evidence_identity(scope, identity)
         for identity in target_state.evidence_ids
     )
     for watermark in target_state.watermarks:
         watermark_key = dependencies.order_watermark_key(key, watermark.order_id)
-        state.order_cumulative_fills[watermark_key] = watermark.cumulative_quantity
-        state.order_cumulative_quotes[watermark_key] = watermark.cumulative_quote
+        execution_book._order_cumulative_fills[watermark_key] = watermark.cumulative_quantity
+        execution_book._order_cumulative_quotes[watermark_key] = watermark.cumulative_quote
     return book.get_view()
 
 
 async def reload_execution_position(
-    state: ExecutionRecoveryState,
+    execution_book: ExecutionBook,
     dependencies: ReloadDependencies,
     key: PositionKey,
     *,
@@ -445,7 +440,7 @@ async def reload_execution_position(
         as_of=as_of,
     )
     return apply_loaded_execution_position(
-        state,
+        execution_book,
         dependencies,
         key,
         target_state,

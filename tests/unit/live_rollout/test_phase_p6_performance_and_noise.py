@@ -114,7 +114,8 @@ async def test_inactive_head_migrations_are_consolidated_at_info_level(monkeypat
 
     mock_uow = SimpleNamespace(load_positions=AsyncMock(return_value=(state,)))
     await restore_durable_positions(
-        book.recovery_state, watermark_key=book._order_watermark_key,
+        book,
+        watermark_key=book._order_watermark_key,
         unit_of_work=mock_uow,
         account_label="primary",
         environment="live",

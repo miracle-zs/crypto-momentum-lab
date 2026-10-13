@@ -75,8 +75,13 @@ async def test_missing_previously_created_head_still_seals_book():
     uow = LegacyUow()
     book = ExecutionBook(command_repository=Commands(), execution_unit_of_work=uow)
     await restore_durable_positions(
-        book.recovery_state, watermark_key=book._order_watermark_key,unit_of_work=uow, account_label="primary",
-                                         environment="live", as_of=NOW)
+        book,
+        watermark_key=book._order_watermark_key,
+        unit_of_work=uow,
+        account_label="primary",
+        environment="live",
+        as_of=NOW,
+    )
     row = legacy_command()
     entry = decode_active_commands((row,), account_label="primary", restored_at=NOW)[0].entry
     book._outbox_by_command_id[entry.command_id] = entry

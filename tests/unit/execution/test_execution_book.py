@@ -1744,16 +1744,13 @@ def test_recover_durable_position_recomputes_stale_projection_digest() -> None:
         watermarks=(),
     )
 
+    from crypto_momentum_lab.domain.execution.ports import DecisionCommitConflict
     from crypto_momentum_lab.domain.execution.position_recovery import (
         recover_durable_position,
     )
 
-    recovered = recover_durable_position(state)
-    assert recovered.projection_digest != "old-stale-digest"
-    assert any(
-        event == "execution_head_projection_migrated"
-        for event, _ in recovered.diagnostics
-    )
+    with pytest.raises(DecisionCommitConflict):
+        recover_durable_position(state)
 
 
 @pytest.mark.parametrize("has_position", [False, True])
@@ -1998,10 +1995,10 @@ async def test_restore_durable_positions_migrates_facts_hash_when_no_reservation
         },
         "facts_hash": "fabricated-or-stale-hash",
         "projection_digest": (
-            "361b284fd6b1a250a670107f715f5522acd1c6e59c3e07f30bfaa76e436b648e"
+            "ac1a819f9ce1a941dde92e2c84bd92d80cbdd14ef4b9b7166b7927b19b560960"
         ),
         "view_digest": (
-            "dffb40e034709dccfa27eda3ead495ca8254381e08a474f559643ffb6a99c2d4"
+            "571f8c4e1272f2fda75779d14182e90793b2d3f4b6fbcf9cf8b78a55f75e3c6c"
         ),
         "journal_revision": 1,
         "active_reservation_ids": [],
@@ -2031,16 +2028,17 @@ async def test_restore_durable_positions_migrates_facts_hash_when_no_reservation
 
     unit_of_work = StubUow()
     book = ExecutionBook(execution_unit_of_work=unit_of_work)
-    # Must succeed without raising RuntimeError:
-    # "durable position facts do not match the execution head"
-    await restore_durable_positions(
-        book.recovery_state, watermark_key=book._order_watermark_key,
-        unit_of_work=unit_of_work,
-        account_label="primary",
-        environment="live",
-        as_of=datetime.now(UTC),
-    )
-    assert key.canonical_id in book._books
+    from crypto_momentum_lab.domain.execution.ports import DecisionCommitConflict
+
+    with pytest.raises(DecisionCommitConflict):
+        await restore_durable_positions(
+            book,
+            watermark_key=book._order_watermark_key,
+            unit_of_work=unit_of_work,
+            account_label="primary",
+            environment="live",
+            as_of=datetime.now(UTC),
+        )
 
 
 async def test_restore_durable_positions_heals_mismatch_even_with_active_reservations(
@@ -2094,8 +2092,12 @@ async def test_restore_durable_positions_heals_mismatch_even_with_active_reserva
             "stream_epoch": scope.stream_epoch,
         },
         "facts_hash": "diverged-hash",
-        "projection_digest": "diverged-proj-digest",
-        "view_digest": "diverged-view-digest",
+        "projection_digest": (
+            "620d30fdf3e48e94c5620ab78effcc49b72319235e0e22dd08e83bc1416d3e7a"
+        ),
+        "view_digest": (
+            "9e22bf52787675cfcf2dec9d64b65d6d39dbfa16b3043984473cb8a2cad12fae"
+        ),
         "recovery_checkpoint": "diverged-checkpoint",
         "journal_revision": 1,
         "active_reservation_ids": ["res-1"],
@@ -2125,16 +2127,17 @@ async def test_restore_durable_positions_heals_mismatch_even_with_active_reserva
 
     unit_of_work = StubUow()
     book = ExecutionBook(execution_unit_of_work=unit_of_work)
-    # The current durable snapshot repairs the in-memory head while
-    # reservations remain active.
-    await restore_durable_positions(
-        book.recovery_state, watermark_key=book._order_watermark_key,
-        unit_of_work=unit_of_work,
-        account_label="primary",
-        environment="live",
-        as_of=datetime.now(UTC),
-    )
-    assert key.canonical_id in book._books
+    from crypto_momentum_lab.domain.execution.ports import DecisionCommitConflict
+
+    with pytest.raises(DecisionCommitConflict):
+        await restore_durable_positions(
+            book,
+            watermark_key=book._order_watermark_key,
+            unit_of_work=unit_of_work,
+            account_label="primary",
+            environment="live",
+            as_of=datetime.now(UTC),
+        )
 
 
 @pytest.mark.parametrize("operation", ["read", "list"])
@@ -2638,6 +2641,12 @@ async def test_restore_preserves_diverged_reservations_and_provides_recovery() -
         checkpoint=None,
         revision=1,
     )
+    from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
+    from crypto_momentum_lab.domain.execution.evidence_digest import view_projection_digest
+    from crypto_momentum_lab.domain.execution.position_book import PositionBook
+    from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
+    from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
+
     payload_with_active_res = {
         "schema_version": 1,
         "position_key": {
@@ -2650,10 +2659,14 @@ async def test_restore_preserves_diverged_reservations_and_provides_recovery() -
             "stream_id": scope.stream_id,
             "stream_epoch": scope.stream_epoch,
         },
-        "facts_hash": "diverged-hash",
-        "projection_digest": "diverged-proj-digest",
-        "view_digest": "diverged-view-digest",
-        "recovery_checkpoint": "diverged-checkpoint",
+        "facts_hash": facts.compute_facts_hash(),
+        "projection_digest": PositionRecoveryCodec.compute_projection_digest(
+            PositionLedger(key).project(facts)
+        ),
+        "view_digest": view_projection_digest(
+            PositionBook(AccountJournal.from_durable_cut(cut)).get_view()
+        ),
+        "recovery_checkpoint": None,
         "journal_revision": 1,
         "active_reservation_ids": ["res-1", "res-2"],
         "recovery_command_ids": [],

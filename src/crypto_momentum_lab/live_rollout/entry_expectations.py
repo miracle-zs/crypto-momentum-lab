@@ -20,6 +20,16 @@ class PositionExpectationPublisher(Protocol):
     async def register(self, expectation: AccountPositionExpectation) -> None: ...
 
 
+class DirectPositionExpectationPublisher:
+    """Direct in-process publisher for entry expectations without network hop."""
+
+    def __init__(self, registry: object) -> None:
+        self._registry = registry
+
+    async def register(self, expectation: AccountPositionExpectation) -> None:
+        self._registry.register(expectation)
+
+
 class LiveEntryExpectationRegistrar:
     """Publish a strategy-owned entry hint before exchange submission."""
 
@@ -61,4 +71,8 @@ class LiveEntryExpectationRegistrar:
             ) from error
 
 
-__all__ = ["LiveEntryExpectationRegistrar", "PositionExpectationPublisher"]
+__all__ = [
+    "DirectPositionExpectationPublisher",
+    "LiveEntryExpectationRegistrar",
+    "PositionExpectationPublisher",
+]

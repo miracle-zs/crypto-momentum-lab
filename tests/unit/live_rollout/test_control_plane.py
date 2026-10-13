@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 from crypto_momentum_lab.domain.account import ExecutionAccountStatus
@@ -59,6 +59,7 @@ def _runtime(
     *,
     provider: FakeContextProvider,
     market_state_available: bool = True,
+    account_facts_ready: bool = False,
 ) -> tuple[
     LiveControlPlaneRuntime,
     list[bool],
@@ -77,6 +78,7 @@ def _runtime(
         refresh_entry_gate=lambda: refreshes.append(True),
         telemetry=telemetry,
         clock=lambda: NOW,
+        account_facts_ready=account_facts_ready,
     )
     return (
         runtime,
@@ -115,6 +117,9 @@ def test_account_snapshot_recovery_fails_closed_until_full_snapshot() -> None:
     provider = FakeContextProvider()
     runtime, refreshes, telemetry, _ = _runtime(
         provider=provider,
+        # A deployment that already has account facts keeps them until the
+        # consumer reports a recovery.
+        account_facts_ready=True,
     )
 
     runtime.on_account_snapshot(_account_event(snapshot=None))
@@ -181,3 +186,79 @@ def test_strategy_warmup_transition_refreshes_entry_gate() -> None:
     assert runtime.strategy_warmup_ready is True
     assert runtime.strategy_warmup_reason == "strategy_warmup_ready"
     assert len(refreshes) == 1
+
+
+def test_account_facts_readiness_is_reported_separately_from_market_readiness() -> None:
+    """A fresh runtime must not claim account facts are ready."""
+
+    provider = FakeContextProvider()
+    runtime, _, _, _ = _runtime(provider=provider)
+
+    assert runtime.market_state_available is True
+    assert runtime.account_snapshot_available is False
+    assert runtime.account_facts_degraded is False
+    status = runtime.account_facts_status()
+    assert status["ready"] is False
+    assert status["reason"] == "account_facts_pending"
+
+    # An accepted baseline opens the account-facts dimension only.
+    runtime.on_account_snapshot(
+        _account_event(snapshot=_snapshot(), sequence=3)
+    )
+    assert runtime.account_snapshot_available is True
+    assert runtime.account_facts_status() == {
+        "ready": True,
+        "reason": None,
+        "degraded": False,
+    }
+
+
+async def test_account_facts_startup_budget_degrades_with_a_concrete_reason() -> None:
+    """Missing account facts past the budget degrade readiness and keep entry closed.
+
+    The trusted exit path is untouched; only the account-facts dimension and the
+    entry gate change.
+    """
+
+    provider = FakeContextProvider()
+    refreshes: list[bool] = []
+    telemetry = FakeTelemetry()
+    runtime = LiveControlPlaneRuntime(
+        session_id="live-budget",
+        context_provider=provider,
+        market_state_available=True,
+        notify_market_state_gap=lambda reason: None,
+        refresh_entry_gate=lambda: refreshes.append(True),
+        telemetry=telemetry,
+        clock=lambda: NOW,
+        account_facts_timeout_seconds=30.0,
+    )
+
+    # The stream lost continuity: account facts are pending from NOW.
+    runtime.on_account_snapshot_recovery("account_stream_disconnected")
+    assert runtime.account_snapshot_available is False
+
+    # Inside the budget nothing is degraded yet.
+    assert await runtime.observe_account_facts_budget() is False
+    assert runtime.account_facts_degraded is False
+
+    # Past the budget the process reports degraded with the concrete reason.
+    late = NOW + timedelta(seconds=45)
+    runtime._clock = lambda: late  # type: ignore[method-assign]
+    runtime._account_facts_observed_at = NOW  # type: ignore[attr-defined]
+    assert await runtime.observe_account_facts_budget() is False
+    assert runtime.account_facts_degraded is True
+    status = runtime.account_facts_status()
+    assert status["ready"] is False
+    assert str(status["reason"]).startswith("account_facts_startup_timeout:")
+    assert "account_stream_disconnected" in str(status["reason"])
+    assert any(
+        event.get("reason", "").startswith("account_facts_startup_timeout")
+        for event in telemetry.events
+    )
+
+    # An accepted baseline clears the degraded state.
+    runtime._clock = lambda: NOW  # type: ignore[method-assign]
+    runtime.on_account_snapshot(_account_event(snapshot=_snapshot(), sequence=4))
+    assert runtime.account_facts_degraded is False
+    assert runtime.account_facts_status()["ready"] is True

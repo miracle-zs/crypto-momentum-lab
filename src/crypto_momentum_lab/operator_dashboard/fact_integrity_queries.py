@@ -11,6 +11,7 @@ from crypto_momentum_lab.domain.execution.evidence_codec import (
     recovery_checkpoint_head_binding,
 )
 from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
+from crypto_momentum_lab.domain.execution.recovery_models import RecoverySchemaError
 from crypto_momentum_lab.operator_dashboard.fact_proof import (
     INVALID,
     PROVEN,
@@ -232,6 +233,21 @@ async def load_fact_integrity(
                 )
                 for row in suffix_rows
             }
+            # Fetch the newest authoritative coverage event in the suffix
+            # for each scope, decoding its real payload to obtain the
+            # actual coverage end_at — not a proxy from occurred_at.
+            newest_coverage_by_scope = await _load_suffix_coverage(
+                session, bindings, scope_keys, checkpoints, heads
+            )
+            for scope_key, coverage_end_at in newest_coverage_by_scope.items():
+                if scope_key in suffix_by_scope:
+                    existing = suffix_by_scope[scope_key]
+                    suffix_by_scope[scope_key] = SuffixFacts(
+                        distinct_revisions=existing.distinct_revisions,
+                        max_source_revision=existing.max_source_revision,
+                        newest_occurred_at=existing.newest_occurred_at,
+                        newest_coverage_end_at=coverage_end_at,
+                    )
 
     grouped: dict[str, list[ExecutionBookHeadRow]] = {
         account: [] for account in accounts
@@ -393,6 +409,204 @@ def _record_unknown(proof: _AccountProof, scope: str, reason: str) -> None:
     proof.current_unknown = True
     proof.reasons.append(reason)
     proof.scopes.append(scope)
+
+
+async def _load_suffix_coverage(
+    session: AsyncSession,
+    bindings: list[tuple[str, str, str, str, str, str]],
+    scope_keys: tuple[tuple[str, str, str, str, str], ...],
+    checkpoints: dict[
+        tuple[str, str, str, str, str, str], PositionRecoveryCheckpointRow
+    ],
+    heads: list[ExecutionBookHeadRow],
+) -> dict[tuple[str, str, str, str, str], datetime]:
+    """Load the newest authoritative coverage end_at from suffix coverage events.
+
+    For each scope, fetches coverage events (event_kind="coverage") persisted
+    after the bound checkpoint, decodes their payloads using the real codec,
+    validates authority, coverage interval, stream/epoch/environment, and
+    anchor relationship, and returns the maximum valid ``end_at`` across all
+    qualifying coverage events.  A newer revision with a smaller ``end_at``
+    does not overwrite a larger valid ``end_at`` from an older revision,
+    preventing watermark regression.
+    """
+    events = PositionFactJournalEventRow
+    cuts = PositionRecoveryCheckpointRow
+    coverage_rows = (
+        await session.execute(
+            select(
+                events.account_label,
+                events.symbol,
+                events.position_side,
+                events.stream_id,
+                events.stream_epoch,
+                events.payload,
+                events.source_revision,
+            )
+            .select_from(events)
+            .join(
+                cuts,
+                (events.environment == cuts.environment)
+                & (events.account_label == cuts.account_label)
+                & (events.symbol == cuts.symbol)
+                & (events.position_side == cuts.position_side)
+                & (events.stream_id == cuts.stream_id)
+                & (events.stream_epoch == cuts.stream_epoch)
+                & (
+                    events.source_revision
+                    > cuts.source_revision
+                ),
+            )
+            .where(
+                events.environment == "live",
+                events.event_kind == "coverage",
+                tuple_(
+                    cuts.account_label,
+                    cuts.symbol,
+                    cuts.position_side,
+                    cuts.stream_id,
+                    cuts.stream_epoch,
+                    cuts.checkpoint_id,
+                ).in_(bindings),
+                tuple_(
+                    events.account_label,
+                    events.symbol,
+                    events.position_side,
+                    events.stream_id,
+                    events.stream_epoch,
+                ).in_(scope_keys),
+            )
+        )
+    ).all()
+
+    # Build a lookup from scope key to the bound checkpoint for that scope.
+    scope_to_bound: dict[
+        tuple[str, str, str, str, str], PositionRecoveryCheckpointRow
+    ] = {}
+    for b in bindings:
+        scope_k = (b[0], b[1], b[2], b[3], b[4])
+        cp = checkpoints.get(b)
+        if cp is not None:
+            scope_to_bound[scope_k] = cp
+
+    # Build per-scope max journal_revision from heads.  Coverage events
+    # beyond the head's declared revision cannot prove current state.
+    scope_max_revision: dict[tuple[str, str, str, str, str], int] = {}
+    for head in heads:
+        payload = head.state_payload or {}
+        rev = payload.get("journal_revision")
+        if isinstance(rev, int):
+            scope_k = (
+                head.account_label,
+                head.symbol,
+                head.position_side,
+                head.stream_id,
+                head.stream_epoch,
+            )
+            existing = scope_max_revision.get(scope_k)
+            if existing is None or rev > existing:
+                scope_max_revision[scope_k] = rev
+
+    result: dict[tuple[str, str, str, str, str], datetime] = {}
+    for row in coverage_rows:
+        scope_key: tuple[str, str, str, str, str] = (
+            row[0], row[1], row[2], row[3], row[4]
+        )
+        # Coverage events beyond the head's declared journal_revision
+        # cannot prove current state.
+        max_rev = scope_max_revision.get(scope_key)
+        if max_rev is not None and row[6] > max_rev:
+            continue
+        payload = row[5]
+        try:
+            coverage = PositionRecoveryCodec.decode_coverage(payload)
+        except RecoverySchemaError:
+            # Malformed or schema-incompatible payload cannot prove anything.
+            continue
+        # Validate authority: must be authoritative (no gaps, confirmed,
+        # page_exhausted, not_truncated, complete provenance with
+        # source_anchor_event_cut <= start_at).
+        if not coverage.is_authoritative:
+            continue
+        # Live coverage must have a stream_scope with environment == "live";
+        # reject "legacy authoritative" entries that bypass stream identity
+        # by having None stream_scope or a non-live environment.
+        if coverage.stream_scope is None:
+            continue
+        if coverage.stream_scope.environment != "live":
+            continue
+        # Validate stream_scope matches the scope we are proving.
+        cs = coverage.stream_scope
+        if (
+            cs.account_label != row[0]
+            or cs.symbol != row[1]
+            or cs.position_side.value != row[2]
+            or cs.stream_id != row[3]
+            or cs.stream_epoch != row[4]
+        ):
+            continue
+        # Validate anchor: the coverage's provenance anchor must reference
+        # the bound checkpoint for this scope.  For recovery_checkpoint
+        # anchors, source_anchor_id and source_anchor_event_cut must match
+        # the bound checkpoint.  For zero_snapshot anchors, the bound
+        # checkpoint's own coverage must have proven a zero_snapshot source,
+        # and the id/cut must strictly match; otherwise fail closed.
+        bound_cp = scope_to_bound.get(scope_key)
+        if bound_cp is not None and coverage.load_provenance is not None:
+            lp = coverage.load_provenance
+            if lp.source_anchor_kind == "recovery_checkpoint":
+                if (
+                    lp.source_anchor_id is not None
+                    and lp.source_anchor_id != bound_cp.checkpoint_id
+                ):
+                    continue
+                if (
+                    lp.source_anchor_event_cut is not None
+                    and lp.source_anchor_event_cut != bound_cp.event_cut
+                ):
+                    continue
+            elif lp.source_anchor_kind == "zero_snapshot":
+                # Fail closed: the bound checkpoint must have a known
+                # zero_snapshot source we can compare against.
+                try:
+                    cp_decoded = PositionRecoveryCodec.decode_checkpoint(
+                        bound_cp.payload
+                    )
+                except (RecoverySchemaError, ValueError):
+                    continue
+                cp_coverage = cp_decoded.coverage
+                if cp_coverage is None or cp_coverage.load_provenance is None:
+                    continue
+                cp_lp = cp_coverage.load_provenance
+                if cp_lp.source_anchor_kind != "zero_snapshot":
+                    continue
+                if (
+                    lp.source_anchor_id is not None
+                    and lp.source_anchor_id != cp_lp.source_anchor_id
+                ):
+                    continue
+                if (
+                    lp.source_anchor_event_cut is not None
+                    and cp_lp.source_anchor_event_cut is not None
+                    and lp.source_anchor_event_cut
+                    != cp_lp.source_anchor_event_cut
+                ):
+                    continue
+            else:
+                # Unknown anchor kind cannot be verified.
+                continue
+        # The coverage must bridge from the bound recovery cut to the
+        # current proof cut.  If the coverage interval starts after the
+        # bound cut, there is a gap that cannot prove current risk.
+        if bound_cp is not None:
+            if not coverage.covers(bound_cp.event_cut):
+                continue
+        # Keep the maximum valid end_at per scope, preventing watermark
+        # regression from a newer but less-extended coverage.
+        existing = result.get(scope_key)
+        if existing is None or coverage.end_at > existing:
+            result[scope_key] = coverage.end_at
+    return result
 
 
 __all__ = ["FactIntegritySummary", "load_fact_integrity"]

@@ -48,8 +48,6 @@ from crypto_momentum_lab.domain.live_rollout.authorization import (
 )
 from crypto_momentum_lab.domain.risk import (
     RiskConfigSnapshot,
-    TradingLease,
-    TradingLeaseState,
 )
 from crypto_momentum_lab.domain.strategy import EntryType
 from crypto_momentum_lab.domain.strategy.position_exit import PositionExitMode
@@ -323,10 +321,6 @@ def prepare_command(
         str,
         typer.Option("--git-commit-hash"),
     ] = "",
-    lease_ttl_seconds: Annotated[
-        int,
-        typer.Option("--lease-ttl-seconds", min=180),
-    ] = 300,
     max_order_notional: Annotated[
         str,
         typer.Option("--max-order-notional"),
@@ -431,9 +425,7 @@ def prepare_command(
             database_url=_execution_database_url(database_url),
             account_label=account_label,
             strategy_name=strategy,
-            lease_owner=lease_owner,
             code_generation=git_commit_hash,
-            lease_ttl_seconds=lease_ttl_seconds,
             max_order_notional=_parse_optional_decimal_limit(
                 max_order_notional,
                 "--max-order-notional",
@@ -938,11 +930,11 @@ def run_command(
         ),
     ] = _LIVE_MARKET_WEBSOCKET_URL,
     account_event_hub_url: Annotated[
-        str,
+        str | None,
         typer.Option("--account-event-hub-url"),
-    ] = "ws://execution-account-live:8767",
+    ] = None,
     risk_control_hub_url: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--risk-control-hub-url",
             help=(
@@ -950,7 +942,7 @@ def run_command(
                 "durable authority."
             ),
         ),
-    ] = "ws://execution-account-live:8769",
+    ] = None,
     session_id: Annotated[str | None, typer.Option("--session-id")] = None,
     operator: Annotated[str, typer.Option("--operator")] = "",
     strategy_config_hash: Annotated[str, typer.Option("--strategy-config-hash")] = "",
@@ -1407,9 +1399,6 @@ async def _prepare_live_risk_gates(
     database_url: str,
     account_label: str,
     strategy_name: str,
-    lease_owner: str,
-    code_generation: str,
-    lease_ttl_seconds: int,
     max_order_notional: Decimal | None,
     max_gross_notional: Decimal | None,
     max_daily_loss: Decimal | None,
@@ -1432,29 +1421,19 @@ async def _prepare_live_risk_gates(
         allow_reduce_only_while_draining=True,
         created_at=now,
     )
-    lease = TradingLease(
-        lease_id=f"lease-{uuid4()}",
-        environment="live",
-        account_label=account_label,
-        strategy_name=strategy_name,
-        owner=lease_owner,
-        code_generation=code_generation,
-        state=TradingLeaseState.ACTIVE,
-        acquired_at=now,
-        expires_at=now + timedelta(seconds=lease_ttl_seconds),
-    )
     engine = create_execution_database_engine(database_url)
     try:
         repository = PostgresRiskRepository(
             async_sessionmaker(engine, expire_on_commit=False)
         )
+        # `prepare` writes the risk limits that authorise live trading.  It does
+        # not take the dispatch lease: the run process acquires its own lease
+        # before its first execution write, so `prepare` followed immediately by
+        # `run` never has to wait for an expiry or force a takeover.
         await repository.save_risk_config(risk_config)
-        await repository.acquire_lease(lease)
     finally:
         await engine.dispose()
     return {
-        "lease_id": lease.lease_id,
-        "lease_expires_at": lease.expires_at.isoformat(),
         "risk_config_hash": risk_config.config_hash,
         "strategy_config_hash": _live_strategy_config_hash(
             strategy_name,

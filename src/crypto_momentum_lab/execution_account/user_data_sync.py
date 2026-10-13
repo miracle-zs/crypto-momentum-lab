@@ -113,7 +113,7 @@ class AccountUserDataState:
         fills: tuple[AccountFillEvent, ...] = ()
         changed = False
         if event.event_type == "ACCOUNT_UPDATE":
-            changed, reason = self._apply_account_update(event)
+            changed, reason = self._apply_account_update(event, previous_snapshot)
             needs_reconciliation = reason is not None
         elif event.event_type == "ORDER_TRADE_UPDATE":
             changed, fills, reason = self._apply_order_trade_update(event)
@@ -149,6 +149,7 @@ class AccountUserDataState:
     def _apply_account_update(
         self,
         event: BinanceUserDataEvent,
+        previous_snapshot: AccountSnapshot,
     ) -> tuple[bool, str | None]:
         stale_reason = stale_user_data_reason(
             event,
@@ -168,7 +169,6 @@ class AccountUserDataState:
         changed = False
         balance_updates: list[AccountBalanceSnapshot] = []
         position_updates: list[AccountPositionSnapshot] = []
-        new_positions: list[tuple[str, str, Decimal]] = []
         # E / local receipt time cannot prove inclusion in a REST entity baseline.
         for row in balance_rows:
             asset = required_text(row.get("a"), "ACCOUNT_UPDATE balance asset")
@@ -218,8 +218,6 @@ class AccountUserDataState:
                 row.get("pa"), "ACCOUNT_UPDATE position amount"
             )
             existing_position = self._positions.get((symbol, position_side))
-            if existing_position is None and position_amt != 0:
-                new_positions.append((symbol, position_side, position_amt))
             if existing_position is None and position_amt == 0:
                 continue
             entry_price = parse_decimal(
@@ -273,25 +271,77 @@ class AccountUserDataState:
                 )
             )
 
-        for symbol, position_side, position_amt in new_positions:
-            expected_position = None
-            if self._expected_position_registry is not None:
-                expected_position = self._expected_position_registry.consume(
-                    symbol=symbol,
-                    position_side=position_side,
-                    position_amt=position_amt,
-                    observed_at=event.received_at,
-                )
-            if expected_position is None:
-                reason = reason or "unknown_position"
-
         for balance in balance_updates:
             self._balances[balance.asset] = balance
         for position in position_updates:
             self._positions[(position.symbol, position.position_side)] = position
+        if self._consume_verified_positions(
+            self.new_unverified_positions(previous_snapshot),
+            observed_at=event.received_at,
+        ):
+            reason = reason or "unknown_position"
         if event.exchange_event_at is not None:
             self._last_account_exchange_event_at = event.exchange_event_at
         return changed, reason
+
+    def new_unverified_positions(
+        self,
+        previous: AccountSnapshot,
+    ) -> tuple[AccountPositionSnapshot, ...]:
+        """Return non-zero positions that had no accepted baseline before this event.
+
+        A position that the account already carried (for example after a restart
+        with an open position or after a first update whose expectation was
+        already consumed) is an ordinary update, not a new responsibility.  Only
+        a position whose identity was absent from the previously accepted view
+        needs an entry expectation or a fact-gap reconciliation.
+        """
+
+        previous_keys = {
+            (
+                position.symbol.strip().upper(),
+                position.position_side.strip().upper(),
+            )
+            for position in previous.positions
+            if position.position_amt != 0
+        }
+        return tuple(
+            position
+            for position in self._positions.values()
+            if position.position_amt != 0
+            and (
+                position.symbol.strip().upper(),
+                position.position_side.strip().upper(),
+            )
+            not in previous_keys
+        )
+
+    def _consume_verified_positions(
+        self,
+        positions: tuple[AccountPositionSnapshot, ...],
+        *,
+        observed_at: datetime,
+    ) -> bool:
+        """Consume one expectation per genuinely new position.
+
+        Compared with an unconditioned expectation lookup, this never marks an
+        already-accepted holding as unverified and never spends a single-use
+        expectation on a position that was already known.
+        """
+
+        unverified = False
+        for position in positions:
+            expected_position = None
+            if self._expected_position_registry is not None:
+                expected_position = self._expected_position_registry.consume(
+                    symbol=position.symbol,
+                    position_side=position.position_side,
+                    position_amt=position.position_amt,
+                    observed_at=observed_at,
+                )
+            if expected_position is None:
+                unverified = True
+        return unverified
 
     def _apply_order_trade_update(
         self,

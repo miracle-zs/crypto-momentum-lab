@@ -22,6 +22,14 @@ if TYPE_CHECKING:
 
 
 class ExecutionJournalStore(Protocol):
+    async def filter_known_facts_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        scope: AccountFactStreamScope,
+        delta: JournalFactDelta,
+    ) -> JournalFactDelta: ...
+
     async def persist_facts_in_session(
         self,
         session: AsyncSession,

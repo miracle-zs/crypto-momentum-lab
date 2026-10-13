@@ -76,12 +76,7 @@ def critical_containers() -> list[str]:
         name
         for name in names.splitlines()
         if name in exact
-        or name.startswith(
-            (
-                "crypto-momentum-lab-live-strategy-",
-                "crypto-momentum-lab-execution-account-live-",
-            )
-        )
+        or name.startswith("crypto-momentum-lab-live-strategy-")
     }
     if not exact <= discovered:
         raise RuntimeError("required base containers are missing")

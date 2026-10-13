@@ -82,6 +82,7 @@ from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 from crypto_momentum_lab.domain.execution.observation_models import (
     Applied,
     Duplicate,
+    EvidenceConflict,
 )
 from crypto_momentum_lab.domain.execution.order_state import ExitAllocation
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
@@ -89,6 +90,9 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFillLoadProvenance,
     CoverageEvidence,
     PositionKey,
+)
+from crypto_momentum_lab.domain.execution.recovery_models import (
+    AccountFacts,
 )
 from crypto_momentum_lab.domain.execution.snapshot_encoding import (
     stable_snapshot_anchor_id,
@@ -258,9 +262,7 @@ async def test_each_account_has_at_most_one_effective_writer_lease(
         for account in sorted(LIVE_ACCOUNTS):
             first = _lease(account, "writer-a", acquired_at=NOW, ttl=60)
             await repository.acquire_lease(first)
-            assert (
-                await repository.load_active_lease("live", account, NOW)
-            ) == first
+            assert (await repository.load_active_lease("live", account, NOW)) == first
 
             competing = _lease(
                 account, "writer-b", acquired_at=NOW + timedelta(seconds=1), ttl=60
@@ -288,8 +290,7 @@ async def test_each_account_has_at_most_one_effective_writer_lease(
                         .where(
                             TradingLeaseRow.environment == "live",
                             TradingLeaseRow.account_label == account,
-                            TradingLeaseRow.state
-                            == TradingLeaseState.ACTIVE.value,
+                            TradingLeaseRow.state == TradingLeaseState.ACTIVE.value,
                             TradingLeaseRow.expires_at > evaluated_at,
                         )
                     )
@@ -602,8 +603,7 @@ async def test_restart_recovers_command_fill_reservation_batch_and_state(
 
         # The reservation is recovered and still guards the real position.
         reservation_ids = {
-            reservation.reservation_id
-            for reservation in accepted.receipt.reservations
+            reservation.reservation_id for reservation in accepted.receipt.reservations
         }
         assert len(reservation_ids) == 1
         active = restarted.get_active_reservations(key)
@@ -784,13 +784,514 @@ async def test_redelivered_known_datum_appends_no_durable_state_row(
             after["position_fact_journal_events"]
             - before["position_fact_journal_events"]
         )
-        assert after["position_fact_journal_events"] == before[
-            "position_fact_journal_events"
-        ], (
+        assert (
+            after["position_fact_journal_events"]
+            == before["position_fact_journal_events"]
+        ), (
             f"re-observing the same snapshot/coverage/fill datum {BURST} times "
             f"appended {appended} durable journal state rows; the datum carries "
             "no new business fact and SYSTEM.md 4 requires the writer to stop "
             "duplicating internal journal/checkpoint/policy snapshots"
         )
+    finally:
+        await engine.dispose()
+
+
+async def test_redelivered_known_datum_does_not_advance_head_revision(
+    async_database_url: str,
+) -> None:
+    """A redelivered known datum returns Duplicate and does not advance head
+    revision.
+    """
+    engine = create_async_database_engine(async_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    account = f"persist-redelivery-head-{uuid4().hex}"
+    key = PositionKey("live", account, "BTCUSDT")
+    scope = AccountFactStreamScope.for_position_key(
+        key, stream_id="account-events", stream_epoch="epoch-1"
+    )
+    try:
+        book, key, _flat, opened = await _seed_known_datum(factory, account=account)
+        async with factory() as session:
+            head_row = await session.get(
+                ExecutionBookHeadRow,
+                (
+                    key.environment,
+                    key.account_label,
+                    key.symbol,
+                    key.position_side.value,
+                ),
+            )
+            assert head_row is not None
+            assert head_row.revision == 2
+
+        # Re-observe known datum with fresh evidence_id and higher sequence
+        result = await book.observe(
+            replace(
+                opened,
+                evidence_id="fresh-redelivery",
+                sequence=100,
+            )
+        )
+        assert isinstance(result, Duplicate)
+
+        # Head revision in DB must still be 2
+        async with factory() as session:
+            head_row = await session.get(
+                ExecutionBookHeadRow,
+                (
+                    key.environment,
+                    key.account_label,
+                    key.symbol,
+                    key.position_side.value,
+                ),
+            )
+            assert head_row is not None
+            assert head_row.revision == 2
+
+        # After restart, the restored book knows about sequence 100 and rejects <= 100
+        restarted, _ = _book(factory)
+        await restarted.restore(account_label=account)
+        # Sequence <= 100 must conflict / be rejected
+        conflict_result = await restarted.observe(
+            replace(
+                opened,
+                evidence_id="stale-seq",
+                sequence=50,
+            )
+        )
+        assert isinstance(conflict_result, EvidenceConflict)
+
+        # Same evidence identity with different payload must conflict
+        payload_conflict = await restarted.observe(
+            replace(
+                opened,
+                evidence_id="fresh-redelivery",
+                sequence=100,
+                snapshot=replace(opened.snapshot, position_amt=Decimal("99")),
+            )
+        )
+        assert isinstance(payload_conflict, EvidenceConflict)
+
+        # New valid fill/coverage advances head revision
+        cut_new = opened.observed_at + timedelta(minutes=5)
+        new_evidence = _scoped_evidence(
+            key,
+            evidence_id="new-fill-datum",
+            scope=scope,
+            at=cut_new,
+            sequence=101,
+            fill=_fill(
+                key,
+                trade_id="trade-open-2",
+                order_id="order-open-2",
+                quantity=Decimal("1"),
+                at=cut_new,
+            ),
+            proof=_coverage(
+                scope,
+                load_id="scan-3",
+                scan_origin=opened.observed_at,
+                anchor_id="anchor-2",
+                anchor_cut=opened.observed_at,
+                anchor_kind="zero_snapshot",
+                checked_through=cut_new,
+            ),
+        )
+        applied_result = await restarted.observe(new_evidence)
+        assert isinstance(applied_result, Applied)
+        async with factory() as session:
+            head_row = await session.get(
+                ExecutionBookHeadRow,
+                (
+                    key.environment,
+                    key.account_label,
+                    key.symbol,
+                    key.position_side.value,
+                ),
+            )
+            assert head_row is not None
+            assert head_row.revision == 3
+    finally:
+        await engine.dispose()
+
+
+async def test_checkpoint_bounded_suffix_and_known_prefix_deduplication(
+    async_database_url: str,
+) -> None:
+    """A restored checkpoint folds historical fills; known prefix trade deduplicates."""
+    engine = create_async_database_engine(async_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    account = f"persist-bounded-suffix-{uuid4().hex}"
+    try:
+        _seeded_book, key, _flat, opened = await _seed_known_datum(
+            factory, account=account
+        )
+
+        restarted, _reservations = _book(factory)
+        await restarted.restore(account_label=account)
+
+        journal = restarted._journals.get(key.canonical_id)
+        assert journal is not None
+        assert journal.read_cut().recovery_checkpoint is not None, (
+            "seed failed to create a verified checkpoint folding the opened trade"
+        )
+        assert opened.fill is not None
+        assert not any(
+            fill.trade_id == opened.fill.trade_id for fill in journal.read_cut().fills
+        )
+
+        scope = _scope(key)
+        view_before = await restarted.read(scope)
+        assert view_before.total_quantity == Decimal("3")
+        assert len(view_before.batches) == 1
+        assert view_before.batches[0].quantity == Decimal("3")
+        assert view_before.batches[0].entry_price == Decimal("100")
+
+        async with factory() as session:
+            head_before = await session.scalar(
+                select(ExecutionBookHeadRow).where(
+                    ExecutionBookHeadRow.account_label == account,
+                    ExecutionBookHeadRow.symbol == key.symbol,
+                    ExecutionBookHeadRow.position_side == key.position_side.value,
+                )
+            )
+        assert head_before is not None
+        initial_revision = head_before.revision
+
+        prefix_bare = replace(
+            opened,
+            evidence_id="prefix-bare",
+            sequence=100,
+            snapshot=None,
+            coverage_evidence=None,
+            fill_load_provenance=None,
+        )
+        result_bare = await restarted.observe(prefix_bare)
+        assert isinstance(result_bare, Duplicate)
+
+        view_after_bare = await restarted.read(scope)
+        assert view_after_bare.total_quantity == Decimal("3")
+        assert view_after_bare.batches == view_before.batches
+        assert view_after_bare.projection_version == view_before.projection_version
+
+        async with factory() as session:
+            head_bare = await session.scalar(
+                select(ExecutionBookHeadRow).where(
+                    ExecutionBookHeadRow.account_label == account,
+                    ExecutionBookHeadRow.symbol == key.symbol,
+                    ExecutionBookHeadRow.position_side == key.position_side.value,
+                )
+            )
+        assert head_bare is not None
+        assert head_bare.revision == initial_revision
+
+        retry_same = await restarted.observe(prefix_bare)
+        assert isinstance(retry_same, Duplicate)
+
+        conflict_evidence = replace(
+            prefix_bare,
+            evidence_id="prefix-bare-conflict",
+            sequence=101,
+            fill=replace(opened.fill, price=Decimal("101")),
+        )
+        result_conflict = await restarted.observe(conflict_evidence)
+        assert isinstance(result_conflict, EvidenceConflict)
+
+        async with factory() as session:
+            head_conflict = await session.scalar(
+                select(ExecutionBookHeadRow).where(
+                    ExecutionBookHeadRow.account_label == account,
+                    ExecutionBookHeadRow.symbol == key.symbol,
+                    ExecutionBookHeadRow.position_side == key.position_side.value,
+                )
+            )
+        assert head_conflict is not None
+        assert head_conflict.revision == initial_revision
+
+        fresh_trade_at = opened.observed_at + timedelta(minutes=5)
+        new_fill_evidence = ExecutionEvidence(
+            evidence_id="fresh-fill-after-checkpoint",
+            scope=scope,
+            observed_at=fresh_trade_at,
+            fill=AccountFillEvent(
+                environment=key.environment,
+                account_label=key.account_label,
+                symbol=key.symbol,
+                trade_id=f"trade-fresh-{uuid4().hex[:8]}",
+                order_id=f"order-fresh-{uuid4().hex[:8]}",
+                side="BUY",
+                price=Decimal("100"),
+                quantity=Decimal("1"),
+                realized_pnl=Decimal("0"),
+                fee=Decimal("0"),
+                fee_asset="USDT",
+                trade_at=fresh_trade_at,
+                raw_payload={"positionSide": key.position_side.value},
+            ),
+            stream_id=opened.stream_id,
+            stream_epoch=opened.stream_epoch,
+            sequence=101,
+        )
+        result_fresh = await restarted.observe(new_fill_evidence)
+        assert isinstance(result_fresh, Applied)
+
+        view_fresh = await restarted.read(scope)
+        assert view_fresh.total_quantity == Decimal("4")
+    finally:
+        await engine.dispose()
+
+
+async def test_full_replay_after_restart_deduplicates_without_advancing_head(
+    async_database_url: str,
+) -> None:
+    """Fresh full envelope replay after restart must Duplicate and keep
+    revision stable.
+    """
+    engine = create_async_database_engine(async_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    account = f"persist-full-replay-{uuid4().hex}"
+    try:
+        _seeded_book, key, _flat, opened = await _seed_known_datum(
+            factory, account=account
+        )
+
+        restarted, _reservations = _book(factory)
+        await restarted.restore(account_label=account)
+
+        async with factory() as session:
+            head_before = await session.scalar(
+                select(ExecutionBookHeadRow).where(
+                    ExecutionBookHeadRow.account_label == account,
+                    ExecutionBookHeadRow.symbol == key.symbol,
+                    ExecutionBookHeadRow.position_side == key.position_side.value,
+                )
+            )
+        assert head_before is not None
+        initial_revision = head_before.revision
+
+        scope = _scope(key)
+        view_before = await restarted.read(scope)
+
+        full_replay = replace(
+            opened,
+            evidence_id="full-replay",
+            sequence=100,
+        )
+        result = await restarted.observe(full_replay)
+        assert isinstance(result, Duplicate)
+
+        async with factory() as session:
+            head_after = await session.scalar(
+                select(ExecutionBookHeadRow).where(
+                    ExecutionBookHeadRow.account_label == account,
+                    ExecutionBookHeadRow.symbol == key.symbol,
+                    ExecutionBookHeadRow.position_side == key.position_side.value,
+                )
+            )
+        assert head_after is not None
+        assert head_after.revision == initial_revision
+
+        view_after = await restarted.read(scope)
+        assert view_after.total_quantity == view_before.total_quantity
+        assert view_after.batches == view_before.batches
+        assert view_after.projection_version == view_before.projection_version
+
+        conflict_replay = replace(
+            opened,
+            evidence_id="prefix-snapshot-conflict",
+            sequence=101,
+            snapshot=replace(opened.snapshot, position_amt=Decimal("99")),
+        )
+        conflict_result = await restarted.observe(conflict_replay)
+        assert isinstance(conflict_result, EvidenceConflict)
+
+        async with factory() as session:
+            head_after_conflict = await session.scalar(
+                select(ExecutionBookHeadRow).where(
+                    ExecutionBookHeadRow.account_label == account,
+                    ExecutionBookHeadRow.symbol == key.symbol,
+                    ExecutionBookHeadRow.position_side == key.position_side.value,
+                )
+            )
+        assert head_after_conflict is not None
+        assert head_after_conflict.revision == initial_revision
+
+        view_after_conflict = await restarted.read(scope)
+        assert view_after_conflict.total_quantity == view_before.total_quantity
+        assert view_after_conflict.batches == view_before.batches
+        assert view_after_conflict.projection_version == view_before.projection_version
+    finally:
+        await engine.dispose()
+
+
+async def test_checkpoint_known_prefix_with_fresh_coverage_advances_head(
+    async_database_url: str,
+) -> None:
+    """Restored checkpoint given known prefix fill & snapshot plus fresh coverage
+    scan advances head revision and checked_through while keeping business state.
+    """
+    engine = create_async_database_engine(async_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    account = f"persist-fresh-cov-{uuid4().hex}"
+    try:
+        _seeded_book, key, _flat, opened = await _seed_known_datum(
+            factory, account=account
+        )
+        restarted, _reservations = _book(factory)
+        await restarted.restore(account_label=account)
+
+        scope = _scope(key)
+        view_before = await restarted.read(scope)
+        assert view_before.total_quantity == Decimal("3")
+
+        journal = restarted._journals.get(key.canonical_id)
+        assert journal is not None
+        cut = journal.read_cut()
+        assert cut.recovery_checkpoint is not None
+        ckpt = cut.recovery_checkpoint
+
+        async with factory() as session:
+            head_before = await session.scalar(
+                select(ExecutionBookHeadRow).where(
+                    ExecutionBookHeadRow.account_label == account,
+                    ExecutionBookHeadRow.symbol == key.symbol,
+                    ExecutionBookHeadRow.position_side == key.position_side.value,
+                )
+            )
+        assert head_before is not None
+        initial_rev = head_before.revision
+
+        stream_scope = ckpt.stream_scope
+        adv_checked_through = ckpt.event_cut + timedelta(minutes=10)
+        fresh_coverage_evidence = _scoped_evidence(
+            key,
+            evidence_id="fresh-coverage-after-checkpoint",
+            scope=stream_scope,
+            at=adv_checked_through,
+            sequence=100,
+            fill=opened.fill,
+            snapshot=opened.snapshot,
+            proof=_coverage(
+                stream_scope,
+                load_id="scan-adv-1",
+                scan_origin=ckpt.event_cut,
+                anchor_id=ckpt.checkpoint_id,
+                anchor_cut=ckpt.event_cut,
+                anchor_kind="recovery_checkpoint",
+                checked_through=adv_checked_through,
+            ),
+        )
+
+        observe_result = await restarted.observe(fresh_coverage_evidence)
+        assert isinstance(observe_result, Applied)
+
+        async with factory() as session:
+            head_after = await session.scalar(
+                select(ExecutionBookHeadRow).where(
+                    ExecutionBookHeadRow.account_label == account,
+                    ExecutionBookHeadRow.symbol == key.symbol,
+                    ExecutionBookHeadRow.position_side == key.position_side.value,
+                )
+            )
+        assert head_after is not None
+        assert head_after.revision == initial_rev + 1
+
+        view_after = await restarted.read(scope)
+        assert view_after.total_quantity == Decimal("3")
+        assert view_after.batches == view_before.batches
+
+        restarted_again, _ = _book(factory)
+        await restarted_again.restore(account_label=account)
+        journal_again = restarted_again._journals.get(key.canonical_id)
+        assert journal_again is not None
+        cut_again = journal_again.read_cut()
+        assert cut_again.coverage is not None
+        assert cut_again.coverage.end_at == adv_checked_through
+        assert cut_again.fill_load_provenance is not None
+        assert cut_again.fill_load_provenance.checked_through == adv_checked_through
+        assert restarted_again._last_sequences[key.canonical_id] == 100
+        view_again = await restarted_again.read(scope)
+        assert view_again.total_quantity == Decimal("3")
+        assert view_again.batches == view_before.batches
+    finally:
+        await engine.dispose()
+
+
+async def test_headless_uncheckpointed_recovery_from_raw_journal(
+    async_database_url: str,
+) -> None:
+    """Old format / uncheckpointed stream with 2 real fills and no HeadRow/checkpoint
+    restores correct quantity, weighted cost basis and batches; duplicate replay
+    does not double-count, and altered payload triggers EvidenceConflict.
+    """
+    engine = create_async_database_engine(async_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    account = f"persist-headless-{uuid4().hex}"
+    key = PositionKey("live", account, "BTCUSDT")
+    scope = AccountFactStreamScope.for_position_key(
+        key, stream_id="headless-events", stream_epoch="epoch-0"
+    )
+    store = PostgresAccountJournalStore()
+    t1 = NOW - timedelta(minutes=15)
+    t2 = NOW - timedelta(minutes=10)
+
+    f1 = AccountFillEvent(
+        environment=key.environment,
+        account_label=key.account_label,
+        symbol=key.symbol,
+        trade_id="headless-trade-1",
+        order_id="headless-order-1",
+        side="BUY",
+        price=Decimal("100"),
+        quantity=Decimal("2"),
+        realized_pnl=Decimal("0"),
+        fee=Decimal("0"),
+        fee_asset="USDT",
+        trade_at=t1,
+        raw_payload={"positionSide": key.position_side.value},
+    )
+    f2 = AccountFillEvent(
+        environment=key.environment,
+        account_label=key.account_label,
+        symbol=key.symbol,
+        trade_id="headless-trade-2",
+        order_id="headless-order-2",
+        side="BUY",
+        price=Decimal("130"),
+        quantity=Decimal("1"),
+        realized_pnl=Decimal("0"),
+        fee=Decimal("0"),
+        fee_asset="USDT",
+        trade_at=t2,
+        raw_payload={"positionSide": key.position_side.value},
+    )
+    facts = AccountFacts(
+        position_key=key,
+        stream_scope=scope,
+        fills=(f1, f2),
+    )
+
+    try:
+        async with factory() as session, session.begin():
+            await store.persist_facts_in_session(
+                session, scope=scope, facts=facts, revision=2
+            )
+
+        # Confirm no ExecutionBookHeadRow and no PositionRecoveryCheckpoint exist
+        async with factory() as session:
+            head_row = await session.scalar(
+                select(ExecutionBookHeadRow).where(
+                    ExecutionBookHeadRow.account_label == account,
+                )
+            )
+            assert head_row is None
+
+        book, _reservations = _book(factory)
+        from crypto_momentum_lab.domain.execution.ports import DecisionCommitConflict
+
+        # Headless stream with existing responsibilities must explicitly block recovery
+        with pytest.raises(DecisionCommitConflict, match="recovery blocked"):
+            await book.restore(account_label=account)
     finally:
         await engine.dispose()

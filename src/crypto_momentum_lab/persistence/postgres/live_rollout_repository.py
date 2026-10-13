@@ -219,10 +219,13 @@ class PostgresLiveRolloutRepository:
                         LiveRollbackCommandRow.command_id == command_id,
                         LiveRollbackCommandRow.account_label == account_label,
                         LiveRollbackCommandRow.strategy_name == strategy_name,
-                        LiveRollbackCommandRow.session_id == session_id,
+                        or_(
+                            LiveRollbackCommandRow.session_id == session_id,
+                            LiveRollbackCommandRow.session_id.is_(None),
+                        ),
                         LiveRollbackCommandRow.status == "requested",
                     )
-                    .values(status="executing")
+                    .values(status="executing", session_id=session_id)
                     .returning(LiveRollbackCommandRow.command_id)
                 )
                 if claimed_id is None:
@@ -260,6 +263,107 @@ class PostgresLiveRolloutRepository:
                 )
         rowcount = cast(int, result.rowcount)
         return rowcount == 1
+
+    async def load_pending_requested_commands(
+        self,
+        *,
+        account_label: str,
+        strategy_name: str,
+        session_id: str | None = None,
+        limit: int = 16,
+    ) -> tuple[RollbackCommand, ...]:
+        stmt = (
+            select(LiveRollbackCommandRow)
+            .where(
+                LiveRollbackCommandRow.account_label == account_label,
+                LiveRollbackCommandRow.strategy_name == strategy_name,
+                LiveRollbackCommandRow.status == "requested",
+            )
+            .order_by(LiveRollbackCommandRow.requested_at.asc())
+            .limit(limit)
+        )
+        if session_id is not None:
+            stmt = stmt.where(
+                or_(
+                    LiveRollbackCommandRow.session_id == session_id,
+                    LiveRollbackCommandRow.session_id.is_(None),
+                )
+            )
+        async with self._session_factory() as session:
+            rows = (await session.scalars(stmt)).all()
+        return tuple(_rollback_command_from_row(row) for row in rows)
+
+    async def claim_executing_command_for_recovery(
+        self,
+        command_id: str,
+        *,
+        account_label: str,
+        strategy_name: str,
+        session_id: str,
+    ) -> RollbackCommand | None:
+        """Atomically take responsibility for one stranded ``executing`` command.
+
+        Uses the command record's existing ``session_id`` column: the recoverer
+        that succeeds names itself as the continuing owner, and the row is then
+        concluded exactly once through ``complete_command`` (which only accepts
+        ``executing``).  No separate claim table or distributed lock is involved;
+        a competing *dispatcher* is prevented by the single account lease, not by
+        this statement.  A same-session retry still matches, so a process that
+        crashed mid-recovery can finish its own responsibility.
+        """
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                claimed_id = await session.scalar(
+                    update(LiveRollbackCommandRow)
+                    .where(
+                        LiveRollbackCommandRow.command_id == command_id,
+                        LiveRollbackCommandRow.account_label == account_label,
+                        LiveRollbackCommandRow.strategy_name == strategy_name,
+                        LiveRollbackCommandRow.status == "executing",
+                    )
+                    .values(session_id=session_id)
+                    .returning(LiveRollbackCommandRow.command_id)
+                )
+                if claimed_id is None:
+                    return None
+                row = await session.scalar(
+                    select(LiveRollbackCommandRow).where(
+                        LiveRollbackCommandRow.command_id == claimed_id
+                    )
+                )
+        return None if row is None else _rollback_command_from_row(row)
+
+    async def load_executing_commands_for_recovery(
+        self,
+        *,
+        account_label: str,
+        strategy_name: str,
+        limit: int = 16,
+    ) -> tuple[RollbackCommand, ...]:
+        """Load operator commands stranded in ``executing`` by a restart.
+
+        ``claim_command`` moves a command to ``executing`` before the action
+        runs.  A crash between the claim and the completion record leaves the
+        command invisible to the requested-command poller yet still carrying an
+        unfinished operator responsibility, so recovery must find it.  The
+        original session is deliberately not filtered: the responsibility
+        outlives the session that claimed it.
+        """
+
+        stmt = (
+            select(LiveRollbackCommandRow)
+            .where(
+                LiveRollbackCommandRow.account_label == account_label,
+                LiveRollbackCommandRow.strategy_name == strategy_name,
+                LiveRollbackCommandRow.status == "executing",
+            )
+            .order_by(LiveRollbackCommandRow.requested_at.asc())
+            .limit(limit)
+        )
+        async with self._session_factory() as session:
+            rows = (await session.scalars(stmt)).all()
+        return tuple(_rollback_command_from_row(row) for row in rows)
 
     async def _insert(self, model: Any, values: dict[str, object]) -> None:
         async with self._session_factory() as session:

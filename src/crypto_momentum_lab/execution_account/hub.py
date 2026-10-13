@@ -48,6 +48,7 @@ from crypto_momentum_lab.execution_account.snapshot_changes import (
 from crypto_momentum_lab.health.stream_availability import (
     StreamAvailabilityClock,
     StreamAvailabilityConfig,
+    StreamAvailabilityState,
 )
 
 log = structlog.get_logger()
@@ -829,6 +830,319 @@ class AccountEventHub:
         await writer_start.wait()
         while True:
             await connection.send(await queue.get())
+
+
+class InProcessAccountEventSource:
+    """Async iterator adapter for in-process account events without WebSocket hop."""
+
+    def __init__(
+        self,
+        queue: asyncio.Queue[AccountEvent] | None = None,
+        *,
+        environment: str = "live",
+        account_label: str = "primary",
+        availability_clock: StreamAvailabilityClock | None = None,
+        on_overflow_reconcile: Callable[[tuple[str, ...]], None] | None = None,
+    ) -> None:
+        self._queue: asyncio.Queue[AccountEvent] = (
+            queue if queue is not None else asyncio.Queue(maxsize=1024)
+        )
+        self._environment = environment
+        self._account_label = account_label
+        self._on_overflow_reconcile = on_overflow_reconcile
+        self._stopping = False
+        self._recovery_count = 0
+        self._queue_overflow_count = 0
+        self._last_recovery_reason: str | None = None
+        self._enqueued_event_count = 0
+        self._dequeued_event_count = 0
+        self._order_trade_update_count = 0
+        self._account_update_count = 0
+        self._queue_high_watermark = 0
+        self._max_queue_wait_ms = 0.0
+        self._gap_symbols: set[str] = set()
+        self._availability_clock = availability_clock or StreamAvailabilityClock(
+            StreamAvailabilityConfig(startup_timeout_seconds=30.0),
+            stream_name="in-process account event stream",
+            clock=lambda: time.monotonic(),
+        )
+        # Transport establishment is not fact continuity.  The source starts in
+        # CONNECTING and only becomes READY once the producer has an accepted
+        # baseline and verified the current connection.  A connect alone must
+        # never open new risk.
+        self._continuity_verified = False
+        self._first_frame_seen = False
+        self._baseline_established = False
+        # Transport continuity and per-range fact state are separate
+        # dimensions.  A symbol gap isolates that symbol; a baseline
+        # requirement blocks the whole account until a new baseline lands.
+        self._requires_rebaseline = True
+        self._last_sequence: int | None = None
+        self._stream_epoch: str | None = None
+        self._availability_clock.mark_connecting()
+
+    @property
+    def queue(self) -> asyncio.Queue[AccountEvent]:
+        return self._queue
+
+    @property
+    def continuity_verified(self) -> bool:
+        return self._continuity_verified
+
+    @property
+    def stream_epoch(self) -> str | None:
+        return self._stream_epoch
+
+    @property
+    def last_sequence(self) -> int | None:
+        return self._last_sequence
+
+    def mark_stream_connected(self, *, needs_recovery: bool) -> None:
+        """Record a transport connection without granting fact continuity."""
+
+        self._continuity_verified = False
+        self._requires_rebaseline = True
+        self._availability_clock.mark_connected(needs_recovery=True)
+        self._last_recovery_reason = "account_stream_connected_recovering"
+
+    def mark_stream_disrupted(self, reason: str) -> None:
+        """Record a disconnect: connectivity loss is not fact continuity loss proof."""
+
+        self._continuity_verified = False
+        self._requires_rebaseline = True
+        self._last_recovery_reason = reason
+        self._set_fact_gap(("*",))
+        self._request_recovery(("*",))
+
+    def mark_continuity_verified(self, *, stream_epoch: str, sequence: int) -> None:
+        """Record a verified baseline for the current connection.
+
+        Only an accepted baseline (startup or reconnect) may clear the
+        transport-continuity gate.  A successful handshake alone does not.
+
+        The watermark is re-anchored to *this* connection and to the sequence of
+        the frame that carried the baseline, so the first frame after a
+        reconnect is never misjudged against the previous connection's cursor
+        while a genuinely missing frame (sequence jump) is still detected.
+        """
+
+        if not stream_epoch.strip():
+            raise ValueError("stream_epoch must not be empty")
+        if sequence <= 0:
+            raise ValueError("sequence must be positive")
+        self._continuity_verified = True
+        self._baseline_established = True
+        self._requires_rebaseline = False
+        self._last_recovery_reason = None
+        self._stream_epoch = stream_epoch
+        self._last_sequence = sequence
+        if not self._gap_symbols:
+            self._availability_clock.mark_ready()
+
+    def validate_stream_continuity(self, event: AccountEvent) -> bool:
+        """Return False (and mark the affected range) when the frame cannot be trusted."""
+
+        epoch_changed = (
+            self._stream_epoch is not None
+            and event.stream_epoch is not None
+            and event.stream_epoch != self._stream_epoch
+        )
+        sequence_gap = (
+            (self._last_sequence is not None or self._baseline_established)
+            and event.sequence > 0
+            and event.sequence != (self._last_sequence or 0) + 1
+        )
+        expected_sequence = self._last_sequence
+        if event.stream_epoch is not None:
+            self._stream_epoch = event.stream_epoch
+        if event.sequence > 0:
+            self._last_sequence = event.sequence
+        if not epoch_changed and not sequence_gap:
+            return True
+        affected = event.symbols or ((event.symbol,) if event.symbol else ("*",))
+        self._set_fact_gap(affected)
+        self._recovery_count += 1
+        self._last_recovery_reason = (
+            "account_event_stream_epoch_changed"
+            if epoch_changed
+            else "account_event_sequence_gap"
+        )
+        self._continuity_verified = False
+        if epoch_changed:
+            # A different epoch is a different connection: the whole account
+            # needs a new authoritative baseline, not just one symbol.
+            self._requires_rebaseline = True
+            self._set_fact_gap(("*",))
+        log.warning(
+            "in_process_account_event_continuity_broken",
+            reason=self._last_recovery_reason,
+            symbols=list(affected),
+            expected_sequence=expected_sequence,
+            received_sequence=event.sequence,
+        )
+        return False
+
+    def _set_fact_gap(self, affected: tuple[str, ...]) -> None:
+        """Isolate the affected range without blocking healthy symbols.
+
+        A wildcard gap means the transport continuity itself is unverified, so
+        the whole stream must stop admitting new risk.  A symbol-scoped gap is a
+        per-range fact problem: the healthy range must keep trading and the
+        trusted exit path must keep running, so the stream stays READY and only
+        :meth:`is_risk_allowed` for the affected symbols refuses.
+        """
+
+        gap_symbols = affected or ("*",)
+        self._gap_symbols.update(gap_symbols)
+        if "*" in gap_symbols:
+            self._availability_clock.mark_recovering()
+
+    def _request_recovery(self, affected: tuple[str, ...]) -> None:
+        if self._on_overflow_reconcile is None:
+            return
+        try:
+            self._on_overflow_reconcile(affected)
+        except Exception as err:
+            log.warning(
+                "overflow_reconciliation_trigger_failed",
+                error=str(err),
+            )
+
+    @property
+    def availability_clock(self) -> StreamAvailabilityClock:
+        return self._availability_clock
+
+    @property
+    def has_fact_gap(self) -> bool:
+        return bool(self._gap_symbols)
+
+    @property
+    def has_account_wide_gap(self) -> bool:
+        """True only when transport continuity (not one symbol) is broken."""
+
+        return "*" in self._gap_symbols
+
+    @property
+    def gap_symbols(self) -> frozenset[str]:
+        return frozenset(self._gap_symbols)
+
+    def is_risk_allowed(self, symbol: str | None = None) -> bool:
+        """New risk is blocked until continuity is verified and no gap covers the symbol.
+
+        A stream that still requires a baseline refuses every symbol.  Once a
+        baseline has re-anchored the epoch, a symbol-scoped fact gap isolates
+        only that range; healthy symbols keep admitting new risk.
+        """
+
+        if self._requires_rebaseline:
+            return False
+        if not self._continuity_verified:
+            return False
+        if self._availability_clock.state != StreamAvailabilityState.READY:
+            return False
+        if symbol is not None and symbol in self._gap_symbols:
+            return False
+        return True
+
+    def clear_fact_gap(self, symbol: str | None = None) -> None:
+        """Clear fact gap after bounded reconciliation has verified state.
+
+        Clearing a symbol gap restores readiness only for a connection whose
+        continuity was already re-verified; a transport (re)connect or a
+        detected sequence/epoch break still requires an explicit
+        :meth:`mark_continuity_verified` before new risk may proceed.
+        """
+
+        if symbol is not None:
+            self._gap_symbols.discard(symbol)
+        else:
+            self._gap_symbols.clear()
+        if not self._gap_symbols and self._continuity_verified:
+            self._availability_clock.mark_ready()
+
+    def set_on_overflow_reconcile(
+        self, callback: Callable[[tuple[str, ...]], None] | None
+    ) -> None:
+        self._on_overflow_reconcile = callback
+
+    @property
+    def metrics(self) -> AccountEventHubClientMetrics:
+        return AccountEventHubClientMetrics(
+            recovery_count=self._recovery_count,
+            queue_overflow_count=self._queue_overflow_count,
+            last_recovery_reason=self._last_recovery_reason,
+            queue_capacity=self._queue.maxsize,
+            queue_depth=self._queue.qsize(),
+            queue_high_watermark=self._queue_high_watermark,
+            enqueued_event_count=self._enqueued_event_count,
+            dequeued_event_count=self._dequeued_event_count,
+            order_trade_update_count=self._order_trade_update_count,
+            account_update_count=self._account_update_count,
+            max_queue_wait_ms=self._max_queue_wait_ms,
+        )
+
+    def publish(self, event: AccountEvent) -> None:
+        if not self._stopping:
+            if (
+                not self._first_frame_seen
+                and event.sequence > 0
+                and event.stream_epoch is not None
+            ):
+                # The producer only publishes frames it accepted from the
+                # exchange stream, so the very first accepted frame is
+                # transport evidence for the initial connection.  Later
+                # connects and detected breaks must re-verify explicitly.
+                self._first_frame_seen = True
+                self.mark_continuity_verified(
+                    stream_epoch=event.stream_epoch,
+                    sequence=event.sequence,
+                )
+            try:
+                self._queue.put_nowait(event)
+                self._enqueued_event_count += 1
+                if event.event_type == "ORDER_TRADE_UPDATE":
+                    self._order_trade_update_count += 1
+                elif event.event_type == "ACCOUNT_UPDATE":
+                    self._account_update_count += 1
+                qsize = self._queue.qsize()
+                if qsize > self._queue_high_watermark:
+                    self._queue_high_watermark = qsize
+            except asyncio.QueueFull:
+                self._queue_overflow_count += 1
+                self._recovery_count += 1
+                self._last_recovery_reason = "queue_overflow"
+                affected: list[str] = []
+                if event.symbol:
+                    affected.append(event.symbol)
+                elif event.symbols:
+                    affected.extend(event.symbols)
+                if not affected:
+                    affected.append("*")
+                self._set_fact_gap(tuple(affected))
+                log.warning(
+                    "in_process_account_event_queue_full",
+                    event_id=event.event_id,
+                    symbols=affected,
+                    queue_depth=self._queue.qsize(),
+                )
+                self._request_recovery(tuple(affected))
+
+    def stop(self) -> None:
+        self._stopping = True
+
+    def __aiter__(self) -> AsyncIterator[AccountEvent]:
+        return self._iterate()
+
+    async def _iterate(self) -> AsyncIterator[AccountEvent]:
+        while not self._stopping:
+            try:
+                event = await asyncio.wait_for(self._queue.get(), timeout=1.0)
+                self._dequeued_event_count += 1
+                yield event
+            except TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
 
 
 class WebSocketAccountEventSource:
@@ -2263,6 +2577,7 @@ __all__ = [
     "AccountEventHubMetrics",
     "AccountEventHubProtocolError",
     "AccountEventHubSequenceGap",
+    "InProcessAccountEventSource",
     "WebSocketAccountEventSource",
     "WebSocketAccountPositionExpectationPublisher",
     "decode_account_position_expectation",

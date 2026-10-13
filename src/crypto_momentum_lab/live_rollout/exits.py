@@ -559,8 +559,13 @@ class LiveExitManager:
         symbol: str | None = None,
         reference_prices: Mapping[str, Decimal] | None = None,
         attempt: int = 1,
+        identity_at: datetime | None = None,
     ) -> tuple[LiveExitRequest, ...]:
         """Build market reduce-only requests for the scheduled risk window.
+
+        ``identity_at`` pins the client order identity to a caller-supplied
+        instant (an operator action), so a resumed attempt reuses the identity
+        instead of producing a new one from the current wall clock.
 
         Scheduled flattening is deliberately independent of the configured
         strategy exit policy.  Every live position is targeted, including a
@@ -591,7 +596,7 @@ class LiveExitManager:
                 position=position,
                 reason=reason,
                 trigger_at=now,
-                identity_trigger_at=now,
+                identity_trigger_at=identity_at or now,
                 created_at=now,
                 reference_price=reference_price,
                 quantity=position.quantity,
@@ -600,6 +605,24 @@ class LiveExitManager:
             if recovery_plan is not None and _recovery_order_blocks_current_episode(
                 position
             ):
+                # Post-cancellation branch: the fallback that replaces the
+                # cancelled recovery order must keep the caller's stable
+                # identity, otherwise resuming the same operator command after a
+                # restart would rebuild a different order identity.
+                fallback = self._build_order_request(
+                    state=None,
+                    position=position,
+                    reason=reason,
+                    trigger_at=now,
+                    identity_trigger_at=(
+                        identity_at
+                        or _recovery_exit_started_at(position)
+                        or recovery_plan.created_at
+                    ),
+                    created_at=now,
+                    reference_price=reference_price,
+                    quantity=position.quantity,
+                )
                 requests.append(
                     LiveExitCancellationRequest(
                         cancel_plan=recovery_plan,

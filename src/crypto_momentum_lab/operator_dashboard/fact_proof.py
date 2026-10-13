@@ -80,6 +80,7 @@ class SuffixFacts:
     distinct_revisions: int = 0
     max_source_revision: int | None = None
     newest_occurred_at: datetime | None = None
+    newest_coverage_end_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,9 +157,21 @@ def evaluate_head_proof(
         else:
             proof_cut = recovery.event_cut
 
+    # Use the newest coverage end_at from either the checkpoint or the suffix.
+    # A newer coverage event in the suffix can prove a later cut than the
+    # checkpoint's own coverage.
+    effective_coverage_end_at = recovery.coverage_end_at
     if (
-        recovery.coverage_end_at is None
-        or recovery.coverage_end_at < proof_cut
+        suffix.newest_coverage_end_at is not None
+        and (
+            effective_coverage_end_at is None
+            or suffix.newest_coverage_end_at > effective_coverage_end_at
+        )
+    ):
+        effective_coverage_end_at = suffix.newest_coverage_end_at
+    if (
+        effective_coverage_end_at is None
+        or effective_coverage_end_at < proof_cut
     ):
         return HeadProof(UNKNOWN, REASON_COVERAGE_STALE, None, current)
     if (now - proof_cut).total_seconds() > max_age_seconds:

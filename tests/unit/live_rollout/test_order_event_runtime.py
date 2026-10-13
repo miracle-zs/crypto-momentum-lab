@@ -64,7 +64,7 @@ async def test_only_unknown_order_results_request_repair(state):
     runtime = LiveOrderEventRuntime(
         telemetry=SimpleNamespace(order_event=AsyncMock()), request_recovery=request
     )
-    await runtime.handle(SimpleNamespace(), SimpleNamespace(state=state))
+    await runtime.handle(SimpleNamespace(), SimpleNamespace(state=state, details={}))
     assert request.call_count == (
         1 if state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION else 0
     )

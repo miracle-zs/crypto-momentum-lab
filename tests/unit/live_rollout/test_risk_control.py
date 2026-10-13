@@ -50,6 +50,39 @@ class FakeCommandRepository:
         self.command = replace(self.command, status="executing")
         return self.command
 
+    async def claim_executing_command_for_recovery(
+        self,
+        command_id: str,
+        *,
+        account_label: str,
+        strategy_name: str,
+        session_id: str,
+    ) -> RollbackCommand | None:
+        if (
+            command_id != self.command.command_id
+            or self.command.status != "executing"
+            or self.command.account_label != account_label
+            or self.command.strategy_name != strategy_name
+        ):
+            return None
+        self.command = replace(self.command, session_id=session_id)
+        return self.command
+
+    async def load_executing_commands_for_recovery(
+        self,
+        *,
+        account_label: str,
+        strategy_name: str,
+        limit: int = 16,
+    ) -> tuple[RollbackCommand, ...]:
+        if (
+            self.command.status == "executing"
+            and self.command.account_label == account_label
+            and self.command.strategy_name == strategy_name
+        ):
+            return (self.command,)
+        return ()
+
     async def complete_command(
         self,
         command_id: str,
@@ -109,8 +142,8 @@ async def test_dispatcher_claims_and_completes_one_shot_action_once() -> None:
         account_label="primary",
         strategy_name="orderflow_impulse",
         session_id="live-1",
-        cancel_all_open_entries=lambda: _record(calls, "cancel"),
-        request_flatten=lambda: _record(calls, "flatten"),
+        cancel_all_open_entries=lambda identity_at: _record(calls, "cancel"),
+        request_flatten=lambda identity_at: _record(calls, "flatten"),
         clock=lambda: NOW,
     )
 
@@ -129,8 +162,8 @@ async def test_dispatcher_rejects_event_without_matching_command_type() -> None:
         account_label="primary",
         strategy_name="orderflow_impulse",
         session_id="live-1",
-        cancel_all_open_entries=lambda: _record(calls, "cancel"),
-        request_flatten=lambda: _record(calls, "flatten"),
+        cancel_all_open_entries=lambda identity_at: _record(calls, "cancel"),
+        request_flatten=lambda identity_at: _record(calls, "flatten"),
         clock=lambda: NOW,
     )
 

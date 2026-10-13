@@ -924,7 +924,10 @@ accounts:
 
     assert result.exit_code == 0
     assert captured["code_generation"] == "a" * 40
-    assert captured["lease_owner"] == "live-worker"
+    # `prepare` writes risk limits only; it does not take the dispatch lease.
+    assert "lease_owner" not in captured
+    assert "lease_ttl_seconds" not in captured
+    assert captured["account_label"] == "primary"
 
 
 def test_prepare_rejects_manifest_lease_owner_mismatch(tmp_path: Path) -> None:

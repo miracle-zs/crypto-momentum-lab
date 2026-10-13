@@ -68,7 +68,9 @@ class AccountJournal:
         self._fact_conflicts: list[AccountFactConflict] = []
         self._integrity_issues: list[str] = []
         self._snapshots: list[AccountPositionSnapshot] = []
+        self._snapshots_by_key: dict[datetime, tuple[AccountPositionSnapshot, ...]] = {}
         self._boundaries: list[ExitOrderSubmissionFact] = []
+        self._boundaries_by_key: dict[str, tuple[ExitOrderSubmissionFact, ...]] = {}
         self._coverage: FactCoverageInterval | None = None
         self._recovery_checkpoint: PositionRecoveryCheckpoint | None = None
         self._high_watermark_trade_at: datetime | None = None
@@ -230,6 +232,10 @@ class AccountJournal:
             raise ValueError(
                 "Snapshot position side does not match journal position key"
             )
+        existing_variants = self._snapshots_by_key.get(snapshot.observed_at, ())
+        if snapshot in existing_variants:
+            return
+        self._snapshots_by_key[snapshot.observed_at] = (*existing_variants, snapshot)
         self._snapshots.append(snapshot)
         self._pending_snapshots.append(snapshot)
         self._update_latest_event_at(snapshot.observed_at)
@@ -244,6 +250,10 @@ class AccountJournal:
             )
         if boundary.position_side != self._position_key.position_side:
             raise ValueError("Boundary position side does not match journal key")
+        existing_variants = self._boundaries_by_key.get(boundary.order_id, ())
+        if boundary in existing_variants:
+            return
+        self._boundaries_by_key[boundary.order_id] = (*existing_variants, boundary)
         self._boundaries.append(boundary)
         self._pending_boundaries.append(boundary)
         self._update_latest_event_at(boundary.submitted_at)
@@ -312,8 +322,6 @@ class AccountJournal:
         self._cached_facts_none = None
         self._revision += 1
 
-
-
     def record_fill_load_provenance(
         self,
         provenance: AccountFillLoadProvenance,
@@ -369,7 +377,9 @@ class AccountJournal:
         candidate._fact_conflicts = list(self._fact_conflicts)
         candidate._integrity_issues = list(self._integrity_issues)
         candidate._snapshots = list(self._snapshots)
+        candidate._snapshots_by_key = dict(self._snapshots_by_key)
         candidate._boundaries = list(self._boundaries)
+        candidate._boundaries_by_key = dict(self._boundaries_by_key)
         candidate._late_trade_ids = set(self._late_trade_ids)
         candidate._pending_fills = list(self._pending_fills)
         candidate._pending_snapshots = list(self._pending_snapshots)
@@ -413,7 +423,15 @@ class AccountJournal:
                 journal._conflicts.append(fill)
         journal._conflicts.extend(cut.facts.conflicting_fills)
         journal._snapshots = list(cut.facts.snapshots)
+        snapshots_by_key: dict[datetime, list[AccountPositionSnapshot]] = {}
+        for s in journal._snapshots:
+            snapshots_by_key.setdefault(s.observed_at, []).append(s)
+        journal._snapshots_by_key = {k: tuple(v) for k, v in snapshots_by_key.items()}
         journal._boundaries = list(cut.facts.exit_boundaries)
+        boundaries_by_key: dict[str, list[ExitOrderSubmissionFact]] = {}
+        for b in journal._boundaries:
+            boundaries_by_key.setdefault(b.order_id, []).append(b)
+        journal._boundaries_by_key = {k: tuple(v) for k, v in boundaries_by_key.items()}
         journal._coverage = cut.facts.coverage
         journal._recovery_checkpoint = cut.checkpoint
         journal._fact_conflicts = list(cut.facts.fact_conflicts)

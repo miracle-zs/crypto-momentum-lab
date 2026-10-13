@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
+import os
 import time
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
@@ -90,17 +92,16 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
     PositionKey,
 )
-from crypto_momentum_lab.domain.execution.recovery_models import (
-    StreamCheckpointAdoption,
-)
 from crypto_momentum_lab.domain.execution.reservation_registry import (
     ExecutionReadinessError,
-    ReservationRegistry,
 )
 from crypto_momentum_lab.domain.execution.trade_command import (
     ExitPolicyMode,
     PositionReservation,
     TradeCommandType,
+)
+from crypto_momentum_lab.persistence.postgres.risk_repository import (
+    LeaseOwnershipError,
 )
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.domain.trading import TradeSide
@@ -115,8 +116,47 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger()
 
+# Unit tests that exercise scheduling, persistence and recovery install
+# this explicit opt-out instead of silently disabling ownership checks in
+# their own constructors.  Production never sets it, so dispatch stays
+# fail-closed when no ownership verifier is configured.
+_TEST_LEASE_OPT_OUT_ENV = "CML_TEST_DISABLE_DISPATCH_LEASE"
+
 
 OrderExecutionBackend = _OrderExecutionPort
+
+
+@dataclass(frozen=True, slots=True)
+class DispatchOwnership:
+    """The single dispatch identity and its full lease token.
+
+    ``owner`` is the configured account owner (shareable by successive
+    processes) and ``lease_id``/``code_generation`` pin the exact active
+    ``trading_leases`` row.  Every write path re-reads the durable binding, so
+    ownership is never inferred from a cached boolean, from the owner string
+    alone, or from the mere presence of an active lease row.
+    """
+
+    owner: str
+    lease_id: str
+    code_generation: str | None = None
+
+    def __post_init__(self) -> None:
+        for value, field_name in (
+            (self.owner, "owner"),
+            (self.lease_id, "lease_id"),
+        ):
+            if not isinstance(value, str):
+                raise TypeError("dispatch ownership fields must be strings")
+        if self.code_generation is not None and not isinstance(
+            self.code_generation, str
+        ):
+            raise TypeError("code_generation must be a string when present")
+
+
+# A verifier returns the current ownership token, or a boolean for the legacy
+# compatibility path where no lease identity was ever captured.
+type LeaseVerifier = Callable[[], DispatchOwnership | bool | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -456,6 +496,8 @@ class OrderExecutionCoordinator:
         submission_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         order_observation_capacity: int = 256,
         on_projection_recovery_required: Callable[[str], None] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        lease_required: bool | None = None,
     ) -> None:
         if not environment.strip():
             raise ValueError("environment must not be empty")
@@ -482,11 +524,12 @@ class OrderExecutionCoordinator:
         self._execution_book = execution_book
         self._order_observation_capacity = order_observation_capacity
         self._on_projection_recovery_required = on_projection_recovery_required
+        self._clock = clock
         self._schedulers: dict[OrderExecutionKey, _KeyCommandScheduler] = {}
         self._scheduler_lock = asyncio.Lock()
         self._closed = False
         self._order_observations: asyncio.Queue[
-            tuple[OrderExecutionPlan, OrderExecutionResult]
+            tuple[OrderExecutionPlan, OrderExecutionResult, float]
         ] = asyncio.Queue(maxsize=order_observation_capacity)
         self._order_observer_task: asyncio.Task[None] | None = None
         self._observation_high_watermark = 0
@@ -494,6 +537,7 @@ class OrderExecutionCoordinator:
         self._observation_enqueued_count = 0
         self._observation_dequeued_count = 0
         self._observation_oldest_enqueued_at: float | None = None
+        self._observation_timestamps: deque[float] = deque()
         self._entry_submissions_blocked = False
         self._active_entry_submissions = 0
         self._entry_submissions_idle = asyncio.Event()
@@ -503,10 +547,83 @@ class OrderExecutionCoordinator:
             PositionKey, tuple[str | None, str | None, EvidencePendingReason]
         ] = {}
         self._active_stream: tuple[str, str] | None = None
+        self._lease_verifier: LeaseVerifier | None = None
+        resolved_lease_required = (
+            os.environ.get(_TEST_LEASE_OPT_OUT_ENV, "").strip() != "1"
+            if lease_required is None
+            else bool(lease_required)
+        )
+        self._lease_required = resolved_lease_required
 
-    @property
-    def reservation_registry(self) -> ReservationRegistry:
-        return self._execution_book.coordinator
+    def set_lease_verifier(self, verifier: LeaseVerifier | None) -> None:
+        """Configure the dispatch lease verifier.
+
+        The verifier may be sync or async and returns the current
+        :class:`DispatchOwnership` token (or a boolean for explicit
+        compatibility).  A boolean can never prove ownership of a specific
+        lease, so it is treated as an unowned pass/fail signal.
+        """
+        self._lease_verifier = verifier
+
+    async def _current_ownership(self) -> DispatchOwnership | None:
+        if self._lease_verifier is None:
+            if self._lease_required:
+                # Live dispatch fails closed: a coordinator that was never
+                # given an ownership verifier must not write or POST.
+                return None
+            return DispatchOwnership(owner="", lease_id="")
+        result = self._lease_verifier()
+        if inspect.isawaitable(result):
+            result = await result
+        if isinstance(result, DispatchOwnership):
+            return result
+        if result:
+            return DispatchOwnership(owner="", lease_id="")
+        return None
+
+    async def _verified_live_ownership(
+        self,
+        ownership: DispatchOwnership,
+    ) -> DispatchOwnership:
+        """Re-verify the captured token against durable state before a side effect.
+
+        A non-empty cached token is not proof: the lease may have expired, been
+        renewed under a new generation, or been taken over by another process
+        that reuses the same owner string.  The live verifier re-reads the
+        durable binding and this method requires the *whole* token to match.
+        """
+
+        if not self._lease_required:
+            return ownership
+        current = await self._current_ownership()
+        if current is None:
+            raise LeaseOwnershipError(
+                "cannot proceed: trading lease expired, not held, or owned by "
+                "another worker"
+            )
+        if (
+            current.owner != ownership.owner
+            or current.lease_id != ownership.lease_id
+            or current.code_generation != ownership.code_generation
+        ):
+            raise LeaseOwnershipError(
+                "cannot proceed: dispatch ownership token no longer matches the "
+                "durable lease"
+            )
+        return ownership
+
+    def _require_ownership(
+        self,
+        ownership: DispatchOwnership | None,
+        *,
+        action: str,
+    ) -> DispatchOwnership:
+        if ownership is None:
+            raise LeaseOwnershipError(
+                f"cannot {action}: trading lease expired, not held, or owned "
+                "by another worker"
+            )
+        return ownership
 
     @property
     def execution_book(self) -> ExecutionBook:
@@ -724,7 +841,6 @@ class OrderExecutionCoordinator:
                 position_side=key.position_side,
             )
             proof = None
-            adoption = None
             scan = scans_by_key.get(key)
             if scan is not None:
                 assert (
@@ -737,40 +853,6 @@ class OrderExecutionCoordinator:
                 )
                 proof = coverage_from_scan(scan, snapshot=pos, scope=target_scope)
                 assert proof.load_provenance is not None
-                if (
-                    scan.source_anchor_kind == "recovery_checkpoint"
-                    and proof.load_provenance.is_complete
-                ):
-                    assert (
-                        scan.source_stream_id is not None
-                        and scan.source_stream_epoch is not None
-                    )
-                    parent_scope = AccountFactStreamScope.for_position_key(
-                        key,
-                        stream_id=scan.source_stream_id,
-                        stream_epoch=scan.source_stream_epoch,
-                    )
-                    if parent_scope != target_scope:
-                        parent = await self._execution_book.load_recovery_checkpoint(
-                            parent_scope
-                        )
-                        if parent is None:
-                            note_waiting(
-                                key, EvidencePendingReason.PARENT_CHECKPOINT_UNAVAILABLE
-                            )
-                            continue
-                        if parent.checkpoint_id != scan.source_anchor_id:
-                            self._waiting_for_evidence.pop(key, None)
-                            conflict_reasons[
-                                "fill scan parent checkpoint identity mismatch"
-                            ] += 1
-                            continue
-                        adoption = StreamCheckpointAdoption(
-                            parent_checkpoint=parent,
-                            target_scope=target_scope,
-                            fill_load_provenance=proof.load_provenance,
-                            target_event_cut=scan.observed_at,
-                        )
             result = await self._execution_book.observe(
                 ExecutionEvidence(
                     evidence_id=scoped_evidence_id,
@@ -782,7 +864,6 @@ class OrderExecutionCoordinator:
                     fill_load_provenance=None
                     if proof is None
                     else proof.load_provenance,
-                    stream_checkpoint_adoption=adoption,
                     source_anchor_snapshot=None
                     if scan is None
                     else scan.source_anchor_snapshot,
@@ -954,8 +1035,27 @@ class OrderExecutionCoordinator:
                 f"{plan.client_order_id}: {result.reason}"
             )
 
-    async def _ensure_reservation(self, plan: OrderExecutionPlan) -> None:
+    async def _ensure_reservation(
+        self,
+        plan: OrderExecutionPlan,
+        ownership: DispatchOwnership | None = None,
+    ) -> None:
+        resolved = (
+            ownership if ownership is not None else await self._current_ownership()
+        )
+        self._require_ownership(resolved, action="record dispatch")
+        entry = self._execution_book.get_outbox(plan.client_order_id)
+        if entry is not None and entry.state in (
+            DispatchState.REJECTED,
+            DispatchState.TERMINAL,
+        ):
+            raise OrderPreSubmissionError(
+                f"execution command {plan.client_order_id} is in "
+                f"non-dispatchable state {entry.state.value}"
+            )
         if not self._execution_book.has_reservation_repository:
+            if entry is not None and entry.state == DispatchState.PREPARED:
+                await self._execution_book.record_dispatch(plan.client_order_id)
             return
         try:
             if plan.strategy_name is None:
@@ -979,12 +1079,24 @@ class OrderExecutionCoordinator:
                 f"{prefix}{plan.client_order_id}: {err}"
             ) from err
         self._require_accepted_execution_result(plan, act_res)
+        # Re-verify the same identity against durable state: a takeover may
+        # have happened while the reservation transaction was waiting.
+        await self._verified_live_ownership(
+            self._require_ownership(resolved, action="record dispatch")
+        )
+        entry = self._execution_book.get_outbox(plan.client_order_id)
+        if entry is not None and entry.state == DispatchState.PREPARED:
+            await self._execution_book.record_dispatch(plan.client_order_id)
 
     async def _atomic_prepare_submission(
         self,
         plan: OrderExecutionPlan,
         preparation: OrderSubmissionPreparation,
+        ownership: DispatchOwnership | None,
     ) -> PreparedOrderSubmission | None:
+        ownership = self._require_ownership(
+            ownership, action="prepare submission"
+        )
         if self._submission_repository is None:
             raise OrderPreSubmissionError("submission repository is not configured")
         if not self._execution_book.has_execution_unit_of_work:
@@ -1016,6 +1128,13 @@ class OrderExecutionCoordinator:
                 open_position_symbols=preparation.open_position_symbols,
                 exposure_notional=preparation.exposure_notional,
                 baseline_observed_at=preparation.baseline_observed_at,
+                expected_owner=(
+                    ownership.owner or None if self._lease_required else None
+                ),
+                expected_lease_id=(
+                    ownership.lease_id or None if self._lease_required else None
+                ),
+                lease_required=self._lease_required,
             )
             if prepared is None:
                 raise OrderAlreadyPreparedError("submission already prepared")
@@ -1086,19 +1205,17 @@ class OrderExecutionCoordinator:
         if cumulative_quantity < Decimal("0"):
             raise ValueError("exchange cumulative executed quantity cannot be negative")
         average_price = res.average_price
-        if cumulative_quantity > Decimal("0") and average_price <= Decimal("0"):
-            if res.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
-                if self._execution_book.get_outbox(res.client_order_id) is not None:
-                    await self._execution_book.mark_unknown(
-                        res.client_order_id,
-                        reason="cumulative_fill_price_pending",
-                    )
-                return
-            raise RuntimeError(
-                "positive cumulative fill has no positive cumulative average price; "
-                "execution facts require recovery"
-            )
-        cumulative_quote = cumulative_quantity * average_price
+        if cumulative_quantity > Decimal("0") and (
+            average_price is None or average_price <= Decimal("0")
+        ):
+            if res.state is not ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
+                raise RuntimeError(
+                    "positive cumulative fill has no positive cumulative average "
+                    "price; execution facts require recovery"
+                )
+            cumulative_quote = Decimal("0")
+        else:
+            cumulative_quote = cumulative_quantity * (average_price or Decimal("0"))
         position_side = plan.position_side.value
         order_event = ExchangeOrderEvent(
             # Replaced with the canonical content-addressed ID before this
@@ -1122,92 +1239,97 @@ class OrderExecutionCoordinator:
                 "position_side": position_side,
             },
         )
-        try:
-            stream_id: str | None = None
-            stream_epoch: str | None = None
-            if self._execution_book.has_execution_unit_of_work:
-                current_view = await self._execution_book.read(scope)
-                stream_scope = current_view.stream_scope
-                if stream_scope is not None:
-                    stream_id = stream_scope.stream_id
-                    stream_epoch = stream_scope.stream_epoch
+        stream_id: str | None = None
+        stream_epoch: str | None = None
+        if self._execution_book.has_execution_unit_of_work:
+            current_view = await self._execution_book.read(scope)
+            stream_scope = current_view.stream_scope
+            if stream_scope is not None:
+                stream_id = stream_scope.stream_id
+                stream_epoch = stream_scope.stream_epoch
+            else:
+                active = self._execution_book.get_active_stream(
+                    self._environment, self._account_label
+                )
+                if active is not None:
+                    stream_id, stream_epoch = active
+                elif self._active_stream is not None:
+                    stream_id, stream_epoch = self._active_stream
                 else:
-                    active = self._execution_book.get_active_stream(
-                        self._environment, self._account_label
+                    raise RuntimeError(
+                        "cumulative order report has no restored Book stream "
+                        "identity and no active stream scope is registered"
                     )
-                    if active is not None:
-                        stream_id, stream_epoch = active
-                    elif self._active_stream is not None:
-                        stream_id, stream_epoch = self._active_stream
-                    else:
-                        raise RuntimeError(
-                            "cumulative order report has no restored Book stream "
-                            "identity and no active stream scope is registered"
-                        )
-            evidence = ExecutionEvidence(
-                evidence_id=order_event.event_id,
-                scope=scope,
-                observed_at=now_dt,
-                order_event=order_event,
-                stream_id=stream_id,
-                stream_epoch=stream_epoch,
-                cumulative_order=ExecutionCumulativeOrderReport(
+        evidence = ExecutionEvidence(
+            evidence_id=order_event.event_id,
+            scope=scope,
+            observed_at=now_dt,
+            order_event=order_event,
+            stream_id=stream_id,
+            stream_epoch=stream_epoch,
+            cumulative_order=(
+                None
+                if cumulative_quantity > Decimal("0")
+                and (average_price is None or average_price <= Decimal("0"))
+                else ExecutionCumulativeOrderReport(
                     order_id=res.client_order_id,
                     cumulative_quantity=cumulative_quantity,
                     cumulative_quote=cumulative_quote,
                     observed_at=now_dt,
-                ),
-                settlement_fills=settlement_fills,
-            )
-            evidence_id = content_addressed_evidence_id(evidence, prefix="order")
-            evidence = replace(
-                evidence,
-                evidence_id=evidence_id,
-                order_event=replace(order_event, event_id=evidence_id),
-            )
+                )
+            ),
+            settlement_fills=settlement_fills,
+        )
+        evidence_id = content_addressed_evidence_id(evidence, prefix="order")
+        evidence = replace(
+            evidence,
+            evidence_id=evidence_id,
+            order_event=replace(order_event, event_id=evidence_id),
+        )
+        try:
             result = await self._execution_book.observe(evidence)
-            if isinstance(result, WaitingForEvidence):
-                if res.state.terminal:
-                    self._execution_book.require_command_recovery(res.client_order_id)
-                    log.warning(
-                        "order_terminal_evidence_waiting_for_recovery",
-                        client_order_id=res.client_order_id,
-                        state=res.state.value,
-                        reason=result.reason.value,
-                    )
-                    return
-                raise ExecutionReadinessError(
-                    "cumulative order evidence is waiting for recovery: "
-                    + result.reason.value
-                )
-            if isinstance(result, EvidenceConflict):
-                raise RuntimeError(
-                    "cumulative order evidence was rejected: " + result.reason
-                )
         except Exception as observe_err:
-            if self._execution_book.get_outbox(res.client_order_id) is not None:
-                try:
-                    await self._execution_book.mark_unknown(
-                        res.client_order_id,
-                        reason=(
-                            "exchange result could not be persisted: "
-                            f"{observe_err}"
-                        ),
-                    )
-                except Exception as transition_err:
-                    raise RuntimeError(
-                        "exchange returned a result, fact persistence failed, and "
-                        "the UNKNOWN outbox transition also failed: "
-                        f"{transition_err}"
-                    ) from transition_err
+            if hasattr(self._execution_book, "record_indeterminate_observation"):
+                await self._execution_book.record_indeterminate_observation(
+                    res.client_order_id,
+                    error=observe_err,
+                    occurred_at=now_dt,
+                )
             raise
+        if isinstance(result, WaitingForEvidence):
+            if res.state.terminal:
+                log.warning(
+                    "order_terminal_evidence_waiting_for_recovery",
+                    client_order_id=res.client_order_id,
+                    state=res.state.value,
+                    reason=result.reason.value,
+                )
+                return
+            raise ExecutionReadinessError(
+                "cumulative order evidence is waiting for recovery: "
+                + result.reason.value
+            )
+        if isinstance(result, EvidenceConflict):
+            raise RuntimeError(
+                "cumulative order evidence was rejected: " + result.reason
+            )
         if isinstance(result, Applied) and result.recovery_required:
-            self._execution_book.require_command_recovery(res.client_order_id)
             log.warning(
                 "order_facts_applied_reservation_recovery_required",
                 client_order_id=res.client_order_id,
                 diagnostics=result.diagnostics,
             )
+
+    async def _record_submission_failure(
+        self,
+        plan: OrderExecutionPlan,
+        error: BaseException,
+        *,
+        before_exchange_post: bool,
+    ) -> None:
+        await self._compensate_submission_failure(
+            plan, error, before_exchange_post=before_exchange_post
+        )
 
     async def _compensate_submission_failure(
         self,
@@ -1218,18 +1340,64 @@ class OrderExecutionCoordinator:
     ) -> None:
         """Run failure cleanup without ever masking or amplifying the failure.
 
-        Cleanup can itself fail (the durable order may already be terminal, or
-        persistence may be unavailable). A recoverable cleanup condition must
-        never replace the original submission outcome, and it must leave the
-        command gated behind recovery instead of dispatchable.
+        Delegates failure settlement to ExecutionBook, which holds the transition
+        to REJECTED (with reservation release) or UNKNOWN, and keeps the command
+        recoverable if compensation fails.
         """
         try:
-            await self._record_submission_failure(
-                plan,
-                error,
-                before_exchange_post=before_exchange_post,
-            )
+            if hasattr(self._execution_book, "compensate_submission_failure"):
+                await self._execution_book.compensate_submission_failure(
+                    plan.client_order_id,
+                    error,
+                    before_exchange_post=before_exchange_post,
+                    intent_id=plan.intent_id,
+                    occurred_at=self._submission_clock(),
+                    submission_repository=self._submission_repository,
+                )
+            else:
+                def _is_identity_collision(err: BaseException | None) -> bool:
+                    if err is None:
+                        return False
+                    if isinstance(
+                        err,
+                        (
+                            OrderAlreadyPreparedError,
+                            OrderCommandConflictError,
+                            ValueError,
+                        ),
+                    ):
+                        return True
+                    if "client order ID is already bound" in str(err):
+                        return True
+                    cause = getattr(err, "__cause__", None)
+                    return bool(cause and _is_identity_collision(cause))
+
+                if _is_identity_collision(error):
+                    return
+
+                if hasattr(self._execution_book, "mark_rejected"):
+                    await self._execution_book.mark_rejected(
+                        plan.client_order_id,
+                        reason=str(error),
+                        intent_id=plan.intent_id,
+                    )
+                if before_exchange_post and self._submission_repository is not None:
+                    if hasattr(self._submission_repository, "mark_submission_rejected"):
+                        try:
+                            await self._submission_repository.mark_submission_rejected(
+                                plan.client_order_id,
+                                reason=str(error),
+                                occurred_at=self._submission_clock(),
+                                intent_id=plan.intent_id,
+                            )
+                        except Exception:
+                            pass
         except Exception as compensation_error:
+            if hasattr(self._execution_book, "require_command_recovery"):
+                try:
+                    self._execution_book.require_command_recovery(plan.client_order_id)
+                except Exception:
+                    pass
             log.error(
                 "order_submission_failure_compensation_failed",
                 account_label=self._account_label,
@@ -1238,113 +1406,6 @@ class OrderExecutionCoordinator:
                 original_error_type=type(error).__name__,
                 compensation_error_type=type(compensation_error).__name__,
                 compensation_error=str(compensation_error),
-            )
-            try:
-                self._execution_book.require_command_recovery(
-                    plan.client_order_id
-                )
-            except Exception:
-                # Keeping the command recoverable is best effort here; the
-                # original failure must still reach the caller unchanged.
-                pass
-
-    async def _record_submission_failure(
-        self,
-        plan: OrderExecutionPlan,
-        error: BaseException,
-        *,
-        before_exchange_post: bool,
-    ) -> None:
-        def _is_identity_collision(err: BaseException | None) -> bool:
-            if err is None:
-                return False
-            if isinstance(err, (OrderAlreadyPreparedError, OrderCommandConflictError)):
-                return True
-            if "client order ID is already bound" in str(err):
-                return True
-            cause = getattr(err, "__cause__", None)
-            return bool(cause and _is_identity_collision(cause))
-
-        if _is_identity_collision(error):
-            # A concurrent or previous worker owns this order or it is already
-            # active/prepared. Preserving identity requires NEVER rejecting
-            # an already prepared order.
-            return
-        if self._execution_book.get_outbox(plan.client_order_id) is None:
-            if hasattr(self._execution_book, "has_command_repository") and (
-                self._execution_book.has_command_repository
-                or self._execution_book.has_reservation_repository
-            ):
-                try:
-                    await self._execution_book.mark_rejected(
-                        plan.client_order_id,
-                        reason=str(error),
-                        intent_id=plan.intent_id,
-                    )
-                except Exception:
-                    pass
-            if before_exchange_post and self._submission_repository is not None:
-                if hasattr(self._submission_repository, "mark_submission_rejected"):
-                    try:
-                        await self._submission_repository.mark_submission_rejected(
-                            plan.client_order_id,
-                            reason=str(error),
-                            occurred_at=self._submission_clock(),
-                            intent_id=plan.intent_id,
-                        )
-                    except Exception:
-                        pass
-            return
-        if before_exchange_post or isinstance(
-            error,
-            (
-                OrderAlreadyPreparedError,
-                OrderPreSubmissionError,
-                ExchangeOrderRejectedError,
-                LiveSubmissionDisabledError,
-            ),
-        ):
-            await self._execution_book.mark_rejected(
-                plan.client_order_id,
-                reason=str(error),
-                intent_id=plan.intent_id,
-            )
-            if before_exchange_post and self._submission_repository is not None:
-                if hasattr(self._submission_repository, "mark_submission_rejected"):
-                    try:
-                        await self._submission_repository.mark_submission_rejected(
-                            plan.client_order_id,
-                            reason=str(error),
-                            occurred_at=self._submission_clock(),
-                            intent_id=plan.intent_id,
-                        )
-                    except Exception:
-                        pass
-            return
-        await self._execution_book.mark_unknown(
-            plan.client_order_id,
-            reason=str(error) or "submission outcome unknown",
-        )
-
-    async def _mark_dispatching_if_accepted(self, plan: OrderExecutionPlan) -> None:
-        entry = self._execution_book.get_outbox(plan.client_order_id)
-        if entry is None:
-            if (
-                self._execution_book.has_command_repository
-                or self._execution_book.has_reservation_repository
-            ):
-                raise OrderPreSubmissionError(
-                    f"execution command {plan.client_order_id} has no accepted outbox"
-                )
-            # In-memory coordinators are used by isolated scheduler tests and
-            # adapters. Durable live wiring must supply both repositories.
-            return
-        if entry.state == DispatchState.PREPARED:
-            await self._execution_book.mark_dispatching(plan.client_order_id)
-        elif entry.state in (DispatchState.REJECTED, DispatchState.TERMINAL):
-            raise OrderPreSubmissionError(
-                f"execution command {plan.client_order_id} is in "
-                f"non-dispatchable state {entry.state.value}"
             )
 
     async def _observe_returned_order_result(
@@ -1392,7 +1453,7 @@ class OrderExecutionCoordinator:
             enqueued_count=self._observation_enqueued_count,
             dequeued_count=self._observation_dequeued_count,
             oldest_pending_age_seconds=(
-                None if oldest is None else max(0.0, time.monotonic() - oldest)
+                None if oldest is None else max(0.0, self._clock() - oldest)
             ),
         )
 
@@ -1402,13 +1463,15 @@ class OrderExecutionCoordinator:
         if self._closed:
             self._handle_projection_overflow(result.client_order_id)
             return
+        now = self._clock()
         try:
-            self._order_observations.put_nowait((plan, result))
+            self._order_observations.put_nowait((plan, result, now))
         except asyncio.QueueFull:
             self._handle_projection_overflow(result.client_order_id)
             return
+        self._observation_timestamps.append(now)
         if self._observation_oldest_enqueued_at is None:
-            self._observation_oldest_enqueued_at = time.monotonic()
+            self._observation_oldest_enqueued_at = now
         self._observation_enqueued_count += 1
         self._observation_high_watermark = max(
             self._observation_high_watermark, self._order_observations.qsize()
@@ -1422,11 +1485,16 @@ class OrderExecutionCoordinator:
         try:
             while not self._order_observations.empty():
                 try:
-                    plan, result = self._order_observations.get_nowait()
+                    plan, result, _enqueued_at = self._order_observations.get_nowait()
                 except asyncio.QueueEmpty:
                     break
+                self._observation_timestamps.popleft()
                 self._observation_dequeued_count += 1
-                if self._order_observations.empty():
+                if self._observation_timestamps:
+                    self._observation_oldest_enqueued_at = (
+                        self._observation_timestamps[0]
+                    )
+                else:
                     self._observation_oldest_enqueued_at = None
                 try:
                     await self._apply_returned_order_result(plan, result)
@@ -1507,8 +1575,11 @@ class OrderExecutionCoordinator:
 
         async def operation() -> OrderExecutionResult:
             async with self._entry_submission(plan):
-                await self._ensure_reservation(plan)
-                await self._mark_dispatching_if_accepted(plan)
+                submit_ownership = self._require_ownership(
+                    await self._current_ownership(), action="record dispatch"
+                )
+                await self._ensure_reservation(plan, ownership=submit_ownership)
+                await self._verified_live_ownership(submit_ownership)
                 try:
                     res = await self._backend.submit(
                         plan,
@@ -1582,8 +1653,15 @@ class OrderExecutionCoordinator:
         preparation: OrderSubmissionPreparation,
     ) -> OrderExecutionResult | None:
         async with self._entry_submission(plan):
+            # Ownership is captured before the first write and re-verified at
+            # every later step of the same dispatch attempt.
+            ownership = self._require_ownership(
+                await self._current_ownership(), action="prepare submission"
+            )
             try:
-                prepared = await self._atomic_prepare_submission(plan, preparation)
+                prepared = await self._atomic_prepare_submission(
+                    plan, preparation, ownership
+                )
             except Exception as prepare_err:
                 await self._compensate_submission_failure(
                     plan,
@@ -1593,6 +1671,11 @@ class OrderExecutionCoordinator:
                 raise
             if prepared is None:
                 return None
+            await self._verified_live_ownership(
+                self._require_ownership(
+                    ownership, action="submit order before exchange post"
+                )
+            )
             try:
                 res = await self._backend.submit(
                     plan,
@@ -1626,6 +1709,10 @@ class OrderExecutionCoordinator:
             return replace(res, prepared_at=prepared.submitting_event.occurred_at)
 
     async def cancel_order(self, plan: OrderExecutionPlan) -> OrderExecutionResult:
+        cancel_ownership = self._require_ownership(
+            await self._current_ownership(),
+            action="cancel order before exchange cancel",
+        )
         key = OrderExecutionKey(
             account_label=self._account_label,
             symbol=plan.symbol.strip().upper(),
@@ -1635,7 +1722,7 @@ class OrderExecutionCoordinator:
             scheduler = self._schedulers.get(key)
         if scheduler is not None and scheduler.cancel_queued(plan.client_order_id):
             if self._execution_book.get_outbox(plan.client_order_id) is not None:
-                await self._execution_book.mark_rejected(
+                await self._execution_book.abort_prepared_command(
                     plan.client_order_id,
                     reason="cancelled_before_submission",
                     intent_id=plan.intent_id,
@@ -1648,6 +1735,7 @@ class OrderExecutionCoordinator:
             )
 
         async def cancel_and_project() -> OrderExecutionResult:
+            await self._verified_live_ownership(cancel_ownership)
             result = await self._backend.cancel_order(plan)
             await self._observe_returned_order_result(plan, result)
             return result
@@ -1741,13 +1829,16 @@ class OrderExecutionCoordinator:
                 pass
         while not self._order_observations.empty():
             try:
-                plan, result = self._order_observations.get_nowait()
+                plan, result, _enqueued_at = self._order_observations.get_nowait()
             except asyncio.QueueEmpty:
                 break
+            if self._observation_timestamps:
+                self._observation_timestamps.popleft()
             try:
                 self._handle_projection_overflow(result.client_order_id)
             finally:
                 self._order_observations.task_done()
+        self._observation_oldest_enqueued_at = None
         await self._order_observations.join()
 
     def _remove_idle_scheduler(self, key: OrderExecutionKey) -> None:

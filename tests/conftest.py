@@ -48,6 +48,13 @@ from crypto_momentum_lab.persistence.postgres.session import (
 )
 
 
+# Unit and acceptance fixtures construct coordinators directly to exercise
+# scheduling, persistence and recovery.  Dispatch ownership is opt-out here so
+# those fixtures do not each have to disable it; the dedicated ownership
+# acceptance test sets `lease_required=True` explicitly.
+os.environ.setdefault("CML_TEST_DISABLE_DISPATCH_LEASE", "1")
+
+
 class FakeUniverseMarketData:
     def __init__(self) -> None:
         self.contracts: tuple[ContractMetadata, ...] = ()

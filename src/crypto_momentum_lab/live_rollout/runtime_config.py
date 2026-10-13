@@ -101,6 +101,7 @@ class LiveRuntimeIdentity:
     strategy_name: str
     session_id: str
     operator: str
+    lease_owner: str
     strategy_config_hash: str
     git_commit_hash: str
 
@@ -113,8 +114,9 @@ class LiveRuntimeMarket:
     market_quote_hub_url: str
     market_quote_volume_hub_url: str
     market_websocket_url: str
-    account_event_hub_url: str
-    risk_control_hub_url: str | None
+    account_event_hub_url: str | None = None
+    risk_control_hub_url: str | None = None
+    user_data_websocket_url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +158,8 @@ class LiveRuntimeCredentials:
     base_url: str
     api_key: str
     api_secret: str
+    read_api_key: str | None = None
+    read_api_secret: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

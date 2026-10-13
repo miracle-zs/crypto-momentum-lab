@@ -808,8 +808,6 @@ def test_dashboard_only_deployment_mode_is_configured() -> None:
         ("dashboard", 0, 0, "running|healthy", 0),
         ("live-strategy", 0, 1, "running|healthy", 1),
         ("live-strategy", 1, 0, "running|healthy", 0),
-        ("execution-account-live", 1, 0, "running|healthy", 1),
-        ("execution-account-live", 0, 1, "running|healthy", 0),
         ("market-data", 1, 1, "running|healthy", 1),
         ("market-data", 0, 0, "running|unhealthy", 1),
         ("market-data", 0, 0, "exited|none", 1),
@@ -934,3 +932,105 @@ def test_destructive_live_schema_migrations_are_blocked_from_registry() -> None:
     assert "destructive_schema_changed" in script
     assert "Refusing Live deployment" in script
     assert "20261005_0047_drop_unused_risk_state_age_limits.py" in registry
+
+
+def test_legacy_writer_protection_and_account_isolation(tmp_path: Path) -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    start = script.index("stop_legacy_writers_for_services() {")
+    end = script.index("stop_live_services() {", start)
+    func_def = script[start:end]
+
+    # Test 1: Account isolation - live-strategy should NOT match account-2 container
+    mock_ps_acc2 = "cid2 execution-account-live-account-2-1 execution-account-live-account-2"
+    cmd_acc_isolation = f"""
+    live_stop_timeout=5
+    docker() {{
+        if [[ "$1" == "ps" ]]; then
+            printf "%s\\n" "{mock_ps_acc2}"
+        elif [[ "$1" == "stop" ]]; then
+            echo "STOPPED $2"
+        fi
+    }}
+    {func_def}
+    stop_legacy_writers_for_services live-strategy
+    """
+    res = subprocess.run(["bash", "-c", cmd_acc_isolation], capture_output=True, text=True)
+    assert res.returncode == 0
+    assert "STOPPED" not in res.stdout
+
+    # Test 2: Multiple IDs for target account are all stopped
+    mock_ps_multi = "cid1 execution-account-live-1 execution-account-live\\ncid2 execution-account-live-2 execution-account-live"
+    out_file = tmp_path / "cml_stopped_test.txt"
+    cmd_multi = f"""
+    live_stop_timeout=5
+    calls=()
+    docker() {{
+        if [[ "$1" == "ps" ]]; then
+            if [[ "${{#calls[@]}}" -ge 2 ]]; then
+                echo ""
+            else
+                printf "%b\\n" "{mock_ps_multi}"
+            fi
+        elif [[ "$1" == "stop" ]]; then
+            calls+=("${{@: -1}}")
+            echo "${{@: -1}}" >> "{out_file}"
+        fi
+    }}
+    {func_def}
+    stop_legacy_writers_for_services live-strategy
+    """
+    res = subprocess.run(["bash", "-c", cmd_multi], capture_output=True, text=True)
+    assert res.returncode == 0
+    assert "(cid1 cid2)" in res.stdout
+    assert out_file.read_text().splitlines() == ["cid1", "cid2"]
+
+    # Test 3: Query failure fails closed
+    cmd_query_fail = f"""
+    live_stop_timeout=5
+    docker() {{
+        if [[ "$1" == "ps" ]]; then
+            echo "daemon error" >&2
+            return 1
+        fi
+    }}
+    {func_def}
+    stop_legacy_writers_for_services live-strategy
+    """
+    res = subprocess.run(["bash", "-c", cmd_query_fail], capture_output=True, text=True)
+    assert res.returncode != 0
+    assert "failed to query docker containers" in res.stderr
+
+    # Test 4: Stop failure fails closed
+    cmd_stop_fail = f"""
+    live_stop_timeout=5
+    docker() {{
+        if [[ "$1" == "ps" ]]; then
+            echo "cid1 execution-account-live execution-account-live"
+        elif [[ "$1" == "stop" ]]; then
+            echo "stop failed" >&2
+            return 1
+        fi
+    }}
+    {func_def}
+    stop_legacy_writers_for_services live-strategy
+    """
+    res = subprocess.run(["bash", "-c", cmd_stop_fail], capture_output=True, text=True)
+    assert res.returncode != 0
+    assert "failed to stop legacy writer container" in res.stderr
+
+    # Test 5: Container still running after stop verification fails closed
+    cmd_still_running = f"""
+    live_stop_timeout=5
+    docker() {{
+        if [[ "$1" == "ps" ]]; then
+            echo "cid1 execution-account-live execution-account-live"
+        elif [[ "$1" == "stop" ]]; then
+            return 0
+        fi
+    }}
+    {func_def}
+    stop_legacy_writers_for_services live-strategy
+    """
+    res = subprocess.run(["bash", "-c", cmd_still_running], capture_output=True, text=True)
+    assert res.returncode != 0
+    assert "still running; aborting" in res.stderr

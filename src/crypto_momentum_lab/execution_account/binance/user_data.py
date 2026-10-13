@@ -53,6 +53,7 @@ class BinanceUserDataStreamMetrics:
 
 
 type UserDataEventSink = Callable[[BinanceUserDataEvent], Awaitable[None]]
+type ConnectionChangeSink = Callable[[bool, str | None], None]
 
 log = structlog.get_logger(__name__)
 
@@ -72,6 +73,7 @@ class BinanceUsdMUserDataStream:
         ping_interval_seconds: float = 20.0,
         ping_timeout_seconds: float = 20.0,
         event_queue_size: int = 256,
+        on_connection_change: ConnectionChangeSink | None = None,
     ) -> None:
         if not websocket_url.strip():
             raise ValueError("websocket_url must not be empty")
@@ -87,6 +89,7 @@ class BinanceUsdMUserDataStream:
             raise ValueError("event_queue_size must be positive")
         self._listen_key_client = listen_key_client
         self._on_event = on_event
+        self._on_connection_change = on_connection_change
         self._websocket_url = websocket_url.rstrip("/")
         self._keepalive_interval_seconds = keepalive_interval_seconds
         self._reconnect_delays = reconnect_delays
@@ -142,6 +145,24 @@ class BinanceUsdMUserDataStream:
 
     def set_handler(self, on_event: UserDataEventSink) -> None:
         self._on_event = on_event
+
+    def _notify_connection_change(
+        self,
+        connected: bool,
+        reason: str | None,
+    ) -> None:
+        """Report transport state; an observer failure never breaks the stream."""
+
+        if self._on_connection_change is None:
+            return
+        try:
+            self._on_connection_change(connected, reason)
+        except Exception as error:
+            log.warning(
+                "binance_user_data_connection_observer_failed",
+                connected=connected,
+                reason=error.__class__.__name__,
+            )
 
     async def run(self) -> None:
         listen_key: str | None = None
@@ -247,6 +268,7 @@ class BinanceUsdMUserDataStream:
                     name="binance-user-data-event-dispatcher",
                 )
                 log.info("binance_user_data_stream_connected")
+                self._notify_connection_change(True, "connected")
                 while not self._stopping:
                     if keepalive_failed.is_set():
                         return "keepalive_failed"
@@ -316,8 +338,8 @@ class BinanceUsdMUserDataStream:
                 pass
             async with self._connection_lock:
                 self._connection = None
+            self._notify_connection_change(False, "connection_closed")
         return "closed"
-
     async def _dispatch_events(
         self,
         event_queue: asyncio.Queue[BinanceUserDataEvent],

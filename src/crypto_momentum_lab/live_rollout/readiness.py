@@ -84,6 +84,7 @@ class LiveReadinessPublisher:
         order_observation_metrics: (
             Callable[[], Mapping[str, object]] | None
         ) = None,
+        account_facts_status: Callable[[], Mapping[str, object]] | None = None,
     ) -> None:
         for value, field_name in (
             (account_label, "account_label"),
@@ -99,6 +100,7 @@ class LiveReadinessPublisher:
         self._health = health
         self._on_publish = on_publish
         self._order_observation_metrics = order_observation_metrics
+        self._account_facts_status = account_facts_status
         self._account_label = account_label
         self._session_id = session_id
         self._strategy = strategy
@@ -261,6 +263,20 @@ class LiveReadinessPublisher:
             (current_time - self._latest_market_state_at).total_seconds(),
         )
 
+    def _account_facts_payload(self) -> Mapping[str, object]:
+        """Account-truth readiness, reported separately from market readiness."""
+
+        if self._account_facts_status is None:
+            return {"ready": None, "reason": "account_facts_unreported"}
+        try:
+            return dict(self._account_facts_status())
+        except Exception as error:
+            log.warning(
+                "live_readiness_account_facts_status_failed",
+                error_type=type(error).__name__,
+            )
+            return {"ready": None, "reason": "account_facts_status_failed"}
+
     def _observation_payload(self) -> Mapping[str, object]:
         """Best-effort observation-queue metrics; publishing must never fail."""
         if self._order_observation_metrics is None:
@@ -300,6 +316,7 @@ class LiveReadinessPublisher:
             "latest_market_state_age_seconds": (self._latest_market_state_age_seconds),
             "entry_enabled": self._entry_enabled,
             "entry_enabled_reason": self._entry_enabled_reason,
+            "account_facts": self._account_facts_payload(),
             "tradeability": {
                 "mode": "RUNNING",
                 "entry_gate_open": self._entry_enabled,

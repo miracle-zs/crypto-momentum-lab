@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from decimal import Decimal
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -21,6 +22,9 @@ from crypto_momentum_lab.domain.execution.evidence_grouping import (
     observe_evidence_group,
 )
 from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
+from crypto_momentum_lab.domain.execution.evidence_rules import (
+    _scoped_evidence_identity,
+)
 from crypto_momentum_lab.domain.execution.execution_evidence_processor import (
     is_terminal_settlement_recovery,
     is_unfilled_terminal_order,
@@ -49,10 +53,14 @@ from crypto_momentum_lab.domain.execution.ports import (
 from crypto_momentum_lab.domain.execution.position_book import PositionBook
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
+    JournalFactDelta,
 )
 from crypto_momentum_lab.domain.execution.position_recovery import (
     create_verified_recovery_checkpoint,
     rebuild_ordered_scan_journal,
+)
+from crypto_momentum_lab.domain.execution.recovery_models import (
+    StreamCheckpointAdoption,
 )
 
 log = structlog.get_logger(__name__)
@@ -87,7 +95,7 @@ async def observe_evidence_transaction(
     scope = durable_input.scope
     key = evidence.scope.to_position_key()
     canon = key.canonical_id
-    book.evidence_state.register_active_stream(evidence)
+    book.register_active_stream(evidence)
 
     for obs_attempt in range(3):
         async with book._mutation_lock(key):
@@ -101,7 +109,7 @@ async def observe_evidence_transaction(
             # transaction. This eliminates thousands of redundant staged copies
             # and transactions on every snapshot cycle.
             flat_result = apply_flat_snapshot(
-                book.evidence_state,
+                book,
                 evidence,
                 scope=scope,
                 requires_verified_stream_adoption=book._requires_verified_stream_adoption,
@@ -114,11 +122,19 @@ async def observe_evidence_transaction(
             # opening a transaction; account snapshots may contain thousands
             # of historical symbols on every refresh.
             terminal_without_fill = is_unfilled_terminal_order(evidence)
+            pos_book = book._books.get(canon)
+            is_flat = pos_book is not None and (
+                pos_book.get_view().total_quantity == Decimal("0")
+                and not pos_book.get_view().batches
+                and not pos_book.get_view().unallocated_quantity
+            )
             can_rollover, recovery_proof_required = evaluate_stream_rollover(
-                book.evidence_state,
-                evidence,
+                current_scope=book._stream_scopes.get(canon),
+                is_flat=is_flat,
+                active_reservations=book._coordinator.get_active_reservations(key),
+                evidence=evidence,
                 is_unfilled_terminal_order=terminal_without_fill,
-                requires_verified_stream_adoption=book._requires_verified_stream_adoption,
+                requires_verified_stream_adoption=book._requires_verified_stream_adoption(key),
             )
             if recovery_proof_required:
                 return WaitingForEvidence(
@@ -243,6 +259,87 @@ async def observe_evidence_transaction(
                         raise RuntimeError("stream adoption state is inconsistent")
 
                 adoption = evidence.stream_checkpoint_adoption
+                if adoption is None and adopting_epoch and head is not None:
+                    prov = evidence.fill_load_provenance
+                    if (
+                        prov is not None
+                        and prov.source_anchor_kind == "recovery_checkpoint"
+                        and prov.is_complete
+                    ):
+                        parent_scope = AccountFactStreamScope.for_position_key(
+                            key,
+                            stream_id=head.stream_id,
+                            stream_epoch=head.stream_epoch,
+                        )
+                        if parent_scope != scope:
+                            persisted_parent = await tx.load_checkpoint_by_id(
+                                scope=parent_scope,
+                                checkpoint_id=prov.source_anchor_id,
+                            )
+                            if persisted_parent is None:
+                                raise AbortObservation(
+                                    WaitingForEvidence(
+                                        evidence_id=evidence.evidence_id,
+                                        reason=EvidencePendingReason.PARENT_CHECKPOINT_UNAVAILABLE,
+                                    )
+                                )
+                            if persisted_parent.checkpoint_id != prov.source_anchor_id:
+                                raise AbortObservation(
+                                    EvidenceConflict(
+                                        evidence_id=evidence.evidence_id,
+                                        reason=(
+                                            "fill scan parent checkpoint "
+                                            "identity mismatch"
+                                        ),
+                                    )
+                                )
+                            local_journal = candidate._journals.get(canon)
+                            local_parent = (
+                                local_journal.read_cut().recovery_checkpoint
+                                if local_journal is not None
+                                and local_journal.stream_scope == parent_scope
+                                else None
+                            )
+                            if (
+                                local_parent is not None
+                                and local_parent != persisted_parent
+                            ):
+                                raise AbortObservation(
+                                    EvidenceConflict(
+                                        evidence_id=evidence.evidence_id,
+                                        reason=(
+                                            "checkpoint adoption parent differs from "
+                                            "its immutable durable checkpoint"
+                                        ),
+                                    )
+                                )
+                            parent_checkpoint = local_parent or persisted_parent
+                            target_event_cut = (
+                                prov.observed_at
+                                if prov.observed_at > parent_checkpoint.event_cut
+                                else (
+                                    evidence.source_anchor_snapshot.observed_at
+                                    if evidence.source_anchor_snapshot is not None
+                                    and evidence.source_anchor_snapshot.observed_at
+                                    > parent_checkpoint.event_cut
+                                    else evidence.observed_at
+                                )
+                            )
+                            try:
+                                adoption = StreamCheckpointAdoption(
+                                    parent_checkpoint=parent_checkpoint,
+                                    target_scope=scope,
+                                    fill_load_provenance=prov,
+                                    target_event_cut=target_event_cut,
+                                )
+                            except ValueError as err:
+                                raise AbortObservation(
+                                    EvidenceConflict(
+                                        evidence_id=evidence.evidence_id,
+                                        reason=str(err),
+                                    )
+                                ) from err
+
                 if adoption is not None:
                     if not adopting_epoch or head is None:
                         raise AbortObservation(
@@ -269,7 +366,10 @@ async def observe_evidence_transaction(
                     if (
                         adoption.target_scope != scope
                         or adoption.parent_checkpoint.stream_scope != parent_scope
-                        or adoption.parent_checkpoint != local_parent
+                        or (
+                            local_parent is not None
+                            and adoption.parent_checkpoint != local_parent
+                        )
                     ):
                         raise AbortObservation(
                             EvidenceConflict(
@@ -297,14 +397,11 @@ async def observe_evidence_transaction(
 
                 if adopting_epoch:
                     apply_stream_rollover(
-                        candidate.evidence_state,
+                        candidate,
                         key=key,
                         scope=scope,
                         can_rollover=can_rollover,
                         is_unfilled_terminal_order=terminal_without_fill,
-                    )
-                    candidate._recovery_adoption_scope = (
-                        candidate.evidence_state.recovery_adoption_scope
                     )
                 else:
                     candidate._journal_for_scope(key, scope)
@@ -323,7 +420,7 @@ async def observe_evidence_transaction(
                         )
                     ) from err
                 if not accepted and not is_terminal_settlement_recovery(
-                    candidate.evidence_state, evidence
+                    candidate, evidence
                 ):
                     return Duplicate(
                         evidence_id=evidence.evidence_id,
@@ -364,6 +461,13 @@ async def observe_evidence_transaction(
                 fills_to_record = evidence.fills or (
                     (evidence.fill,) if evidence.fill is not None else ()
                 )
+                omitted_prefix_trade_ids: set[str] = set()
+                candidate_journal = candidate._journals.get(canon)
+                checkpoint = (
+                    candidate_journal.read_cut().recovery_checkpoint
+                    if candidate_journal is not None
+                    else None
+                )
                 for fill in fills_to_record:
                     try:
                         identity_inserted = await tx.record_trade(
@@ -387,6 +491,8 @@ async def observe_evidence_transaction(
                                 reason=str(err),
                             )
                         ) from err
+                    if not identity_inserted:
+                        candidate._seen_trade_ids.add(fill.trade_id)
                     prior_fill = next(
                         (
                             item
@@ -400,19 +506,95 @@ async def observe_evidence_transaction(
                         and prior_fill is None
                         and not adopting_epoch
                     ):
-                        raise AbortObservation(
-                            EvidenceConflict(
-                                evidence_id=evidence.evidence_id,
-                                reason=(
-                                    f"trade {fill.trade_id} was already consumed "
-                                    "but its journal facts are unavailable"
+                        if (
+                            checkpoint is not None
+                            and checkpoint.stream_scope == scope
+                            and fill.trade_at <= checkpoint.event_cut
+                        ):
+                            omitted_prefix_trade_ids.add(fill.trade_id)
+                        else:
+                            raise AbortObservation(
+                                EvidenceConflict(
+                                    evidence_id=evidence.evidence_id,
+                                    reason=(
+                                        f"trade {fill.trade_id} was already consumed "
+                                        "but its journal facts are unavailable"
+                                    ),
+                                )
+                            )
+
+                if omitted_prefix_trade_ids:
+                    filtered_fills = tuple(
+                        fill
+                        for fill in evidence.fills
+                        if fill.trade_id not in omitted_prefix_trade_ids
+                    )
+                    filtered_fill = (
+                        evidence.fill
+                        if evidence.fill is not None
+                        and evidence.fill.trade_id not in omitted_prefix_trade_ids
+                        else None
+                    )
+                    observation_evidence = replace(
+                        evidence,
+                        fill=filtered_fill,
+                        fills=filtered_fills,
+                    )
+                else:
+                    observation_evidence = evidence
+
+                if (
+                    not adopting_epoch
+                    and checkpoint is not None
+                    and checkpoint.stream_scope == scope
+                ):
+                    prefix_snapshot = observation_evidence.snapshot
+                    prefix_boundary = observation_evidence.boundary
+                    prefix_snapshots = (
+                        (prefix_snapshot,)
+                        if prefix_snapshot is not None
+                        and prefix_snapshot.observed_at <= checkpoint.event_cut
+                        else ()
+                    )
+                    prefix_boundaries = (
+                        (prefix_boundary,)
+                        if prefix_boundary is not None
+                        and prefix_boundary.submitted_at <= checkpoint.event_cut
+                        else ()
+                    )
+                    if prefix_snapshots or prefix_boundaries:
+                        try:
+                            retained_delta = await tx.filter_known_facts(
+                                scope=scope,
+                                delta=JournalFactDelta(
+                                    snapshots=prefix_snapshots,
+                                    exit_boundaries=prefix_boundaries,
                                 ),
                             )
+                        except DecisionCommitConflict as err:
+                            raise AbortObservation(
+                                EvidenceConflict(evidence.evidence_id, str(err))
+                            ) from err
+                        observation_evidence = replace(
+                            observation_evidence,
+                            snapshot=(
+                                None
+                                if prefix_snapshots and not retained_delta.snapshots
+                                else observation_evidence.snapshot
+                            ),
+                            boundary=(
+                                None
+                                if (
+                                    prefix_boundaries
+                                    and not retained_delta.exit_boundaries
+                                )
+                                else observation_evidence.boundary
+                            ),
                         )
 
                 candidate._active_transaction = tx
                 result = await observe_evidence_group(
-                    evidence,
+                    observation_evidence,
                     observe_one=candidate._observe_mutating,
                     forget_identity=candidate._seen_evidence_ids.discard,
                 )
@@ -420,125 +602,177 @@ async def observe_evidence_transaction(
                     raise AbortObservation(result)
                 journal = candidate._ensure_journal(key)
                 fact_delta = journal.pending_fact_delta()
-                checkpoint = None
-                if (
-                    evidence.coverage_evidence is not None
-                    and evidence.fill_load_provenance is not None
-                ):
-                    rebuilt = rebuild_ordered_scan_journal(
-                        journal=journal,
-                        proof=evidence.coverage_evidence,
-                        provenance=evidence.fill_load_provenance,
-                        scanned_fills=fills_to_record,
-                    )
-                    rebuilt_order = rebuilt is not journal
-                    if rebuilt is not journal:
-                        journal = rebuilt
-                        candidate._journals[canon] = journal
-                        candidate._books[canon] = PositionBook(journal)
-                    checkpoint = create_verified_recovery_checkpoint(
-                        key=key,
-                        scope=scope,
-                        journal=candidate._ensure_journal(key),
-                        proof=evidence.coverage_evidence,
-                        provenance=evidence.fill_load_provenance,
-                        adoption=evidence.stream_checkpoint_adoption,
-                        adopting_epoch=adopting_epoch,
-                        force_checkpoint=rebuilt_order,
-                    )
-                    if rebuilt_order and checkpoint is None:
+
+                receipt_only = (
+                    head is not None
+                    and current_scope == scope
+                    and not adopting_epoch
+                    and not fact_delta.fills
+                    and not fact_delta.snapshots
+                    and not fact_delta.exit_boundaries
+                    and journal.read_cut() == facts_before
+                    and candidate._outbox_by_command_id == book._outbox_by_command_id
+                    and candidate.get_active_reservations(key)
+                    == book.get_active_reservations(key)
+                    and candidate._order_cumulative_fills
+                    == book._order_cumulative_fills
+                    and candidate._order_cumulative_quotes
+                    == book._order_cumulative_quotes
+                    and candidate._recovery_required_commands
+                    == book._recovery_required_commands
+                    and candidate._external_recovery_positions
+                    == book._external_recovery_positions
+                    and candidate._dispatch_reconciliation_required_commands
+                    == book._dispatch_reconciliation_required_commands
+                )
+
+                if receipt_only:
+                    candidate._active_transaction = None
+                else:
+                    checkpoint = None
+                    if (
+                        evidence.coverage_evidence is not None
+                        and evidence.fill_load_provenance is not None
+                    ):
+                        rebuilt = rebuild_ordered_scan_journal(
+                            journal=journal,
+                            proof=evidence.coverage_evidence,
+                            provenance=evidence.fill_load_provenance,
+                            scanned_fills=fills_to_record,
+                        )
+                        rebuilt_order = rebuilt is not journal
+                        if rebuilt is not journal:
+                            journal = rebuilt
+                            candidate._journals[canon] = journal
+                            candidate._books[canon] = PositionBook(journal)
+                        checkpoint = create_verified_recovery_checkpoint(
+                            key=key,
+                            scope=scope,
+                            journal=candidate._ensure_journal(key),
+                            proof=evidence.coverage_evidence,
+                            provenance=evidence.fill_load_provenance,
+                            adoption=adoption,
+                            adopting_epoch=adopting_epoch,
+                            force_checkpoint=rebuilt_order,
+                        )
+                        if rebuilt_order and checkpoint is None:
+                            raise AbortObservation(
+                                EvidenceConflict(
+                                    evidence_id=evidence.evidence_id,
+                                    reason=(
+                                        "ordered replay did not produce a"
+                                        " verified checkpoint"
+                                    ),
+                                )
+                            )
+                    if adopting_epoch and not can_rollover and checkpoint is None:
                         raise AbortObservation(
                             EvidenceConflict(
                                 evidence_id=evidence.evidence_id,
                                 reason=(
-                                    "ordered replay did not produce a"
-                                    " verified checkpoint"
+                                    "stream adoption did not produce a validated "
+                                    "recovery checkpoint"
                                 ),
                             )
                         )
-                if adopting_epoch and not can_rollover and checkpoint is None:
-                    raise AbortObservation(
-                        EvidenceConflict(
-                            evidence_id=evidence.evidence_id,
-                            reason=(
-                                "stream adoption did not produce a validated "
-                                "recovery checkpoint"
-                            ),
+                    journal = candidate._ensure_journal(key)
+                    if checkpoint is not None:
+                        journal.set_recovery_checkpoint(checkpoint)
+                    if isinstance(result, Applied):
+                        result = replace(
+                            result,
+                            updated_view_token=candidate._ensure_book(key)
+                            .get_view(now=evidence.observed_at)
+                            .projection_version,
                         )
+                    facts = journal.read_cut()
+                    persist_result = await tx.persist_facts(
+                        scope=scope,
+                        facts=facts,
+                        revision=journal.revision,
+                        checkpoint=checkpoint,
+                        delta=fact_delta,
                     )
-                journal = candidate._ensure_journal(key)
-                if checkpoint is not None:
-                    journal.set_recovery_checkpoint(checkpoint)
-                if isinstance(result, Applied):
-                    result = replace(
-                        result,
-                        updated_view_token=candidate._ensure_book(key)
-                        .get_view(now=evidence.observed_at)
-                        .projection_version,
-                    )
-                facts = journal.read_cut()
-                persist_result = await tx.persist_facts(
-                    scope=scope,
-                    facts=facts,
-                    revision=journal.revision,
-                    checkpoint=checkpoint,
-                    delta=fact_delta,
-                )
-                if persist_result.has_conflicts:
-                    raise AbortObservation(
-                        EvidenceConflict(
-                            evidence_id=evidence.evidence_id,
-                            reason=("durable account journal reported a fact conflict"),
+                    if persist_result.has_conflicts:
+                        raise AbortObservation(
+                            EvidenceConflict(
+                                evidence_id=evidence.evidence_id,
+                                reason=(
+                                    "durable account journal reported a fact conflict"
+                                ),
+                            )
                         )
-                    )
-                candidate._journal_revisions[canon] = persist_result.revision
-                if evidence.sequence is not None:
-                    candidate._last_sequences[canon] = max(
-                        candidate._last_sequences.get(canon, evidence.sequence),
-                        evidence.sequence,
-                    )
+                    candidate._journal_revisions[canon] = persist_result.revision
+                    if evidence.sequence is not None:
+                        candidate._last_sequences[canon] = max(
+                            candidate._last_sequences.get(canon, evidence.sequence),
+                            evidence.sequence,
+                        )
 
-                watermarks = changed_order_watermarks(
-                    key,
-                    before_quantities=book._order_cumulative_fills,
-                    before_quotes=book._order_cumulative_quotes,
-                    after_quantities=candidate._order_cumulative_fills,
-                    after_quotes=candidate._order_cumulative_quotes,
-                    observed_at=evidence.observed_at,
-                )
-                for watermark in watermarks:
-                    await tx.persist_watermark(
+                    watermarks = changed_order_watermarks(
+                        key,
+                        before_quantities=book._order_cumulative_fills,
+                        before_quotes=book._order_cumulative_quotes,
+                        after_quantities=candidate._order_cumulative_fills,
+                        after_quotes=candidate._order_cumulative_quotes,
+                        observed_at=evidence.observed_at,
+                    )
+                    for watermark in watermarks:
+                        await tx.persist_watermark(
+                            key=key,
+                            stream_id=scope.stream_id,
+                            stream_epoch=scope.stream_epoch,
+                            watermark=watermark,
+                        )
+                    head_payload = build_execution_head_payload(
+                        candidate,
+                        key,
+                        facts.compute_facts_hash(),
+                        ensure_book=candidate._ensure_book,
+                        ensure_journal=candidate._ensure_journal,
+                        active_reservations=candidate.get_active_reservations,
+                    )
+                    candidate._head_revisions[canon] = await tx.persist_head(
                         key=key,
                         stream_id=scope.stream_id,
                         stream_epoch=scope.stream_epoch,
-                        watermark=watermark,
+                        expected_revision=expected_head_revision,
+                        projection_version=candidate._ensure_book(key)
+                        .get_view(now=evidence.observed_at)
+                        .projection_version,
+                        state_payload=head_payload,
+                        updated_at=evidence.observed_at,
+                        stream_adoption_checkpoint_id=(
+                            checkpoint.checkpoint_id
+                            if adopting_epoch and checkpoint is not None
+                            else None
+                        ),
+                        is_flat_adoption=can_rollover,
                     )
-                head_payload = build_execution_head_payload(
-                    candidate.evidence_state,
-                    key,
-                    facts.compute_facts_hash(),
-                    ensure_book=candidate._ensure_book,
-                    ensure_journal=candidate._ensure_journal,
-                    active_reservations=book.get_active_reservations,
+                    candidate._active_transaction = None
+
+            if receipt_only:
+                async with book._mutation_lock(key):
+                    view_token = (
+                        book._ensure_book(key)
+                        .get_view(now=evidence.observed_at)
+                        .projection_version
+                    )
+                    book._seen_evidence_ids.add(
+                        _scoped_evidence_identity(scope, evidence.evidence_id)
+                    )
+                    if (
+                        evidence.sequence is not None
+                        and book._stream_scopes.get(canon) == scope
+                    ):
+                        book._last_sequences[canon] = max(
+                            book._last_sequences.get(canon, evidence.sequence),
+                            evidence.sequence,
+                        )
+                return Duplicate(
+                    evidence_id=evidence.evidence_id,
+                    view_token=view_token,
                 )
-                candidate._head_revisions[canon] = await tx.persist_head(
-                    key=key,
-                    stream_id=scope.stream_id,
-                    stream_epoch=scope.stream_epoch,
-                    expected_revision=expected_head_revision,
-                    projection_version=candidate._ensure_book(key)
-                    .get_view(now=evidence.observed_at)
-                    .projection_version,
-                    state_payload=head_payload,
-                    updated_at=evidence.observed_at,
-                    stream_adoption_checkpoint_id=(
-                        checkpoint.checkpoint_id
-                        if adopting_epoch and checkpoint is not None
-                        else None
-                    ),
-                    is_flat_adoption=can_rollover,
-                )
-                candidate._active_transaction = None
 
             # The evidence is already committed; publication must not replay it.
             def _read_published_view(
@@ -567,8 +801,7 @@ async def observe_evidence_transaction(
             return abort.result
         except Exception as err:
             if obs_attempt < 2 and (
-                "execution head changed" in str(err)
-                or "restore required" in str(err)
+                "execution head changed" in str(err) or "restore required" in str(err)
             ):
                 await book.reload_position(key)
                 continue

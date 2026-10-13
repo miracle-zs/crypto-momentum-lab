@@ -20,8 +20,9 @@ Crash points and the contract each one proves:
   same durable identity a second time.
 * ``send_stage`` -- the send stage was durably recorded (command
   ``dispatching`` plus a ``SUBMITTING`` exchange order) and the child died
-  inside the POST.  The restart must classify it as ``UNKNOWN``, never as
-  unsent, and must keep both the reservation and the lookup responsibility.
+  at the send stage (either before the network call or after an accepted HTTP POST).
+  The restart must classify it as ``UNKNOWN``, never as unsent, and must keep
+  both the reservation and the lookup responsibility.
 * ``facts`` -- real fills were committed.  The restart must restore quantity,
   batch identity, weighted cost basis and trade/order identity, and an
   already-seen trade must stay counted exactly once.
@@ -176,10 +177,11 @@ class _CrashAfterCommitUnitOfWork(AsyncPostgresExecutionUnitOfWork):
 
 
 class _CrashingExchangeBackend:
-    """Exchange network double: the POST kills the process instead of replying."""
+    """Exchange network double: optionally POSTs before killing the process."""
 
-    def __init__(self, exit_code: int) -> None:
+    def __init__(self, exit_code: int, *, exchange_url: str | None = None) -> None:
         self._exit_code = exit_code
+        self._exchange_url = exchange_url
 
     async def submit(
         self,
@@ -187,6 +189,15 @@ class _CrashingExchangeBackend:
         *,
         prepared_submission,
     ):
+        if self._exchange_url:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                response = await client.post(
+                    self._exchange_url,
+                    json={"client_order_id": plan.client_order_id},
+                )
+                assert response.status_code == 200
         os._exit(self._exit_code)
 
 
@@ -376,7 +387,7 @@ async def _child_prepared_not_sent(params: dict) -> None:
 
 
 async def _child_send_stage(params: dict) -> None:
-    """Record the send stage durably, then die inside the POST."""
+    """Record the send stage durably, then die inside the POST (or after HTTP POST)."""
     engine = create_async_database_engine(_child_database_url())
     factory = async_sessionmaker(engine, expire_on_commit=False)
     account = params["account"]
@@ -390,7 +401,10 @@ async def _child_send_stage(params: dict) -> None:
         batch_id=view.batches[0].batch_id,
     )
     coordinator = OrderExecutionCoordinator(
-        backend=_CrashingExchangeBackend(_EXIT_SEND_STAGE),
+        backend=_CrashingExchangeBackend(
+            _EXIT_SEND_STAGE,
+            exchange_url=params.get("exchange_url"),
+        ),
         environment="live",
         account_label=account,
         execution_book=book,
@@ -591,7 +605,9 @@ async def test_prepared_command_restarts_as_not_sent_with_its_reservation(
 async def test_send_stage_crash_restarts_as_unknown_with_reservation(
     async_database_url: str,
 ) -> None:
-    """Crash inside the POST: restart says UNKNOWN, keeps reservation + lookup."""
+    """Crash before exchange network call: restart says UNKNOWN, keeps
+    reservation + lookup.
+    """
     account = f"crash-send-{uuid4().hex[:12]}"
     params = _params("send_stage", account)
     command_id = params["exit_command_id"]
@@ -656,6 +672,154 @@ async def test_send_stage_crash_restarts_as_unknown_with_reservation(
         )
     finally:
         await engine.dispose()
+
+
+async def test_send_stage_crash_after_accepted_http_post_restarts_as_unknown_and_refuses_resend(  # noqa: E501
+    async_database_url: str,
+) -> None:
+    """Real child dies after accepted HTTP POST: restart says UNKNOWN,
+    refuses resend.
+    """
+    account = f"crash-send-posted-{uuid4().hex[:12]}"
+    params = _params("send_stage", account)
+    command_id = params["exit_command_id"]
+    posted_order_ids: list[str] = []
+
+    async def handle_client(
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        try:
+            headers_bytes = await asyncio.wait_for(
+                reader.readuntil(b"\r\n\r\n"), timeout=3.0
+            )
+            headers_text = headers_bytes.decode("latin1")
+            content_length = 0
+            for line in headers_text.split("\r\n"):
+                if line.lower().startswith("content-length:"):
+                    content_length = int(line.split(":", 1)[1].strip())
+            body_bytes = b""
+            if content_length > 0:
+                body_bytes = await asyncio.wait_for(
+                    reader.readexactly(content_length), timeout=3.0
+                )
+            payload = json.loads(body_bytes.decode("utf-8"))
+            posted_order_ids.append(payload["client_order_id"])
+            response_body = b"{}"
+            response = (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: " + str(len(response_body)).encode("ascii") + b"\r\n"
+                b"Connection: close\r\n\r\n" + response_body
+            )
+            writer.write(response)
+            await asyncio.wait_for(writer.drain(), timeout=3.0)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server_port = server.sockets[0].getsockname()[1]
+    exchange_url = f"http://127.0.0.1:{server_port}/orders"
+    params["exchange_url"] = exchange_url
+
+    engine = None
+    coordinator = None
+    try:
+        try:
+            await _run_crash_child(
+                "send_stage", params, _EXIT_SEND_STAGE, async_database_url
+            )
+        except BaseException:
+            raise
+
+        assert posted_order_ids == [command_id]
+
+        engine = create_async_database_engine(async_database_url)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        row = await _command_row(factory, command_id)
+        assert row.status == DispatchState.DISPATCHING.value
+        async with factory() as session:
+            order = await session.get(ExchangeOrderRow, command_id)
+        assert order is not None
+        assert order.state == ExchangeOrderState.SUBMITTING.value
+        assert order.executed_quantity == Decimal("0")
+
+        book = await _restore_book(factory, account)
+        entry = book.get_outbox(command_id)
+        assert entry is not None
+        assert entry.state is DispatchState.UNKNOWN
+        assert entry.execution_state is CommandExecutionState.UNKNOWN
+        assert entry.attempt_count == 1
+        assert book.command_requires_recovery(command_id)
+
+        reservations = book.get_active_reservations()
+        assert len(reservations) == 1
+        assert reservations[0].active_quantity == Decimal("1")
+        assert reservations[0].consumed_quantity == Decimal("0")
+        assert reservations[0].released_quantity == Decimal("0")
+
+        scope = _scope_for(account)
+        view = await book.read(scope)
+        assert view.total_quantity == Decimal("2")
+        assert len(view.batches) == 1
+        assert reservations[0].batch_id == view.batches[0].batch_id
+
+        plan = _submission_plan(
+            params,
+            projection_version=view.projection_version,
+            batch_id=view.batches[0].batch_id,
+        )
+        preparation = _preparation(params, plan)
+
+        class _CountingExchangeBackend:
+            def __init__(self) -> None:
+                self.submit_count = 0
+
+            async def submit(self, plan: OrderExecutionPlan, *, prepared_submission):
+                import httpx
+
+                self.submit_count += 1
+                async with httpx.AsyncClient(timeout=3.0) as client:
+                    response = await client.post(
+                        exchange_url,
+                        json={"client_order_id": plan.client_order_id},
+                    )
+                    assert response.status_code == 200
+                raise AssertionError("unknown command was sent twice")
+
+        backend = _CountingExchangeBackend()
+        coordinator = OrderExecutionCoordinator(
+            backend=backend,
+            environment="live",
+            account_label=account,
+            execution_book=book,
+            submission_repository=PostgresOrderSubmissionRepository(factory),
+        )
+
+        retry_result = await coordinator.prepare_and_execute(
+            plan, preparation=preparation
+        )
+        assert retry_result is None
+        assert backend.submit_count == 0
+        assert posted_order_ids == [command_id]
+
+        reservations_after = book.get_active_reservations()
+        assert len(reservations_after) == 1
+        assert reservations_after[0].active_quantity == Decimal("1")
+
+        entry_after = book.get_outbox(command_id)
+        assert entry_after is not None
+        assert entry_after.state is DispatchState.UNKNOWN
+        assert entry_after.execution_state is CommandExecutionState.UNKNOWN
+    finally:
+        server.close()
+        await server.wait_closed()
+        if coordinator is not None:
+            await coordinator.aclose()
+        if engine is not None:
+            await engine.dispose()
 
 
 async def test_committed_facts_restore_quantity_cost_and_deduplication(

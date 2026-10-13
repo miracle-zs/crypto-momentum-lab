@@ -1,7 +1,8 @@
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, cast
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -33,6 +34,42 @@ class LeaseAlreadyHeldError(RuntimeError):
 
 class LeaseOwnershipError(RuntimeError):
     pass
+
+
+class DispatchLeaseLostError(LeaseOwnershipError):
+    """This process no longer holds the account's active dispatch lease."""
+
+
+@dataclass(frozen=True, slots=True)
+class DispatchLeaseToken:
+    """The account lease a process holds, bound to one lease generation.
+
+    ``owner`` is the configured account owner and may be shared by successive
+    processes.  ``lease_id`` plus ``code_generation`` identify the exact active
+    ``trading_leases`` row, so a process that lost its lease to a replacement
+    cannot keep dispatching under the shared owner name.
+    """
+
+    owner: str
+    lease_id: str
+    code_generation: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.owner, str) or not self.owner.strip():
+            raise ValueError("owner must not be empty")
+        if not isinstance(self.lease_id, str) or not self.lease_id.strip():
+            raise ValueError("lease_id must not be empty")
+        if self.code_generation is not None and (
+            not isinstance(self.code_generation, str) or not self.code_generation.strip()
+        ):
+            raise ValueError("code_generation must not be blank when present")
+
+    def matches(self, row: TradingLeaseRow) -> bool:
+        return (
+            row.lease_id == self.lease_id
+            and row.owner == self.owner
+            and row.state == TradingLeaseState.ACTIVE.value
+        )
 
 
 def trading_lease_row(lease: TradingLease) -> dict[str, object]:
@@ -104,7 +141,19 @@ class PostgresRiskRepository:
     ) -> None:
         self._session_factory = session_factory
 
-    async def acquire_lease(self, lease: TradingLease) -> None:
+    async def acquire_lease(
+        self,
+        lease: TradingLease,
+        *,
+        takeover: bool = False,
+    ) -> None:
+        """Acquire this account's single active dispatch lease.
+
+        A competing process fails with :class:`LeaseAlreadyHeldError` while the
+        current lease is active and unexpired.  ``takeover`` is the deliberate
+        operator action that replaces a still-valid lease; it is never implied.
+        """
+
         if lease.state is not TradingLeaseState.ACTIVE:
             raise ValueError("acquired lease must be active")
         try:
@@ -116,7 +165,10 @@ class PostgresRiskRepository:
                             TradingLeaseRow.environment == lease.environment,
                             TradingLeaseRow.account_label == lease.account_label,
                             TradingLeaseRow.state == TradingLeaseState.ACTIVE.value,
-                            TradingLeaseRow.expires_at <= lease.acquired_at,
+                            or_(
+                                TradingLeaseRow.expires_at <= lease.acquired_at,
+                                takeover,
+                            ),
                         )
                         .values(state=TradingLeaseState.EXPIRED.value)
                     )
@@ -135,6 +187,8 @@ class PostgresRiskRepository:
         owner: str,
         expires_at: datetime,
         code_generation: str | None = None,
+        token: DispatchLeaseToken | None = None,
+        now: datetime | None = None,
     ) -> TradingLease:
         async with self._session_factory() as session:
             async with session.begin():
@@ -143,7 +197,12 @@ class PostgresRiskRepository:
                     .where(TradingLeaseRow.lease_id == lease_id)
                     .with_for_update()
                 )
-                owned_row = _require_owned_active_lease(row, owner)
+                owned_row = _require_owned_active_lease(row, owner, token=token)
+                reference_now = now or datetime.now(tz=UTC)
+                if owned_row.expires_at <= reference_now:
+                    raise LeaseOwnershipError(
+                        "trading lease has expired and cannot be renewed"
+                    )
                 if expires_at < owned_row.expires_at:
                     raise ValueError("renewed expiration must extend the lease")
                 if expires_at == owned_row.expires_at and code_generation is None:
@@ -172,6 +231,48 @@ class PostgresRiskRepository:
                 )
             )
         return None if row is None else _lease_from_row(row)
+
+    async def load_dispatch_lease(
+        self,
+        environment: str,
+        account_label: str,
+        now: datetime,
+        *,
+        token: DispatchLeaseToken,
+    ) -> TradingLease | None:
+        """Return the active lease only when it is still this exact token."""
+
+        async with self._session_factory() as session:
+            row = await session.scalar(
+                select(TradingLeaseRow).where(
+                    TradingLeaseRow.environment == environment,
+                    TradingLeaseRow.account_label == account_label,
+                    TradingLeaseRow.state == TradingLeaseState.ACTIVE.value,
+                    TradingLeaseRow.expires_at > now,
+                )
+            )
+        if row is None or not token.matches(row):
+            return None
+        return _lease_from_row(row)
+
+    async def require_dispatch_lease(
+        self,
+        environment: str,
+        account_label: str,
+        now: datetime,
+        *,
+        token: DispatchLeaseToken,
+    ) -> TradingLease:
+        """Raise unless this process still holds the active, unexpired lease."""
+
+        lease = await self.load_dispatch_lease(
+            environment, account_label, now, token=token
+        )
+        if lease is None:
+            raise DispatchLeaseLostError(
+                f"{environment}/{account_label} is no longer held by this process"
+            )
+        return lease
 
     async def save_risk_config(self, config: RiskConfigSnapshot) -> None:
         await self._insert_immutable(RiskConfigSnapshotRow, risk_config_row(config))
@@ -273,6 +374,8 @@ class PostgresRiskRepository:
 def _require_owned_active_lease(
     row: TradingLeaseRow | None,
     owner: str,
+    *,
+    token: DispatchLeaseToken | None = None,
 ) -> TradingLeaseRow:
     if row is None:
         raise LeaseOwnershipError("trading lease does not exist")
@@ -281,6 +384,12 @@ def _require_owned_active_lease(
         raise LeaseOwnershipError("trading lease is owned by another worker")
     if lease.state is not TradingLeaseState.ACTIVE:
         raise LeaseOwnershipError("trading lease is not active")
+    if token is not None and not token.matches(row):
+        # Sharing an owner is not holding the lease: the lease generation must
+        # match, so a process that lost its lease cannot keep writing.
+        raise DispatchLeaseLostError(
+            "trading lease is not held by this process"
+        )
     return row
 
 

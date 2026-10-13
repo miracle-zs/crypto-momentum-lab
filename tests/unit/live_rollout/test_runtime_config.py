@@ -35,6 +35,7 @@ def test_live_runtime_config_keeps_composition_inputs_grouped() -> None:
             account_label="account-1",
             strategy_name="orderflow_impulse",
             session_id="session-1",
+            lease_owner="live-worker",
             operator="operator-1",
             strategy_config_hash="a" * 64,
             git_commit_hash="b" * 40,

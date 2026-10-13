@@ -53,6 +53,7 @@ def _make_test_config() -> LiveRuntimeConfig:
             account_label="account-1",
             strategy_name="orderflow_impulse",
             session_id="session-1",
+            lease_owner="live-worker",
             operator="operator-1",
             strategy_config_hash="a" * 64,
             git_commit_hash="b" * 40,
@@ -96,6 +97,8 @@ def _make_test_config() -> LiveRuntimeConfig:
             base_url="https://fapi.binance.com",
             api_key="mock-key",
             api_secret="mock-secret",
+            read_api_key="mock-read-key",
+            read_api_secret="mock-read-secret",
         ),
     )
 
@@ -159,6 +162,19 @@ async def test_runtime_failure_is_not_classified_as_startup_retryable_error(
     mock_persistence.factories.market_factory = MagicMock()
     mock_persistence.factories.observability_factory = MagicMock()
     mock_persistence.factories.heartbeat_factory = MagicMock()
+
+    # The run process acquires its own account lease before the first write;
+    # patch the repository so the startup path does not need a real session.
+    mock_risk_repository = MagicMock()
+    mock_risk_repository.acquire_lease = AsyncMock()
+    mock_risk_repository.load_active_lease = AsyncMock(return_value=None)
+    mock_risk_repository.load_active_halts = AsyncMock(return_value=())
+    mock_risk_repository.load_dispatch_lease = AsyncMock(return_value=None)
+    mock_risk_repository.renew_lease = AsyncMock()
+    monkeypatch.setattr(
+        "crypto_momentum_lab.live_rollout.runtime_orchestrator.PostgresRiskRepository",
+        lambda *args, **kwargs: mock_risk_repository,
+    )
 
     mock_persistence.repositories.telemetry_repository.save_runtime_events = AsyncMock()
     mock_persistence.repositories.signal_repository.save_signals = AsyncMock()
@@ -265,9 +281,8 @@ async def test_runtime_failure_is_not_classified_as_startup_retryable_error(
     mock_persistence.repositories.live_repository.load_active_approval = AsyncMock(
         side_effect=AssertionError("startup must not require approval")
     )
-    mock_persistence.repositories.risk_repository.load_active_lease = AsyncMock(
-        side_effect=AssertionError("startup must not require lease")
-    )
+    # The run process acquires its own account lease before the first write;
+    # this mock accepts the acquisition and records it for assertions.
     mock_persistence.repositories.risk_repository.load_active_halts = AsyncMock(
         return_value=()
     )
@@ -326,4 +341,65 @@ async def test_runtime_failure_is_not_classified_as_startup_retryable_error(
     with pytest.raises(
         InjectedRetryableRuntimeFailure, match="network dropped during runtime"
     ):
+        await run_live_daemon(config=config)
+
+
+def test_live_read_credentials_are_required_regardless_of_market_environment() -> None:
+    """Read credentials are an account capability, not a market-data setting."""
+
+    from crypto_momentum_lab.live_rollout.runtime_orchestrator import (
+        resolve_live_read_credentials,
+    )
+
+    base = _make_test_config()
+
+    # live execution + research market data still needs the read role.
+    research = replace(
+        base,
+        market=replace(base.market, market_environment="research"),
+        credentials=replace(
+            base.credentials, read_api_key=None, read_api_secret=None
+        ),
+    )
+    with pytest.raises(ValueError, match="BINANCE_READ_API_KEY"):
+        resolve_live_read_credentials(research)
+
+    # A blank value is missing, not an empty credential.
+    blank = replace(
+        base,
+        credentials=replace(base.credentials, read_api_key="  ", read_api_secret="  "),
+    )
+    with pytest.raises(ValueError, match="BINANCE_READ_API_SECRET"):
+        resolve_live_read_credentials(blank)
+
+    # Only a real read credential pair is accepted, and the trade credential is
+    # never used as a fallback.
+    provided = replace(
+        base,
+        credentials=replace(
+            base.credentials,
+            read_api_key="read-key",
+            read_api_secret="read-secret",
+        ),
+    )
+    assert resolve_live_read_credentials(provided) == ("read-key", "read-secret")
+
+
+@pytest.mark.asyncio
+async def test_live_execution_with_research_market_and_missing_read_credentials_is_rejected(
+) -> None:
+    """The real startup entry rejects the process instead of degrading roles."""
+
+    config = replace(
+        _make_test_config(),
+        market=replace(
+            _make_test_config().market, market_environment="research"
+        ),
+        credentials=replace(
+            _make_test_config().credentials,
+            read_api_key=None,
+            read_api_secret=None,
+        ),
+    )
+    with pytest.raises(ValueError, match="Missing required read credentials"):
         await run_live_daemon(config=config)

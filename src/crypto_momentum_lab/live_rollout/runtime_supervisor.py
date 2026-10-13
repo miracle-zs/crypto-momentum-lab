@@ -33,6 +33,7 @@ class LiveRuntimeTasks:
     entry_filter_cache: asyncio.Task[None] | None = None
     entry_symbol_cache: asyncio.Task[None] | None = None
     local_health: asyncio.Task[None] | None = None
+    account_producer: asyncio.Task[None] | None = None
     shutdown: asyncio.Task[bool] | None = None
 
     def monitored(self) -> set[asyncio.Task[Any]]:
@@ -50,6 +51,7 @@ class LiveRuntimeTasks:
             *(() if self.entry_filter_cache is None else (self.entry_filter_cache,)),
             *(() if self.entry_symbol_cache is None else (self.entry_symbol_cache,)),
             *(() if self.local_health is None else (self.local_health,)),
+            *(() if self.account_producer is None else (self.account_producer,)),
             *(() if self.shutdown is None else (self.shutdown,)),
         }
 
@@ -62,11 +64,12 @@ class LiveRuntimeTasks:
                 self.market,
                 self.startup_market,
                 self.account,
+                self.account_producer,
                 self.risk_control,
                 self.quote,
                 self.closed_candle,
                 self.grace_timeout,
-                    self.reconcile,
+                self.reconcile,
                 self.local_health,
                 self.entry_filter_cache,
                 self.entry_symbol_cache,
@@ -153,6 +156,7 @@ class LiveRuntimeSupervisor:
         self._cancel(self._tasks.market)
         self._cancel(self._tasks.startup_market)
         self._cancel(self._tasks.account)
+        self._cancel(self._tasks.account_producer)
         self._cancel(self._tasks.risk_control)
         self._cancel(self._tasks.quote)
         self._cancel(self._tasks.closed_candle)

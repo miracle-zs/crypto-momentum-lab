@@ -47,7 +47,6 @@ accounts:
     profile_ref: compose.server.yaml#services.live-strategy
     limits_ref: postgres:risk_config/primary
     services:
-      - execution-account-live
       - live-strategy
 
   - label: account-2
@@ -85,7 +84,6 @@ accounts:
     profile_ref: compose.live.accounts.yaml#services.live-strategy-account-2
     limits_ref: postgres:risk_config/account-2
     services:
-      - execution-account-live-account-2
       - live-strategy-account-2
 
   - label: account-3
@@ -123,7 +121,6 @@ accounts:
     profile_ref: compose.live.accounts.yaml#services.live-strategy-account-3
     limits_ref: postgres:risk_config/account-3
     services:
-      - execution-account-live-account-3
       - live-strategy-account-3
 
   - label: account-4
@@ -161,5 +158,4 @@ accounts:
     profile_ref: compose.live.accounts.yaml#services.live-strategy-account-4
     limits_ref: postgres:risk_config/account-4
     services:
-      - execution-account-live-account-4
       - live-strategy-account-4

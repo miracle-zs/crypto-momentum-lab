@@ -8,7 +8,7 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 import structlog
 
@@ -42,6 +42,26 @@ RecoveryTask = Literal["positions", "orders", "exits"]
 _RECOVERY_TASKS: tuple[RecoveryTask, ...] = ("positions", "orders", "exits")
 
 
+@dataclass(frozen=True, slots=True)
+class ReconciliationPassResult:
+    tasks: frozenset[str]
+    success: bool
+    verified_symbols: frozenset[str]
+    failed_symbols: frozenset[str]
+    pending_tasks: frozenset[str]
+    has_unknown: bool
+    has_pending_work: bool
+    failed_tasks: frozenset[str] = frozenset()
+    has_exception: bool = False
+
+
+def _extract_plan_symbol(plan: Any) -> str | None:
+    sym = getattr(plan, "symbol", None)
+    if isinstance(sym, str) and sym.strip():
+        return sym.strip()
+    return None
+
+
 @dataclass(slots=True)
 class LiveOrderReconciliation:
     """Apply WS facts directly and repair only explicitly requested uncertainty.
@@ -63,6 +83,9 @@ class LiveOrderReconciliation:
     execution_book: ExecutionBook | None = None
     repair_positions: Callable[[], Awaitable[bool]] | None = None
     request_unknown_exit: Callable[[PersistedExchangeOrder], bool] | None = None
+    on_reconcile_pass_completed: (
+        Callable[[ReconciliationPassResult], None] | Callable[[], None] | None
+    ) = None
     time_source: Callable[[], float] = time.monotonic
     _requested: asyncio.Event = field(
         default_factory=asyncio.Event, init=False, repr=False
@@ -72,6 +95,13 @@ class LiveOrderReconciliation:
     _requested_tasks: set[RecoveryTask] = field(
         default_factory=set, init=False, repr=False
     )
+    _pass_verified_symbols: set[str] = field(
+        default_factory=set, init=False, repr=False
+    )
+    _pass_failed_symbols: set[str] = field(
+        default_factory=set, init=False, repr=False
+    )
+    _pass_has_unknown: bool = field(default=False, init=False, repr=False)
     _retry_at: dict[RecoveryTask, float] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -105,6 +135,18 @@ class LiveOrderReconciliation:
             raise ValueError("interval_seconds must be positive")
         if self.max_order_lookups_per_pass <= 0 or self.family_timeout_seconds <= 0:
             raise ValueError("recovery lookup and time budgets must be positive")
+
+    def _record_failed_symbol(self, plan: Any) -> None:
+        sym = _extract_plan_symbol(plan)
+        if sym:
+            self._pass_failed_symbols.add(sym)
+        else:
+            self._pass_failed_symbols.add("*")
+
+    def _record_verified_symbol(self, plan: Any) -> None:
+        sym = _extract_plan_symbol(plan)
+        if sym:
+            self._pass_verified_symbols.add(sym)
 
     def request_recovery(self) -> None:
         """Discover all recovery families at startup or explicit full repair."""
@@ -150,9 +192,19 @@ class LiveOrderReconciliation:
             if from_account_event:
                 is_material = True
             elif self._active_reconciliation_order is not None:
-                # Callback occurred during in-flight lookup of this order.
-                # Current query's unresolved result, not material new evidence.
-                is_material = False
+                if target_client_id == self._active_reconciliation_order:
+                    # Callback for the currently in-flight order — the
+                    # query's own unresolved result, not material.
+                    is_material = False
+                elif target_client_id is not None:
+                    # A genuinely different order — material new evidence.
+                    if target_client_id not in self._known_unresolved_order_ids:
+                        is_material = True
+                        self._known_unresolved_order_ids.add(target_client_id)
+                else:
+                    # Generic callback (no specific order) during an active
+                    # lookup — suppress to avoid self-triggering.
+                    is_material = False
             elif target_client_id is not None:
                 if target_client_id not in self._known_unresolved_order_ids:
                     is_material = True
@@ -347,6 +399,7 @@ class LiveOrderReconciliation:
                 try:
                     result = await self.state_machine.cancel_order(plan)
                 except Exception as error:
+                    self._record_failed_symbol(plan)
                     log.warning(
                         "live_orphan_cancel_deferred",
                         run_id=self.run_id,
@@ -356,6 +409,9 @@ class LiveOrderReconciliation:
                     continue
                 if result.state.terminal:
                     self._orphan_cancels.pop(plan.client_order_id, None)
+                    self._record_verified_symbol(plan)
+                else:
+                    self._record_failed_symbol(plan)
             pending = bool(self._orphan_cancels)
             if self.execution_book is not None:
                 command_pending, command_plans = await recover_restored_commands(
@@ -365,6 +421,9 @@ class LiveOrderReconciliation:
                 )
                 pending = command_pending or pending
                 plans.update((plan.client_order_id, plan) for plan in command_plans)
+                if command_pending:
+                    for plan in command_plans:
+                        self._record_failed_symbol(plan)
             for run_id in sorted(runs):
                 for order in await self.order_repository.load_unresolved_orders(run_id):
                     requires_recovery = (
@@ -385,13 +444,18 @@ class LiveOrderReconciliation:
                         continue
                     if (
                         self.request_unknown_exit is not None
-                        and order.plan.reduce_only
+                        and getattr(order.plan, "reduce_only", False)
                         and order.state
                         is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
                         and self.request_unknown_exit(order)
                     ):
+                        self._pass_has_unknown = True
+                        self._record_failed_symbol(order.plan)
                         self.request_exit_recovery()
                         continue
+                    if order.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
+                        self._pass_has_unknown = True
+                        self._record_failed_symbol(order.plan)
                     pending = True
                     self._requested_runs.add(run_id)
                     plans.setdefault(order.plan.client_order_id, order.plan)
@@ -409,12 +473,26 @@ class LiveOrderReconciliation:
                 self._last_lookup_id = plan.client_order_id
                 self._active_reconciliation_order = plan.client_order_id
                 try:
-                    await self.state_machine.reconcile_order(plan)
+                    res = await self.state_machine.reconcile_order(plan)
+                    if (
+                        res is not None
+                        and getattr(res, "state", None)
+                        is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+                    ):
+                        self._pass_has_unknown = True
+                        self._record_failed_symbol(plan)
+                    else:
+                        self._record_verified_symbol(plan)
+                except Exception:
+                    self._record_failed_symbol(plan)
+                    raise
                 finally:
                     self._active_reconciliation_order = None
             if len(ordered) > lookup_budget:
                 self._requested_runs.update(runs)
                 pending = True
+                for plan in ordered[lookup_budget:]:
+                    self._record_failed_symbol(plan)
         except BaseException:
             self._requested_runs.update(runs)
             raise
@@ -445,10 +523,18 @@ class LiveOrderReconciliation:
             self._requested.clear()
             # New requests are retained independently while this pass awaits I/O.
             self._running_tasks = tasks
+            executed_tasks: set[str] = set()
+            failed_tasks: set[str] = set()
+            pending_tasks: set[str] = set()
+            self._pass_verified_symbols.clear()
+            self._pass_failed_symbols.clear()
+            self._pass_has_unknown = False
+            pass_has_exception = False
             try:
                 for task in _RECOVERY_TASKS:
                     if task not in tasks:
                         continue
+                    executed_tasks.add(task)
                     now = self.time_source()
                     deadline = self._retry_at.get(task)
                     if (
@@ -478,6 +564,7 @@ class LiveOrderReconciliation:
                         raise
                     except TimeoutError:
                         pending = True
+                        failed_tasks.add(task)
                         self._last_failure[task] = "timeout"
                         log.warning(
                             "live_recovery_family_timed_out",
@@ -487,6 +574,8 @@ class LiveOrderReconciliation:
                         )
                     except Exception as error:
                         pending = True
+                        failed_tasks.add(task)
+                        pass_has_exception = True
                         self._last_failure[task] = f"error:{type(error).__name__}"
                         log.exception(
                             "live_position_repair_failed"
@@ -499,6 +588,7 @@ class LiveOrderReconciliation:
                     else:
                         self._last_failure.pop(task, None)
                     if pending:
+                        pending_tasks.add(task)
                         self._retry_at[task] = (
                             self.time_source() + self.interval_seconds
                         )
@@ -508,9 +598,41 @@ class LiveOrderReconciliation:
                     self._running_tasks.discard(task)
             finally:
                 self._running_tasks.clear()
+                if self.on_reconcile_pass_completed is not None:
+                    pass_success = (
+                        not pass_has_exception
+                        and not failed_tasks
+                        and not pending_tasks
+                        and not self._pass_has_unknown
+                        and not self._pass_failed_symbols
+                        and not self._retry_at
+                        and bool(executed_tasks)
+                    )
+                    pass_result = ReconciliationPassResult(
+                        tasks=frozenset(executed_tasks),
+                        success=pass_success,
+                        verified_symbols=frozenset(
+                            self._pass_verified_symbols - self._pass_failed_symbols
+                        ),
+                        failed_symbols=frozenset(self._pass_failed_symbols),
+                        pending_tasks=frozenset(pending_tasks | set(self._retry_at.keys())),
+                        failed_tasks=frozenset(failed_tasks),
+                        has_unknown=self._pass_has_unknown,
+                        has_pending_work=bool(
+                            pending_tasks or self._retry_at or self._orphan_cancels
+                        ),
+                        has_exception=pass_has_exception,
+                    )
+                    try:
+                        self.on_reconcile_pass_completed(pass_result)
+                    except TypeError:
+                        self.on_reconcile_pass_completed()
+                    except Exception as err:
+                        log.warning("on_reconcile_pass_completed_error", error=str(err))
 
 
 __all__ = [
     "DEFAULT_RECONCILE_INTERVAL_SECONDS",
     "LiveOrderReconciliation",
+    "ReconciliationPassResult",
 ]

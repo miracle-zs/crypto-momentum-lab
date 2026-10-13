@@ -23,15 +23,20 @@ class _Result:
 
 
 class _Session:
-    def __init__(self, heads, checkpoints, suffix_rows) -> None:
+    def __init__(
+        self, heads, checkpoints, suffix_rows, *, coverage_rows=None
+    ) -> None:
         self._scalars = [heads, checkpoints]
-        self._execute = suffix_rows
+        if coverage_rows is None:
+            self._executes = [suffix_rows]
+        else:
+            self._executes = [suffix_rows, coverage_rows]
 
     async def scalars(self, _statement):
         return _Result(self._scalars.pop(0))
 
     async def execute(self, _statement):
-        return _Result(self._execute)
+        return _Result(self._executes.pop(0))
 
 
 class _Sessions:
@@ -130,8 +135,16 @@ def _checkpoint_row(account: str, symbol: str, side: str):
     )
 
 
-def _run(*, heads, checkpoints, suffix_rows, accounts, checkpoint_for):
-    session = _Session(heads, checkpoints, suffix_rows)
+def _run(
+    *,
+    heads,
+    checkpoints,
+    suffix_rows,
+    accounts,
+    checkpoint_for,
+    coverage_rows=None,
+):
+    session = _Session(heads, checkpoints, suffix_rows, coverage_rows=coverage_rows)
     with patch(
         "crypto_momentum_lab.operator_dashboard.fact_integrity_queries"
         ".PositionRecoveryCodec.decode_checkpoint",
@@ -166,6 +179,7 @@ def test_closed_historical_object_does_not_unknown_current_health() -> None:
         heads=heads,
         checkpoints=checkpoints,
         suffix_rows=[],
+        coverage_rows=[],
         accounts={"account-2": SimpleNamespace(position_count=0)},
         checkpoint_for=lambda payload: _checkpoint(
             account="account-2",
@@ -204,6 +218,7 @@ def test_open_position_suffix_inside_verified_cut_is_proven() -> None:
         heads=heads,
         checkpoints=checkpoints,
         suffix_rows=suffix_rows,
+        coverage_rows=[],
         accounts={"primary": SimpleNamespace(position_count=1)},
         checkpoint_for=lambda payload: _checkpoint(
             account="primary",
@@ -235,6 +250,7 @@ def test_unresolved_work_keeps_a_closed_object_in_current_scope() -> None:
         heads=heads,
         checkpoints=checkpoints,
         suffix_rows=[],
+        coverage_rows=[],
         accounts={"account-2": SimpleNamespace(position_count=0)},
         checkpoint_for=lambda payload: _checkpoint(
             account="account-2",
@@ -274,7 +290,7 @@ def test_active_position_count_mismatch_is_reported(
     checkpoints = [
         _checkpoint_row("primary", "WUSDT", "LONG"),
     ]
-    session = _Session(heads, checkpoints, [])
+    session = _Session(heads, checkpoints, [], coverage_rows=[])
     with patch(
         "crypto_momentum_lab.operator_dashboard.fact_integrity_queries"
         ".PositionRecoveryCodec.decode_checkpoint",
