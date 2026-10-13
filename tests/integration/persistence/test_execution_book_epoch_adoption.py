@@ -60,6 +60,137 @@ from crypto_momentum_lab.persistence.postgres.session import (
 )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("other_head", [False, True])
+@pytest.mark.parametrize(
+    "status,unsettled",
+    [("terminal", False), ("unknown", False), ("prepared", False), ("terminal", True)],
+)
+async def test_closed_history_does_not_require_head_but_live_responsibility_does(
+    async_database_url, other_head, status, unsettled
+):
+    from crypto_momentum_lab.domain.execution.ports import DecisionCommitConflict
+    from crypto_momentum_lab.persistence.postgres.models import (
+        ExecutionCommandRow,
+        ExchangeOrderRow,
+        OrderIntentExecutionRow,
+        PositionReservationRow,
+    )
+
+    engine = create_async_database_engine(async_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    account = f"closed-history-{uuid4().hex}"
+    identity = f"cml_{uuid4().hex}"
+    now = datetime.now(UTC).replace(microsecond=0)
+    try:
+        if other_head:
+            key = PositionKey("live", account, "BTCUSDT")
+            scope = AccountFactStreamScope.for_position_key(
+                key, stream_id="flat", stream_epoch="one"
+            )
+            flat = _snapshot(key, now, "0", "0")
+            proof = _coverage(
+                scope,
+                load_id="flat",
+                scan_origin=now,
+                anchor_id=stable_snapshot_anchor_id(flat),
+                anchor_cut=now,
+                anchor_kind="zero_snapshot",
+                checked_through=now,
+            )
+            initial_book = _book(factory)
+            await initial_book.restore(account_label=account)
+            assert isinstance(
+                await initial_book.observe(
+                    _evidence(
+                        key,
+                        evidence_id="flat",
+                        scope=scope,
+                        at=now,
+                        sequence=1,
+                        snapshot=flat,
+                        proof=proof,
+                    )
+                ),
+                Applied,
+            )
+        async with factory.begin() as session:
+            session.add(
+                OrderIntentExecutionRow(
+                    intent_id=identity,
+                    candidate_id=identity,
+                    run_id=account,
+                    risk_evaluation_id=identity,
+                    strategy_name="epoch-adoption-test",
+                    symbol="COWUSDT",
+                    state="approved",
+                    approved_at=now,
+                    details={},
+                )
+            )
+            await session.flush()
+            session.add(
+                ExchangeOrderRow(
+                    client_order_id=identity,
+                    intent_id=identity,
+                    run_id=account,
+                    symbol="COWUSDT",
+                    side="SELL",
+                    order_type="MARKET",
+                    quantity=Decimal("1"),
+                    executed_quantity=Decimal("1"),
+                    reduce_only=True,
+                    position_side="LONG",
+                    state="filled",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.add(
+                ExecutionCommandRow(
+                    command_id=identity,
+                    client_order_id=identity,
+                    command="exit",
+                    status=status,
+                    requested_at=now,
+                    details={
+                        "scope": {
+                            "environment": "live",
+                            "account_label": account,
+                            "symbol": "COWUSDT",
+                            "position_side": "LONG",
+                        }
+                    },
+                )
+            )
+            session.add(
+                PositionReservationRow(
+                    reservation_id=f"res_{identity}",
+                    environment="live",
+                    account_label=account,
+                    strategy_name="epoch-adoption-test",
+                    symbol="COWUSDT",
+                    position_side="LONG",
+                    batch_id=identity,
+                    command_id=identity,
+                    client_order_id=identity,
+                    reserved_quantity=Decimal("1"),
+                    consumed_quantity=Decimal("0" if unsettled else "1"),
+                    released_quantity=Decimal("0"),
+                    status="COMMITTED",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        if status != "terminal" or unsettled:
+            with pytest.raises(DecisionCommitConflict, match="no durable head"):
+                await _book(factory).restore(account_label=account)
+        else:
+            await _book(factory).restore(account_label=account)
+    finally:
+        await engine.dispose()
+
+
 def _book(factory):
     commands = PostgresCommandRepository(factory)
     reservations = AsyncPostgresPositionReservationRepository(
@@ -1460,8 +1591,7 @@ async def test_execution_book_observe_resolves_checkpoint_adoption_internally(
         )
         assert isinstance(waiting_result, WaitingForEvidence)
         assert (
-            waiting_result.reason
-            == EvidencePendingReason.PARENT_CHECKPOINT_UNAVAILABLE
+            waiting_result.reason == EvidencePendingReason.PARENT_CHECKPOINT_UNAVAILABLE
         )
 
         # Case 2: caller provides NO adoption, engine resolves parent internally

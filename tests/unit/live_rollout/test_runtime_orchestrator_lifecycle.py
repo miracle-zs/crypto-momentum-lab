@@ -19,7 +19,12 @@ from crypto_momentum_lab.live_rollout.runtime_config import (
     LiveRuntimeMarket,
     LiveRuntimeStrategy,
 )
-from crypto_momentum_lab.live_rollout.runtime_orchestrator import run_live_daemon
+from crypto_momentum_lab.live_rollout.runtime_orchestrator import (
+    DispatchOwnershipState,
+    refresh_dispatch_lease_authority,
+    run_live_daemon,
+)
+from crypto_momentum_lab.persistence.postgres.risk_repository import DispatchLeaseToken
 from crypto_momentum_lab.live_rollout.startup_resilience import (
     LiveStartupRetryableError,
 )
@@ -27,6 +32,29 @@ from crypto_momentum_lab.live_rollout.startup_resilience import (
 
 class InjectedAssemblyFailure(Exception):
     pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing_method", ["load_dispatch_lease", "renew_lease"])
+async def test_unconfirmed_lease_stops_dispatch_until_successful_renewal(
+    failing_method,
+):
+    repository = MagicMock()
+    repository.load_dispatch_lease = AsyncMock(return_value=object())
+    repository.renew_lease = AsyncMock()
+    getattr(repository, failing_method).side_effect = RuntimeError(
+        "database unavailable"
+    )
+    state = DispatchOwnershipState(DispatchLeaseToken("worker", "lease"))
+    arguments = dict(
+        state=state, environment="live", account_label="account-1", ttl_seconds=30
+    )
+
+    assert not await refresh_dispatch_lease_authority(repository, **arguments)
+    assert state.ownership_lost
+    getattr(repository, failing_method).side_effect = None
+    assert await refresh_dispatch_lease_authority(repository, **arguments)
+    assert not state.ownership_lost
 
 
 class InjectedRetryableRuntimeFailure(ConnectionResetError):
@@ -204,10 +232,14 @@ async def test_runtime_failure_is_not_classified_as_startup_retryable_error(
         AsyncMock(),
     )
     risk_config = RiskConfigSnapshot(
-        environment="live", account_label="account-1",
-        max_open_positions=5, max_gross_notional=Decimal("1000"),
-        max_order_notional=Decimal("200"), max_daily_loss=Decimal("100"),
-        allow_reduce_only_while_draining=True, created_at=datetime.now(UTC),
+        environment="live",
+        account_label="account-1",
+        max_open_positions=5,
+        max_gross_notional=Decimal("1000"),
+        max_order_notional=Decimal("200"),
+        max_daily_loss=Decimal("100"),
+        allow_reduce_only_while_draining=True,
+        created_at=datetime.now(UTC),
     )
     monkeypatch.setattr(
         "crypto_momentum_lab.live_rollout.runtime_orchestrator._latest_risk_config",
@@ -357,9 +389,7 @@ def test_live_read_credentials_are_required_regardless_of_market_environment() -
     research = replace(
         base,
         market=replace(base.market, market_environment="research"),
-        credentials=replace(
-            base.credentials, read_api_key=None, read_api_secret=None
-        ),
+        credentials=replace(base.credentials, read_api_key=None, read_api_secret=None),
     )
     with pytest.raises(ValueError, match="BINANCE_READ_API_KEY"):
         resolve_live_read_credentials(research)
@@ -386,15 +416,14 @@ def test_live_read_credentials_are_required_regardless_of_market_environment() -
 
 
 @pytest.mark.asyncio
-async def test_live_execution_with_research_market_and_missing_read_credentials_is_rejected(
-) -> None:
+async def test_live_execution_with_research_market_and_missing_read_credentials_is_rejected() -> (
+    None
+):
     """The real startup entry rejects the process instead of degrading roles."""
 
     config = replace(
         _make_test_config(),
-        market=replace(
-            _make_test_config().market, market_environment="research"
-        ),
+        market=replace(_make_test_config().market, market_environment="research"),
         credentials=replace(
             _make_test_config().credentials,
             read_api_key=None,

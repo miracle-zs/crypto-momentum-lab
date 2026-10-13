@@ -366,19 +366,19 @@ async def refresh_dispatch_lease_authority(
 
     now = datetime.now(tz=UTC)
     token = state.token
-    live = await repository.load_dispatch_lease(
-        environment, account_label, now, token=token
-    )
-    if live is None:
-        state.renewal_failure_reason = "dispatch_lease_not_held"
-        log.error(
-            "trading_lease_ownership_lost",
-            expected_owner=token.owner,
-            lease_id=token.lease_id,
-            reason=state.renewal_failure_reason,
-        )
-        return False
     try:
+        live = await repository.load_dispatch_lease(
+            environment, account_label, now, token=token
+        )
+        if live is None:
+            state.renewal_failure_reason = "dispatch_lease_not_held"
+            log.error(
+                "trading_lease_ownership_lost",
+                expected_owner=token.owner,
+                lease_id=token.lease_id,
+                reason=state.renewal_failure_reason,
+            )
+            return False
         await repository.renew_lease(
             lease_id=token.lease_id,
             owner=token.owner,
@@ -910,8 +910,7 @@ async def run_live_daemon(
                     ExecutionAccountProcessState(
                         environment="live",
                         account_label=account_label,
-                        state=event.account_state
-                        or ExecutionAccountStatus.RUNNING,
+                        state=event.account_state or ExecutionAccountStatus.RUNNING,
                         occurred_at=observed_at,
                         reason=None,
                     )
@@ -1029,9 +1028,16 @@ async def run_live_daemon(
             if ownership_state.ownership_lost:
                 return None
             now = datetime.now(tz=UTC)
-            lease = await risk_repository.load_dispatch_lease(
-                "live", account_label, now, token=lease_token
-            )
+            try:
+                lease = await risk_repository.load_dispatch_lease(
+                    "live", account_label, now, token=lease_token
+                )
+            except Exception as error:
+                ownership_state.renewal_failure_reason = (
+                    f"lease_read_failed:{type(error).__name__}"
+                )
+                log.warning("trading_lease_check_failed", error=str(error))
+                return None
             if lease is None:
                 return None
             return DispatchOwnership(
@@ -1649,8 +1655,7 @@ async def run_live_daemon(
             if elapsed < control_plane_runtime.account_facts_timeout_seconds:
                 return
             startup_status.mark_account_facts_timeout(
-                control_plane_runtime.account_facts_reason
-                or "account_facts_pending"
+                control_plane_runtime.account_facts_reason or "account_facts_pending"
             )
             _request_account_facts_budget_check()
 
@@ -1677,7 +1682,9 @@ async def run_live_daemon(
                 # symbol.  A symbol-scoped gap is enforced per symbol by the
                 # entry gate's is_symbol_fact_ready check.
                 risk_blocked = True
-                gap_symbols_str = ",".join(sorted(in_process_account_source.gap_symbols))
+                gap_symbols_str = ",".join(
+                    sorted(in_process_account_source.gap_symbols)
+                )
                 risk_reason = f"account_event_fact_gap:{gap_symbols_str}"
             daemon.set_risk_control_entry_blocked(
                 risk_blocked,
@@ -1726,8 +1733,7 @@ async def run_live_daemon(
             # accepted a baseline; a fresh process starts with them unknown.
             account_facts_ready=(
                 in_process_producer is not None
-                and in_process_producer.account_state
-                is ExecutionAccountStatus.RUNNING
+                and in_process_producer.account_state is ExecutionAccountStatus.RUNNING
             ),
         )
         startup_market_assembly.set_control_plane_listener(
@@ -1738,8 +1744,8 @@ async def run_live_daemon(
         # exactly like Hub frames used to.
         control_plane_listener[0] = control_plane_runtime.on_account_snapshot
         account_facts_status_holder[0] = control_plane_runtime.account_facts_status
-        account_facts_ready_holder[0] = (
-            lambda: control_plane_runtime.account_snapshot_available
+        account_facts_ready_holder[0] = lambda: (
+            control_plane_runtime.account_snapshot_available
         )
         order_reconciliation.on_unknown_order = (
             control_plane_runtime.on_account_snapshot_recovery
@@ -1760,7 +1766,10 @@ async def run_live_daemon(
         def _on_reconciliation_pass_completed(
             result: ReconciliationPassResult | None = None,
         ) -> None:
-            if in_process_account_source is None or not in_process_account_source.has_fact_gap:
+            if (
+                in_process_account_source is None
+                or not in_process_account_source.has_fact_gap
+            ):
                 return
             if result is None:
                 return
@@ -1801,7 +1810,9 @@ async def run_live_daemon(
                 if cleared_any:
                     refresh_entry_enabled()
 
-        order_reconciliation.on_reconcile_pass_completed = _on_reconciliation_pass_completed
+        order_reconciliation.on_reconcile_pass_completed = (
+            _on_reconciliation_pass_completed
+        )
 
         risk_control_runtime = LiveRiskControlRuntime(
             enabled=risk_control_enabled,
@@ -1812,7 +1823,9 @@ async def run_live_daemon(
             refresh_entry_gate=refresh_entry_enabled,
             telemetry=telemetry,
             clock=lambda: datetime.now(tz=UTC),
-            database_mode=(not risk_control_hub_url or not risk_control_hub_url.strip()),
+            database_mode=(
+                not risk_control_hub_url or not risk_control_hub_url.strip()
+            ),
         )
 
         def on_exit_failure(symbol: str, failure: str | None) -> None:
@@ -1997,11 +2010,13 @@ async def run_live_daemon(
                 try:
                     if risk_control_runtime is not None:
                         await risk_control_runtime.reconcile()
-                    pending_commands = await live_repository.load_pending_requested_commands(
-                        account_label=account_label,
-                        strategy_name=strategy_name,
-                        session_id=session_id,
-                        limit=16,
+                    pending_commands = (
+                        await live_repository.load_pending_requested_commands(
+                            account_label=account_label,
+                            strategy_name=strategy_name,
+                            session_id=session_id,
+                            limit=16,
+                        )
                     )
                     if risk_control_dispatcher is not None:
                         # Operator work claimed before a restart is not

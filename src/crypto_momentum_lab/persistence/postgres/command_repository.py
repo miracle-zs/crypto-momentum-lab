@@ -27,6 +27,46 @@ from crypto_momentum_lab.persistence.postgres.models import (
 from crypto_momentum_lab.persistence.postgres.serialization import jsonable
 
 
+def active_execution_command_condition():
+    """Select outstanding dispatch/settlement responsibility, not closed history."""
+    return and_(
+        ExecutionCommandRow.command.not_in(
+            (
+                "resolve_unknown_order",
+                "manual_reduce_only_recovery",
+                "manual_recovery_result",
+            )
+        ),
+        or_(
+            ExchangeOrderRow.state.not_in(
+                tuple(state.value for state in ExchangeOrderState if state.terminal)
+            ),
+            and_(
+                ExchangeOrderRow.executed_quantity > 0,
+                ExecutionCommandRow.status == "rejected",
+            ),
+            ExecutionCommandRow.status.in_(
+                ("prepared", "dispatching", "acknowledged", "unknown")
+            ),
+            exists(
+                select(ExecutionBookHeadRow.symbol).where(
+                    ExecutionBookHeadRow.environment
+                    == ExecutionCommandRow.details["scope"]["environment"].astext,
+                    ExecutionBookHeadRow.account_label
+                    == ExecutionCommandRow.details["scope"]["account_label"].astext,
+                    ExecutionBookHeadRow.symbol
+                    == ExecutionCommandRow.details["scope"]["symbol"].astext,
+                    ExecutionBookHeadRow.position_side
+                    == ExecutionCommandRow.details["scope"]["position_side"].astext,
+                    ExecutionBookHeadRow.state_payload["recovery_command_ids"].contains(
+                        func.jsonb_build_array(ExecutionCommandRow.command_id)
+                    ),
+                )
+            ),
+        ),
+    )
+
+
 def _execution_decimal(
     value: object,
     *,
@@ -159,32 +199,13 @@ class PostgresCommandRepository:
                     ),
                 )
                 .where(
-                    or_(
-                        ExchangeOrderRow.state.not_in(tuple(
-                            state.value for state in ExchangeOrderState if state.terminal
-                        )),
-                        and_(
-                            ExchangeOrderRow.executed_quantity > 0,
-                            ExecutionCommandRow.status == "rejected",
-                        ),
-                        ExecutionCommandRow.status.in_(
-                            ["prepared", "dispatching", "acknowledged", "unknown"]
-                        ),
-                        exists(select(ExecutionBookHeadRow.symbol).where(
-                            ExecutionBookHeadRow.environment == ExecutionCommandRow.details["scope"]["environment"].astext,
-                            ExecutionBookHeadRow.account_label == ExecutionCommandRow.details["scope"]["account_label"].astext,
-                            ExecutionBookHeadRow.symbol == ExecutionCommandRow.details["scope"]["symbol"].astext,
-                            ExecutionBookHeadRow.position_side == ExecutionCommandRow.details["scope"]["position_side"].astext,
-                            ExecutionBookHeadRow.state_payload["recovery_command_ids"].contains(
-                                func.jsonb_build_array(ExecutionCommandRow.command_id)
-                            ),
-                        )),
-                    ),
+                    active_execution_command_condition(),
                 )
             )
             if account_label is not None:
                 query = query.where(
-                    ExecutionCommandRow.details["scope"]["account_label"].astext == account_label
+                    ExecutionCommandRow.details["scope"]["account_label"].astext
+                    == account_label
                 )
             rows = (
                 await session.execute(query.order_by(ExecutionCommandRow.requested_at))
@@ -199,7 +220,9 @@ class PostgresCommandRepository:
                     continue
                 dtls = dict(r.details)
                 if dtls.get("external_order_id") is None:
-                    dtls["external_order_id"] = order.exchange_order_id if order is not None else None
+                    dtls["external_order_id"] = (
+                        order.exchange_order_id if order is not None else None
+                    )
                 # The account scope is already filtered in SQL above. A row
                 # without a scope mapping cannot be restored (the command codec
                 # requires one), so there is no second Python-side filter here:
@@ -248,7 +271,9 @@ class PostgresCommandRepository:
                 )
 
 
-def _restored_dispatch_status(order: ExchangeOrderRow | None, settlement_status: str) -> str:
+def _restored_dispatch_status(
+    order: ExchangeOrderRow | None, settlement_status: str
+) -> str:
     """Use the order for submission state; terminal projection still needs settlement."""
     if order is None:
         return settlement_status
@@ -256,8 +281,15 @@ def _restored_dispatch_status(order: ExchangeOrderRow | None, settlement_status:
     if state.terminal:
         if settlement_status == "rejected" and order.executed_quantity > 0:
             return "unknown"
-        return settlement_status if settlement_status in {"terminal", "rejected"} else "unknown"
-    if state in {ExchangeOrderState.ACKNOWLEDGED, ExchangeOrderState.SUBMITTED,
-                 ExchangeOrderState.PARTIALLY_FILLED}:
+        return (
+            settlement_status
+            if settlement_status in {"terminal", "rejected"}
+            else "unknown"
+        )
+    if state in {
+        ExchangeOrderState.ACKNOWLEDGED,
+        ExchangeOrderState.SUBMITTED,
+        ExchangeOrderState.PARTIALLY_FILLED,
+    }:
         return "acknowledged"
     return "unknown"

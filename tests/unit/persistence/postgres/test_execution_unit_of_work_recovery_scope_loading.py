@@ -56,8 +56,7 @@ class _FakeSession:
 
     async def _scalars(self, statement):
         self.statements.append(statement)
-        text = str(statement)
-        if "execution_book_heads" in text:
+        if statement.column_descriptions[0].get("entity") is ExecutionBookHeadRow:
             return _Rows(list(self._heads))
         return _Rows([])
 
@@ -325,7 +324,7 @@ async def test_head_direct_recovery_does_not_load_journal_cut():
 
     async def scalars(statement):
         text = str(statement)
-        if "execution_book_heads" in text:
+        if statement.column_descriptions[0].get("entity") is ExecutionBookHeadRow:
             return _Rows([head])
         if "account_fill_events" in text:
             # The completeness audit is a DISTINCT symbol projection; the load

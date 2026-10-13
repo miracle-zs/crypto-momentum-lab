@@ -58,6 +58,9 @@ from crypto_momentum_lab.persistence.postgres.account_fact_rows import (
 from crypto_momentum_lab.persistence.postgres.account_journal_store import (
     JournalFactConflict,
 )
+from crypto_momentum_lab.persistence.postgres.command_repository import (
+    active_execution_command_condition,
+)
 from crypto_momentum_lab.persistence.postgres.command_store_ports import (
     ExecutionCommandStore,
 )
@@ -72,6 +75,7 @@ from crypto_momentum_lab.persistence.postgres.journal_store_ports import (
     ExecutionJournalStore,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
+    ExchangeOrderRow,
     AccountFillEventRow,
     ExecutionCommandRow,
     PositionReservationRow,
@@ -574,7 +578,9 @@ _EXECUTION_POSITION_FIELDS = (
 )
 
 
-def _max_projection_timestamp(projection: PositionLedgerProjection | None) -> datetime | None:
+def _max_projection_timestamp(
+    projection: PositionLedgerProjection | None,
+) -> datetime | None:
     if projection is None:
         return None
     cuts: list[datetime] = []
@@ -757,7 +763,11 @@ class AsyncPostgresExecutionUnitOfWork:
                             select(PositionReservationRow).where(
                                 PositionReservationRow.environment == environment,
                                 PositionReservationRow.account_label == account_label,
-                                PositionReservationRow.status == "ACTIVE",
+                                PositionReservationRow.reserved_quantity
+                                > (
+                                    PositionReservationRow.consumed_quantity
+                                    + PositionReservationRow.released_quantity
+                                ),
                             )
                         )
                     ).all()
@@ -769,17 +779,33 @@ class AsyncPostgresExecutionUnitOfWork:
                             )
                     active_cmd_rows = (
                         await session.scalars(
-                            select(ExecutionCommandRow).where(
-                                ExecutionCommandRow.details["scope"]["environment"].astext == environment,
-                                ExecutionCommandRow.details["scope"]["account_label"].astext == account_label,
-                                ExecutionCommandRow.status.notin_(("rejected", "completed", "failed")),
+                            select(ExecutionCommandRow)
+                            .outerjoin(
+                                ExchangeOrderRow,
+                                ExecutionCommandRow.client_order_id
+                                == ExchangeOrderRow.client_order_id,
+                            )
+                            .where(
+                                ExecutionCommandRow.details["scope"][
+                                    "environment"
+                                ].astext
+                                == environment,
+                                ExecutionCommandRow.details["scope"][
+                                    "account_label"
+                                ].astext
+                                == account_label,
+                                active_execution_command_condition(),
                             )
                         )
                     ).all()
                     for cmd in active_cmd_rows:
                         cmd_sym = cmd.details.get("scope", {}).get("symbol")
                         cmd_ps = cmd.details.get("scope", {}).get("position_side")
-                        if cmd_sym and cmd_ps and (cmd_sym, cmd_ps) not in heads_by_position:
+                        if (
+                            cmd_sym
+                            and cmd_ps
+                            and (cmd_sym, cmd_ps) not in heads_by_position
+                        ):
                             raise _DecisionCommitConflict(
                                 f"position {cmd_sym}:{cmd_ps} has active command {cmd.command_id} "
                                 "but no durable head; recovery blocked"
@@ -813,7 +839,11 @@ class AsyncPostgresExecutionUnitOfWork:
                             select(PositionReservationRow).where(
                                 PositionReservationRow.environment == environment,
                                 PositionReservationRow.account_label == account_label,
-                                PositionReservationRow.status == "ACTIVE",
+                                PositionReservationRow.reserved_quantity
+                                > (
+                                    PositionReservationRow.consumed_quantity
+                                    + PositionReservationRow.released_quantity
+                                ),
                             )
                         )
                     ).all()
@@ -825,10 +855,22 @@ class AsyncPostgresExecutionUnitOfWork:
                         )
                     active_cmd_rows = (
                         await session.scalars(
-                            select(ExecutionCommandRow).where(
-                                ExecutionCommandRow.details["scope"]["environment"].astext == environment,
-                                ExecutionCommandRow.details["scope"]["account_label"].astext == account_label,
-                                ExecutionCommandRow.status.notin_(("rejected", "completed", "failed")),
+                            select(ExecutionCommandRow)
+                            .outerjoin(
+                                ExchangeOrderRow,
+                                ExecutionCommandRow.client_order_id
+                                == ExchangeOrderRow.client_order_id,
+                            )
+                            .where(
+                                ExecutionCommandRow.details["scope"][
+                                    "environment"
+                                ].astext
+                                == environment,
+                                ExecutionCommandRow.details["scope"][
+                                    "account_label"
+                                ].astext
+                                == account_label,
+                                active_execution_command_condition(),
                             )
                         )
                     ).all()
@@ -862,8 +904,13 @@ class AsyncPostgresExecutionUnitOfWork:
                                 PositionReservationRow.environment == environment,
                                 PositionReservationRow.account_label == account_label,
                                 PositionReservationRow.symbol == key.symbol,
-                                PositionReservationRow.position_side == key.position_side.value,
-                                PositionReservationRow.status == "ACTIVE",
+                                PositionReservationRow.position_side
+                                == key.position_side.value,
+                                PositionReservationRow.reserved_quantity
+                                > (
+                                    PositionReservationRow.consumed_quantity
+                                    + PositionReservationRow.released_quantity
+                                ),
                             )
                         )
                     ).first()
@@ -874,12 +921,28 @@ class AsyncPostgresExecutionUnitOfWork:
                         )
                     active_cmd = (
                         await session.scalars(
-                            select(ExecutionCommandRow).where(
-                                ExecutionCommandRow.details["scope"]["environment"].astext == environment,
-                                ExecutionCommandRow.details["scope"]["account_label"].astext == account_label,
-                                ExecutionCommandRow.details["scope"]["symbol"].astext == key.symbol,
-                                ExecutionCommandRow.details["scope"]["position_side"].astext == key.position_side.value,
-                                ExecutionCommandRow.status.notin_(("rejected", "completed", "failed")),
+                            select(ExecutionCommandRow)
+                            .outerjoin(
+                                ExchangeOrderRow,
+                                ExecutionCommandRow.client_order_id
+                                == ExchangeOrderRow.client_order_id,
+                            )
+                            .where(
+                                ExecutionCommandRow.details["scope"][
+                                    "environment"
+                                ].astext
+                                == environment,
+                                ExecutionCommandRow.details["scope"][
+                                    "account_label"
+                                ].astext
+                                == account_label,
+                                ExecutionCommandRow.details["scope"]["symbol"].astext
+                                == key.symbol,
+                                ExecutionCommandRow.details["scope"][
+                                    "position_side"
+                                ].astext
+                                == key.position_side.value,
+                                active_execution_command_condition(),
                             )
                         )
                     ).first()
@@ -889,9 +952,7 @@ class AsyncPostgresExecutionUnitOfWork:
                             "but no durable head; recovery blocked"
                         )
                     return ()
-                heads_by_position[(head_row.symbol, head_row.position_side)] = (
-                    head_row
-                )
+                heads_by_position[(head_row.symbol, head_row.position_side)] = head_row
                 scopes = (
                     AccountFactStreamScope.for_position_key(
                         key,
@@ -1050,7 +1111,8 @@ class AsyncPostgresExecutionUnitOfWork:
                         for batch in projection.active_episode.batches:
                             if batch.exit_order_submitted_at is not None:
                                 if not any(
-                                    b.target_batch_id == batch.batch_id for b in boundaries
+                                    b.target_batch_id == batch.batch_id
+                                    for b in boundaries
                                 ):
                                     boundaries.append(
                                         ExitOrderSubmissionFact(
@@ -1070,12 +1132,16 @@ class AsyncPostgresExecutionUnitOfWork:
                         )
                     else:
                         snap_stmt = select(PositionFactJournalEventRow).where(
-                            PositionFactJournalEventRow.environment == scope.environment,
-                            PositionFactJournalEventRow.account_label == scope.account_label,
+                            PositionFactJournalEventRow.environment
+                            == scope.environment,
+                            PositionFactJournalEventRow.account_label
+                            == scope.account_label,
                             PositionFactJournalEventRow.symbol == scope.symbol,
-                            PositionFactJournalEventRow.position_side == scope.position_side.value,
+                            PositionFactJournalEventRow.position_side
+                            == scope.position_side.value,
                             PositionFactJournalEventRow.stream_id == scope.stream_id,
-                            PositionFactJournalEventRow.stream_epoch == scope.stream_epoch,
+                            PositionFactJournalEventRow.stream_epoch
+                            == scope.stream_epoch,
                             PositionFactJournalEventRow.event_kind == "snapshot",
                         )
                         snap_rows = (await session.scalars(snap_stmt)).all()
@@ -1100,7 +1166,9 @@ class AsyncPostgresExecutionUnitOfWork:
                         )
                     )
                 if checkpoint is not None:
-                    eff_as_of = max([as_of, checkpoint.event_cut] + [f.trade_at for f in fills])
+                    eff_as_of = max(
+                        [as_of, checkpoint.event_cut] + [f.trade_at for f in fills]
+                    )
                     prefix_complete = False
                 elif cp_id:
                     valid_cuts = [
@@ -1316,7 +1384,9 @@ class AsyncPostgresExecutionUnitOfWork:
                 "identities; recovery blocked"
             )
         if not active_fills_present:
-            missing = [trade_id for trade_id in trade_ids if trade_id not in set(fill_ids)]
+            missing = [
+                trade_id for trade_id in trade_ids if trade_id not in set(fill_ids)
+            ]
             if missing:
                 raise _DecisionCommitConflict(
                     f"execution head for {key.canonical_id} names active trade "
