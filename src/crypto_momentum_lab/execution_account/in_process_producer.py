@@ -128,7 +128,9 @@ def convert_user_data_event_to_account_event(
                     )
                     fills.append(fill_event)
                 except Exception as fill_err:
-                    log.warning("user_data_fill_event_parse_failed", error=str(fill_err))
+                    log.warning(
+                        "user_data_fill_event_parse_failed", error=str(fill_err)
+                    )
             if symbol is not None:
                 symbols.add(symbol)
     elif event.event_type == "ACCOUNT_UPDATE":
@@ -142,9 +144,7 @@ def convert_user_data_event_to_account_event(
                         if position_symbol is not None:
                             symbols.add(position_symbol)
     if account_snapshot is not None:
-        symbols.update(
-            position.symbol for position in account_snapshot.positions
-        )
+        symbols.update(position.symbol for position in account_snapshot.positions)
         symbols.update(order.symbol for order in account_snapshot.open_orders)
 
     return AccountEvent(
@@ -240,6 +240,7 @@ class InProcessAccountStreamProducer:
         self._task: asyncio.Task[None] | None = None
         self._events_processed_count = 0
         self._stream: BinanceUsdMUserDataStream | None = None
+        self._stream_connected = False
         self._on_unverified_position = on_unverified_position
         self._read_client = read_client
         self._expected_multi_assets_mode = expected_multi_assets_mode
@@ -276,11 +277,15 @@ class InProcessAccountStreamProducer:
 
     @property
     def account_snapshot(self) -> AccountSnapshot | None:
-        return None if self._state is None else self._state.snapshot(
-            self._baseline_observed_at or datetime.now(tz=UTC)
+        return (
+            None
+            if self._state is None
+            else self._state.snapshot(
+                self._baseline_observed_at or datetime.now(tz=UTC)
+            )
         )
 
-    async def baseline(self) -> AccountSnapshot:
+    async def baseline(self, *, force: bool = False) -> AccountSnapshot:
         """Fetch and accept the authoritative REST baseline for this account.
 
         The startup (and post-reconnect) baseline is what makes an existing
@@ -288,16 +293,17 @@ class InProcessAccountStreamProducer:
         """
 
         if self._read_client is None:
-            raise ValueError(
-                "read_client is required to establish an account baseline"
-            )
+            raise ValueError("read_client is required to establish an account baseline")
         if self._baseline_lock is None:
             self._baseline_lock = asyncio.Lock()
         async with self._baseline_lock:
+            if force:
+                self._require_baseline = True
             if not self._require_baseline:
                 snapshot = self.account_snapshot
                 if snapshot is not None:
                     return snapshot
+            epoch = self._stream_epoch
             account_config = await self._read_client.fetch_account_config()
             if account_config.multi_assets_mode != self._expected_multi_assets_mode:
                 raise RuntimeError(
@@ -323,9 +329,11 @@ class InProcessAccountStreamProducer:
                 )
             else:
                 self._state.replace_snapshot(snapshot)
+            if epoch != self._stream_epoch:
+                raise RuntimeError("account connection changed during baseline load")
+            await self._accept_baseline(snapshot, stream_epoch=epoch)
             self._baseline_observed_at = account_config.observed_at
             self._require_baseline = False
-            await self._accept_baseline(snapshot)
             return snapshot
 
     def _next_sequence(self) -> int:
@@ -334,7 +342,9 @@ class InProcessAccountStreamProducer:
         self._sequence += 1
         return self._sequence
 
-    async def _accept_baseline(self, snapshot: AccountSnapshot) -> None:
+    async def _accept_baseline(
+        self, snapshot: AccountSnapshot, *, stream_epoch: str
+    ) -> None:
         self._account_state = ExecutionAccountStatus.RUNNING
         # The baseline is itself a frame on the new epoch and consumes a
         # sequence number, so the first business frame after it is sequence 2
@@ -342,21 +352,24 @@ class InProcessAccountStreamProducer:
         sequence = self._next_sequence()
         # An accepted REST baseline is a complete authoritative account view, so
         # it resolves the fact gaps opened by the transport break that forced it.
-        self._source.clear_fact_gap()
-        # A baseline is the continuity evidence for the current connection.
-        self._source.mark_continuity_verified(
-            stream_epoch=self._stream_epoch,
-            sequence=sequence,
-        )
         event = build_snapshot_account_event(
             snapshot,
-            event_id=f"baseline:{self._stream_epoch}:{sequence}",
+            event_id=f"baseline:{stream_epoch}:{sequence}",
             sequence=sequence,
-            stream_epoch=self._stream_epoch,
+            stream_epoch=stream_epoch,
             account_state=self._account_state,
         )
         if self._publish_baseline is not None:
             await self._publish_baseline(snapshot, event)
+        if stream_epoch != self._stream_epoch or (
+            self._stream is not None and not self._stream_connected
+        ):
+            raise RuntimeError("account connection changed during baseline acceptance")
+        self._source.clear_fact_gap()
+        self._source.mark_continuity_verified(
+            stream_epoch=stream_epoch,
+            sequence=sequence,
+        )
         if self._persist_snapshot is not None:
             await self._schedule_persistence(snapshot, event)
 
@@ -366,7 +379,7 @@ class InProcessAccountStreamProducer:
         reason: str | None,
     ) -> None:
         """React to transport changes without equating a connect with continuity."""
-
+        self._stream_connected = connected
         if connected:
             self._require_baseline = True
             self._stream_epoch = f"epoch-{uuid4().hex[:8]}"
@@ -382,9 +395,7 @@ class InProcessAccountStreamProducer:
             )
         else:
             self._require_baseline = True
-            self._source.mark_stream_disrupted(
-                reason or "account_stream_disconnected"
-            )
+            self._source.mark_stream_disrupted(reason or "account_stream_disconnected")
             log.warning(
                 "in_process_account_stream_disrupted",
                 account_label=self._account_label,
@@ -554,14 +565,18 @@ class InProcessAccountStreamProducer:
         if self._connected_event is None:
             self._connected_event = asyncio.Event()
         while not self._stopping:
-            await self._connected_event.wait()
+            try:
+                await asyncio.wait_for(self._connected_event.wait(), timeout=60.0)
+            except TimeoutError:
+                if not self._stream_connected:
+                    continue
             self._connected_event.clear()
             if self._stopping:
                 return
             if self._read_client is None:
                 return
             try:
-                await self.baseline()
+                await self.baseline(force=True)
             except asyncio.CancelledError:
                 raise
             except Exception as error:

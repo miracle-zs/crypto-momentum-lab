@@ -4,7 +4,7 @@ import hashlib
 import json
 from typing import cast as typing_cast
 
-from sqlalchemy import Numeric, cast, func, select, tuple_
+from sqlalchemy import Numeric, cast, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.account.models import (
@@ -33,7 +33,11 @@ from crypto_momentum_lab.persistence.postgres.recovery_relevance import (
 
 
 async def load_fill_recovery_sources(
-    sessions: async_sessionmaker[AsyncSession], *, environment: str, account_label: str
+    sessions: async_sessionmaker[AsyncSession],
+    *,
+    environment: str,
+    account_label: str,
+    position_keys: tuple[tuple[str, str], ...] | None = None,
 ) -> dict[tuple[str, str], AccountFillSourceAnchor | None]:
     """Use a verified current head checkpoint, otherwise an explicit flat row.
 
@@ -46,16 +50,22 @@ async def load_fill_recovery_sources(
                 select(ExecutionBookHeadRow).where(
                     ExecutionBookHeadRow.environment == environment,
                     ExecutionBookHeadRow.account_label == account_label,
-                    relevant_recovery_head(),
+                    relevant_recovery_head()
+                    if position_keys is None
+                    else tuple_(
+                        ExecutionBookHeadRow.symbol, ExecutionBookHeadRow.position_side
+                    ).in_(position_keys),
                 )
             )
         ).all()
-        if not heads:
+        if not heads and not position_keys:
             return {}
         heads_by_key = {(head.symbol, head.position_side): head for head in heads}
         result: dict[tuple[str, str], AccountFillSourceAnchor | None] = {
             key: None for key in heads_by_key
         }
+        if position_keys is not None:
+            result.update({key: None for key in position_keys if key not in result})
         bindings = []
         for head in heads:
             binding = head.state_payload.get("recovery_checkpoint")
@@ -90,7 +100,9 @@ async def load_fill_recovery_sources(
         )
         for row in checkpoints:
             key = (row.symbol, row.position_side)
-            anchor = _checkpoint_anchor(row, heads_by_key[key], environment, account_label)
+            anchor = _checkpoint_anchor(
+                row, heads_by_key[key], environment, account_label
+            )
             if anchor is not None:
                 result[key] = anchor
         keys = [key for key, anchor in result.items() if anchor is None]
@@ -103,13 +115,6 @@ async def load_fill_recovery_sources(
                     AccountPositionSnapshotRow.environment == environment,
                     AccountPositionSnapshotRow.account_label == account_label,
                     AccountPositionSnapshotRow.position_amt == 0,
-                    func.mod(
-                        func.extract(
-                            "microseconds", AccountPositionSnapshotRow.observed_at
-                        ),
-                        1000,
-                    )
-                    == 0,
                     tuple_(
                         AccountPositionSnapshotRow.symbol,
                         AccountPositionSnapshotRow.position_side,
@@ -138,13 +143,6 @@ async def load_fill_recovery_sources(
                     cast(
                         PositionFactJournalEventRow.payload["position_amt"].astext,
                         Numeric,
-                    )
-                    == 0,
-                    func.mod(
-                        func.extract(
-                            "microseconds", PositionFactJournalEventRow.occurred_at
-                        ),
-                        1000,
                     )
                     == 0,
                     tuple_(

@@ -170,13 +170,21 @@ async def test_startup_failure_is_classified_as_startup_retryable_error() -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("in_process_mode", [False, True])
 async def test_runtime_failure_is_not_classified_as_startup_retryable_error(
     monkeypatch,
+    in_process_mode,
 ) -> None:
     config = _make_test_config()
     config = replace(
         config,
         strategy=replace(config.strategy, entry_positive_gainer_top_count=None),
+        market=replace(
+            config.market,
+            account_event_hub_url=None
+            if in_process_mode
+            else config.market.account_event_hub_url,
+        ),
     )
 
     mock_persistence = MagicMock()
@@ -286,6 +294,46 @@ async def test_runtime_failure_is_not_classified_as_startup_retryable_error(
     mock_exec_runtime.book = MagicMock()
     mock_exec_runtime.coordinator = MagicMock()
     mock_exec_runtime.coordinator.aclose = AsyncMock()
+    accepted_baseline = []
+    baseline_callback = []
+    if in_process_mode:
+        from types import SimpleNamespace
+        from crypto_momentum_lab.domain.account import ExecutionAccountStatus
+        from crypto_momentum_lab.live_rollout.decision_facts import (
+            LiveDecisionFactSource,
+        )
+
+        original_bind = LiveDecisionFactSource.bind_account_stream
+
+        def bind_stream(self, **kwargs):
+            original_bind(self, **kwargs)
+            accepted_baseline.append("bind")
+
+        monkeypatch.setattr(LiveDecisionFactSource, "bind_account_stream", bind_stream)
+
+        async def accept_book(*args, **kwargs):
+            accepted_baseline.append("book")
+
+        mock_exec_runtime.coordinator.observe_account_snapshot = AsyncMock(
+            side_effect=accept_book
+        )
+
+        def make_producer(**kwargs):
+            baseline_callback.append(kwargs["publish_baseline"])
+            return SimpleNamespace(
+                start=lambda: None,
+                stop=AsyncMock(),
+                account_state=ExecutionAccountStatus.RUNNING,
+            )
+
+        monkeypatch.setattr(
+            "crypto_momentum_lab.live_rollout.runtime_orchestrator.InProcessAccountStreamProducer",
+            make_producer,
+        )
+        monkeypatch.setattr(
+            "crypto_momentum_lab.live_rollout.runtime_orchestrator.LiveControlPlaneRuntime.on_account_snapshot",
+            lambda self, event: accepted_baseline.append("context"),
+        )
     monkeypatch.setattr(
         "crypto_momentum_lab.live_rollout.runtime_orchestrator.build_live_execution_runtime",
         AsyncMock(return_value=mock_exec_runtime),
@@ -353,9 +401,25 @@ async def test_runtime_failure_is_not_classified_as_startup_retryable_error(
 
     def mock_session_factory(*, supervisor, **kwargs):
         mock_session = AsyncMock()
-        mock_session.run.side_effect = InjectedRetryableRuntimeFailure(
-            "network dropped during runtime"
-        )
+
+        async def run_session():
+            if in_process_mode:
+                from types import SimpleNamespace
+
+                event = SimpleNamespace(
+                    account_snapshot=SimpleNamespace(positions=()),
+                    fills=(),
+                    fill_load_scans=(),
+                    stream_epoch="baseline-epoch",
+                    sequence=1,
+                    event_id="baseline:1",
+                    symbols=(),
+                )
+                await baseline_callback[0](event.account_snapshot, event)
+                assert accepted_baseline == ["book", "bind", "context"]
+            raise InjectedRetryableRuntimeFailure("network dropped during runtime")
+
+        mock_session.run.side_effect = run_session
 
         async def _close(*args, **kwargs):
             await supervisor.stop()

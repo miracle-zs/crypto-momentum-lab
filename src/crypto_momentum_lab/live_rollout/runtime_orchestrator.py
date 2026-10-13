@@ -7,7 +7,7 @@ module owns the runtime assembly and lifecycle of one live daemon.
 import asyncio
 import json
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -101,6 +101,11 @@ from crypto_momentum_lab.domain.account import (
     ExecutionAccountStatus,
 )
 from crypto_momentum_lab.domain.account.snapshot_models import AccountSnapshot
+from crypto_momentum_lab.domain.account.models import AccountFillLoadScan
+from crypto_momentum_lab.execution_account.fill_scan_plan import plan_fill_scan
+from crypto_momentum_lab.persistence.postgres.fill_recovery_sources import (
+    load_fill_recovery_sources,
+)
 from crypto_momentum_lab.execution_account.balance_history import (
     BalanceValue,
     balance_value,
@@ -563,7 +568,9 @@ async def run_live_daemon(
     # The merged account projection is published to the control plane and
     # persisted for the dashboard; both sinks are created later in the
     # assembly, so the producer writes through stable one-slot holders.
-    control_plane_listener: list[Callable[[AccountEvent], None] | None] = [None]
+    account_baseline_listener: list[
+        Callable[[AccountEvent], Awaitable[None]] | None
+    ] = [None]
     account_facts_status_holder: list[Callable[[], Mapping[str, object]]] = [
         lambda: {"ready": None, "reason": "account_facts_unreported"}
     ]
@@ -838,8 +845,79 @@ async def run_live_daemon(
                 instead of the retired execution-account sync process.
                 """
 
-                if control_plane_listener[0] is not None:
-                    control_plane_listener[0](event)
+                if account_baseline_listener[0] is None:
+                    raise RuntimeError("account baseline consumer is not assembled")
+                if snapshot.positions:
+                    loader = (
+                        None
+                        if entry_runtime is None
+                        else entry_runtime.entry_symbol_loader
+                    )
+                    symbols = (
+                        None
+                        if loader is None
+                        else await loader(snapshot.config.observed_at)
+                    )
+                    ordered_symbols = {order.symbol for order in snapshot.open_orders}
+                    selected = tuple(
+                        position
+                        for position in snapshot.positions
+                        if position.position_amt != 0
+                        or symbols is None
+                        or position.symbol in symbols
+                        or position.symbol in ordered_symbols
+                    )
+                    anchors = await load_fill_recovery_sources(
+                        execution_factory,
+                        environment="live",
+                        account_label=account_label,
+                        position_keys=tuple(
+                            (position.symbol, position.position_side.upper())
+                            for position in selected
+                        ),
+                    )
+                    scans = []
+                    fills = {}
+                    for position in selected:
+                        plan = plan_fill_scan(
+                            position,
+                            anchors.get(
+                                (position.symbol, position.position_side.upper())
+                            ),
+                        )
+                        if plan is None:
+                            continue
+                        (
+                            loaded_fills,
+                            page,
+                        ) = await read_client.fetch_fills_with_provenance(
+                            position.symbol,
+                            start_time_ms=plan.start_time_ms,
+                            checked_through=plan.checked_through,
+                        )
+                        for fill in loaded_fills:
+                            if fill.trade_at <= position.observed_at:
+                                fills[(fill.symbol, fill.trade_id)] = fill
+                        scans.append(
+                            AccountFillLoadScan(
+                                environment="live",
+                                account_label=account_label,
+                                symbol=position.symbol,
+                                position_side=position.position_side.upper(),
+                                page_scan=page,
+                                observed_at=position.observed_at,
+                                source_anchor_id=plan.source_anchor_id,
+                                source_anchor_event_cut=plan.source_anchor_event_cut,
+                                source_anchor_kind=plan.source_anchor_kind,
+                                source_stream_id=plan.source_stream_id,
+                                source_stream_epoch=plan.source_stream_epoch,
+                                source_anchor_snapshot=plan.source_anchor_snapshot,
+                            )
+                        )
+                    event = replace(
+                        event, fills=tuple(fills.values()), fill_load_scans=tuple(scans)
+                    )
+                await account_baseline_listener[0](event)
 
             async def _persist_in_process_snapshot(
                 snapshot: AccountSnapshot,
@@ -1742,7 +1820,6 @@ async def run_live_daemon(
         # The merged producer writes the account projection through this
         # listener, so startup baselines and WS deltas reach the live context
         # exactly like Hub frames used to.
-        control_plane_listener[0] = control_plane_runtime.on_account_snapshot
         account_facts_status_holder[0] = control_plane_runtime.account_facts_status
         account_facts_ready_holder[0] = lambda: (
             control_plane_runtime.account_snapshot_available
@@ -1927,6 +2004,7 @@ async def run_live_daemon(
             if event.account_snapshot is not None or event.fills:
                 exit_channel_runtime.note_account_facts_changed(event.symbols)
 
+        account_baseline_listener[0] = _on_account_snapshot_combined
         account_event_runtime = LiveAccountEventRuntime(
             daemon=daemon,
             latest_market_states=latest_market_states,

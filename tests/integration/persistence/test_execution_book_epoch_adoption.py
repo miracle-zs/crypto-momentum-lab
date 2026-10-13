@@ -61,6 +61,151 @@ from crypto_momentum_lab.persistence.postgres.session import (
 
 
 @pytest.mark.asyncio
+async def test_flat_baseline_scan_adopts_restored_head_without_business_event(
+    async_database_url,
+):
+    from dataclasses import replace
+    from crypto_momentum_lab.domain.account.models import (
+        AccountFillLoadScan,
+        AccountFillPageScan,
+    )
+    from crypto_momentum_lab.execution_account.fill_scan_plan import plan_fill_scan
+    from crypto_momentum_lab.execution_account.orders.fill_scan_evidence import (
+        coverage_from_scan,
+    )
+    from crypto_momentum_lab.persistence.postgres.fill_recovery_sources import (
+        load_fill_recovery_sources,
+    )
+
+    engine = create_async_database_engine(async_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    key = PositionKey("live", f"baseline-{uuid4().hex}", "BTCUSDT")
+    at = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=1)
+    scope = AccountFactStreamScope.for_position_key(
+        key, stream_id="account_event_hub", stream_epoch="old"
+    )
+    first = _snapshot(key, at, "0", "0")
+    try:
+        book = _book(factory)
+        await book.restore(account_label=key.account_label)
+        proof = _coverage(
+            scope,
+            load_id="old",
+            scan_origin=at,
+            anchor_id=stable_snapshot_anchor_id(first),
+            anchor_cut=at,
+            anchor_kind="zero_snapshot",
+            checked_through=at,
+        )
+        evidence = _evidence(
+            key,
+            evidence_id="old",
+            scope=scope,
+            at=at,
+            sequence=1,
+            snapshot=first,
+            proof=proof,
+        )
+        assert isinstance(await book.observe(evidence), Applied)
+        book = _book(factory)
+        await book.restore(account_label=key.account_label)
+        current = _snapshot(key, at + timedelta(minutes=1), "0", "0")
+        target = AccountFactStreamScope.for_position_key(
+            key, stream_id="account_event_hub", stream_epoch="new"
+        )
+        anchors = await load_fill_recovery_sources(
+            factory,
+            environment="live",
+            account_label=key.account_label,
+            position_keys=((key.symbol, key.position_side.value),),
+        )
+        plan = plan_fill_scan(current, anchors[(key.symbol, key.position_side.value)])
+        assert plan is not None
+        page = AccountFillPageScan(
+            symbol=key.symbol,
+            load_id="baseline-scan",
+            scan_origin_start_time_ms=plan.start_time_ms,
+            checked_through=plan.checked_through,
+            next_from_id=None,
+            page_count=1,
+            page_exhausted=True,
+            truncated=False,
+        )
+        scan = AccountFillLoadScan(
+            environment="live",
+            account_label=key.account_label,
+            symbol=key.symbol,
+            position_side=key.position_side.value,
+            page_scan=page,
+            observed_at=current.observed_at,
+            source_anchor_id=plan.source_anchor_id,
+            source_anchor_event_cut=plan.source_anchor_event_cut,
+            source_anchor_kind=plan.source_anchor_kind,
+            source_stream_id=plan.source_stream_id,
+            source_stream_epoch=plan.source_stream_epoch,
+            source_anchor_snapshot=plan.source_anchor_snapshot,
+        )
+        proof = coverage_from_scan(scan, snapshot=current, scope=target)
+        incoming = _evidence(
+            key,
+            evidence_id="baseline",
+            scope=target,
+            at=current.observed_at,
+            sequence=1,
+            snapshot=current,
+            proof=proof,
+        )
+        incoming = replace(incoming, source_anchor_snapshot=plan.source_anchor_snapshot)
+        assert isinstance(await book.observe(incoming), Applied)
+        view = await book.read(
+            incoming.scope,
+            event_cut=current.observed_at,
+            stream_id=target.stream_id,
+            stream_epoch=target.stream_epoch,
+        )
+        assert view.stream_scope == target
+        assert view.total_quantity == 0
+        assert view.is_ready_for_trade
+        from types import SimpleNamespace
+        from crypto_momentum_lab.domain.account import ExecutionAccountStatus
+        from crypto_momentum_lab.domain.risk import StrategyLiveState
+        from crypto_momentum_lab.live_rollout.decision_facts import (
+            LiveDecisionFactSource,
+        )
+
+        provider = LiveDecisionFactSource(
+            account_label=key.account_label,
+            execution_book=book,
+            hedge_mode=False,
+            request_exit_recovery=lambda: None,
+        )
+        provider.bind_context(
+            SimpleNamespace(
+                account_snapshot=SimpleNamespace(
+                    balances=(
+                        SimpleNamespace(asset="USDT", wallet_balance=Decimal("1000")),
+                    )
+                ),
+                account_state=ExecutionAccountStatus.RUNNING,
+                strategy_state=StrategyLiveState.ACTIVE,
+                active_halts=(),
+                risk_config=SimpleNamespace(config_hash="risk-version"),
+                context_epoch=1,
+            )
+        )
+        provider.bind_account_stream(
+            stream_id=target.stream_id, stream_epoch=target.stream_epoch, sequence=1
+        )
+        inputs = await provider.build(
+            SimpleNamespace(symbol=key.symbol, bucket_end=current.observed_at)
+        )
+        assert inputs is not None
+        assert inputs.position_view.is_ready_for_trade
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("other_head", [False, True])
 @pytest.mark.parametrize(
     "status,unsettled",

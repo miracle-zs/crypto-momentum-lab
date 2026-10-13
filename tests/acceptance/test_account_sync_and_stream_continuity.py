@@ -259,7 +259,9 @@ class _NoopListenKeyClient:
 
 
 @pytest.mark.asyncio
-async def test_account_update_publishes_merged_balance_and_position_projection() -> None:
+async def test_account_update_publishes_merged_balance_and_position_projection() -> (
+    None
+):
     """ACCOUNT_UPDATE must publish the merged account projection, not only symbols."""
 
     account = "acct-merge"
@@ -406,7 +408,9 @@ async def test_existing_position_update_does_not_consume_missing_expectation() -
 
 
 @pytest.mark.asyncio
-async def test_growth_of_held_position_requires_verification_without_reisolating() -> None:
+async def test_growth_of_held_position_requires_verification_without_reisolating() -> (
+    None
+):
     """A material quantity change on a held position still needs verification."""
 
     account = "acct-grow"
@@ -473,7 +477,9 @@ async def test_source_without_verified_connection_never_admits_new_risk() -> Non
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("multi_assets_mode", [True, False])
-async def test_reconnect_blocks_account_until_the_new_baseline_is_accepted(multi_assets_mode) -> None:
+async def test_reconnect_blocks_account_until_the_new_baseline_is_accepted(
+    multi_assets_mode,
+) -> None:
     """A transport break blocks every symbol until a baseline re-anchors the epoch."""
 
     account = "acct-reconnect"
@@ -484,7 +490,10 @@ async def test_reconnect_blocks_account_until_the_new_baseline_is_accepted(multi
     read_client = _FakeReadClient(account=account)
     from dataclasses import replace
     from unittest.mock import AsyncMock
-    read_client.fetch_account_config = AsyncMock(return_value=replace(_config(account), multi_assets_mode=multi_assets_mode))
+
+    read_client.fetch_account_config = AsyncMock(
+        return_value=replace(_config(account), multi_assets_mode=multi_assets_mode)
+    )
     producer = _make_producer(
         account=account,
         source=source,
@@ -608,3 +617,33 @@ def _event(
         sequence=sequence,
         stream_epoch=stream_epoch,
     )
+
+
+@pytest.mark.asyncio
+async def test_baseline_consumer_failure_does_not_confirm_continuity():
+    account = "baseline-not-accepted"
+    source = InProcessAccountEventSource(environment="live", account_label=account)
+    registry = AccountPositionExpectationRegistry(
+        environment="live", account_label=account
+    )
+
+    async def reject_baseline(snapshot, event):
+        assert not source.is_risk_allowed()
+        raise RuntimeError("durable facts not accepted")
+
+    producer = InProcessAccountStreamProducer(
+        client=_NoopListenKeyClient(),
+        read_client=_FakeReadClient(account=account),
+        registry=registry,
+        source=source,
+        environment="live",
+        account_label=account,
+        expected_multi_assets_mode=True,
+        expected_hedge_mode=True,
+        publish_baseline=reject_baseline,
+    )
+    with pytest.raises(RuntimeError, match="durable facts not accepted"):
+        await producer.baseline()
+    assert not source.continuity_verified
+    assert not source.is_risk_allowed()
+    source.stop()
