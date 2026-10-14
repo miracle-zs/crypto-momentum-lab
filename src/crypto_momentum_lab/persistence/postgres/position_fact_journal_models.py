@@ -54,6 +54,17 @@ class PositionFactJournalEventRow(Base):
             "stream_epoch",
             "recorded_at",
         ),
+        Index(
+            "ix_position_fact_events_scope_revision",
+            "environment",
+            "account_label",
+            "symbol",
+            "position_side",
+            "stream_id",
+            "stream_epoch",
+            "source_revision",
+            postgresql_include=["occurred_at"],
+        ),
     )
 
 
