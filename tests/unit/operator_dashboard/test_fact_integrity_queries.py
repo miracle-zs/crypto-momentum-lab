@@ -106,7 +106,16 @@ def _head(
     revision: int,
     active_hint: bool,
     unresolved: bool,
+    total_active_quantity: Decimal | None = None,
 ):
+    payload = {
+        "journal_revision": revision,
+        "recovery_checkpoint": {"checkpoint_id": "cp-1"},
+        "recovery_command_ids": ["cmd-1"] if unresolved else [],
+        "active_reservation_ids": [],
+    }
+    if total_active_quantity is not None:
+        payload["total_active_quantity"] = format(total_active_quantity, "f")
     return SimpleNamespace(
         account_label=account,
         symbol=symbol,
@@ -114,12 +123,7 @@ def _head(
         stream_id="account_event_hub",
         stream_epoch="epoch-1",
         updated_at=NOW,
-        state_payload={
-            "journal_revision": revision,
-            "recovery_checkpoint": {"checkpoint_id": "cp-1"},
-            "recovery_command_ids": ["cmd-1"] if unresolved else [],
-            "active_reservation_ids": [],
-        },
+        state_payload=payload,
         _active_hint=active_hint,
     )
 
@@ -206,6 +210,7 @@ def test_suffix_queries_join_current_heads_without_expanding_tuple_lists(
         "source_revision <= bound_checkpoints.head_revision" in sql
         for sql in compiled
     )
+    assert all("count(DISTINCT" not in sql for sql in compiled)
 
 
 def test_closed_historical_object_does_not_unknown_current_health() -> None:
@@ -258,7 +263,7 @@ def test_open_position_suffix_inside_verified_cut_is_proven() -> None:
     suffix_rows = [
         (
             "primary", "WUSDT", "LONG", "account_event_hub", "epoch-1",
-            3, 13, NOW - timedelta(seconds=30),
+            13, NOW - timedelta(seconds=30),
         )
     ]
     integrity = _run(
@@ -365,6 +370,38 @@ def test_active_position_count_mismatch_is_reported(
     summary = integrity["primary"]
     assert summary.gaps is None
     assert expected_reason in summary.reasons
+
+
+def test_closed_head_does_not_count_stale_checkpoint_position_as_current() -> None:
+    """A closed current head must not inherit the checkpoint's old quantity."""
+    integrity = _run(
+        heads=[
+            _head(
+                account="primary",
+                symbol="BTWUSDT",
+                side="LONG",
+                revision=13,
+                active_hint=False,
+                unresolved=False,
+                total_active_quantity=Decimal("0"),
+            )
+        ],
+        checkpoints=[_checkpoint_row("primary", "BTWUSDT", "LONG")],
+        suffix_rows=[],
+        coverage_rows=[],
+        accounts={"primary": SimpleNamespace(position_count=0)},
+        checkpoint_for=lambda payload: _checkpoint(
+            account="primary",
+            symbol="BTWUSDT",
+            side="LONG",
+            active_quantity=Decimal("43"),
+        ),
+    )
+
+    summary = integrity["primary"]
+    assert summary.gaps == 0
+    assert summary.reasons == ()
+    assert summary.historical_reasons == ("journal_suffix_incomplete",)
 
 
 def test_integrity_details_name_the_missing_evidence_and_scope() -> None:

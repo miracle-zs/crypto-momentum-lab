@@ -77,7 +77,6 @@ class RecoveryCut:
 class SuffixFacts:
     """Persisted journal facts after the recovery cut, as stored."""
 
-    distinct_revisions: int = 0
     max_source_revision: int | None = None
     newest_occurred_at: datetime | None = None
     newest_coverage_end_at: datetime | None = None
@@ -143,12 +142,13 @@ def evaluate_head_proof(
             return HeadProof(
                 UNKNOWN, REASON_HEAD_REVISION_BEHIND, None, current
             )
-        expected_suffix = head.journal_revision - recovery.source_revision
-        if expected_suffix > 0:
-            if (
-                suffix.max_source_revision != head.journal_revision
-                or suffix.distinct_revisions != expected_suffix
-            ):
+        if head.journal_revision > recovery.source_revision:
+            # A journal revision is advanced per fact mutation, but one
+            # persistence transaction writes all changed facts at the final
+            # revision. Revisions between the checkpoint and that final value
+            # therefore need not each have a row; only the final persisted
+            # revision can prove that the current transaction reached the head.
+            if suffix.max_source_revision != head.journal_revision:
                 return HeadProof(
                     UNKNOWN, REASON_JOURNAL_SUFFIX_INCOMPLETE, None, current
                 )

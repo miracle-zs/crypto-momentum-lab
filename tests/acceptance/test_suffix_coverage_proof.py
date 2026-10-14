@@ -691,11 +691,10 @@ async def test_suffix_coverage_with_wrong_stream_scope_must_be_unknown(
 
 
 @pytest.mark.asyncio
-async def test_incomplete_suffix_with_coverage_still_unknown(
+async def test_sparse_suffix_revisions_with_coverage_prove_current_head(
     async_database_url: str,
 ) -> None:
-    """Incomplete suffix (missing revisions) keeps the head UNKNOWN even with
-    valid coverage."""
+    """Revision gaps are valid when the latest transaction reached the head."""
     engine = create_async_database_engine(async_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
@@ -726,8 +725,8 @@ async def test_incomplete_suffix_with_coverage_still_unknown(
             assert checkpoint_row is not None
             base_revision = checkpoint_row.source_revision
 
-            # Only add ONE suffix event, but claim head_revision = base+3.
-            # The suffix is incomplete: distinct_revisions=1, expected=2.
+            # This transaction can advance multiple fact revisions while the
+            # store writes its changed facts at the final revision.
             session.add(
                 _journal_row(
                     scope=scope,
@@ -792,10 +791,10 @@ async def test_incomplete_suffix_with_coverage_still_unknown(
             max_age_seconds=3600.0,
         )
         summary = integrity[account]
-        assert summary.gaps is None, (
-            "incomplete suffix must not prove current risk even with valid coverage"
+        assert summary.gaps == 0, (
+            "a sparse revision suffix ending at the head should prove current risk"
         )
-        assert "journal_suffix_incomplete" in summary.reasons
+        assert summary.reasons == ()
     finally:
         await engine.dispose()
 

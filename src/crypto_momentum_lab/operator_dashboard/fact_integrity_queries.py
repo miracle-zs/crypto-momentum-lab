@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import BigInteger, and_, case, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -165,6 +165,22 @@ def _head_facts(
     )
 
 
+def _current_head_quantity(
+    head: ExecutionBookHeadRow,
+    *,
+    checkpoint_quantity: Decimal,
+) -> Decimal:
+    """Read current quantity from the head, falling back for legacy payloads."""
+    value = (head.state_payload or {}).get("total_active_quantity")
+    if value is None:
+        return checkpoint_quantity
+    try:
+        quantity = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return checkpoint_quantity
+    return quantity if quantity.is_finite() else checkpoint_quantity
+
+
 async def load_fact_integrity(
     sessions: async_sessionmaker[AsyncSession],
     *,
@@ -247,8 +263,8 @@ async def load_fact_integrity(
             ): row
             for row in rows
         }
-        # One aggregate pass proves which journal revisions after each recovery
-        # cut are actually persisted, instead of replaying every suffix event.
+        # One aggregate pass finds the latest persisted revision after each
+        # recovery cut instead of replaying every suffix event.
         # The join is pinned to the exact referenced checkpoints so an older
         # checkpoint of the same scope cannot widen another scope's suffix.
         # Since that exact checkpoint set joins on every scope column, a second
@@ -264,7 +280,6 @@ async def load_fact_integrity(
                         events.position_side,
                         events.stream_id,
                         events.stream_epoch,
-                        func.count(func.distinct(events.source_revision)),
                         func.max(events.source_revision),
                         func.max(events.occurred_at),
                     )
@@ -283,11 +298,10 @@ async def load_fact_integrity(
             ).all()
             suffix_by_scope = {
                 (row[0], row[1], row[2], row[3], row[4]): SuffixFacts(
-                    distinct_revisions=int(row[5] or 0),
                     max_source_revision=(
-                        int(row[6]) if row[6] is not None else None
+                        int(row[5]) if row[5] is not None else None
                     ),
-                    newest_occurred_at=row[7],
+                    newest_occurred_at=row[6],
                 )
                 for row in suffix_rows
             }
@@ -301,7 +315,6 @@ async def load_fact_integrity(
                 if scope_key in suffix_by_scope:
                     existing = suffix_by_scope[scope_key]
                     suffix_by_scope[scope_key] = SuffixFacts(
-                        distinct_revisions=existing.distinct_revisions,
                         max_source_revision=existing.max_source_revision,
                         newest_occurred_at=existing.newest_occurred_at,
                         newest_coverage_end_at=coverage_end_at,
@@ -387,9 +400,13 @@ def _apply_head(
         _record_unknown(proof, scope, REASON_CHECKPOINT_ROW_MISSING)
         return
     checkpoint = PositionRecoveryCodec.decode_checkpoint(row.payload)
+    current_quantity = _current_head_quantity(
+        head,
+        checkpoint_quantity=checkpoint.projection.total_active_quantity,
+    )
     facts = _head_facts(
         head,
-        active_quantity=checkpoint.projection.total_active_quantity,
+        active_quantity=current_quantity,
         reconciliation_gap=checkpoint.projection.reconciliation_gap,
     )
     coverage = checkpoint.coverage
@@ -444,7 +461,7 @@ def _apply_head(
         proof.reasons.append(verdict.reason)
         proof.scopes.append(scope)
         return
-    if checkpoint.projection.total_active_quantity != 0:
+    if facts.active_quantity != 0:
         proof.active_positions += 1
     if verdict.status == PROVEN and verdict.cut is not None:
         if verdict.current:

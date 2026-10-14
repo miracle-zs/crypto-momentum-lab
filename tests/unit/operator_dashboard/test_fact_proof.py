@@ -68,7 +68,6 @@ def test_complete_suffix_within_verified_cut_proves_a_newer_publication() -> Non
             coverage_end_at=NOW - timedelta(seconds=30),
         ),
         suffix=SuffixFacts(
-            distinct_revisions=3,
             max_source_revision=13,
             newest_occurred_at=NOW - timedelta(seconds=30),
         ),
@@ -81,15 +80,31 @@ def test_complete_suffix_within_verified_cut_proves_a_newer_publication() -> Non
     assert proof.current
 
 
+def test_sparse_revisions_are_valid_when_latest_revision_reaches_head() -> None:
+    """One transaction may advance several journal revisions before persisting."""
+    proof = evaluate_head_proof(
+        head=_head(),
+        recovery=_recovery(
+            event_cut=NOW - timedelta(seconds=30),
+            coverage_end_at=NOW - timedelta(seconds=30),
+        ),
+        suffix=SuffixFacts(
+            max_source_revision=13,
+            newest_occurred_at=NOW - timedelta(seconds=30),
+        ),
+        now=NOW,
+        max_age_seconds=180.0,
+    )
+
+    assert proof.status == PROVEN
+    assert proof.current
+
+
 def test_incomplete_suffix_is_unknown_and_names_the_reason() -> None:
     missing_revision = evaluate_head_proof(
         head=_head(),
         recovery=_recovery(),
-        suffix=SuffixFacts(
-            distinct_revisions=2,
-            max_source_revision=13,
-            newest_occurred_at=NOW - timedelta(seconds=30),
-        ),
+        suffix=SuffixFacts(max_source_revision=12),
         now=NOW,
         max_age_seconds=180.0,
     )
@@ -112,7 +127,6 @@ def test_coverage_watermark_must_reach_the_proven_cut() -> None:
         head=_head(),
         recovery=_recovery(coverage_end_at=CHECKPOINT_CUT),
         suffix=SuffixFacts(
-            distinct_revisions=3,
             max_source_revision=13,
             newest_occurred_at=NOW - timedelta(seconds=30),
         ),
@@ -132,7 +146,6 @@ def test_old_proof_and_missing_checkpoint_coverage_are_unknown() -> None:
             coverage_covers_cut=True,
         ),
         suffix=SuffixFacts(
-            distinct_revisions=3,
             max_source_revision=13,
             newest_occurred_at=NOW - timedelta(minutes=10),
         ),
@@ -146,7 +159,7 @@ def test_old_proof_and_missing_checkpoint_coverage_are_unknown() -> None:
         head=_head(),
         recovery=_recovery(coverage_authoritative=False),
         suffix=SuffixFacts(
-            distinct_revisions=3, max_source_revision=13, newest_occurred_at=NOW
+            max_source_revision=13, newest_occurred_at=NOW
         ),
         now=NOW,
         max_age_seconds=180.0,
@@ -159,7 +172,7 @@ def test_conflicts_and_unready_projection_stay_invalid() -> None:
     conflict = evaluate_head_proof(
         head=_head(),
         recovery=_recovery(has_conflicts=True),
-        suffix=SuffixFacts(distinct_revisions=3, max_source_revision=13),
+        suffix=SuffixFacts(max_source_revision=13),
         now=NOW,
         max_age_seconds=180.0,
     )
@@ -168,7 +181,7 @@ def test_conflicts_and_unready_projection_stay_invalid() -> None:
     not_ready = evaluate_head_proof(
         head=_head(),
         recovery=_recovery(projection_ready=False),
-        suffix=SuffixFacts(distinct_revisions=3, max_source_revision=13),
+        suffix=SuffixFacts(max_source_revision=13),
         now=NOW,
         max_age_seconds=180.0,
     )
@@ -180,7 +193,7 @@ def test_mismatched_checkpoint_identity_is_unknown() -> None:
     proof = evaluate_head_proof(
         head=_head(),
         recovery=_recovery(binding_matches=False),
-        suffix=SuffixFacts(distinct_revisions=3, max_source_revision=13),
+        suffix=SuffixFacts(max_source_revision=13),
         now=NOW,
         max_age_seconds=180.0,
     )
