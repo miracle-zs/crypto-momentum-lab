@@ -680,3 +680,27 @@ primary 新进程启动暴露两个接线问题：账户读取硬编码 Multi-As
 在这个前提下，trading_leases 只是在数据库重复表示进程是否运行。租约获取、续约、逐次派发复核及 Dashboard 租约状态已从源码移除；账户运行身份仍由现有 session 和进程状态记录。订单命令、执行 head 与预留继续保存交易恢复所需的业务事实，不承担进程互斥。
 
 新增迁移 20261014_0061 删除 trading_leases 表，历史迁移保持不变。相应运行时代码和 migration 尚未部署；当前生产版本仍按本节之前记录运行，生产表要等后续受控发布执行迁移时才会删除。
+
+
+### 8.13 额外防御与过度设计审查（2026-10-14）
+
+本轮审查基于源码 HEAD `25d9d345`，是源码盘点和计划，不代表这些改动已实现或部署。目标是减少同一事实的多份表示和重复决策；不为“简化”删掉处理真实交易不确定性的机制，也不再新增门控、状态副本或通用框架。
+
+|优先级|发现|判断与收敛方向|
+|---|---|---|
+|高|`PositionBook` 同时保存 `_projection` 和 `_facts`；`execution_head` 又把它们分别编码为 `position_state.projection` 与 `position_state.verification`。后者包含快照、覆盖范围、恢复锚点和成交读取 provenance。|这不是 Journal，但仍是当前持仓的两种表示。将持仓数量、批次、成本和退出责任收敛为唯一 `PositionState`；只保留继续消费后续成交所必需的最小来源游标/覆盖信息。先逐字段查明冷启动和增量更新的实际读取点，再改 head 格式；不能把缺失来源信息当作零仓。|
+|高|成交扫描先生成 `AccountFillLoadProvenance`，再由 `coverage_from_scan` 复制到 `FactCoverageInterval`；两个模型重复携带 stream scope、分页完成/截断标记及时间边界，覆盖模型还复核复制值是否一致。|保留“锚点到查询截止时间的成交扫描完整”这一必要事实，删去重复存储和仅用于相互比对的字段；分页是否耗尽、是否截断、作用域和检查截止点应有一个来源。确认 Binance 查询分页边界后实施。 |
+|中|入口控制在 `LiveEntryControlGate` 中分别维护通用 entry、risk、schedule、halt 状态，并把 risk/schedule 阻塞镜像到提交状态机；`LiveReadinessPublisher` 再复制 entry 状态。其 payload 另有固定 `mode=RUNNING`、`unmanaged_risk_clear=true`、`halt_active=false` 和空的 `stream_readiness=UNKNOWN`。|将入口结果和原因收敛为一个权威状态，由交易路径和 Dashboard 读取；去掉诊断 payload 的重复字段和不代表真实运行状态的固定占位值。scheduled controller 的即时时间拦截与“执行/核实完毕后才重开”的持续阻塞承担不同职责，不能一并删除。候选信号记录中的检查也不应变成另一个交易 authority。|
+|中|`runtime_orchestrator.py` 有约 2,180 行，使用多个单元素 list holder 延迟连线；执行核心又在 `ExecutionBook`、processor、transaction 和 state helper 之间多层转发。|清除只传参的内部转发和重复装配；先画出命令准备、成交接纳、持仓更新三个实际事务边界，再合并仅为拆文件而拆开的实现。不要为了文件变少新建“总控”类或通用插件层。|
+|低|头部解码与 `PositionBook.from_current_state` 都验证位置身份/作用域；gate setter 与调用方也会重复验证同一原因文本等内部类型约束。|逐项确认调用边界后，把外部/持久化输入校验留在解析入口，把领域不变量留在领域构造处；移除纯内部重复检查。只清除证据明确的重复校验，不删除数据库唯一约束、CAS 或请求身份冲突检查。|
+|待测|`LiveUnmanagedPositionRepair` 为每个持仓维护 evidence、attempt count、failure 分类、重试截止和重复日志抑制；恢复、重连和订单对账各自也有重试状态。|这些状态可能避免无效重复读取和日志风暴，不能仅凭代码量判为多余。先统计同一证据重复触发次数、恢复耗时和失败率；若同一 evidence/backoff 已足够，就删除 attempt 分类等未被运营消费的字段。保留必要的断线重连与失败后重试。|
+
+优化顺序：
+
+1. 收敛 gate/readiness 的状态和展示副本；保留账户事实未就绪、行情未就绪、人工暂停、风险暂停和计划窗口等现有业务原因，但不要再维护两份可独立变化的最终 gate。复用现有 gate、Dashboard 和 scheduled-window 测试。
+2. 将 `execution_book_heads` 的持仓部分改成唯一当前 `PositionState`，仅附带确有下游读取的最小成交游标/来源范围。覆盖空仓冷启动、非零仓恢复、退出批次和成交增量；不引入 Journal 或新审计链。
+3. 将成交扫描完整性压成一个权威结果，去除 `AccountFillLoadProvenance` 与 `FactCoverageInterval` 的重复字段及重复校验。用现有分页、缺口和非零仓恢复用例确认行为不变。
+4. 清理剩余确认过的重复 validator 和 pass-through 模块；执行命令、接纳订单/成交、持仓 CAS 的事务边界保持原样。
+5. 只对实测有重复工作的自愈/重试路径做裁剪；用同一线上负载记录启动读取数、恢复重试数和决策延迟。沿用 §8.11 的 `_staged_copy(key)`、Dashboard 和装配测量，不增加预设性能目标。
+
+必须保留的核心行为：单进程账户前提下不恢复 trading lease；当前持仓不恢复 position journal；订单累计成交只推进该订单状态/预留，账户成交才改变持仓；网络提交结果不确定时保留原命令身份并查证，避免重复 POST；成交 ID 去重、持仓版本/CAS、真实挂单冲突、账户流连续性、风险限额及明确的 pause/drain/halt 都直接对应真实业务约束。以上是审查边界，不授权额外增加校验。
