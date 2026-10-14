@@ -370,7 +370,7 @@ T2/T3 既有目标失败（不在 T1 范围）：
 
 ## 9. 附录 B：开发、切换与必要运维
 
-本文命令以现有仓库工具为入口，目标新拓扑尚未实现；修改 CLI/Compose 后同步更新本节，不复制旧服务名作为新设计要求。执行任何命令先检查目标版本的 --help 与环境，密钥不放 Git、文档、日志或看板。
+本文命令以当前仓库的 CLI、Compose 和运维脚本为准；修改这些入口后同步更新本节。密钥不放 Git、文档、日志或看板。
 
 本地开发：`.venv/bin/python -m pip install -e ".[dev]"`；`docker compose up -d postgres`；独立本地数据库上执行 `.venv/bin/alembic upgrade head`。测试库连接与安全规则见 `tests/conftest.py`，不能指向生产。
 
@@ -383,9 +383,9 @@ rtk proxy .venv/bin/ruff check src tests
 
 部分网络测试需显式 opt-in；报告跳过项，不能记通过。研究源码/数据可能在 Git 忽略的 `local_optimization/`、`server_exports/` 与 data 中，不能靠 Git 恢复；数据接口改动不删除这些目录。历史结果和退役 CLI 不作为当前验收。
 
-部署入口为 `deploy/ops/update_server.sh`；基础配置 `compose.server.yaml`，账户 overlay `compose.live.accounts.yaml`，环境 `.env.server`/`.env.live` 权限0600。合并Compose只操作明确账户服务，禁止单文件 --remove-orphans 或不加服务名意外启用全实盘。迁移前核对版本、schema及旧写入者，代码回退不自动回退数据库。源文件 `deploy/ops/`、`--help` 与目标机器 unit 是操作细节权威，不复制全部安装脚本。
+部署入口为 `deploy/ops/update_server.sh <host> [git-ref]`；基础配置 `compose.server.yaml`，账户 overlay `compose.live.accounts.yaml`，环境 `.env.server`/`.env.live` 权限0600。脚本只重启部署前正在运行的应用服务，PostgreSQL 和数据卷保留。代码必须快进更新；数据库迁移由 Compose 依赖在应用重启前执行，数据库回退需单独处理。
 
-部署切换只检查四个账户的交易所实时仓位和挂单。任一账户非空时，保持旧策略服务运行，按原退出规则等待并重查；查询失败也不能算作空。四账户都零仓、无挂单后，统一停止当前运行的应用服务，更新版本、运行需要的数据库迁移，再启动部署前正在运行的服务。PostgreSQL 保持运行供迁移，数据卷保留；原本关闭的账户不启动。部署准入不扫描历史成交、不回放旧逐标的快照，也不要求数据库历史投影再次证明交易所当前事实。
+部署前逐一查询四个账户的交易所实时仓位和挂单；策略服务运行时从该进程查询，服务未运行时用 Compose 启动一次性只读查询。任一账户有仓位、挂单或查询失败时，旧服务继续运行，每 30 秒重查；四账户都为空后，一次停掉当前运行的应用服务，更新代码、构建镜像并由 Compose 执行迁移，然后启动部署前运行的服务。PostgreSQL 与数据卷保留，原本关闭的账户不启动。部署准入不扫描历史成交、不回放旧逐标的快照，也不要求数据库历史投影再次证明交易所当前事实。
 
 回退先停入场并检查新格式兼容及当前交易责任，不能将带仓新状态交给不兼容旧版本。备份包含数据库与归档完整root/manifest；同机压缩归档不是异机备份。维护先dry-run，保护活动引用、未知订单、成交身份、累计水位及未结算责任；旧timer按现场unit核验，不自动启用裁剪。普通VACUUM复用页，不等于文件缩小；实盘期间不执行VACUUM FULL，不关闭fsync/full_page_writes。
 
