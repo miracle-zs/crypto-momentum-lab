@@ -439,18 +439,12 @@ async def run_live_daemon(
 
     now = datetime.now(tz=UTC)
     ownership_registry = ResourceOwnershipRegistry(run_id=session_id)
-    # The merged account projection is published to the control plane and
-    # persisted for the dashboard; both sinks are created later in the
-    # assembly, so the producer writes through stable one-slot holders.
-    account_baseline_listener: list[
+    # The producer is assembled before its combined baseline consumer.
+    account_baseline_listener: (
         Callable[[AccountEvent, AccountSnapshot], Awaitable[None]] | None
-    ] = [None]
-    account_facts_status_holder: list[Callable[[], Mapping[str, object]]] = [
-        lambda: {"ready": None, "reason": "account_facts_unreported"}
-    ]
-    account_facts_ready_holder: list[Callable[[], bool]] = [lambda: False]
+    ) = None
     account_facts_budget_tasks: list[asyncio.Task[bool]] = []
-    account_repository_holder: list[PostgresAccountRepository | None] = [None]
+    account_repository: PostgresAccountRepository
     last_balance_values: dict[str, BalanceValue] = {}
     last_position_amounts: dict[tuple[str, str], Decimal] = {}
     execution_engine: AsyncEngine | None = None
@@ -484,6 +478,20 @@ async def run_live_daemon(
     shutdown_task: asyncio.Task[bool] | None = None
     risk_config_hash = ""
     startup_phase = True
+
+    def account_facts_status() -> Mapping[str, object]:
+        if control_plane_runtime is None:
+            return {"ready": None, "reason": "account_facts_unreported"}
+        return control_plane_runtime.account_facts_status()
+
+    def account_facts_ready() -> bool:
+        if control_plane_runtime is None:
+            return False
+        return control_plane_runtime.account_snapshot_available and (
+            in_process_account_source is None
+            or in_process_account_source.is_risk_allowed()
+        )
+
     try:
         persistence = assemble_live_persistence(
             execution_database_url=execution_database_url,
@@ -500,7 +508,7 @@ async def run_live_daemon(
         heartbeat_engine = persistence.engines.heartbeat_engine
 
         execution_factory = persistence.factories.execution_factory
-        account_repository_holder[0] = PostgresAccountRepository(execution_factory)
+        account_repository = PostgresAccountRepository(execution_factory)
         market_factory = persistence.factories.market_factory
         observability_factory = persistence.factories.observability_factory
 
@@ -719,7 +727,7 @@ async def run_live_daemon(
                 instead of the retired execution-account sync process.
                 """
 
-                if account_baseline_listener[0] is None:
+                if account_baseline_listener is None:
                     raise RuntimeError("account baseline consumer is not assembled")
                 execution_snapshot = snapshot
                 if snapshot.positions:
@@ -821,7 +829,7 @@ async def run_live_daemon(
                         event, fills=tuple(fills.values()), fill_load_scans=tuple(scans)
                     )
                     execution_snapshot = replace(snapshot, positions=selected)
-                await account_baseline_listener[0](event, execution_snapshot)
+                await account_baseline_listener(event, execution_snapshot)
                 return snapshot
 
             async def _persist_in_process_snapshot(
@@ -836,9 +844,6 @@ async def run_live_daemon(
                 dashboard and restart readers consume.
                 """
 
-                account_repository = account_repository_holder[0]
-                if account_repository is None:
-                    return
                 observed_at = snapshot.config.observed_at
                 sync_config = ExecutionAccountSyncConfig(
                     environment="live",
@@ -1178,7 +1183,7 @@ async def run_live_daemon(
                 if execution_coordinator is None
                 else _order_observation_payload(execution_coordinator)
             ),
-            account_facts_status=lambda: account_facts_status_holder[0](),
+            account_facts_status=account_facts_status,
         )
         checkpoint = await checkpoint_repository.load_checkpoint(session_id)
         requires_market_recovery = checkpoint is not None and (
@@ -1489,7 +1494,7 @@ async def run_live_daemon(
             ),
             # Account facts (private-stream continuity plus an accepted account
             # baseline) are a separate prerequisite from one symbol's range.
-            is_account_facts_ready=lambda: account_facts_ready_holder[0](),
+            is_account_facts_ready=account_facts_ready,
         )
         order_event_runtime.set_entry_observer(
             daemon.pending_entries.observe_order_event
@@ -1627,14 +1632,6 @@ async def run_live_daemon(
         # The merged producer writes the account projection through this
         # listener, so startup baselines and WS deltas reach the live context
         # exactly like Hub frames used to.
-        account_facts_status_holder[0] = control_plane_runtime.account_facts_status
-        account_facts_ready_holder[0] = lambda: (
-            control_plane_runtime.account_snapshot_available
-            and (
-                in_process_account_source is None
-                or in_process_account_source.is_risk_allowed()
-            )
-        )
         order_reconciliation.on_unknown_order = (
             control_plane_runtime.on_account_snapshot_recovery
         )
@@ -1815,7 +1812,7 @@ async def run_live_daemon(
             if event.account_snapshot is not None or event.fills:
                 exit_channel_runtime.note_account_facts_changed(event.symbols)
 
-        account_baseline_listener[0] = _on_account_snapshot_combined
+        account_baseline_listener = _on_account_snapshot_combined
         account_event_runtime = LiveAccountEventRuntime(
             daemon=daemon,
             latest_market_states=latest_market_states,
