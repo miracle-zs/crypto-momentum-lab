@@ -34,9 +34,8 @@ export function liveAccountStatusClass(status) {
       : "status-UNKNOWN";
 }
 
-export function liveStrategyStateLabel(state, leaseExpiresAt) {
+export function liveStrategyStateLabel(state) {
   const normalized = String(state || "").toLowerCase();
-  if (!normalized && leaseExpiresAt) return "租约有效";
   return {
     active: "运行中",
     running: "运行中",
@@ -58,13 +57,7 @@ export function liveAccountCard(account, index, selectedLabel) {
   const statusClass = liveAccountStatusClass(account.status);
   const readiness = account.readiness || "待确认";
   const strategy = account.strategy_name || "未关联策略";
-  const strategyState = liveStrategyStateLabel(
-    account.strategy_state,
-    account.lease_expires_at,
-  );
-  const lease = account.lease_expires_at
-    ? `租约至 ${dayTime(account.lease_expires_at)}`
-    : "无有效租约";
+  const strategyState = liveStrategyStateLabel(account.strategy_state);
   const financialSnapshot = Object.keys(summary).length > 0;
   const reconciliation = account.reconciliation || {};
   const mismatchCount = asNumber(reconciliation.mismatch_count);
@@ -80,7 +73,7 @@ export function liveAccountCard(account, index, selectedLabel) {
       <span><small>未实现盈亏</small><b class="num ${pnlClass(summary.total_unrealized_pnl)}">${esc(signedMoney(summary.total_unrealized_pnl))}</b></span>
       <span><small>名义价值</small><b class="num">${esc(money(summary.gross_position_notional))}</b></span>
     </span>`
-    : `<span class="live-account-card-state-detail"><span>${esc(strategy)} · ${esc(strategyState)}</span><span>${esc(readiness)} · ${esc(lease)}</span></span>`;
+    : `<span class="live-account-card-state-detail"><span>${esc(strategy)} · ${esc(strategyState)}</span><span>${esc(readiness)}</span></span>`;
   const footer = financialSnapshot
     ? `${summary.position_count ?? 0} 个持仓 · ${summary.open_order_count ?? 0} 个挂单`
     : "进入账户详情";

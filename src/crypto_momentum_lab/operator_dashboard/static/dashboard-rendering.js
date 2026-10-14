@@ -14,7 +14,7 @@ export function sectionRenderKey(id, data) {
     }
     if (Array.isArray(snapshot.account_statuses)) {
       snapshot.account_statuses = snapshot.account_statuses.map(
-        ({ observed_at, lease_expires_at, ...rest }) => rest,
+        ({ observed_at, ...rest }) => rest,
       );
     }
   }

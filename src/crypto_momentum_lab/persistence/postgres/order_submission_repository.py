@@ -26,17 +26,12 @@ from crypto_momentum_lab.domain.execution.order_submission import (
 )
 from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation
 from crypto_momentum_lab.domain.strategy import OrderIntentCandidate
-from crypto_momentum_lab.domain.risk.models import TradingLeaseState
 from crypto_momentum_lab.persistence.postgres.models import (
     ExchangeOrderEventRow,
     ExchangeOrderRow,
     ExitEpisodeReservationRow,
     LiveExposureClaimRow,
     OrderIntentExecutionRow,
-    TradingLeaseRow,
-)
-from crypto_momentum_lab.persistence.postgres.risk_repository import (
-    LeaseOwnershipError,
 )
 from crypto_momentum_lab.persistence.postgres.order_rejection import (
     execute_order_rejection_cascade,
@@ -45,52 +40,6 @@ from crypto_momentum_lab.persistence.postgres.serialization import jsonable
 from crypto_momentum_lab.persistence.postgres.submission_identity import (
     _same_order_identity,
 )
-
-
-async def require_lease_ownership_in_session(
-    session: AsyncSession,
-    *,
-    environment: str,
-    account_label: str,
-    at: datetime,
-    expected_owner: str | None,
-    expected_lease_id: str | None = None,
-) -> None:
-    """Atomically require the caller to hold the current lease token.
-
-    The lease row is read ``FOR UPDATE`` so a competing takeover cannot expire
-    or replace the lease between this check and the write it protects.  A
-    missing or expired lease is always a blocker; when the caller declares its
-    token, the owner and lease generation must both match, so an old process
-    cannot write under a replacement lease that reuses its owner.
-    """
-
-    lease_row = await session.scalar(
-        select(TradingLeaseRow)
-        .where(
-            TradingLeaseRow.environment == environment,
-            TradingLeaseRow.account_label == account_label,
-            TradingLeaseRow.state == TradingLeaseState.ACTIVE.value,
-            TradingLeaseRow.expires_at > at,
-        )
-        .with_for_update()
-    )
-    if lease_row is None:
-        raise LeaseOwnershipError(
-            f"no active trading lease held for {environment}/{account_label} "
-            f"at {at.isoformat()}"
-        )
-    if expected_owner is not None and lease_row.owner != expected_owner:
-        raise LeaseOwnershipError(
-            f"trading lease owner mismatch: expected {expected_owner}, "
-            f"got {lease_row.owner}"
-        )
-    if expected_lease_id is not None and lease_row.lease_id != expected_lease_id:
-        raise LeaseOwnershipError(
-            f"trading lease token mismatch: expected {expected_lease_id}, "
-            f"active lease is {lease_row.lease_id}"
-        )
-
 
 
 def _serialize_candidate_intent(intent: OrderIntentCandidate) -> dict[str, object]:
@@ -193,9 +142,6 @@ class PostgresOrderSubmissionRepository:
         open_position_symbols: frozenset[str] | None = None,
         exposure_notional: Decimal | None = None,
         baseline_observed_at: datetime | None = None,
-        expected_owner: str | None = None,
-        expected_lease_id: str | None = None,
-        lease_required: bool = True,
     ) -> PreparedOrderSubmission | None:
         """Grant one durable submission within an active session."""
         if evaluation.decision is not RiskDecision.APPROVED:
@@ -206,16 +152,6 @@ class PostgresOrderSubmissionRepository:
             raise ValueError("order plan must reference the approved intent")
         if prepared_at.tzinfo is None or prepared_at.utcoffset() is None:
             raise ValueError("prepared_at must be timezone-aware")
-
-        if lease_required and environment is not None and account_label is not None:
-            await require_lease_ownership_in_session(
-                session,
-                environment=environment,
-                account_label=account_label,
-                at=prepared_at,
-                expected_owner=expected_owner,
-                expected_lease_id=expected_lease_id,
-            )
 
         intent_values = {
             "intent_id": intent.candidate_id,

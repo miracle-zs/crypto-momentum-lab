@@ -110,7 +110,7 @@ test("live account directory renders every account against shared market data", 
   assert.match(html, /data-live-account-detail/);
 });
 
-test("live account cards surface the leased strategy and known state", () => {
+test("live account cards show strategy state without lease status", () => {
   const [, html] = renderLiveAccounts({
     status: "READY",
     accounts: [
@@ -121,14 +121,13 @@ test("live account cards surface the leased strategy and known state", () => {
         readiness: "ready_readonly",
         strategy_name: "orderflow_impulse",
         strategy_state: null,
-        lease_expires_at: "2026-09-06T00:10:00Z",
       },
     ],
   });
 
-  assert.match(html, /orderflow_impulse · 租约有效/);
+  assert.match(html, /orderflow_impulse · 状态未知/);
   assert.doesNotMatch(html, /未关联策略/);
-  assert.doesNotMatch(html, /状态未知/);
+  assert.doesNotMatch(html, /租约/);
 });
 
 test("updateLiveAccountsDynamic updates card status, KPIs, footer, and fleet summary in-place", () => {

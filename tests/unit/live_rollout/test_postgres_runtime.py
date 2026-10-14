@@ -1285,9 +1285,6 @@ async def test_delayed_state_reuses_newer_cached_context(monkeypatch) -> None:
     rule_loads = 0
 
     class RiskRepository:
-        async def load_active_lease(self, *_args):
-            raise AssertionError("context must not load lease")
-
         async def load_active_halts(self, *_args):
             nonlocal full_loads
             full_loads += 1
@@ -1453,9 +1450,6 @@ async def test_context_reload_survives_cache_invalidation_during_rule_load(
     provider._sessions = object()
 
     class RiskRepository:
-        async def load_active_lease(self, *_args):
-            raise AssertionError("context must not load lease")
-
         async def load_active_halts(self, *_args):
             return ()
 

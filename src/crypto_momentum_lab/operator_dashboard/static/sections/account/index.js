@@ -1,6 +1,5 @@
 import {
   asNumber,
-  dayTime,
   esc,
   money,
   pnlClass,
@@ -135,9 +134,8 @@ export async function updateLiveAccountsDynamic(root, data) {
       }
     } else {
       const strategy = account.strategy_name || "未关联策略";
-      const strategyState = liveStrategyStateLabel(account.strategy_state, account.lease_expires_at);
-      const lease = account.lease_expires_at ? `租约至 ${dayTime(account.lease_expires_at)}` : "无有效租约";
-      const stateDetailHtml = `<span>${esc(strategy)} · ${esc(strategyState)}</span><span>${esc(readiness)} · ${esc(lease)}</span>`;
+      const strategyState = liveStrategyStateLabel(account.strategy_state);
+      const stateDetailHtml = `<span>${esc(strategy)} · ${esc(strategyState)}</span><span>${esc(readiness)}</span>`;
       if (stateDetailEl) {
         stateDetailEl.innerHTML = stateDetailHtml;
       } else if (kpisEl) {

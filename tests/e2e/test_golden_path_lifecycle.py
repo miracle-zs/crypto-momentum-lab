@@ -278,8 +278,6 @@ async def _build_submission_service(
         account_label="primary",
         environment="live",
         execution_book=book,
-        # This slice exercises the trading lifecycle, not lease acquisition.
-        lease_required=False,
     )
     _created_coordinators.append(coordinator)
 

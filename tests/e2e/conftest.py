@@ -23,7 +23,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
     OrderIntentExecutionRow,
     PositionReservationRow,
     RiskHaltRow,
-    TradingLeaseRow,
 )
 from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
     PositionFactJournalEventRow,
@@ -66,7 +65,6 @@ async def order_repository(
                 OrderIntentClaimRow,
                 OrderIntentExecutionRow,
                 LiveSessionTransitionRow,
-                TradingLeaseRow,
                 ExecutionCommandRow,
                 ExecutionReconciliationEventRow,
                 RiskHaltRow,

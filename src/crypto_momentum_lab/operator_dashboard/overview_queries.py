@@ -57,7 +57,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
     StrategyLiveStateRow,
     StrategyRuntimeCheckpointRow,
     StrategyRuntimeEventRow,
-    TradingLeaseRow,
     UniverseEntryRow,
     UniverseSnapshotRow,
 )
@@ -155,11 +154,10 @@ def live_account_fleet_status(
 def live_account_summaries(
     processes: Sequence[ExecutionAccountProcessStateRow],
     strategy_states: Sequence[StrategyLiveStateRow],
-    leases: Sequence[TradingLeaseRow],
     *,
     now: datetime | None = None,
 ) -> list[LiveAccountSummaryResponse]:
-    """Join current process, strategy, and lease state by account label."""
+    """Join current process and strategy state by account label."""
     process_by_account = {row.account_label: row for row in processes}
     strategy_by_account: dict[str, StrategyLiveStateRow] = {}
     for row in sorted(
@@ -168,16 +166,14 @@ def live_account_summaries(
         reverse=True,
     ):
         strategy_by_account.setdefault(row.account_label, row)
-    lease_by_account = {row.account_label: row for row in leases}
     account_labels = sorted(
-        set(process_by_account) | set(strategy_by_account) | set(lease_by_account),
+        set(process_by_account) | set(strategy_by_account),
         key=account_label_sort_key,
     )
     summaries: list[LiveAccountSummaryResponse] = []
     for account_label in account_labels:
         process_row = process_by_account.get(account_label)
         strategy = strategy_by_account.get(account_label)
-        lease = lease_by_account.get(account_label)
         occurred_at = process_row.occurred_at if process_row is not None else None
         state = process_row.state if process_row is not None else None
         summaries.append(
@@ -196,12 +192,9 @@ def live_account_summaries(
                 strategy_name=(
                     strategy.strategy_name
                     if strategy is not None
-                    else lease.strategy_name
-                    if lease is not None
                     else None
                 ),
                 strategy_state=(strategy.state if strategy is not None else None),
-                lease_expires_at=(lease.expires_at if lease is not None else None),
             )
         )
     return summaries
@@ -607,21 +600,9 @@ class OverviewQueries:
                     )
                 )
             ).all()
-            leases = (
-                await session.scalars(
-                    select(TradingLeaseRow)
-                    .where(
-                        TradingLeaseRow.environment == "live",
-                        TradingLeaseRow.state == "active",
-                        TradingLeaseRow.expires_at > now,
-                    )
-                    .order_by(TradingLeaseRow.expires_at.desc())
-                )
-            ).all()
         accounts = live_account_summaries(
             processes,
             strategy_states,
-            leases,
             now=now,
         )
         async with self._session_factory() as session:
@@ -699,22 +680,6 @@ class OverviewQueries:
                     )
                 )
             ).all()
-            leases = (
-                await session.scalars(
-                    select(TradingLeaseRow)
-                    .where(
-                        TradingLeaseRow.environment == "live",
-                        TradingLeaseRow.state == "active",
-                        TradingLeaseRow.expires_at > now,
-                    )
-                    .order_by(TradingLeaseRow.expires_at.desc())
-                )
-            ).all()
-            primary_lease = next(
-                (item for item in leases if item.account_label == "primary"),
-                None,
-            )
-            lease = primary_lease or (leases[0] if leases else None)
             live = await session.scalar(
                 select(LiveSessionTransitionRow)
                 .order_by(LiveSessionTransitionRow.occurred_at.desc())
@@ -745,7 +710,6 @@ class OverviewQueries:
         account_statuses = live_account_summaries(
             account_rows,
             strategy_states=strategy_states,
-            leases=leases,
             now=now,
         )
         services = [
@@ -803,23 +767,6 @@ class OverviewQueries:
             database_status=OperationalStatus.READY,
             services=services,
             active_halt_count=int(halt_count or 0),
-            active_lease=None
-            if lease is None
-            else {
-                "account_label": lease.account_label,
-                "strategy_name": lease.strategy_name,
-                "owner": lease.owner,
-                "expires_at": lease.expires_at.isoformat(),
-            },
-            active_leases=[
-                {
-                    "account_label": item.account_label,
-                    "strategy_name": item.strategy_name,
-                    "owner": item.owner,
-                    "expires_at": item.expires_at.isoformat(),
-                }
-                for item in leases
-            ],
             account_statuses=account_statuses,
         )
 

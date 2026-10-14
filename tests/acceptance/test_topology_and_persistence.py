@@ -1,43 +1,11 @@
 """SYSTEM.md section 8 acceptance: target topology and lean persistence.
 
-This file closes the two acceptance items that SYSTEM.md 8.1 still lists as
-uncovered ("目标单进程装配与唯一派发者" and "目标单进程装配与精简持久化增长").
-Every case drives the real ``ExecutionBook``, the real PostgreSQL repositories
-and the real trading-lease repository against the local test database.  Only
-the external boundaries are substitutable (exchange network, clock); nothing
-here mocks the target engine or re-implements decision, settlement or recovery
-logic.
+This file checks one-process-per-account deployment assembly and lean durable
+execution facts.  Cases drive the real ``ExecutionBook`` and PostgreSQL
+repositories against the local test database.  Only external boundaries such
+as exchange network and clock are substitutable.
 
-Row "目标单进程装配与唯一派发者" (T3)
-    Q5/T3 require account synchronisation and trading execution to be assembled
-    as ONE process per account with the ``read``/``trade`` credential roles
-    preserved inside it, and exactly one effective writer per account.  The
-    credential-isolation, four-account and single-order-dispatcher half of this
-    row is already proven by ``tests/smoke/test_server_deployment_manifest.py``
-    and is deliberately not repeated.  Added here:
-
-    * per-account process assembly, derived from the merged deployment
-      descriptor by account label and credential role only - never by service
-      name (EXPECTED FAIL today: every account is still assembled as a read-only
-      synchroniser plus a separate trade writer);
-    * durable account-level writer exclusivity of the real trading lease
-      repository: while one writer holds the active lease a competing writer is
-      refused, an expired lease is no longer effective, and after hand-over
-      exactly one active writer exists for the account.
-
-    NOT EXECUTABLE: "切换不得双跑旧新写入者" during cut-over.  No ownership
-    token or control plane can observe whether two writers are simultaneously in
-    effect.  SYSTEM.md 8.1 records the minimal missing contract: input
-    ``{environment, account_label, desired_writer_id, schema/format_version}``
-    -> output ``{allowed, blockers[]}`` enumerating open positions,
-    active/unresolved orders, unknown submissions and unsettled
-    reservations/settlement, plus a durable dispatch-ownership token acquired
-    before the first write.  The only existing surfaces are entry-stop
-    (``LiveEntryControlGate``/``DRAINING``) and the single-position
-    incompatible-format refusal in ``ExecutionBook.restore``; neither can show
-    that two writers are both live, so no assertion is fabricated for it.
-
-Row "目标单进程装配与精简持久化增长" - lean persistence half (Q7)
+Row "目标单进程装配与精简持久化增长" (Q5/T3/Q7)
     Necessary execution evidence survives a restart in a brand new
     process-level ``ExecutionBook.restore``: the accepted command, the real
     fill, the reservation, the active batch and the recoverable current state.
@@ -62,7 +30,7 @@ from uuid import uuid4
 
 import pytest
 import yaml
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from crypto_momentum_lab.domain.account import (
@@ -98,7 +66,6 @@ from crypto_momentum_lab.domain.execution.trade_command import (
     ExitPolicyMode,
     TradeCommandType,
 )
-from crypto_momentum_lab.domain.risk import TradingLease, TradingLeaseState
 from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.persistence.postgres.command_repository import (
     PostgresCommandRepository,
@@ -113,17 +80,12 @@ from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models impo
 from crypto_momentum_lab.persistence.postgres.models import (
     ExecutionCommandRow,
     PositionReservationRow,
-    TradingLeaseRow,
 )
 from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
     PositionFactJournalEventRow,
 )
 from crypto_momentum_lab.persistence.postgres.position_reservation_repository import (
     AsyncPostgresPositionReservationRepository,
-)
-from crypto_momentum_lab.persistence.postgres.risk_repository import (
-    LeaseAlreadyHeldError,
-    PostgresRiskRepository,
 )
 from crypto_momentum_lab.persistence.postgres.session import (
     create_async_database_engine,
@@ -142,9 +104,8 @@ CREDENTIAL_ROLES = ("READ", "TRADE")
 
 BURST = 50
 
-
 # --------------------------------------------------------------------------- #
-# (A) Target per-account assembly and one effective writer
+# (A) One live process per account
 # --------------------------------------------------------------------------- #
 def _merged_live_services() -> dict[str, dict[str, object]]:
     base = yaml.safe_load(Path("compose.server.yaml").read_text(encoding="utf-8"))[
@@ -220,82 +181,6 @@ def test_each_account_is_assembled_as_one_process_holding_both_roles() -> None:
         "account facts and executes trades; observed assembly: "
         f"{violations}"
     )
-
-
-def _lease(
-    account: str, owner: str, *, acquired_at: datetime, ttl: int
-) -> TradingLease:
-    return TradingLease(
-        lease_id=f"lease-{uuid4().hex}",
-        environment="live",
-        account_label=account,
-        strategy_name="orderflow_impulse",
-        owner=owner,
-        code_generation="acceptance",
-        state=TradingLeaseState.ACTIVE,
-        acquired_at=acquired_at,
-        expires_at=acquired_at + timedelta(seconds=ttl),
-    )
-
-
-async def test_each_account_has_at_most_one_effective_writer_lease(
-    async_database_url: str,
-) -> None:
-    """Exactly one effective writer per account; an expired lease is not one."""
-    engine = create_async_database_engine(async_database_url)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    repository = PostgresRiskRepository(factory)
-    try:
-        async with factory() as session, session.begin():
-            await session.execute(
-                delete(TradingLeaseRow).where(
-                    TradingLeaseRow.environment == "live",
-                    TradingLeaseRow.account_label.in_(sorted(LIVE_ACCOUNTS)),
-                )
-            )
-        for account in sorted(LIVE_ACCOUNTS):
-            first = _lease(account, "writer-a", acquired_at=NOW, ttl=60)
-            await repository.acquire_lease(first)
-            assert (await repository.load_active_lease("live", account, NOW)) == first
-
-            competing = _lease(
-                account, "writer-b", acquired_at=NOW + timedelta(seconds=1), ttl=60
-            )
-            with pytest.raises(LeaseAlreadyHeldError):
-                await repository.acquire_lease(competing)
-
-            # The first writer's lease expires unrenewed: the successor takes
-            # over, and the old lease is no longer active, so the account never
-            # has two effective writers at once.
-            takeover_at = first.expires_at + timedelta(seconds=1)
-            successor = _lease(account, "writer-b", acquired_at=takeover_at, ttl=60)
-            await repository.acquire_lease(successor)
-
-            evaluated_at = takeover_at + timedelta(seconds=1)
-            active = await repository.load_active_lease("live", account, evaluated_at)
-            assert active is not None
-            assert active.owner == "writer-b"
-            assert active.lease_id == successor.lease_id
-            async with factory() as session:
-                effective = int(
-                    await session.scalar(
-                        select(func.count())
-                        .select_from(TradingLeaseRow)
-                        .where(
-                            TradingLeaseRow.environment == "live",
-                            TradingLeaseRow.account_label == account,
-                            TradingLeaseRow.state == TradingLeaseState.ACTIVE.value,
-                            TradingLeaseRow.expires_at > evaluated_at,
-                        )
-                    )
-                    or 0
-                )
-            assert effective == 1, (
-                f"{account} has {effective} effective writers after hand-over"
-            )
-    finally:
-        await engine.dispose()
-
 
 # --------------------------------------------------------------------------- #
 # (B) Lean persistence: recoverable evidence, bounded meaningless observation

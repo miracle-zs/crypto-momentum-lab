@@ -11,8 +11,6 @@ from crypto_momentum_lab.domain.risk import (
     RiskConfigSnapshot,
     RiskHalt,
     StrategyLiveState,
-    TradingLease,
-    TradingLeaseState,
 )
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
@@ -30,7 +28,6 @@ NOW = datetime(2026, 7, 4, 0, 0, 20, tzinfo=UTC)
 @dataclass(frozen=True, slots=True)
 class RiskFixtureContext:
     now: datetime
-    active_lease: TradingLease | None
     account_state: ExecutionAccountStatus
     open_position_symbols: frozenset[str]
     active_halts: tuple[RiskHalt, ...]
@@ -74,14 +71,11 @@ class FakeStrategy:
 
 def _context(
     *,
-    active_lease: TradingLease | None | object = "default",
     account_state: ExecutionAccountStatus = ExecutionAccountStatus.READY_READONLY,
     now: datetime = NOW,
 ) -> RiskFixtureContext:
-    lease = _lease() if active_lease == "default" else active_lease
     return RiskFixtureContext(
         now=now,
-        active_lease=lease,
         account_state=account_state,
         open_position_symbols=frozenset(),
         active_halts=(),
@@ -106,20 +100,6 @@ def _context(
                 min_notional=Decimal("5"),
             )
         },
-    )
-
-
-def _lease() -> TradingLease:
-    return TradingLease(
-        lease_id="lease-1",
-        environment="live",
-        account_label="primary",
-        strategy_name="compression_breakout",
-        owner="shadow-worker",
-        code_generation="test-generation",
-        state=TradingLeaseState.ACTIVE,
-        acquired_at=NOW - timedelta(minutes=1),
-        expires_at=NOW + timedelta(minutes=5),
     )
 
 

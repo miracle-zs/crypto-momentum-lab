@@ -39,7 +39,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
     LiveSessionTransitionRow,
     OrderIntentClaimRow,
     OrderIntentExecutionRow,
-    TradingLeaseRow,
 )
 from crypto_momentum_lab.persistence.postgres.order_adoption_repository import (
     PostgresOrderAdoptionRepository,
@@ -68,8 +67,6 @@ async def _prepare_submission(repository, **values):
         OrderAlreadyPreparedError,
     )
 
-    # These slices exercise submission persistence, not lease acquisition.
-    values.setdefault("lease_required", False)
     try:
         async with repository._session_factory() as session:
             async with session.begin():
@@ -514,7 +511,6 @@ async def order_repository(
                 OrderIntentClaimRow,
                 OrderIntentExecutionRow,
                 LiveSessionTransitionRow,
-                TradingLeaseRow,
                 ExecutionCommandRow,
                 ExecutionReconciliationEventRow,
             ):

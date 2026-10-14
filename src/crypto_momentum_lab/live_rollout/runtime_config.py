@@ -101,7 +101,6 @@ class LiveRuntimeIdentity:
     strategy_name: str
     session_id: str
     operator: str
-    lease_owner: str
     strategy_config_hash: str
     git_commit_hash: str
 

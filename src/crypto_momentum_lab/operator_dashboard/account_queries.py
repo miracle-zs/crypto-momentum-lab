@@ -45,7 +45,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
     OrderIntentExecutionRow,
     RuntimeMarketState15sRow,
     StrategyLiveStateRow,
-    TradingLeaseRow,
 )
 
 _LIVE_SIGNAL_MAX_ROWS = 30
@@ -188,19 +187,9 @@ class LiveAccountQueries:
                     )
                 )
             ).all()
-            leases = (
-                await session.scalars(
-                    select(TradingLeaseRow).where(
-                        TradingLeaseRow.environment == "live",
-                        TradingLeaseRow.state == "active",
-                        TradingLeaseRow.expires_at > equity_window_end,
-                    )
-                )
-            ).all()
             available_accounts = live_account_summaries(
                 live_processes,
                 strategy_states,
-                leases,
             )
             process_query = select(ExecutionAccountProcessStateRow)
             if environment is None:

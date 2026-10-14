@@ -1928,12 +1928,11 @@ class MonitorConfig:
     compose_profiles: tuple[str, ...] = ()
     compose_env_file: Path | None = Path("/opt/crypto-momentum-lab/.env.server")
     services: tuple[str, ...] = _DEFAULT_SERVICES
-    live_accounts: tuple[tuple[str, str, str], ...] = (
-        ("primary", "live-primary-v1", "live-worker"),
+    live_accounts: tuple[tuple[str, str], ...] = (
+        ("primary", "live-primary-v1"),
     )
     live_run_id: str = "live-primary-v1"
     live_account_label: str = "primary"
-    live_lease_owner: str = "live-worker"
     interval_seconds: float = _DEFAULT_INTERVAL_SECONDS
     log_window_seconds: float = _DEFAULT_LOG_WINDOW_SECONDS
     telemetry_stale_after_seconds: float = _DEFAULT_TELEMETRY_STALE_AFTER_SECONDS
@@ -2604,7 +2603,7 @@ SELECT json_build_object(
         containers = self._container_snapshots()
         live_strategy_accounts = {
             _live_strategy_service(account_label): account_label
-            for account_label, _run_id, _lease_owner in self._config.live_accounts
+            for account_label, _run_id in self._config.live_accounts
         }
         seen_services = {snapshot.service for snapshot in containers}
         for service in self._config.services:
@@ -2662,7 +2661,7 @@ SELECT json_build_object(
         market_id = self._container_id("market-data")
         strategy_services = tuple(
             _live_strategy_service(account_label)
-            for account_label, _run_id, _lease_owner in self._config.live_accounts
+            for account_label, _run_id in self._config.live_accounts
         )
         combined_signals = LogSignals()
         for strategy_service in strategy_services:
@@ -2751,13 +2750,12 @@ SELECT json_build_object(
                     alerts.extend(
                         self._database_storage_growth_alerts(footprint, now=now)
                     )
-            for account_label, run_id, lease_owner in self._config.live_accounts:
+            for account_label, run_id in self._config.live_accounts:
                 try:
                     database_state = self._database_state(
                         postgres_id,
                         live_run_id=run_id,
                         live_account_label=account_label,
-                        live_lease_owner=lease_owner,
                     )
                 except Exception as error:
                     alerts.append(
@@ -2866,9 +2864,7 @@ SELECT json_build_object(
                             "error": str(error),
                             "accounts": [
                                 account_label
-                                for account_label, _run_id, _lease_owner in (
-                                    self._config.live_accounts
-                                )
+                                for account_label, _run_id in self._config.live_accounts
                             ],
                         },
                     )
@@ -2888,9 +2884,7 @@ SELECT json_build_object(
                 alerts,
                 account_labels=tuple(
                     account_label
-                    for account_label, _run_id, _lease_owner in (
-                        self._config.live_accounts
-                    )
+                    for account_label, _run_id in self._config.live_accounts
                 ),
             )
         )
@@ -3633,7 +3627,6 @@ FROM activity CROSS JOIN checkpoint CROSS JOIN temp_queries;
         *,
         live_run_id: str | None = None,
         live_account_label: str | None = None,
-        live_lease_owner: str | None = None,
     ) -> DatabaseState:
         run_id = _sql_literal(live_run_id or self._config.live_run_id)
         account_label = _sql_literal(
@@ -3935,8 +3928,8 @@ COMMIT;
         """Read a bounded cross-account consistency window from PostgreSQL."""
 
         accounts = tuple(self._config.live_accounts)
-        account_labels = tuple(account_label for account_label, _, _ in accounts)
-        run_ids = tuple(run_id for _, run_id, _ in accounts)
+        account_labels = tuple(account_label for account_label, _ in accounts)
+        run_ids = tuple(run_id for _, run_id in accounts)
         account_sql = _sql_list(account_labels)
         run_sql = _sql_list(run_ids)
         window_seconds = _sql_numeric(self._config.consistency_window_seconds)
@@ -4078,7 +4071,7 @@ LEFT JOIN (
             timeout_seconds=self._config.command_timeout_seconds,
         )
         account_by_run_id = {
-            run_id: account_label for account_label, run_id, _ in accounts
+            run_id: account_label for account_label, run_id in accounts
         }
         signals_by_key: dict[tuple[str, str, str, str], SignalObservation] = {}
         positions: list[PositionObservation] = []
@@ -6208,18 +6201,18 @@ def _read_env_value(path: Path | None, name: str) -> str | None:
     return None
 
 
-def _parse_live_accounts(raw_value: str | None) -> tuple[tuple[str, str, str], ...]:
+def _parse_live_accounts(raw_value: str | None) -> tuple[tuple[str, str], ...]:
     if raw_value is None or not raw_value.strip():
-        return (("primary", "live-primary-v1", "live-worker"),)
-    accounts: list[tuple[str, str, str]] = []
+        return (("primary", "live-primary-v1"),)
+    accounts: list[tuple[str, str]] = []
     for item in raw_value.split(","):
         parts = tuple(part.strip() for part in item.split("|"))
-        if len(parts) != 3 or any(not part for part in parts):
+        if len(parts) != 2 or any(not part for part in parts):
             raise ValueError(
                 "CML_MONITOR_LIVE_ACCOUNTS must use "
-                "label|session-id|lease-owner entries"
+                "label|session-id entries"
             )
-        accounts.append((parts[0], parts[1], parts[2]))
+        accounts.append((parts[0], parts[1]))
     return tuple(accounts)
 
 
@@ -6290,19 +6283,14 @@ def _configured_env_value(
 def _discover_live_accounts(
     compose_files: Sequence[Path],
     compose_env_file: Path | None,
-) -> tuple[tuple[str, str, str], ...]:
-    accounts: list[tuple[str, str, str]] = []
+) -> tuple[tuple[str, str], ...]:
+    accounts: list[tuple[str, str]] = []
     for account_label in _discover_live_account_labels(compose_files):
         suffix = _live_account_env_suffix(account_label)
         default_session = (
             "live-primary-v1"
             if account_label == "primary"
             else f"live-{account_label}-v1"
-        )
-        default_lease_owner = (
-            "live-worker"
-            if account_label == "primary"
-            else f"live-worker-{account_label}"
         )
         session_id = (
             _configured_env_value(
@@ -6311,22 +6299,15 @@ def _discover_live_accounts(
             )
             or default_session
         )
-        lease_owner = (
-            _configured_env_value(
-                compose_env_file,
-                f"CML_LIVE_LEASE_OWNER{suffix}",
-            )
-            or default_lease_owner
-        )
-        accounts.append((account_label, session_id, lease_owner))
+        accounts.append((account_label, session_id))
     return tuple(accounts)
 
 
 def _monitor_services_for_accounts(
-    live_accounts: Sequence[tuple[str, str, str]],
+    live_accounts: Sequence[tuple[str, str]],
 ) -> tuple[str, ...]:
     services = ["postgres", "market-data"]
-    for account_label, _run_id, _lease_owner in live_accounts:
+    for account_label, _run_id in live_accounts:
         suffix = "" if account_label == "primary" else f"-{account_label}"
         services.append(f"live-strategy{suffix}")
     return tuple(dict.fromkeys(services))
@@ -6350,12 +6331,6 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
         or os.environ.get("CML_LIVE_ACCOUNT_LABEL")
         or _read_env_value(compose_env_file, "CML_LIVE_ACCOUNT_LABEL")
         or "primary"
-    )
-    live_lease_owner = (
-        getattr(args, "live_lease_owner", None)
-        or os.environ.get("CML_LIVE_LEASE_OWNER")
-        or _read_env_value(compose_env_file, "CML_LIVE_LEASE_OWNER")
-        or "live-worker"
     )
     compose_file_values = tuple(
         item.strip() for item in str(args.compose_file).split(",") if item.strip()
@@ -6391,7 +6366,6 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
         live_accounts=live_accounts,
         live_run_id=live_run_id,
         live_account_label=live_account_label,
-        live_lease_owner=live_lease_owner,
         interval_seconds=args.interval_seconds,
         log_window_seconds=args.log_window_seconds,
         telemetry_stale_after_seconds=args.telemetry_stale_after_seconds,
@@ -6682,10 +6656,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--live-account-label",
-        default=None,
-    )
-    parser.add_argument(
-        "--live-lease-owner",
         default=None,
     )
     parser.add_argument(

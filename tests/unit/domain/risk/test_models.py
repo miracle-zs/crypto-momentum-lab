@@ -1,12 +1,9 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
-import pytest
 
 from crypto_momentum_lab.domain.risk.models import (
     RiskConfigSnapshot,
-    TradingLease,
-    TradingLeaseState,
 )
 
 
@@ -35,34 +32,8 @@ def test_risk_config_allows_unbounded_capacity_limits() -> None:
     assert config.max_daily_loss is None
 
 
-def test_trading_lease_rejects_invalid_state() -> None:
-    with pytest.raises(ValueError, match="state must be a TradingLeaseState"):
-        TradingLease(
-            lease_id="lease-1",
-            environment="live",
-            account_label="primary",
-            strategy_name="compression_breakout",
-            owner="worker-1",
-            code_generation="test-generation",
-            state="active",
-            acquired_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
-            expires_at=datetime(2026, 7, 4, 0, 1, tzinfo=UTC),
-        )
 
 
-def test_trading_lease_requires_expiration_after_acquisition() -> None:
-    with pytest.raises(ValueError, match="expires_at must be after acquired_at"):
-        TradingLease(
-            lease_id="lease-1",
-            environment="live",
-            account_label="primary",
-            strategy_name="compression_breakout",
-            owner="worker-1",
-            code_generation="test-generation",
-            state=TradingLeaseState.ACTIVE,
-            acquired_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
-            expires_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
-        )
 
 
 def _risk_config(

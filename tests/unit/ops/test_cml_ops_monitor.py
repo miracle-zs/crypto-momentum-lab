@@ -1122,7 +1122,7 @@ def test_database_state_parses_postgres_boolean_text(tmp_path) -> None:
     assert state.oldest_unknown_order_age_seconds is None
 
 
-def test_database_state_uses_checkpoint_without_retired_lease(
+def test_database_state_uses_checkpoint_without_lease_table_query(
     tmp_path,
 ) -> None:
     class Runner:
@@ -1146,7 +1146,6 @@ def test_database_state_uses_checkpoint_without_retired_lease(
             state_path=tmp_path / "state.json",
             live_run_id="live-session",
             live_account_label="primary",
-            live_lease_owner="live-worker",
         ),
         runner=runner,
     )
@@ -1155,7 +1154,6 @@ def test_database_state_uses_checkpoint_without_retired_lease(
     sql = str(runner.last_args[-1])
 
     assert "strategy_runtime_checkpoints" in sql
-    assert "trading_leases" not in sql
     assert "live_session_transitions" in sql
     assert "strategy_runtime_events" in sql
     assert "market_state_progress" in sql
@@ -1708,8 +1706,7 @@ def test_build_config_reads_live_session_from_compose_env(
     env_file = tmp_path / "compose.env"
     env_file.write_text(
         "CML_LIVE_SESSION_ID='live-b1-long-100u-5x-v1'\n"
-        "CML_LIVE_ACCOUNT_LABEL='primary-2'\n"
-        "CML_LIVE_LEASE_OWNER='worker-2'\n",
+        "CML_LIVE_ACCOUNT_LABEL='primary-2'\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("CML_COMPOSE_ENV_FILE", str(env_file))
@@ -1734,7 +1731,6 @@ def test_build_config_reads_live_session_from_compose_env(
 
     assert config.live_run_id == "live-b1-long-100u-5x-v1"
     assert config.live_account_label == "primary-2"
-    assert config.live_lease_owner == "worker-2"
 
 
 def test_build_config_supports_multiple_compose_files_and_live_accounts(
@@ -1743,8 +1739,8 @@ def test_build_config_supports_multiple_compose_files_and_live_accounts(
     monkeypatch.setenv("CML_COMPOSE_PROFILES", "live")
     monkeypatch.setenv(
         "CML_MONITOR_LIVE_ACCOUNTS",
-        "primary|live-primary-v1|live-worker,"
-        "account-2|live-account-2-v1|live-worker-account-2",
+        "primary|live-primary-v1,"
+        "account-2|live-account-2-v1",
     )
     args = argparse.Namespace(
         project_directory=str(tmp_path),
@@ -1772,8 +1768,8 @@ def test_build_config_supports_multiple_compose_files_and_live_accounts(
     )
     assert config.compose_profiles == ("live",)
     assert config.live_accounts == (
-        ("primary", "live-primary-v1", "live-worker"),
-        ("account-2", "live-account-2-v1", "live-worker-account-2"),
+        ("primary", "live-primary-v1"),
+        ("account-2", "live-account-2-v1"),
     )
     assert monitor._compose_prefix()[-4:] == [
         "-f",
@@ -1805,8 +1801,7 @@ def test_build_config_discovers_live_accounts_from_compose_files(
         encoding="utf-8",
     )
     env_file.write_text(
-        "CML_LIVE_SESSION_ID_ACCOUNT_2=custom-account-2\n"
-        "CML_LIVE_LEASE_OWNER_ACCOUNT_4=custom-worker-4\n",
+        "CML_LIVE_SESSION_ID_ACCOUNT_2=custom-account-2\n",
         encoding="utf-8",
     )
     monkeypatch.delenv("CML_MONITOR_LIVE_ACCOUNTS", raising=False)
@@ -1832,9 +1827,9 @@ def test_build_config_discovers_live_accounts_from_compose_files(
     config = build_config(args)
 
     assert config.live_accounts == (
-        ("primary", "live-primary-v1", "live-worker"),
-        ("account-2", "custom-account-2", "live-worker-account-2"),
-        ("account-4", "live-account-4-v1", "custom-worker-4"),
+        ("primary", "live-primary-v1"),
+        ("account-2", "custom-account-2"),
+        ("account-4", "live-account-4-v1"),
     )
     assert config.services == (
         "postgres",
@@ -2287,7 +2282,7 @@ def test_unhealthy_live_account_is_restarted_with_cooldown_and_cap(
             compose_env_file=None,
             services=("live-strategy-account-2",),
             live_accounts=(
-                ("account-2", "live-account-2-v1", "live-worker-account-2"),
+                ("account-2", "live-account-2-v1"),
             ),
             state_path=tmp_path / "state.json",
             auto_restart_stale_live_services=True,

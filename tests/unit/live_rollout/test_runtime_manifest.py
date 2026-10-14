@@ -23,7 +23,6 @@ def test_checked_in_live_runtime_manifest_resolves_account_identity() -> None:
     assert primary.migration_revision == "20260925_0043"
     assert primary.services == ("live-strategy",)
     assert account_3.session_id == "live-account-3-v1"
-    assert account_3.lease_owner == "live-worker-account-3"
     assert account_3.migration_revision == "20260925_0043"
     assert len(primary.strategy_config_hash) == 64
     assert primary.strategy_config_hash != "unset"
@@ -93,7 +92,6 @@ accounts:
   - label: primary
     strategy: "${STRATEGY:-invalid_default_strategy}"
     session_id: live-primary-v1
-    lease_owner: live-worker
     profile_ref: profile.yaml
     limits_ref: postgres:risk_config/primary
     services: [live-strategy]
@@ -149,7 +147,6 @@ accounts:
   - label: primary
     strategy: orderflow_impulse
     session_id: session-1
-    lease_owner: worker-1
     profile_ref: profile.yaml
     limits_ref: limits.yaml
     services: [live-strategy]
@@ -182,7 +179,6 @@ accounts:
   - label: primary
     strategy: orderflow_impulse
     session_id: session-2
-    lease_owner: worker-2
     profile_ref: profile.yaml
     limits_ref: limits.yaml
     services: [live-strategy-2]
@@ -243,14 +239,6 @@ def test_runtime_manifest_requires_explicit_execution_config(tmp_path: Path) -> 
         load_live_runtime_manifest(path, environment={})
 
 
-def test_runtime_manifest_requires_explicit_lease_owner(tmp_path: Path) -> None:
-    document = _trading_manifest_document()
-    document["accounts"][0].pop("lease_owner")
-    path = tmp_path / "runtime.yaml"
-    path.write_text(yaml.safe_dump(document))
-
-    with pytest.raises(RuntimeManifestError, match=r"accounts\[0\]\.lease_owner"):
-        load_live_runtime_manifest(path, environment={})
 
 
 @pytest.mark.parametrize(

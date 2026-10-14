@@ -85,7 +85,6 @@ class LiveAccountSummaryResponse(DashboardSchema):
     observed_at: datetime | None = None
     strategy_name: str | None = None
     strategy_state: str | None = None
-    lease_expires_at: datetime | None = None
     runtime_tradeability: TradeabilityDetailResponse | None = None
     runtime_observed_at: datetime | None = None
     # Observation-queue backpressure published with the runtime readiness
@@ -157,8 +156,6 @@ class SystemOverviewResponse(DashboardSchema):
     database_status: OperationalStatus
     services: list[ServiceStatusResponse]
     active_halt_count: int
-    active_lease: dict[str, JsonValue] | None
-    active_leases: list[dict[str, JsonValue]] = Field(default_factory=list)
     account_statuses: list[LiveAccountSummaryResponse] = Field(default_factory=list)
 
 

@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.risk import (
@@ -8,29 +8,17 @@ from crypto_momentum_lab.domain.risk import (
     RiskHalt,
     StrategyLiveState,
     StrategyLiveStateRecord,
-    TradingLease,
-    TradingLeaseState,
 )
 from crypto_momentum_lab.persistence.postgres.risk_repository import (
     risk_config_row,
     risk_evaluation_row,
     risk_halt_row,
     strategy_live_state_row,
-    trading_lease_row,
 )
 
 NOW = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
 
 
-def test_trading_lease_row_preserves_owner_and_expiration() -> None:
-    lease = _lease()
-
-    row = trading_lease_row(lease)
-
-    assert row["state"] == "active"
-    assert row["owner"] == "worker-1"
-    assert row["code_generation"] == "test-generation"
-    assert row["expires_at"] == NOW + timedelta(minutes=1)
 
 
 def test_risk_config_row_preserves_numeric_limits() -> None:
@@ -86,18 +74,6 @@ def test_halt_and_strategy_state_rows_use_enum_values() -> None:
     assert strategy_live_state_row(state)["state"] == "draining"
 
 
-def _lease() -> TradingLease:
-    return TradingLease(
-        lease_id="lease-1",
-        environment="live",
-        account_label="primary",
-        strategy_name="compression_breakout",
-        owner="worker-1",
-        code_generation="test-generation",
-        state=TradingLeaseState.ACTIVE,
-        acquired_at=NOW,
-        expires_at=NOW + timedelta(minutes=1),
-    )
 
 
 def _config() -> RiskConfigSnapshot:

@@ -8,13 +8,11 @@ import asyncio
 import json
 import os
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
-from uuid import uuid4
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -88,7 +86,6 @@ from crypto_momentum_lab.execution_account.risk_control_hub import (
     RiskControlEvent,
 )
 from crypto_momentum_lab.execution_account.orders.coordinator import (
-    DispatchOwnership,
     OrderExecutionCoordinator,
 )
 from crypto_momentum_lab.health.resources import ProcessResourceSampler
@@ -254,9 +251,6 @@ from crypto_momentum_lab.live_rollout.startup_recovery import (
     warm_live_strategy_then_start_fresh as _warm_live_strategy_then_start_fresh,
 )
 from crypto_momentum_lab.live_rollout.startup_resilience import (
-    LiveStartupRetryableError,
-)
-from crypto_momentum_lab.live_rollout.startup_resilience import (
     LiveStartupRetryableError as _LiveStartupRetryableError,
 )
 from crypto_momentum_lab.live_rollout.startup_resilience import (
@@ -278,13 +272,6 @@ from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
 )
 from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
     PostgresLiveRolloutRepository,
-)
-from crypto_momentum_lab.persistence.postgres.risk_repository import (
-    DispatchLeaseToken,
-    LeaseAlreadyHeldError,
-    PostgresRiskRepository,
-    TradingLease,
-    TradingLeaseState,
 )
 from crypto_momentum_lab.persistence.postgres.live_runtime_assembly import (
     assemble_live_persistence,
@@ -331,124 +318,9 @@ def _positions_for_persistence(
     return tuple(persisted)
 
 
-_DISPATCH_LEASE_TTL_SECONDS = 300.0
 # Account facts (private-stream continuity plus an accepted account baseline)
 # start from the same bounded startup budget the account stream already uses.
 _ACCOUNT_FACTS_STARTUP_TIMEOUT_SECONDS = 30.0
-
-
-@dataclass(slots=True)
-class DispatchOwnershipState:
-    """This process's dispatch authority and the last unconfirmed renewal.
-
-    ``ownership_lost`` is True after a renewal failure or an unconfirmable
-    ownership check, and is cleared only by a successful renewal.  It is the one
-    extra fact the verifier needs beyond the durable lease row: a lease row can
-    still be unexpired while this process must no longer dispatch.
-    """
-
-    token: DispatchLeaseToken
-    renewal_failure_reason: str | None = None
-    confirmed_at: datetime | None = None
-
-    @property
-    def ownership_lost(self) -> bool:
-        return self.renewal_failure_reason is not None
-
-
-async def refresh_dispatch_lease_authority(
-    repository: PostgresRiskRepository,
-    *,
-    state: DispatchOwnershipState,
-    environment: str,
-    account_label: str,
-    ttl_seconds: float,
-) -> bool:
-    """Renew this process's lease, recording loss of authority on any failure.
-
-    Returns True when authority is confirmed and False when it was lost.  The
-    durable lease is re-read first so a replaced or expired lease is detected
-    before any renewal attempt.
-    """
-
-    now = datetime.now(tz=UTC)
-    token = state.token
-    try:
-        live = await repository.load_dispatch_lease(
-            environment, account_label, now, token=token
-        )
-        if live is None:
-            state.renewal_failure_reason = "dispatch_lease_not_held"
-            log.error(
-                "trading_lease_ownership_lost",
-                expected_owner=token.owner,
-                lease_id=token.lease_id,
-                reason=state.renewal_failure_reason,
-            )
-            return False
-        await repository.renew_lease(
-            lease_id=token.lease_id,
-            owner=token.owner,
-            expires_at=now + timedelta(seconds=ttl_seconds),
-            token=token,
-            now=now,
-        )
-    except Exception as renew_err:
-        # A failed renewal must stop NEW requests immediately; the in-flight
-        # responsibility stays recorded and queryable.
-        state.renewal_failure_reason = f"renew_failed:{type(renew_err).__name__}"
-        log.warning(
-            "trading_lease_renew_failed",
-            error=str(renew_err),
-            expected_owner=token.owner,
-            lease_id=token.lease_id,
-        )
-        return False
-    state.renewal_failure_reason = None
-    state.confirmed_at = now
-    return True
-
-
-async def _acquire_dispatch_lease(
-    repository: PostgresRiskRepository,
-    *,
-    account_label: str,
-    owner: str,
-    strategy_name: str,
-    code_generation: str,
-    ttl_seconds: float,
-) -> TradingLease:
-    """Acquire this account's single active dispatch lease for this process.
-
-    Existing authorisation is the ``prepare`` command's risk configuration, not
-    a lease handed to the run process.  The run process obtains the lease
-    itself: while another lease is active and unexpired the acquisition fails,
-    which is the "one dispatcher per account" guarantee.  Replacing a still
-    valid lease is a deliberate operator action (``CML_LIVE_TAKE_OVER_LEASE``),
-    never an automatic inheritance of another process's identity.
-    """
-
-    now = datetime.now(tz=UTC)
-    takeover = os.environ.get("CML_LIVE_TAKE_OVER_LEASE", "").strip() == "1"
-    lease = TradingLease(
-        lease_id=f"lease-{uuid4()}",
-        environment="live",
-        account_label=account_label,
-        strategy_name=strategy_name,
-        owner=owner,
-        code_generation=code_generation or "live-unknown",
-        state=TradingLeaseState.ACTIVE,
-        acquired_at=now,
-        expires_at=now + timedelta(seconds=ttl_seconds),
-    )
-    try:
-        await repository.acquire_lease(lease, takeover=takeover)
-    except LeaseAlreadyHeldError:
-        raise LiveStartupRetryableError(
-            "another process holds this account's active dispatch lease; "
-            "stop it and confirm its responsibility before taking over"
-        ) from None
-    return lease
 
 
 def resolve_live_read_credentials(
@@ -1093,104 +965,6 @@ async def run_live_daemon(
         ownership_registry.register(
             "execution_coordinator", execution_coordinator.aclose
         )
-        risk_repository = PostgresRiskRepository(execution_factory)
-        # Dispatch identity is the account's single active lease.  This process
-        # acquires it here, before its first execution write, and then holds
-        # that exact lease generation; a competing process fails to acquire
-        # while this lease is active and unexpired.
-        lease_owner = config.identity.lease_owner.strip()
-        if not lease_owner:
-            raise ValueError(
-                "runtime identity is missing lease_owner; dispatch ownership "
-                "cannot be verified"
-            )
-        dispatch_lease = await _acquire_dispatch_lease(
-            risk_repository,
-            account_label=account_label,
-            owner=lease_owner,
-            strategy_name=strategy_name,
-            code_generation=git_commit_hash,
-            ttl_seconds=_DISPATCH_LEASE_TTL_SECONDS,
-        )
-        lease_token = DispatchLeaseToken(
-            owner=dispatch_lease.owner,
-            lease_id=dispatch_lease.lease_id,
-            code_generation=dispatch_lease.code_generation,
-        )
-        startup_status.log_phase("dispatch_lease_acquired")
-        # Minimal loss-of-authority state for this process.  It is set by a
-        # failed or unconfirmable renewal and cleared only by a successful
-        # renewal, so dispatch stops even while the durable lease row is still
-        # unexpired and readable.
-        ownership_state = DispatchOwnershipState(
-            token=lease_token,
-            renewal_failure_reason=None,
-        )
-
-        async def _verify_dispatcher_lease() -> DispatchOwnership | None:
-            """Re-read the durable lease for *this* lease generation.
-
-            A non-empty cached token is never sufficient, and a readable
-            unexpired lease is not sufficient either once this process has
-            recorded a renewal failure: the lease may have been replaced, or its
-            validity may no longer be confirmed by this process.
-            """
-
-            if ownership_state.ownership_lost:
-                return None
-            now = datetime.now(tz=UTC)
-            try:
-                lease = await risk_repository.load_dispatch_lease(
-                    "live", account_label, now, token=lease_token
-                )
-            except Exception as error:
-                ownership_state.renewal_failure_reason = (
-                    f"lease_read_failed:{type(error).__name__}"
-                )
-                log.warning("trading_lease_check_failed", error=str(error))
-                return None
-            if lease is None:
-                return None
-            return DispatchOwnership(
-                owner=lease.owner,
-                lease_id=lease.lease_id,
-                code_generation=lease.code_generation,
-            )
-
-        execution_coordinator.set_lease_verifier(_verify_dispatcher_lease)
-
-        async def _refresh_verified_lease() -> None:
-            """Renew this process's lease, or stop new dispatch authority.
-
-            A failed or unconfirmable renewal stops new open/close/cancel
-            requests immediately, even though the durable lease row may still be
-            unexpired and readable.  A later successful renewal restores
-            authority.  In-flight and UNKNOWN responsibility is never released.
-            """
-
-            await refresh_dispatch_lease_authority(
-                risk_repository,
-                state=ownership_state,
-                environment="live",
-                account_label=account_label,
-                ttl_seconds=_DISPATCH_LEASE_TTL_SECONDS,
-            )
-
-        async def _run_lease_renewal() -> None:
-            while True:
-                try:
-                    await _refresh_verified_lease()
-                except asyncio.CancelledError:
-                    break
-                except Exception as err:
-                    log.warning("trading_lease_check_failed", error=str(err))
-                await asyncio.sleep(15.0)
-
-        lease_renewal_task = asyncio.create_task(
-            _run_lease_renewal(),
-            name=f"live-lease-renewal:{session_id}",
-        )
-        ownership_registry.register("lease_renewal", lease_renewal_task.cancel)
         fact_source.set_execution_book(
             execution_book,
             register_account_stream=execution_book.register_active_stream,
@@ -2258,8 +2032,6 @@ async def run_live_daemon(
             )
 
         async def close_risk_control() -> None:
-            if not lease_renewal_task.done():
-                lease_renewal_task.cancel()
             if risk_control_runtime is not None:
                 await risk_control_runtime.close()
 

@@ -19,12 +19,7 @@ from crypto_momentum_lab.live_rollout.runtime_config import (
     LiveRuntimeMarket,
     LiveRuntimeStrategy,
 )
-from crypto_momentum_lab.live_rollout.runtime_orchestrator import (
-    DispatchOwnershipState,
-    refresh_dispatch_lease_authority,
-    run_live_daemon,
-)
-from crypto_momentum_lab.persistence.postgres.risk_repository import DispatchLeaseToken
+from crypto_momentum_lab.live_rollout.runtime_orchestrator import run_live_daemon
 from crypto_momentum_lab.live_rollout.startup_resilience import (
     LiveStartupRetryableError,
 )
@@ -34,27 +29,6 @@ class InjectedAssemblyFailure(Exception):
     pass
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("failing_method", ["load_dispatch_lease", "renew_lease"])
-async def test_unconfirmed_lease_stops_dispatch_until_successful_renewal(
-    failing_method,
-):
-    repository = MagicMock()
-    repository.load_dispatch_lease = AsyncMock(return_value=object())
-    repository.renew_lease = AsyncMock()
-    getattr(repository, failing_method).side_effect = RuntimeError(
-        "database unavailable"
-    )
-    state = DispatchOwnershipState(DispatchLeaseToken("worker", "lease"))
-    arguments = dict(
-        state=state, environment="live", account_label="account-1", ttl_seconds=30
-    )
-
-    assert not await refresh_dispatch_lease_authority(repository, **arguments)
-    assert state.ownership_lost
-    getattr(repository, failing_method).side_effect = None
-    assert await refresh_dispatch_lease_authority(repository, **arguments)
-    assert not state.ownership_lost
 
 
 class InjectedRetryableRuntimeFailure(ConnectionResetError):
@@ -81,7 +55,6 @@ def _make_test_config() -> LiveRuntimeConfig:
             account_label="account-1",
             strategy_name="orderflow_impulse",
             session_id="session-1",
-            lease_owner="live-worker",
             operator="operator-1",
             strategy_config_hash="a" * 64,
             git_commit_hash="b" * 40,
@@ -198,19 +171,6 @@ async def test_runtime_failure_is_not_classified_as_startup_retryable_error(
     mock_persistence.factories.market_factory = MagicMock()
     mock_persistence.factories.observability_factory = MagicMock()
     mock_persistence.factories.heartbeat_factory = MagicMock()
-
-    # The run process acquires its own account lease before the first write;
-    # patch the repository so the startup path does not need a real session.
-    mock_risk_repository = MagicMock()
-    mock_risk_repository.acquire_lease = AsyncMock()
-    mock_risk_repository.load_active_lease = AsyncMock(return_value=None)
-    mock_risk_repository.load_active_halts = AsyncMock(return_value=())
-    mock_risk_repository.load_dispatch_lease = AsyncMock(return_value=None)
-    mock_risk_repository.renew_lease = AsyncMock()
-    monkeypatch.setattr(
-        "crypto_momentum_lab.live_rollout.runtime_orchestrator.PostgresRiskRepository",
-        lambda *args, **kwargs: mock_risk_repository,
-    )
 
     mock_persistence.repositories.telemetry_repository.save_runtime_events = AsyncMock()
     mock_persistence.repositories.signal_repository.save_signals = AsyncMock()
@@ -361,8 +321,6 @@ async def test_runtime_failure_is_not_classified_as_startup_retryable_error(
     mock_persistence.repositories.live_repository.load_active_approval = AsyncMock(
         side_effect=AssertionError("startup must not require approval")
     )
-    # The run process acquires its own account lease before the first write;
-    # this mock accepts the acquisition and records it for assertions.
     mock_persistence.repositories.risk_repository.load_active_halts = AsyncMock(
         return_value=()
     )

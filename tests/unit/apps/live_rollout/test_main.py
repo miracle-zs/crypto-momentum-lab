@@ -12,7 +12,6 @@ from typer import BadParameter
 from typer.testing import CliRunner
 
 from crypto_momentum_lab.apps.live_rollout import main
-from crypto_momentum_lab.domain.risk import TradingLease, TradingLeaseState
 from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
 from crypto_momentum_lab.execution_account.hub import AccountEventHubError
 from crypto_momentum_lab.live_rollout import runtime_config
@@ -115,7 +114,6 @@ accounts:
   - label: account-2
     strategy: orderflow_impulse
     session_id: live-account-2-v1
-    lease_owner: live-worker-account-2
     profile_ref: profile.yaml
     limits_ref: limits.yaml
     services: [live-strategy-account-2]
@@ -279,7 +277,6 @@ def test_live_cli_exposes_required_commands() -> None:
         "approve-runtime",
         "refresh-approval-runtime",
         "prepare",
-        "renew-lease",
         "resolve-missing-order",
         "run",
         "status",
@@ -323,189 +320,10 @@ def test_one_shot_risk_control_commands_require_explicit_confirmation(
     assert confirmation in result.output
 
 
-def test_renew_lease_requires_explicit_confirmation() -> None:
-    result = runner.invoke(
-        app,
-        [
-            "renew-lease",
-            "--database-url",
-            "postgresql+asyncpg://unused",
-        ],
-    )
-
-    assert result.exit_code != 0
-    assert "RENEW LIVE RISK LEASE" in result.output
 
 
-def test_renew_live_lease_checks_owner_and_extends_expiration(monkeypatch) -> None:
-    now = datetime.now(tz=UTC)
-    lease = TradingLease(
-        lease_id="lease-1",
-        environment="live",
-        account_label="account-2",
-        strategy_name="orderflow_impulse",
-        owner="live-worker-account-2",
-        code_generation="test-generation",
-        state=TradingLeaseState.ACTIVE,
-        acquired_at=now - timedelta(minutes=5),
-        expires_at=now + timedelta(minutes=5),
-    )
-    renewed_calls: list[tuple[str, str, datetime, str | None]] = []
-
-    class FakeEngine:
-        async def dispose(self) -> None:
-            return None
-
-    class FakeRepository:
-        def __init__(self, factory) -> None:
-            del factory
-
-        async def load_active_lease(self, environment, account_label, current):
-            assert environment == "live"
-            assert account_label == "account-2"
-            assert current.tzinfo is not None
-            return lease
-
-        async def renew_lease(
-            self,
-            *,
-            lease_id,
-            owner,
-            expires_at,
-            code_generation=None,
-        ):
-            renewed_calls.append((lease_id, owner, expires_at, code_generation))
-            return TradingLease(
-                lease_id=lease.lease_id,
-                environment=lease.environment,
-                account_label=lease.account_label,
-                strategy_name=lease.strategy_name,
-                owner=lease.owner,
-                code_generation=code_generation or lease.code_generation,
-                state=lease.state,
-                acquired_at=lease.acquired_at,
-                expires_at=expires_at,
-            )
-
-    monkeypatch.setattr(
-        main,
-        "create_execution_database_engine",
-        lambda _: FakeEngine(),
-    )
-    monkeypatch.setattr(main, "PostgresRiskRepository", FakeRepository)
-
-    with pytest.raises(RuntimeError, match="owner mismatch"):
-        asyncio.run(
-            main._renew_live_lease(
-                database_url="postgresql+asyncpg://unused",
-                account_label="account-2",
-                strategy_name="orderflow_impulse",
-                lease_owner="wrong-owner",
-                lease_ttl_seconds=3600,
-            )
-        )
-    with pytest.raises(RuntimeError, match="strategy mismatch"):
-        asyncio.run(
-            main._renew_live_lease(
-                database_url="postgresql+asyncpg://unused",
-                account_label="account-2",
-                strategy_name="other_strategy",
-                lease_owner="live-worker-account-2",
-                lease_ttl_seconds=3600,
-            )
-        )
-
-    payload = asyncio.run(
-        main._renew_live_lease(
-            database_url="postgresql+asyncpg://unused",
-            account_label="account-2",
-            strategy_name="orderflow_impulse",
-            lease_owner="live-worker-account-2",
-            lease_ttl_seconds=3600,
-            code_generation="new-generation",
-        )
-    )
-
-    assert payload["account_label"] == "account-2"
-    assert payload["lease_id"] == "lease-1"
-    assert renewed_calls[0][0:2] == ("lease-1", "live-worker-account-2")
-    assert renewed_calls[0][2] > lease.expires_at
-    assert renewed_calls[0][3] == "new-generation"
 
 
-def test_renew_live_lease_preserves_longer_existing_lease_when_updating_code_generation(
-    monkeypatch,
-) -> None:
-    now = datetime.now(tz=UTC)
-    long_lease = TradingLease(
-        lease_id="lease-long",
-        environment="live",
-        account_label="account-4",
-        strategy_name="orderflow_impulse",
-        owner="live-worker-account-4",
-        code_generation="old-generation",
-        state=TradingLeaseState.ACTIVE,
-        acquired_at=now - timedelta(hours=1),
-        expires_at=now + timedelta(days=7),
-    )
-    renewed_calls: list[tuple[str, str, datetime, str | None]] = []
-
-    class FakeEngine:
-        async def dispose(self) -> None:
-            return None
-
-    class FakeRepository:
-        def __init__(self, factory) -> None:
-            del factory
-
-        async def load_active_lease(self, environment, account_label, current):
-            return long_lease
-
-        async def renew_lease(
-            self,
-            *,
-            lease_id,
-            owner,
-            expires_at,
-            code_generation=None,
-        ):
-            renewed_calls.append((lease_id, owner, expires_at, code_generation))
-            return TradingLease(
-                lease_id=long_lease.lease_id,
-                environment=long_lease.environment,
-                account_label=long_lease.account_label,
-                strategy_name=long_lease.strategy_name,
-                owner=long_lease.owner,
-                code_generation=code_generation or long_lease.code_generation,
-                state=long_lease.state,
-                acquired_at=long_lease.acquired_at,
-                expires_at=expires_at,
-            )
-
-    monkeypatch.setattr(
-        main,
-        "create_execution_database_engine",
-        lambda _: FakeEngine(),
-    )
-    monkeypatch.setattr(main, "PostgresRiskRepository", FakeRepository)
-
-    payload = asyncio.run(
-        main._renew_live_lease(
-            database_url="postgresql+asyncpg://unused",
-            account_label="account-4",
-            strategy_name="orderflow_impulse",
-            lease_owner="live-worker-account-4",
-            lease_ttl_seconds=3600,
-            code_generation="new-commit-hash",
-        )
-    )
-
-    assert payload["account_label"] == "account-4"
-    assert payload["lease_id"] == "lease-long"
-    assert renewed_calls[0][0:2] == ("lease-long", "live-worker-account-4")
-    # Expiration is preserved at 7 days, NOT shrunk to 1 hour
-    assert renewed_calls[0][2] == long_lease.expires_at
-    assert renewed_calls[0][3] == "new-commit-hash"
 
 
 def test_live_run_exposes_operation_aware_telemetry_option() -> None:
@@ -865,7 +683,6 @@ accounts:
   - label: primary
     strategy: orderflow_impulse
     session_id: live-primary-v1
-    lease_owner: live-worker
     profile_ref: profile.yaml
     limits_ref: limits.yaml
     services: [live-strategy]
@@ -923,74 +740,9 @@ accounts:
     )
 
     assert result.exit_code == 0
-    assert captured["code_generation"] == "a" * 40
-    # `prepare` writes risk limits only; it does not take the dispatch lease.
-    assert "lease_owner" not in captured
-    assert "lease_ttl_seconds" not in captured
     assert captured["account_label"] == "primary"
 
 
-def test_prepare_rejects_manifest_lease_owner_mismatch(tmp_path: Path) -> None:
-    manifest_path = tmp_path / "runtime.yaml"
-    manifest_path.write_text(
-        """
-schema_version: 1
-runtime:
-  image_commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-  migration_revision: "20260911_0040"
-accounts:
-  - label: primary
-    strategy: orderflow_impulse
-    session_id: live-primary-v1
-    lease_owner: manifest-worker
-    profile_ref: profile.yaml
-    limits_ref: limits.yaml
-    services: [live-strategy]
-    strategy_config:
-      impulse_window_buckets: 4
-      confirmation_buckets: 1
-      min_return_pct: 0.005
-      min_imbalance: 0.30
-      min_intensity: 1.5
-      min_notional_5m_vs_30m: 1.50
-      cooldown_buckets: 0
-      entry_positive_gainer_top_count: 10
-      require_price_above_ema5: false
-      require_price_above_ema10: false
-      entry_policy_mode: enforce
-      entry_order_type: limit
-      entry_limit_ttl_seconds: 900
-    execution_config:
-      target_notional: 100.00
-      hedge_mode: true
-      entry_long_only: true
-      entry_leverage: 5
-      margin_type: CROSSED
-      exit_mode: candle_15m
-      candle_grace_bars: 8
-      candle_grace_decision_profit_pct: 0.001
-      candle_grace_profit_pct: 0.0088
-      persist_exchange_operations: submit,cancel
-      max_concurrency_per_symbol: 2
-""",
-        encoding="utf-8",
-    )
-
-    result = runner.invoke(
-        app,
-        [
-            "prepare",
-            "--database-url",
-            "postgresql+asyncpg://unused",
-            "--runtime-manifest",
-            str(manifest_path),
-            "--confirmation",
-            "PREPARE LIVE RISK GATES",
-        ],
-    )
-
-    assert result.exit_code != 0
-    assert "lease owner does not match" in result.output
 
 
 def test_strategy_config_hash_includes_live_entry_filters() -> None:
@@ -1125,7 +877,7 @@ def test_live_startup_retry_delay_uses_exchange_retry_after() -> None:
 
 def test_only_transient_live_startup_errors_are_retryable() -> None:
     assert is_retryable_live_startup_error(
-        RuntimeError("live gate blocked: missing_active_lease")
+        RuntimeError("live gate blocked: account_not_ready")
     )
     assert is_retryable_live_startup_error(TimeoutError("recovery timed out"))
     assert not is_retryable_live_startup_error(

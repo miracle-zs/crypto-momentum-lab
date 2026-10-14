@@ -956,41 +956,6 @@ class ExecutionAccountProcessStateRow(Base):
     )
 
 
-class TradingLeaseRow(Base):
-    __tablename__ = "trading_leases"
-
-    lease_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    environment: Mapped[str] = mapped_column(String(32))
-    account_label: Mapped[str] = mapped_column(String(64))
-    strategy_name: Mapped[str] = mapped_column(String(64))
-    owner: Mapped[str] = mapped_column(String(128))
-    code_generation: Mapped[str] = mapped_column(String(128))
-    state: Mapped[str] = mapped_column(String(16))
-    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-
-    __table_args__ = (
-        Index(
-            "uq_trading_leases_active_account",
-            "environment",
-            "account_label",
-            unique=True,
-            postgresql_where=(state == "active"),
-        ),
-        Index(
-            "ix_trading_leases_account_expiry",
-            "environment",
-            "account_label",
-            "expires_at",
-        ),
-        Index(
-            "ix_trading_leases_active_expiry",
-            "expires_at",
-            postgresql_where=(state == "active"),
-        ),
-    )
-
-
 class RiskConfigSnapshotRow(Base):
     __tablename__ = "risk_config_snapshots"
 

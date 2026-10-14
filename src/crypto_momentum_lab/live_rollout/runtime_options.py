@@ -319,7 +319,6 @@ def resolve_live_runtime_config(
     )
 
     session_id = options.session_id
-    lease_owner = ""
     strategy = options.strategy
     profile: LiveOrderFlowImpulseProfile
     entry_positive_gainer_top_count: int | None
@@ -342,9 +341,6 @@ def resolve_live_runtime_config(
 
     if manifest_account is None:
         session_id = session_id or "live-manual"
-        # Without a manifest the runtime keeps the same default owner the
-        # `prepare` command writes, so ownership verification can match.
-        lease_owner = lease_owner or "live-worker"
         hedge_mode = True if hedge_mode is None else hedge_mode
         entry_long_only = True if entry_long_only is None else entry_long_only
         entry_price_above_ema5 = (
@@ -407,7 +403,6 @@ def resolve_live_runtime_config(
                 "session id does not match the runtime manifest"
             )
         session_id = manifest_account.session_id
-        lease_owner = manifest_account.lease_owner
         strategy_inputs = manifest_account.strategy_inputs
         profile = strategy_inputs.profile
         entry_positive_gainer_top_count = (
@@ -527,7 +522,6 @@ def resolve_live_runtime_config(
             strategy_name=strategy,
             session_id=session_id,
             operator=options.operator,
-            lease_owner=lease_owner,
             strategy_config_hash=strategy_config_hash,
             git_commit_hash=git_commit_hash,
         ),

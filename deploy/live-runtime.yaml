@@ -16,7 +16,6 @@ accounts:
   - label: primary
     strategy: "${CML_LIVE_STRATEGY:-orderflow_impulse}"
     session_id: "${CML_LIVE_SESSION_ID:-live-primary-v1}"
-    lease_owner: "${CML_LIVE_LEASE_OWNER:-live-worker}"
     strategy_config_hash: "${CML_LIVE_STRATEGY_CONFIG_HASH:-unset}"
     strategy_config:
       impulse_window_buckets: "${CML_LIVE_IMPULSE_WINDOW_BUCKETS:-2}"
@@ -52,7 +51,6 @@ accounts:
   - label: account-2
     strategy: "${CML_LIVE_STRATEGY_ACCOUNT_2:-orderflow_impulse}"
     session_id: "${CML_LIVE_SESSION_ID_ACCOUNT_2:-live-account-2-v1}"
-    lease_owner: "${CML_LIVE_LEASE_OWNER_ACCOUNT_2:-live-worker-account-2}"
     strategy_config_hash: "${CML_LIVE_STRATEGY_CONFIG_HASH_ACCOUNT_2:-unset}"
     strategy_config:
       impulse_window_buckets: "${CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_2:-2}"
@@ -89,7 +87,6 @@ accounts:
   - label: account-3
     strategy: "${CML_LIVE_STRATEGY_ACCOUNT_3:-orderflow_impulse}"
     session_id: "${CML_LIVE_SESSION_ID_ACCOUNT_3:-live-account-3-v1}"
-    lease_owner: "${CML_LIVE_LEASE_OWNER_ACCOUNT_3:-live-worker-account-3}"
     strategy_config_hash: "${CML_LIVE_STRATEGY_CONFIG_HASH_ACCOUNT_3:-unset}"
     strategy_config:
       impulse_window_buckets: "${CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_3:-2}"
@@ -126,7 +123,6 @@ accounts:
   - label: account-4
     strategy: "${CML_LIVE_STRATEGY_ACCOUNT_4:-orderflow_impulse}"
     session_id: "${CML_LIVE_SESSION_ID_ACCOUNT_4:-live-account-4-v1}"
-    lease_owner: "${CML_LIVE_LEASE_OWNER_ACCOUNT_4:-live-worker-account-4}"
     strategy_config_hash: "${CML_LIVE_STRATEGY_CONFIG_HASH_ACCOUNT_4:-unset}"
     strategy_config:
       impulse_window_buckets: "${CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_4:-2}"

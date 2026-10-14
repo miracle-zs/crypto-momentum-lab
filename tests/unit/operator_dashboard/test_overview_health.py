@@ -95,7 +95,6 @@ class Queries(OverviewQueries):
             observed_at=NOW,
             strategy_name="orderflow_impulse",
             strategy_state=strategy_state,
-            lease_expires_at=NOW + timedelta(days=1),
         )
 
     async def health(self):
@@ -117,7 +116,6 @@ class Queries(OverviewQueries):
                 )
             ],
             active_halt_count=0,
-            active_lease=None,
         )
 
 
@@ -128,14 +126,13 @@ class Queries(OverviewQueries):
         ("halted", "strategy_not_active"),
     ],
 )
-async def test_valid_lease_is_not_blamed_for_missing_or_inactive_strategy(
+async def test_missing_or_inactive_strategy_does_not_open_entry_gate(
     state, reason
 ):
     queries = Queries(strategy_state=state)
     view = await queries.operational_health()
     cap = next(d for d in view["dimensions"] if d["name"] == "executable_capability")
     assert "runtime_readiness_missing_or_stale" in cap["details"]
-    assert "lease_expired" not in cap["details"]
     readiness = await queries.readiness()
     assert readiness.tradeability.entry_gate_open is False
     assert (

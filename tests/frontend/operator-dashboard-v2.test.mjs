@@ -165,7 +165,6 @@ test("overview surfaces the four live account statuses", () => {
   const [, html] = renderOverview({
     database_status: "READY",
     active_halt_count: 0,
-    active_lease: null,
     services: [],
     account_statuses: ["primary", "account-2", "account-3", "account-4"].map((account_label) => ({
       account_label,

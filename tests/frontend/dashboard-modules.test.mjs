@@ -67,7 +67,6 @@ test("heartbeat-only account updates do not rebuild the active section", () => {
       account_label: "primary",
       status: "READY",
       observed_at: "2026-09-06T11:00:00Z",
-      lease_expires_at: "2026-09-06T11:02:00Z",
     }],
   };
   const second = {
@@ -75,7 +74,6 @@ test("heartbeat-only account updates do not rebuild the active section", () => {
     accounts: [{
       ...first.accounts[0],
       observed_at: "2026-09-06T11:00:15Z",
-      lease_expires_at: "2026-09-06T11:02:15Z",
     }],
   };
 
@@ -127,12 +125,12 @@ test("overview account heartbeats do not rebuild the section", () => {
   const first = {
     status: "READY",
     services: [{ name: "market-data", status: "READY", age_seconds: 5, observed_at: "2026-09-27T05:00:00Z" }],
-    account_statuses: [{ account_label: "primary", observed_at: "2026-09-27T05:00:00Z", lease_expires_at: "2026-10-01T00:00:00Z", status: "READY" }],
+    account_statuses: [{ account_label: "primary", observed_at: "2026-09-27T05:00:00Z", status: "READY" }],
   };
   const second = {
     ...first,
     services: [{ name: "market-data", status: "READY", age_seconds: 20, observed_at: "2026-09-27T05:00:15Z" }],
-    account_statuses: [{ account_label: "primary", observed_at: "2026-09-27T05:00:15Z", lease_expires_at: "2026-10-01T00:00:00Z", status: "READY" }],
+    account_statuses: [{ account_label: "primary", observed_at: "2026-09-27T05:00:15Z", status: "READY" }],
   };
 
   assert.equal(sectionRenderKey("overview", first), sectionRenderKey("overview", second));
@@ -434,7 +432,6 @@ test("overview renderer exposes local heartbeat update hooks", () => {
   const [status, html] = renderOverview({
     database_status: "READY",
     active_halt_count: 0,
-    active_lease: null,
     services: [{
       name: "live-rollout",
       status: "LIVE",

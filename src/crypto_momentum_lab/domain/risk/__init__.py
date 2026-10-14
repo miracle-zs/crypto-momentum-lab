@@ -10,8 +10,6 @@ from crypto_momentum_lab.domain.risk.models import (
     RiskHalt,
     StrategyLiveState,
     StrategyLiveStateRecord,
-    TradingLease,
-    TradingLeaseState,
 )
 
 __all__ = [
@@ -21,8 +19,6 @@ __all__ = [
     "RiskHalt",
     "StrategyLiveState",
     "StrategyLiveStateRecord",
-    "TradingLease",
-    "TradingLeaseState",
     "CandidateRiskAssessment",
     "RiskContext",
     "RiskGateway",

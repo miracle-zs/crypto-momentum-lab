@@ -19,8 +19,8 @@ Environment=CML_MARKET_REVISION_ARCHIVE_TIMER_UNIT=cml-market-revision-archive.t
 Environment=CML_POSITION_RECOVERY_RETENTION_TIMER_UNIT=cml-position-recovery-retention.timer
 Environment=CML_STORAGE_PATH=/var/lib/docker
 Environment=CML_DATABASE_STORAGE_MONITORING=true
-# cml_ops_monitor derives live services, sessions, and lease owners from the
-# Compose files above. CML_MONITOR_SERVICES and CML_MONITOR_LIVE_ACCOUNTS remain
+# cml_ops_monitor derives live services and sessions from the Compose files
+# above. CML_MONITOR_SERVICES and CML_MONITOR_LIVE_ACCOUNTS remain
 # supported in /etc/crypto-momentum-lab/ops-monitor.env for explicit overrides.
 EnvironmentFile=-/etc/crypto-momentum-lab/ops-monitor.env
 # Live containers use a 90-second stop grace period. Keep monitor operations

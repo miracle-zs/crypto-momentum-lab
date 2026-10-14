@@ -12,8 +12,6 @@ from crypto_momentum_lab.domain.risk import (
     RiskHalt,
     StrategyLiveState,
     StrategyLiveStateRecord,
-    TradingLease,
-    TradingLeaseState,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
     RiskConfigSnapshotRow,
@@ -21,7 +19,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
     RiskHaltRow,
     RiskRejectionRow,
     StrategyLiveStateRow,
-    TradingLeaseRow,
 )
 from crypto_momentum_lab.persistence.postgres.risk_repository import (
     PostgresRiskRepository,
@@ -47,23 +44,12 @@ async def risk_repository(
                 StrategyLiveStateRow,
                 RiskHaltRow,
                 RiskConfigSnapshotRow,
-                TradingLeaseRow,
-            ):
+                        ):
                 await session.execute(delete(model))
     yield PostgresRiskRepository(factory), factory
     await engine.dispose()
 
 
-async def test_acquire_lease_persists_active_lease(
-    risk_repository: tuple[PostgresRiskRepository, async_sessionmaker],
-) -> None:
-    repository, _ = risk_repository
-    lease = _lease("lease-1", "worker-1")
-
-    await repository.acquire_lease(lease)
-
-    loaded = await repository.load_active_lease("live", "primary", NOW)
-    assert loaded == lease
 
 
 async def test_save_risk_evaluation_preserves_rejection_reason(
@@ -176,17 +162,3 @@ async def test_stale_strategy_live_state_cannot_overwrite_newer_state(
     assert row is not None
     assert row.state == StrategyLiveState.ACTIVE.value
     assert row.changed_at == current.changed_at
-
-
-def _lease(lease_id: str, owner: str) -> TradingLease:
-    return TradingLease(
-        lease_id=lease_id,
-        environment="live",
-        account_label="primary",
-        strategy_name="compression_breakout",
-        owner=owner,
-        code_generation="test-generation",
-        state=TradingLeaseState.ACTIVE,
-        acquired_at=NOW,
-        expires_at=NOW + timedelta(minutes=1),
-    )

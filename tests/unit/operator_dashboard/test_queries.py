@@ -97,18 +97,9 @@ def test_live_account_summary_keeps_four_account_order_and_state_join() -> None:
         )
         for label in ("primary", "account-2", "account-3", "account-4")
     ]
-    leases = [
-        SimpleNamespace(
-            account_label=label,
-            expires_at=observed_at + timedelta(minutes=10),
-        )
-        for label in ("primary", "account-2", "account-3", "account-4")
-    ]
-
     summaries = live_account_summaries(
         processes,
         strategy_states,
-        leases,
     )
 
     assert [summary.account_label for summary in summaries] == [
@@ -123,34 +114,8 @@ def test_live_account_summary_keeps_four_account_order_and_state_join() -> None:
         OperationalStatus.HALTED,
         OperationalStatus.READY,
     ]
-    assert all(summary.lease_expires_at is not None for summary in summaries)
 
 
-def test_live_account_summary_uses_active_lease_when_strategy_state_missing() -> None:
-    observed_at = datetime(2026, 9, 6, tzinfo=UTC)
-    lease_expires_at = observed_at + timedelta(minutes=10)
-
-    summaries = live_account_summaries(
-        [
-            SimpleNamespace(
-                account_label="primary",
-                environment="live",
-                state="ready_readonly",
-                occurred_at=observed_at,
-            )
-        ],
-        [],
-        [
-            SimpleNamespace(
-                account_label="primary",
-                strategy_name="orderflow_impulse",
-                expires_at=lease_expires_at,
-            )
-        ],
-    )
-
-    assert summaries[0].strategy_name == "orderflow_impulse"
-    assert summaries[0].strategy_state is None
 
 
 def test_latest_live_account_process_query_excludes_non_live_states() -> None:
@@ -1224,7 +1189,6 @@ async def test_readiness_handles_halt_without_unhealthy_attribute_error() -> Non
                         observed_at=now,
                         strategy_name="orderflow_impulse",
                         strategy_state="running",
-                        lease_expires_at=now + timedelta(minutes=10),
                     )
                 ],
             )
@@ -1242,7 +1206,6 @@ async def test_readiness_handles_halt_without_unhealthy_attribute_error() -> Non
                     )
                 ],
                 active_halt_count=1,
-                active_lease=None,
             )
 
     queries = StubOverviewQueries()
@@ -1291,7 +1254,6 @@ async def test_readiness_prevents_fully_tradeable_when_prerequisites_missing() -
                         observed_at=yesterday,
                         strategy_name=None,
                         strategy_state=None,
-                        lease_expires_at=None,
                     )
                 ],
             )
@@ -1310,7 +1272,6 @@ async def test_readiness_prevents_fully_tradeable_when_prerequisites_missing() -
                     )
                 ],
                 active_halt_count=0,
-                active_lease=None,
             )
 
     queries = StubOverviewQueries()
@@ -1358,7 +1319,6 @@ async def test_readiness_identifies_stale_strategy_stream_without_blame_on_marke
                         observed_at=now,
                         strategy_name="orderflow_impulse",
                         strategy_state="running",
-                        lease_expires_at=now + timedelta(minutes=10),
                     )
                 ],
             )
@@ -1382,7 +1342,6 @@ async def test_readiness_identifies_stale_strategy_stream_without_blame_on_marke
                     ),
                 ],
                 active_halt_count=0,
-                active_lease=None,
             )
 
     response = await StubOverviewQueries().readiness()
@@ -1433,7 +1392,6 @@ async def test_readiness_allows_fully_tradeable_when_services_include_database_r
                         observed_at=now,
                         strategy_name="orderflow_impulse",
                         strategy_state="running",
-                        lease_expires_at=now + timedelta(minutes=10),
                         runtime_observed_at=now,
                         runtime_tradeability=TradeabilityDetailResponse(
                             mode="FULLY_TRADEABLE", entry_gate_open=True,
@@ -1476,7 +1434,6 @@ async def test_readiness_allows_fully_tradeable_when_services_include_database_r
                     ),
                 ],
                 active_halt_count=0,
-                active_lease=None,
             )
 
     queries = StubOverviewQueries()

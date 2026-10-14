@@ -72,7 +72,6 @@ async def build_live_execution_runtime(
     submission_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     order_observation_capacity: int = 256,
     on_projection_recovery_required: Callable[[str], None] | None = None,
-    lease_required: bool = True,
 ) -> LiveExecutionRuntime:
     backend = OrderExecutionStateMachine(
         exchange=exchange,
@@ -113,7 +112,6 @@ async def build_live_execution_runtime(
         submission_clock=submission_clock,
         order_observation_capacity=order_observation_capacity,
         on_projection_recovery_required=on_projection_recovery_required,
-        lease_required=lease_required,
     )
     return LiveExecutionRuntime(book=book, coordinator=coordinator)
 

@@ -32,7 +32,6 @@ class LiveRuntimeAccount:
     label: str
     strategy: str
     session_id: str
-    lease_owner: str
     image_commit: str
     migration_revision: str
     strategy_config_hash: str
@@ -215,10 +214,6 @@ def _parse_manifest(document: Any, *, path: Path) -> LiveRuntimeManifest:
                 session_id=_text(
                     account.get("session_id"),
                     f"{prefix}.session_id",
-                ),
-                lease_owner=_text(
-                    account.get("lease_owner"),
-                    f"{prefix}.lease_owner",
                 ),
                 image_commit=_text(
                     account.get("image_commit", default_image_commit),

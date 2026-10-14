@@ -50,8 +50,8 @@ def test_initial_migration_creates_universe_tables(database_url: str) -> None:
         "strategy_runs",
         "strategy_signals",
         "strategy_live_states",
-        "trading_leases",
         "universe_snapshots",
         "universe_entries",
         "monitoring_memberships",
     } <= table_names
+    assert "trading_leases" not in table_names

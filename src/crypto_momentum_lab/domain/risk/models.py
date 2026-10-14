@@ -7,12 +7,6 @@ from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.domain.strategy import deterministic_config_hash
 
 
-class TradingLeaseState(StrEnum):
-    ACTIVE = "active"
-    RELEASED = "released"
-    EXPIRED = "expired"
-
-
 class RiskDecision(StrEnum):
     APPROVED = "approved"
     REJECTED = "rejected"
@@ -40,32 +34,6 @@ class StrategyLiveStateRecord:
         if not isinstance(self.state, StrategyLiveState):
             raise ValueError("state must be a StrategyLiveState")
         _require_aware(self.changed_at, "changed_at")
-
-
-@dataclass(frozen=True, slots=True)
-class TradingLease:
-    lease_id: str
-    environment: str
-    account_label: str
-    strategy_name: str
-    owner: str
-    code_generation: str
-    state: TradingLeaseState
-    acquired_at: datetime
-    expires_at: datetime
-
-    def __post_init__(self) -> None:
-        _require_non_empty(self.lease_id, "lease_id")
-        _require_common(self.environment, self.account_label)
-        _require_non_empty(self.strategy_name, "strategy_name")
-        _require_non_empty(self.owner, "owner")
-        _require_non_empty(self.code_generation, "code_generation")
-        if not isinstance(self.state, TradingLeaseState):
-            raise ValueError("state must be a TradingLeaseState")
-        _require_aware(self.acquired_at, "acquired_at")
-        _require_aware(self.expires_at, "expires_at")
-        if self.expires_at <= self.acquired_at:
-            raise ValueError("expires_at must be after acquired_at")
 
 
 @dataclass(frozen=True, slots=True)

@@ -82,7 +82,6 @@ async def test_decision_exit_properly_prepares_intent_and_submits() -> None:
     strategy_name = "orderflow_impulse"
     strategy_config_hash = "cfg_hash_test"
     account_label = "primary"
-    active_lease = None
 
     # Simulate _handle_decision_exit logic from runtime_orchestrator
     async def _handle_decision_exit(cmd: TradeCommand) -> OrderExecutionResult:
@@ -164,7 +163,7 @@ async def test_decision_exit_properly_prepares_intent_and_submits() -> None:
             preparation=OrderSubmissionPreparation(
                 intent=intent,
                 evaluation=evaluation,
-                environment="live" if active_lease is not None else None,
+                environment="live",
                 account_label=account_label,
                 strategy_name=strategy_name,
             ),

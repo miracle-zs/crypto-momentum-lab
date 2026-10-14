@@ -122,7 +122,6 @@ class FakeQueries:
             database_status=OperationalStatus.READY,
             services=[],
             active_halt_count=0,
-            active_lease=None,
         )
 
     async def research_collector(self) -> ResearchCollectorResponse:

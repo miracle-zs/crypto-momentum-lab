@@ -48,7 +48,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
     CashFlowCorrectionRow,
     RuntimeMarketState15sRow,
     StrategyLiveStateRow,
-    TradingLeaseRow,
 )
 
 _EQUITY_MAX_POINTS = 240
@@ -484,21 +483,9 @@ class LiveAccountMetricsQueries:
                     )
                 )
             ).all()
-            leases = (
-                await session.scalars(
-                    select(TradingLeaseRow)
-                    .where(
-                        TradingLeaseRow.environment == "live",
-                        TradingLeaseRow.state == "active",
-                        TradingLeaseRow.expires_at > equity_window_end,
-                    )
-                    .order_by(TradingLeaseRow.expires_at.desc())
-                )
-            ).all()
             accounts = live_account_summaries(
                 processes,
                 strategy_states,
-                leases,
             )
             metric_accounts: list[LiveAccountMetricsAccountResponse] = []
             for account in accounts:
