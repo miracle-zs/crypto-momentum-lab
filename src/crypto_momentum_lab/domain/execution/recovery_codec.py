@@ -42,7 +42,8 @@ from crypto_momentum_lab.domain.execution.snapshot_encoding import (
 )
 from crypto_momentum_lab.domain.trading import TradeSide as StrategySide
 
-ACCOUNT_FACTS_SCHEMA_VERSION = 3
+ACCOUNT_FACTS_SCHEMA_VERSION = 4
+LEGACY_ACCOUNT_FACTS_SCHEMA_VERSION = 3
 
 
 class PositionRecoveryCodec:
@@ -798,7 +799,7 @@ class PositionRecoveryCodec:
 
     @classmethod
     def encode_facts(cls, facts: AccountFacts) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema_version": ACCOUNT_FACTS_SCHEMA_VERSION,
             "position_key": cls.encode_position_key(facts.position_key),
             "fills": [cls.encode_fill(item) for item in facts.fills],
@@ -843,38 +844,53 @@ class PositionRecoveryCodec:
             ),
             "prefix_facts_complete": facts.prefix_facts_complete,
         }
+        if (
+            facts.fill_load_provenance is not None
+            and facts.coverage is not None
+            and facts.coverage.load_provenance == facts.fill_load_provenance
+        ):
+            # Coverage already carries this exact scan proof. Keep a separate
+            # value only when the two facts are actually different.
+            del payload["fill_load_provenance"]
+        return payload
 
     @classmethod
     def decode_facts(cls, value: object) -> AccountFacts:
         data = _mapping(value, "facts")
-        _require_schema_version(
-            data,
-            version=ACCOUNT_FACTS_SCHEMA_VERSION,
-            label="account facts",
-        )
-        _require_keys(
-            data,
-            {
-                "schema_version",
-                "position_key",
-                "fills",
-                "snapshots",
-                "exit_boundaries",
-                "coverage",
-                "has_synthetic_fills",
-                "conflicting_fills",
-                "has_late_events",
-                "stream_scope",
-                "recovery_checkpoint",
-                "fact_conflicts",
-                "integrity_issues",
-                "late_fills",
-                "fill_cursor_provenance",
-                "fill_load_provenance",
-                "prefix_facts_complete",
-            },
-            "account facts",
-        )
+        schema_version = data.get("schema_version")
+        if type(schema_version) is not int or schema_version not in {
+            LEGACY_ACCOUNT_FACTS_SCHEMA_VERSION,
+            ACCOUNT_FACTS_SCHEMA_VERSION,
+        }:
+            raise RecoverySchemaError(
+                f"unsupported account facts schema version {schema_version!r}; "
+                f"expected {LEGACY_ACCOUNT_FACTS_SCHEMA_VERSION} or "
+                f"{ACCOUNT_FACTS_SCHEMA_VERSION}"
+            )
+        expected_keys = {
+            "schema_version",
+            "position_key",
+            "fills",
+            "snapshots",
+            "exit_boundaries",
+            "coverage",
+            "has_synthetic_fills",
+            "conflicting_fills",
+            "has_late_events",
+            "stream_scope",
+            "recovery_checkpoint",
+            "fact_conflicts",
+            "integrity_issues",
+            "late_fills",
+            "fill_cursor_provenance",
+            "prefix_facts_complete",
+        }
+        if (
+            schema_version == LEGACY_ACCOUNT_FACTS_SCHEMA_VERSION
+            or "fill_load_provenance" in data
+        ):
+            expected_keys.add("fill_load_provenance")
+        _require_keys(data, expected_keys, "account facts")
         has_synthetic_fills = data.get("has_synthetic_fills")
         if type(has_synthetic_fills) is not bool:
             raise RecoverySchemaError("has_synthetic_fills must be a boolean")
@@ -882,10 +898,24 @@ class PositionRecoveryCodec:
         if type(has_late_events) is not bool:
             raise RecoverySchemaError("has_late_events must be a boolean")
         coverage = data.get("coverage")
+        decoded_coverage = (
+            cls.decode_coverage(coverage) if coverage is not None else None
+        )
         scope = data.get("stream_scope")
         recovery = data.get("recovery_checkpoint")
         cursor = data.get("fill_cursor_provenance")
-        load_provenance = data.get("fill_load_provenance")
+        load_provenance = None
+        if "fill_load_provenance" not in data:
+            if decoded_coverage is None or decoded_coverage.load_provenance is None:
+                raise RecoverySchemaError(
+                    "account facts may omit fill_load_provenance only when "
+                    "coverage contains it"
+                )
+            load_provenance = decoded_coverage.load_provenance
+        elif data.get("fill_load_provenance") is not None:
+            load_provenance = cls.decode_fill_load_provenance(
+                data.get("fill_load_provenance")
+            )
         prefix_facts_complete = data.get("prefix_facts_complete")
         if type(prefix_facts_complete) is not bool:
             raise RecoverySchemaError("prefix_facts_complete must be a boolean")
@@ -898,7 +928,7 @@ class PositionRecoveryCodec:
             exit_boundaries=tuple(
                 cls.decode_boundary(item) for item in _array(data, "exit_boundaries")
             ),
-            coverage=cls.decode_coverage(coverage) if coverage is not None else None,
+            coverage=decoded_coverage,
             has_synthetic_fills=has_synthetic_fills,
             conflicting_fills=tuple(
                 cls.decode_fill(item) for item in _array(data, "conflicting_fills")
@@ -918,11 +948,7 @@ class PositionRecoveryCodec:
             fill_cursor_provenance=(
                 cls.decode_cursor(cursor) if cursor is not None else None
             ),
-            fill_load_provenance=(
-                cls.decode_fill_load_provenance(load_provenance)
-                if load_provenance is not None
-                else None
-            ),
+            fill_load_provenance=load_provenance,
             prefix_facts_complete=prefix_facts_complete,
         )
 

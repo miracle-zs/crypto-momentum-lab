@@ -337,6 +337,28 @@ def test_verified_flat_snapshot_can_seed_a_scoped_stream() -> None:
         fill_load_provenance=provenance,
     )
 
+    encoded_facts = PositionRecoveryCodec.encode_facts(facts)
+    assert encoded_facts["schema_version"] == 4
+    assert "fill_load_provenance" not in encoded_facts
+    decoded_facts = PositionRecoveryCodec.decode_facts(encoded_facts)
+    assert decoded_facts.fill_load_provenance == provenance
+    assert decoded_facts.coverage == coverage
+
+    legacy_facts = dict(encoded_facts)
+    legacy_facts["schema_version"] = 3
+    legacy_facts["fill_load_provenance"] = (
+        PositionRecoveryCodec.encode_fill_load_provenance(provenance)
+    )
+    assert PositionRecoveryCodec.decode_facts(legacy_facts) == facts
+
+    invalid_compact_facts = dict(encoded_facts)
+    invalid_compact_facts["coverage"] = {
+        **encoded_facts["coverage"],
+        "load_provenance": None,
+    }
+    with pytest.raises(RecoverySchemaError, match="coverage contains it"):
+        PositionRecoveryCodec.decode_facts(invalid_compact_facts)
+
     checkpoint = PositionLedger(key).create_recovery_checkpoint(
         facts,
         source_revision=1,
