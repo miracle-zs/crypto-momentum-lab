@@ -703,4 +703,6 @@ primary 新进程启动暴露两个接线问题：账户读取硬编码 Multi-As
 4. 清理剩余确认过的重复 validator 和 pass-through 模块；执行命令、接纳订单/成交、持仓 CAS 的事务边界保持原样。
 5. 只对实测有重复工作的自愈/重试路径做裁剪；用同一线上负载记录启动读取数、恢复重试数和决策延迟。沿用 §8.11 的 `_staged_copy(key)`、Dashboard 和装配测量，不增加预设性能目标。
 
+第 1 项已于 2026-10-14 收敛：运行时 readiness 只在 `tradeability` 发布 entry gate，不再重复发布顶层 entry 字段；删除与 `observed_at` 相同的 `published_at`、空的 `stream_readiness`，以及运行时并不拥有的 `unmanaged_risk_clear=true` / `halt_active=false` 占位值。Dashboard 将缺少的这两项显示为未知，当前 halt 仍以数据库状态为准，并兼容滚动期间较旧快照显式报告的 halt。实际交易门控、计划窗口和在途提交处理没有改变；readiness 只是状态快照，不是第二个下单 authority。
+
 必须保留的核心行为：单进程账户前提下不恢复 trading lease；当前持仓不恢复 position journal；订单累计成交只推进该订单状态/预留，账户成交才改变持仓；网络提交结果不确定时保留原命令身份并查证，避免重复 POST；成交 ID 去重、持仓版本/CAS、真实挂单冲突、账户流连续性、风险限额及明确的 pause/drain/halt 都直接对应真实业务约束。以上是审查边界，不授权额外增加校验。

@@ -1515,13 +1515,16 @@ except Exception as error:
 account_label = payload.get("account_label")
 if account_label != expected_account:
     raise SystemExit(f"readiness account mismatch: {account_label}")
+tradeability = payload.get("tradeability")
+if not isinstance(tradeability, dict):
+    tradeability = {}
 # Readiness is diagnostic. Compose health already verifies the running process;
 # internal warmup counters and entry switches are not deployment approval gates.
 print(
     "live_readiness"
     + f" account={account_label}"
-    + " entry_enabled=" + str(payload.get("entry_enabled"))
-    + " reason=" + str(payload.get("entry_enabled_reason"))
+    + " entry_enabled=" + str(tradeability.get("entry_gate_open"))
+    + " reason=" + str(tradeability.get("entry_gate_reason"))
     + " latest_market_state_age_seconds=" + str(payload.get("latest_market_state_age_seconds"))
 )
 ' "$account"

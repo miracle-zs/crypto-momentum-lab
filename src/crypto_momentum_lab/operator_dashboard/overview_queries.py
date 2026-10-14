@@ -443,8 +443,8 @@ class OverviewQueries:
                     entry_gate_reason=f"readiness_query_failed: {exc}",
                     exit_gate_open=False,
                     exit_gate_reason=f"readiness_query_failed: {exc}",
-                    unmanaged_risk_clear=False,
-                    halt_active=False,
+                    unmanaged_risk_clear=None,
+                    halt_active=None,
                 ),
                 stream_readiness=StreamReadinessDetailResponse(
                     overall="DOWN",
@@ -453,10 +453,9 @@ class OverviewQueries:
                 accounts=[],
             )
 
-        has_halt = overview_resp.active_halt_count > 0 or any(
+        observed_halt = overview_resp.active_halt_count > 0 or any(
             a.status == OperationalStatus.HALTED for a in accounts_resp.accounts
         )
-        observed_halt = has_halt
         database_up = liveness.get("database_status") == "UP"
 
         streams_dict: dict[str, str] = {}
@@ -494,8 +493,16 @@ class OverviewQueries:
                 (item.exit_gate_reason for item in gates if not item.exit_gate_open),
                 gates[0].exit_gate_reason,
             )
-            unmanaged_risk_clear = all(item.unmanaged_risk_clear for item in gates)
-            has_halt = any(item.halt_active for item in gates)
+            unmanaged_risk_clear = (
+                all(item.unmanaged_risk_clear for item in gates)
+                if all(item.unmanaged_risk_clear is not None for item in gates)
+                else None
+            )
+            # The database overview owns current halt state. Keep honoring a
+            # halt explicitly reported by older runtime snapshots during rollout.
+            has_halt = observed_halt or any(
+                item.halt_active is True for item in gates
+            )
             if runtime_running:
                 mode = "RUNNING"
             elif has_halt:
@@ -523,20 +530,24 @@ class OverviewQueries:
         else:
             status = OperationalStatus.UNKNOWN
             mode = "UNKNOWN"
-            entry_gate_open = exit_gate_open = unmanaged_risk_clear = False
+            entry_gate_open = exit_gate_open = False
+            unmanaged_risk_clear = None
             entry_gate_reason = exit_gate_reason = "runtime_readiness_missing_or_stale"
-            has_halt = False
+            has_halt = observed_halt
         if not database_up:
             status = OperationalStatus.DOWN
             mode = "UNKNOWN"
             entry_gate_open = exit_gate_open = False
+            unmanaged_risk_clear = None
+            if not has_halt:
+                has_halt = None
             entry_gate_reason = exit_gate_reason = "runtime_readiness_unavailable"
 
         if observed_halt:
             status = OperationalStatus.HALTED
             mode = "RUNNING" if runtime_running else "HALTED"
             has_halt = True
-            entry_gate_open = exit_gate_open = unmanaged_risk_clear = False
+            entry_gate_open = exit_gate_open = False
             entry_gate_reason = exit_gate_reason = "halt_active"
 
         if status == OperationalStatus.READY:

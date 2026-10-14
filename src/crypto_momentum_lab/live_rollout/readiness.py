@@ -299,7 +299,6 @@ class LiveReadinessPublisher:
         payload: Mapping[str, object] = {
             "schema_version": self.schema_version,
             "observed_at": now_utc.isoformat(),
-            "published_at": now_utc.isoformat(),
             "account_label": self._account_label,
             "session_id": self._session_id,
             "strategy": self._strategy,
@@ -314,8 +313,6 @@ class LiveReadinessPublisher:
             "warmup_cutover_at": _isoformat(self._warmup_cutover_at),
             "latest_market_state_at": _isoformat(self._latest_market_state_at),
             "latest_market_state_age_seconds": (self._latest_market_state_age_seconds),
-            "entry_enabled": self._entry_enabled,
-            "entry_enabled_reason": self._entry_enabled_reason,
             "account_facts": self._account_facts_payload(),
             "tradeability": {
                 "mode": "RUNNING",
@@ -327,12 +324,6 @@ class LiveReadinessPublisher:
                     if self._exit_stream_available
                     else "closed_candle_stream_unavailable"
                 ),
-                "unmanaged_risk_clear": True,
-                "halt_active": False,
-            },
-            "stream_readiness": {
-                "overall": "UNKNOWN",
-                "streams": {},
             },
             "order_observation": self._observation_payload(),
         }

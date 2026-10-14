@@ -68,8 +68,16 @@ def test_readiness_publishes_warmup_and_entry_gate_state(tmp_path) -> None:
     assert payload["warmup_expected_symbols"] == 2
     assert payload["warmup_complete_symbols"] == 1
     assert payload["warmup_deferred_symbols"] == 1
-    assert payload["entry_enabled"] is False
-    assert payload["entry_enabled_reason"] == "strategy_warmup_incomplete"
+    assert payload["tradeability"]["entry_gate_open"] is False
+    assert (
+        payload["tradeability"]["entry_gate_reason"]
+        == "strategy_warmup_incomplete"
+    )
+    assert "entry_enabled" not in payload
+    assert "entry_enabled_reason" not in payload
+    assert "stream_readiness" not in payload
+    assert "unmanaged_risk_clear" not in payload["tradeability"]
+    assert "halt_active" not in payload["tradeability"]
 
 
 def test_mature_symbols_can_run_while_cold_symbols_keep_warming(tmp_path) -> None:
@@ -183,7 +191,7 @@ def test_readiness_deduplicates_entry_gate_updates(tmp_path, monkeypatch) -> Non
 
 
 
-def test_readiness_compute_dynamic_market_age_and_published_at(
+def test_readiness_compute_dynamic_market_age_and_observed_at(
     tmp_path: Path,
 ) -> None:
     """Reader computes current age from latest_market_state_at
@@ -212,9 +220,10 @@ def test_readiness_compute_dynamic_market_age_and_published_at(
     age_75s = publisher.compute_market_state_age_seconds(now=t_reader_stale)
     assert age_75s == 75.0
 
-    # 3. Payload has published_at and latest_market_state_at timestamps
+    # 3. One publication timestamp is enough; market state keeps its own time.
     payload = json.loads(health.readiness_path.read_text())
-    assert "published_at" in payload
+    assert "observed_at" in payload
+    assert "published_at" not in payload
     assert payload["latest_market_state_at"] == t0.isoformat()
 
 
@@ -226,7 +235,9 @@ def test_readiness_publishes_same_payload_to_existing_telemetry_and_file(tmp_pat
     publisher.publish()
     event = telemetry.recent_events[-1]
     assert event.event_type == "runtime_readiness"
-    assert json.loads((tmp_path / "health" / "readiness").read_text()) == dict(event.details)
+    assert json.loads((tmp_path / "health" / "readiness").read_text()) == dict(
+        event.details
+    )
     assert event.details["account_label"] == "primary"
     assert event.details["tradeability"]["entry_gate_open"] is False
     publisher.publish()
@@ -235,7 +246,10 @@ def test_readiness_publishes_same_payload_to_existing_telemetry_and_file(tmp_pat
     publisher._entry_enabled_reason = "ready"
     publisher.publish()
     assert len(telemetry.recent_events) == 2
-    assert telemetry.recent_events[-1].details["tradeability"]["entry_gate_open"] is True
+    assert (
+        telemetry.recent_events[-1].details["tradeability"]["entry_gate_open"]
+        is True
+    )
 
 
 def test_failed_telemetry_sink_does_not_prevent_local_readiness(tmp_path):

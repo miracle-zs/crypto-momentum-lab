@@ -71,8 +71,8 @@ class TradeabilityDetailResponse(DashboardSchema):
     entry_gate_reason: str
     exit_gate_open: bool
     exit_gate_reason: str
-    unmanaged_risk_clear: bool
-    halt_active: bool
+    unmanaged_risk_clear: bool | None = None
+    halt_active: bool | None = None
 
 
 class LiveAccountSummaryResponse(DashboardSchema):

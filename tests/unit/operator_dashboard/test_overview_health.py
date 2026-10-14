@@ -179,6 +179,24 @@ async def test_ready_readonly_observer_can_support_live_strategy():
     assert readiness.tradeability.entry_gate_reason == "live_entry_prerequisites_ready"
 
 
+async def test_minimal_runtime_gate_does_not_invent_unmanaged_risk_state():
+    queries = Queries(strategy_state="active")
+    queries.account.runtime_observed_at = NOW
+    queries.account.runtime_tradeability = TradeabilityDetailResponse(
+        mode="RUNNING",
+        entry_gate_open=True,
+        entry_gate_reason="ready",
+        exit_gate_open=True,
+        exit_gate_reason="normal",
+    )
+
+    readiness = await queries.readiness()
+
+    assert readiness.tradeability.entry_gate_open
+    assert readiness.tradeability.unmanaged_risk_clear is None
+    assert readiness.tradeability.halt_active is False
+
+
 @pytest.mark.parametrize("age", [181, -1])
 async def test_old_or_future_runtime_result_cannot_authorize_display(age):
     queries = Queries(strategy_state="active")
