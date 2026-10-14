@@ -12,15 +12,15 @@ from crypto_momentum_lab.domain.execution.ports import (
     DurableExecutionPositionState,
     ExecutionHeadSnapshot,
 )
+from crypto_momentum_lab.domain.execution.position_book import PositionBook
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
     PositionKey,
 )
-from crypto_momentum_lab.domain.execution.position_book import PositionBook
-from crypto_momentum_lab.domain.execution.projection_codec import encode_position_key
 from crypto_momentum_lab.domain.execution.position_recovery import (
     recover_durable_position,
 )
+from crypto_momentum_lab.domain.execution.projection_codec import encode_position_key
 from crypto_momentum_lab.domain.execution.recovery_models import (
     AccountFacts,
     DurableJournalCut,
@@ -41,7 +41,7 @@ def state():
         scope=scope, facts=facts, revision=0, as_of=datetime(2026, 9, 30, tzinfo=UTC)
     )
     payload = dict(
-        schema_version=3,
+        schema_version=4,
         position_key=encode_position_key(key),
         stream_scope={"stream_id": "hub", "stream_epoch": "epoch"},
         position_state=position_book.encode_current_state(),

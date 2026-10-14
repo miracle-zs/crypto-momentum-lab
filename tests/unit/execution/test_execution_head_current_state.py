@@ -5,13 +5,15 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-import crypto_momentum_lab.domain.execution.projection_codec as projection_codec
+import pytest
+
 from crypto_momentum_lab.domain.account import AccountFillEvent
 from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
 from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
 from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 from crypto_momentum_lab.domain.execution.execution_head import (
     decode_execution_head_state,
+    is_supported_execution_head_schema,
 )
 from crypto_momentum_lab.domain.execution.observation_models import Applied, Duplicate
 from crypto_momentum_lab.domain.execution.ports import ExecutionHeadSnapshot
@@ -119,21 +121,17 @@ async def test_observation_advances_current_head_without_fill_history() -> None:
 
     legacy_payload = dict(payload)
     legacy_payload["schema_version"] = 3
-    legacy_position_state = dict(first_position_state)
-    legacy_position_state["projection"] = projection_codec.encode_projection(
-        first_projection
-    )
-    legacy_payload["position_state"] = legacy_position_state
-    legacy_book = decode_execution_head_state(
-        legacy_payload,
-        key=first_projection.position_key,
-        scope=AccountFactStreamScope.for_position_key(
-            first_projection.position_key,
-            stream_id="trade-source",
-            stream_epoch="one",
-        ),
-    )
-    assert legacy_book.projection == first_projection
+    assert not is_supported_execution_head_schema(3)
+    with pytest.raises(ValueError, match="unsupported execution head schema"):
+        decode_execution_head_state(
+            legacy_payload,
+            key=first_projection.position_key,
+            scope=AccountFactStreamScope.for_position_key(
+                first_projection.position_key,
+                stream_id="trade-source",
+                stream_epoch="one",
+            ),
+        )
 
     second = await book.observe(
         ExecutionEvidence(

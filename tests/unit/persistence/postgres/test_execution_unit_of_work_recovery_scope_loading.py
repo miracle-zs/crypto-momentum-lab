@@ -5,11 +5,11 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 from crypto_momentum_lab.domain.execution.execution_head import (
     build_execution_head_payload,
 )
+from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.ports import DecisionCommitConflict
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
@@ -132,7 +132,7 @@ class _FakeSession:
         return _Rows([])
 
 
-def _head(key: PositionKey, *, revision: int = 1, schema_version: int = 3):
+def _head(key: PositionKey, *, revision: int = 1, schema_version: int = 4):
     scope = AccountFactStreamScope.for_position_key(
         key, stream_id="account-events", stream_epoch="epoch-1"
     )
@@ -288,9 +288,7 @@ async def test_position_read_does_not_block_on_another_positions_identity():
     session = _FakeSession(
         heads=[head],
         position_key=btc,
-        rows_by_model={
-            ExecutionTradeIdentityRow: []
-        },
+        rows_by_model={ExecutionTradeIdentityRow: []},
     )
     unit_of_work = _uow(session)
 

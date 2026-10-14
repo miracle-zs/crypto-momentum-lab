@@ -22,7 +22,7 @@ EXECUTION_HEAD_SCHEMA_VERSION = 4
 
 
 def is_supported_execution_head_schema(value: object) -> bool:
-    return type(value) is int and value in {3, EXECUTION_HEAD_SCHEMA_VERSION}
+    return type(value) is int and value == EXECUTION_HEAD_SCHEMA_VERSION
 
 
 def build_execution_head_payload(
