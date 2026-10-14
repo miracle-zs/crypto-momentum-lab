@@ -431,17 +431,9 @@ class PostgresLiveContextProvider(LiveContextReader):
                 v_key = (view.key.symbol, view.key.position_side.value)
                 if v_key in unmanaged_keys or v_key in pending_keys:
                     continue
-                if (
-                    view.health_status == PositionHealthStatus.CONFLICT
-                    or view.fact_credibility == FactCredibility.CONFLICT
-                ):
+                if view.fact_credibility == FactCredibility.CONFLICT:
                     unmanaged_keys.add(v_key)
-                elif (
-                    not view.is_ready_for_trade
-                    or view.fact_credibility != FactCredibility.READY
-                    or view.pending_command_ids
-                    or view.active_entry_command_ids
-                ):
+                elif not view.is_ready_for_trade or view.active_entry_command_ids:
                     pending_keys.add(v_key)
         else:
             # Without a scoped exposure observation, never infer new ownership.
