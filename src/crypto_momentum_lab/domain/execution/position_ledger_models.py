@@ -59,8 +59,6 @@ class CoverageEvidence:
     checkpoint_event_cut: datetime | None = None
     stream_scope: AccountFactStreamScope | None = None
     evidence_observed_at: datetime | None = None
-    page_exhausted: bool = False
-    not_truncated: bool = False
     load_provenance: AccountFillLoadProvenance | None = None
 
     def proves_complete(
@@ -73,10 +71,6 @@ class CoverageEvidence:
         if (
             self.fill_load_start is None
             or self.fill_checked_through is None
-            or type(self.page_exhausted) is not bool
-            or type(self.not_truncated) is not bool
-            or not self.page_exhausted
-            or not self.not_truncated
             or self.load_provenance is None
         ):
             return False
@@ -107,8 +101,6 @@ class CoverageEvidence:
             and self.evidence_observed_at == provenance.observed_at
             and provenance.checked_through == self.checkpoint_event_cut
             and provenance.checked_through == provenance.observed_at
-            and self.page_exhausted == provenance.page_exhausted
-            and self.not_truncated == (not provenance.truncated)
             and self.fill_checked_through == provenance.checked_through
             and self.evidence_observed_at is not None
             and self.evidence_observed_at.tzinfo is not None
@@ -152,8 +144,6 @@ def compose_fact_coverage(
             checkpoint_id=evidence.checkpoint_id,
             checkpoint_event_cut=evidence.checkpoint_event_cut,
             load_provenance=evidence.load_provenance,
-            page_exhausted=evidence.page_exhausted,
-            not_truncated=evidence.not_truncated,
         )
 
     return FactCoverageInterval(
@@ -187,8 +177,6 @@ def compose_fact_coverage(
             else None
         ),
         load_provenance=(evidence.load_provenance if evidence is not None else None),
-        page_exhausted=(evidence.page_exhausted if evidence is not None else False),
-        not_truncated=(evidence.not_truncated if evidence is not None else False),
     )
 
 
@@ -467,8 +455,6 @@ class FactCoverageInterval:
     checkpoint_id: str | None = None
     checkpoint_event_cut: datetime | None = None
     load_provenance: AccountFillLoadProvenance | None = None
-    page_exhausted: bool = False
-    not_truncated: bool = False
 
     def __post_init__(self) -> None:
         if self.start_at.tzinfo is None:
@@ -493,11 +479,6 @@ class FactCoverageInterval:
             or self.checkpoint_event_cut.utcoffset() is None
         ):
             raise ValueError("coverage checkpoint cut must be timezone-aware")
-        if (
-            type(self.page_exhausted) is not bool
-            or type(self.not_truncated) is not bool
-        ):
-            raise ValueError("coverage pagination flags must be booleans")
         if self.load_provenance is not None:
             if self.stream_scope != self.load_provenance.stream_scope:
                 raise ValueError("coverage load provenance scope mismatch")
@@ -506,10 +487,6 @@ class FactCoverageInterval:
                 and self.load_provenance.observed_at > self.evidence_observed_at
             ):
                 raise ValueError("coverage predates its load provenance")
-            if self.page_exhausted != self.load_provenance.page_exhausted:
-                raise ValueError("coverage pagination exhaustion mismatch")
-            if self.not_truncated == self.load_provenance.truncated:
-                raise ValueError("coverage truncation status mismatch")
 
     def covers(self, point_in_time: datetime) -> bool:
         """Returns True if point_in_time is within interval without known gaps."""
@@ -534,9 +511,7 @@ class FactCoverageInterval:
         if self.load_provenance is None:
             return self.stream_scope is None or self.stream_scope.environment != "live"
         return (
-            self.page_exhausted
-            and self.not_truncated
-            and self.load_provenance.is_complete
+            self.load_provenance.is_complete
             and self.stream_scope == self.load_provenance.stream_scope
             and self.load_provenance.source_anchor_event_cut <= self.start_at
             and self.load_provenance.checked_through is not None

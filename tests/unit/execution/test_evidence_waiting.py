@@ -375,8 +375,6 @@ async def test_partial_scan_waits_but_complete_inconsistent_scan_is_a_conflict(
         )
         proof = replace(
             proof,
-            page_exhausted=False,
-            not_truncated=False,
             fill_checked_through=None,
             load_provenance=provenance,
         )

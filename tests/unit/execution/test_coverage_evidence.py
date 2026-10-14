@@ -116,8 +116,6 @@ def test_full_evidence_confirms_window() -> None:
         checkpoint_event_cut=END,
         stream_scope=_scope(),
         evidence_observed_at=END,
-        page_exhausted=True,
-        not_truncated=True,
         load_provenance=provenance,
     )
     cov = compose_fact_coverage(evidence, start=START, end=END)
@@ -136,8 +134,6 @@ def test_incomplete_or_truncated_pages_cannot_confirm_coverage() -> None:
         checkpoint_event_cut=END,
         stream_scope=_scope(),
         evidence_observed_at=END,
-        page_exhausted=False,
-        not_truncated=False,
         load_provenance=replace(
             provenance,
             next_from_id=10,

@@ -321,8 +321,6 @@ def _coverage(
         checkpoint_event_cut=checked_through,
         stream_scope=scope,
         evidence_observed_at=checked_through,
-        page_exhausted=True,
-        not_truncated=True,
         load_provenance=provenance,
     )
 

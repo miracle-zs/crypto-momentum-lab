@@ -882,8 +882,6 @@ async def test_a3b_all_io_entrypoints_assert_no_application_locks_held() -> None
                 stream_scope=scope,
                 evidence_observed_at=NOW,
                 load_provenance=prov,
-                page_exhausted=True,
-                not_truncated=True,
             )
             cut = DurableJournalCut(
                 scope=scope,

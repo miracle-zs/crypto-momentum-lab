@@ -211,8 +211,6 @@ def repair_case():
         stream_scope=scope,
         evidence_observed_at=NOW,
         load_provenance=prov,
-        page_exhausted=True,
-        not_truncated=True,
     )
     cut = DurableJournalCut(
         scope=scope,
@@ -723,8 +721,6 @@ async def test_repair_filters_checkpoint_fills_without_forging_cursor_coverage()
         checkpoint_id="chk-1",
         checkpoint_event_cut=checkpoint_time,
         load_provenance=provenance,
-        page_exhausted=True,
-        not_truncated=True,
     )
     facts_at_checkpoint = AccountFacts(
         position_key=request.key,

@@ -51,7 +51,5 @@ def coverage_from_scan(
         checkpoint_event_cut=scan.observed_at,
         stream_scope=scope,
         evidence_observed_at=scan.observed_at,
-        page_exhausted=page.page_exhausted,
-        not_truncated=not page.truncated,
         load_provenance=provenance,
     )

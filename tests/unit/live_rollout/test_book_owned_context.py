@@ -173,8 +173,6 @@ async def test_book_readiness_controls_cache_and_unowned_exposure_stays_blocked(
         stream_scope=scope,
         evidence_observed_at=NOW,
         load_provenance=prov,
-        page_exhausted=True,
-        not_truncated=True,
     )
     facts = AccountFacts(
         position_key=key,

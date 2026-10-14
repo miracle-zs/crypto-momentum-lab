@@ -405,32 +405,27 @@ class PositionRecoveryCodec:
                 if coverage.load_provenance is not None
                 else None
             ),
-            "page_exhausted": coverage.page_exhausted,
-            "not_truncated": coverage.not_truncated,
         }
 
     @classmethod
     def decode_coverage(cls, value: object) -> FactCoverageInterval:
         data = _mapping(value, "coverage")
-        _require_keys(
-            data,
-            {
-                "start_at",
-                "end_at",
-                "has_known_gaps",
-                "source_cursor",
-                "status",
-                "confirmed_revision",
-                "checkpoint_id",
-                "checkpoint_event_cut",
-                "stream_scope",
-                "evidence_observed_at",
-                "load_provenance",
-                "page_exhausted",
-                "not_truncated",
-            },
-            "coverage",
-        )
+        keys = {
+            "start_at",
+            "end_at",
+            "has_known_gaps",
+            "source_cursor",
+            "status",
+            "confirmed_revision",
+            "checkpoint_id",
+            "checkpoint_event_cut",
+            "stream_scope",
+            "evidence_observed_at",
+            "load_provenance",
+        }
+        legacy_keys = keys | {"page_exhausted", "not_truncated"}
+        if set(data) not in (keys, legacy_keys):
+            _require_keys(data, keys, "coverage")
         revision = data.get("confirmed_revision")
         checkpoint_id = data.get("checkpoint_id")
         checkpoint_event_cut = data.get("checkpoint_event_cut")
@@ -440,12 +435,6 @@ class PositionRecoveryCodec:
         has_known_gaps = data.get("has_known_gaps")
         if type(has_known_gaps) is not bool:
             raise RecoverySchemaError("has_known_gaps must be a boolean")
-        page_exhausted = data.get("page_exhausted")
-        if type(page_exhausted) is not bool:
-            raise RecoverySchemaError("page_exhausted must be a boolean")
-        not_truncated = data.get("not_truncated")
-        if type(not_truncated) is not bool:
-            raise RecoverySchemaError("not_truncated must be a boolean")
         if revision is not None and type(revision) is not int:
             raise RecoverySchemaError("confirmed_revision must be an integer or null")
         if checkpoint_id is not None and not isinstance(checkpoint_id, str):
@@ -482,8 +471,6 @@ class PositionRecoveryCodec:
                 if data["load_provenance"] is not None
                 else None
             ),
-            page_exhausted=page_exhausted,
-            not_truncated=not_truncated,
         )
 
     encode_batch = staticmethod(projection_codec.encode_batch)

@@ -321,8 +321,6 @@ def test_verified_flat_snapshot_can_seed_a_scoped_stream() -> None:
             checkpoint_event_cut=cut,
             stream_scope=scope,
             evidence_observed_at=cut,
-            page_exhausted=True,
-            not_truncated=True,
             load_provenance=provenance,
         ),
         start=cut,
@@ -340,6 +338,8 @@ def test_verified_flat_snapshot_can_seed_a_scoped_stream() -> None:
     encoded_facts = PositionRecoveryCodec.encode_facts(facts)
     assert encoded_facts["schema_version"] == 4
     assert "fill_load_provenance" not in encoded_facts
+    assert "page_exhausted" not in encoded_facts["coverage"]
+    assert "not_truncated" not in encoded_facts["coverage"]
     decoded_facts = PositionRecoveryCodec.decode_facts(encoded_facts)
     assert decoded_facts.fill_load_provenance == provenance
     assert decoded_facts.coverage == coverage
@@ -349,6 +349,11 @@ def test_verified_flat_snapshot_can_seed_a_scoped_stream() -> None:
     legacy_facts["fill_load_provenance"] = (
         PositionRecoveryCodec.encode_fill_load_provenance(provenance)
     )
+    legacy_facts["coverage"] = {
+        **legacy_facts["coverage"],
+        "page_exhausted": True,
+        "not_truncated": True,
+    }
     assert PositionRecoveryCodec.decode_facts(legacy_facts) == facts
 
     invalid_compact_facts = dict(encoded_facts)
@@ -493,8 +498,6 @@ def test_nonzero_checkpoint_adopts_across_stream_epoch_with_real_suffix_proof(
             checkpoint_event_cut=parent_cut,
             stream_scope=old_scope,
             evidence_observed_at=parent_cut,
-            page_exhausted=True,
-            not_truncated=True,
             load_provenance=parent_provenance,
         ),
         start=anchor_cut,
@@ -548,8 +551,6 @@ def test_nonzero_checkpoint_adopts_across_stream_epoch_with_real_suffix_proof(
             checkpoint_event_cut=target_cut,
             stream_scope=new_scope,
             evidence_observed_at=target_cut,
-            page_exhausted=True,
-            not_truncated=True,
             load_provenance=target_provenance,
         ),
         start=parent_cut,

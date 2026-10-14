@@ -6,8 +6,6 @@ from crypto_momentum_lab.domain.execution.evidence_digest import digest_json_pay
 from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
-    FactCoverageInterval,
-    FactCoverageStatus,
     PositionKey,
     compose_fact_coverage,
 )
@@ -118,23 +116,12 @@ def _coverage_for_scope(
     else:
         start = evidence.observed_at
         end = evidence.observed_at
-    is_page_complete = proof.page_exhausted and proof.not_truncated
-    if is_page_complete:
-        derived = compose_fact_coverage(
-            proof,
-            start=start,
-            end=end,
-            expected_scope=scope,
-        )
-    else:
-        derived = FactCoverageInterval(
-            start_at=start,
-            end_at=end,
-            source_cursor=proof.fill_cursor_id,
-            status=FactCoverageStatus.PENDING,
-            stream_scope=scope,
-            evidence_observed_at=proof.evidence_observed_at,
-        )
+    derived = compose_fact_coverage(
+        proof,
+        start=start,
+        end=end,
+        expected_scope=scope,
+    )
     if evidence.coverage is not None and evidence.coverage != derived:
         raise ValueError(
             "supplied coverage interval disagrees with its typed source proof"
