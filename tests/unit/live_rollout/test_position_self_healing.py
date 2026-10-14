@@ -327,7 +327,7 @@ async def test_context_reads_continue_while_existing_worker_repairs(monkeypatch)
     try:
         await provider._with_execution_book(context, SimpleNamespace(bucket_end=NOW))
         await asyncio.wait_for(started.wait(), 1)
-        # Force another projection read while the actual repair callback remains blocked.
+        # Force another read while the repair callback remains blocked.
         provider._cached_book_result = None
         result = await asyncio.wait_for(
             provider._with_execution_book(context, SimpleNamespace(bucket_end=NOW)), 0.5
@@ -419,20 +419,11 @@ async def test_repair_merges_unchanged_evidence_until_its_deadline(monkeypatch):
         )
         runtime.request(newer)
     assert wakes == [1], "unchanged evidence must not wake recovery again"
-    status = runtime.recovery_status()
-    assert len(status) == 1
-    assert status[0]["symbol"] == "WUSDT"
-    assert status[0]["attempts"] == 1
-    assert status[0]["last_failure"] == (
-        "repair projection does not match actual account exposure"
-    )
-    assert status[0]["next_attempt_in_seconds"] == 60.0
 
     # Only the worker's own retry deadline re-attempts the same evidence.
     now[0] += 60.0
     await runtime.repair_pending()
     assert len(calls) == 2
-    assert runtime.recovery_status()[0]["attempts"] == 2
 
     # At the next deadline a fresh request may wake recovery again.
     now[0] += 60.0
@@ -454,7 +445,9 @@ async def test_repair_merges_unchanged_evidence_until_its_deadline(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_repair_records_error_classification_and_resolution(monkeypatch):
+async def test_repair_error_retries_after_deadline_and_resolution_clears_it(
+    monkeypatch,
+):
     from dataclasses import replace
     from types import SimpleNamespace
 
@@ -466,8 +459,11 @@ async def test_repair_records_error_classification_and_resolution(monkeypatch):
         _runtime_context,
     )
 
+    calls = []
+
     async def failing_repair(**kwargs):
-        raise RuntimeError("durable journal unavailable")
+        calls.append(kwargs)
+        raise RuntimeError("database unavailable")
 
     monkeypatch.setattr(
         "crypto_momentum_lab.live_rollout.position_self_healing"
@@ -481,10 +477,12 @@ async def test_repair_records_error_classification_and_resolution(monkeypatch):
         uow=object(),
         context_is_current=lambda context: True,
         invalidate_context=lambda: None,
-        request_recovery=lambda: None,
-        clock=lambda: 0.0,
+        request_recovery=lambda: wakes.append(1),
+        clock=lambda: now[0],
         retry_interval_seconds=5.0,
     )
+    wakes = []
+    now = [0.0]
     context = replace(
         _runtime_context(),
         unmanaged_position_symbols=frozenset({"BTCUSDT"}),
@@ -494,7 +492,17 @@ async def test_repair_records_error_classification_and_resolution(monkeypatch):
     )
     runtime.request(context)
     assert await runtime.repair_pending() is True
-    assert runtime.recovery_status()[0]["last_failure"] == "error:RuntimeError"
+    assert len(calls) == 1
+
+    now[0] = 4.0
+    runtime.request(context)
+    await runtime.repair_pending()
+    assert len(calls) == 1
+
+    now[0] = 5.0
+    runtime.request(context)
+    await runtime.repair_pending()
+    assert len(calls) == 2
 
     # Resolving the divergence clears the per-key record.
     resolved = replace(
@@ -503,4 +511,6 @@ async def test_repair_records_error_classification_and_resolution(monkeypatch):
         account_snapshot=SimpleNamespace(positions=()),
     )
     runtime.request(resolved)
-    assert runtime.recovery_status() == ()
+    runtime.request(context)
+    await runtime.repair_pending()
+    assert len(calls) == 3, "a resolved divergence must not retain its old deadline"

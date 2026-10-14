@@ -131,12 +131,6 @@ async def test_no_repair_attempt_before_the_recorded_deadline() -> None:
         assert retained is True, "the unfinished repair must stay retained"
 
     assert wakes == [1], "ordinary account events must not bypass the backoff"
-    status = runtime.recovery_status()
-    assert len(status) == 1
-    assert status[0]["attempts"] == 1
-    assert status[0]["next_attempt_in_seconds"] == pytest.approx(3600.0)
-
-
 @pytest.mark.asyncio
 async def test_new_evidence_may_repair_before_the_deadline() -> None:
     """A material change is not the same evidence and may act immediately."""
@@ -182,4 +176,3 @@ async def test_deadline_expiry_allows_exactly_one_more_attempt() -> None:
     runtime.request(replace(context, now=NOW))
     assert await runtime.repair_pending() is True
     assert len(book.calls) == 2
-    assert runtime.recovery_status()[0]["attempts"] == 2

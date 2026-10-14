@@ -51,14 +51,11 @@ class _PositionFacts(Protocol):
 
 
 @dataclass(slots=True)
-class _RepairAttempt:
-    """Per-position repair record: evidence version, failure class, backoff."""
+class _RepairRetry:
+    """Evidence version and deadline for retrying one unresolved position."""
 
     evidence: tuple[object, ...]
-    attempts: int
-    last_failure: str | None
-    next_attempt_at: float
-    deferral_logged: bool = False
+    retry_at: float
 
 
 async def auto_heal_unmanaged_position(
@@ -67,7 +64,6 @@ async def auto_heal_unmanaged_position(
     uow: PositionRepairUnitOfWork,
     book: PositionRepairBook,
     is_current: Callable[[], bool] | None = None,
-    on_blocked: Callable[[str], None] | None = None,
 ) -> bool:
     try:
         published = await book.repair_position(request, uow=uow, is_current=is_current)
@@ -75,8 +71,6 @@ async def auto_heal_unmanaged_position(
         reason = str(error)
         log.warning("position_repair_blocked", symbol=request.key.symbol,
                     account_label=request.key.account_label, reason=reason)
-        if on_blocked is not None:
-            on_blocked(reason)
         return False
     receipt, reloaded = published.receipt, published.view
     log.info(
@@ -95,12 +89,9 @@ async def auto_heal_unmanaged_position(
 class LiveUnmanagedPositionRepair:
     """Coalesce current exposure for the existing account repair worker.
 
-    Requests are merged per position key and evidence version: repeating the
-    same unmanaged observation (same quantity, entry price, snapshot time and
-    stream epoch) never re-runs the repair before its backoff deadline, so a
-    divergence that the evidence does not explain cannot spin the worker or
-    flood the log. Each attempt records its failure classification and the next
-    attempt time, exposed through :meth:`recovery_status`.
+    Requests are merged per position key and material evidence. The same
+    divergence is retried only after the recovery worker's interval; a changed
+    quantity, entry price or stream can be repaired immediately.
     """
 
     def __init__(
@@ -127,7 +118,7 @@ class LiveUnmanagedPositionRepair:
         self._request_recovery = request_recovery
         self._clock = clock
         self._retry_interval_seconds = retry_interval_seconds
-        self._attempts: dict[PositionKey, _RepairAttempt] = {}
+        self._retries: dict[PositionKey, _RepairRetry] = {}
         self._pending: LiveDaemonRuntimeContext | None = None
         self._latest: LiveDaemonRuntimeContext | None = None
 
@@ -152,30 +143,6 @@ class LiveUnmanagedPositionRepair:
         # evidence are unchanged, so leave the existing retry deadline alone
         # instead of attempting the same repair again.
         self._pending = context
-        for position in context.account_snapshot.positions:
-            if (
-                position.symbol in context.unmanaged_position_symbols
-                and position.position_amt != 0
-            ):
-                self._log_deferral(self._key_for(position))
-
-    def recovery_status(self) -> tuple[dict[str, object], ...]:
-        """Per-position attempt classification and next deadline, for health."""
-        now = self._clock()
-        return tuple(
-            {
-                "symbol": key.symbol,
-                "position_side": key.position_side.value,
-                "attempts": record.attempts,
-                "last_failure": record.last_failure,
-                "next_attempt_in_seconds": max(
-                    0.0, record.next_attempt_at - now
-                ),
-            }
-            for key, record in sorted(
-                self._attempts.items(), key=lambda item: item[0].canonical_id
-            )
-        )
 
     def _evidence(
         self,
@@ -194,10 +161,10 @@ class LiveUnmanagedPositionRepair:
     def _needs_attempt(
         self, key: PositionKey, evidence: tuple[object, ...], now: float
     ) -> bool:
-        record = self._attempts.get(key)
+        record = self._retries.get(key)
         if record is None or record.evidence != evidence:
             return True
-        return now >= record.next_attempt_at
+        return now >= record.retry_at
 
     def _needs_repair(self, context: LiveDaemonRuntimeContext) -> bool:
         """Whether a divergent key has new evidence or an expired deadline.
@@ -229,23 +196,6 @@ class LiveUnmanagedPositionRepair:
             self._account,
             position.symbol,
             FuturesPositionSide(str(position.position_side).upper()),
-        )
-
-    def _log_deferral(self, key: PositionKey) -> None:
-        """Report one deferral per unchanged divergence, then stay quiet."""
-        record = self._attempts.get(key)
-        if record is None or record.deferral_logged:
-            return
-        record.deferral_logged = True
-        log.info(
-            "position_repair_deferred_unchanged_evidence",
-            account_label=self._account,
-            symbol=key.symbol,
-            attempts=record.attempts,
-            last_failure=record.last_failure,
-            retry_in_seconds=round(
-                max(0.0, record.next_attempt_at - self._clock()), 3
-            ),
         )
 
     def _repair_is_current(
@@ -300,21 +250,14 @@ class LiveUnmanagedPositionRepair:
             evidence = self._evidence(position, stream)
             if not self._needs_attempt(key, evidence, now):
                 remaining = True
-                self._log_deferral(key)
                 continue
             try:
                 # Record before I/O: a blocked or failing attempt must not be
                 # retried until its deadline, and never twice concurrently.
-                previous_attempts = (
-                    self._attempts[key].attempts if key in self._attempts else 0
-                )
-                record = _RepairAttempt(
+                self._retries[key] = _RepairRetry(
                     evidence=evidence,
-                    attempts=previous_attempts + 1,
-                    last_failure=None,
-                    next_attempt_at=now + self._retry_interval_seconds,
+                    retry_at=now + self._retry_interval_seconds,
                 )
-                self._attempts[key] = record
                 request = PositionRepairRequest(
                     key=key,
                     run_id=self._run_id,
@@ -324,11 +267,6 @@ class LiveUnmanagedPositionRepair:
                     expected_quantity=abs(position.position_amt),
                     observed_at=position.observed_at,
                 )
-                failure: list[str] = []
-
-                def _blocked(reason: str, _sink: list[str] = failure) -> None:
-                    _sink.append(reason)
-
                 healed = await auto_heal_unmanaged_position(
                     request=request,
                     uow=self._uow,
@@ -338,7 +276,6 @@ class LiveUnmanagedPositionRepair:
                         request,
                         position.entry_price,
                     ),
-                    on_blocked=_blocked,
                 )
             except Exception as error:
                 log.exception(
@@ -347,19 +284,11 @@ class LiveUnmanagedPositionRepair:
                     symbol=position.symbol,
                     error_type=type(error).__name__,
                 )
-                if key in self._attempts:
-                    self._attempts[key].last_failure = (
-                        f"error:{type(error).__name__}"
-                    )
                 remaining = True
                 continue
             if healed:
                 repaired = True
             else:
-                if key in self._attempts:
-                    self._attempts[key].last_failure = (
-                        failure[0] if failure else "repair_not_published"
-                    )
                 remaining = True
         if repaired:
             self._invalidate()
@@ -379,6 +308,6 @@ class LiveUnmanagedPositionRepair:
             if position.symbol in context.unmanaged_position_symbols
             and position.position_amt != 0
         }
-        for key in tuple(self._attempts):
+        for key in tuple(self._retries):
             if key not in divergent:
-                self._attempts.pop(key, None)
+                self._retries.pop(key, None)
