@@ -13,7 +13,7 @@ def test_remote_argument_decoder_preserves_timeouts_and_rollout_scope() -> None:
     script = DEPLOY_SCRIPT.read_text()
     marker = script.index("<<'REMOTE_SCRIPT'")
     start = script.index("set -Eeuo pipefail\n", marker)
-    end = script.index("for timeout_name in", start)
+    end = script.index('if [[ "$dashboard_only" == 1', start)
     values = [
         "/srv/cml",
         "origin/main",
@@ -274,35 +274,30 @@ def test_live_overlay_detection_only_reports_running_extra_accounts(
     assert with_extra.strip() == "overlay"
 
 
-def test_ancestor_target_reaches_reset_keep_branch(tmp_path: Path) -> None:
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
-
-    def git(*args: str) -> str:
-        return subprocess.check_output(
-            ["git", "-C", str(tmp_path), *args], text=True
-        ).strip()
-
-    git("config", "user.email", "test@example.com")
-    git("config", "user.name", "Test")
-    git("commit", "--allow-empty", "-qm", "base")
-    base = git("rev-parse", "HEAD")
-    git("commit", "--allow-empty", "-qm", "newer")
-    newer = git("rev-parse", "HEAD")
-    git("branch", "target", base)
-
+def test_normal_deployment_waits_for_flat_accounts_then_restarts_services() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
-    start = script.index('previous_commit="$(git rev-parse HEAD)"')
-    end = script.index('\nenv_runtime_commit=""', start)
-    rollback_logic = script[start:end]
-    command = (
-        "set -Eeuo pipefail\n"
-        "target_ref=target\n"
-        f"{rollback_logic}\n"
-        'test "$(git rev-parse HEAD)" = "$target_commit"\n'
-    )
-    subprocess.run(["bash", "-c", command], cwd=tmp_path, check=True)
-    assert git("rev-parse", "HEAD") == base
-    assert newer != base
+    start = script.index('if [[ "$simple_deployment" == 1 ]]; then')
+    end = script.index("\ndeploy_started_at=", start)
+    deployment = script[start:end]
+
+    account_check = deployment.index('client.fetch_positions()')
+    stop_services = deployment.index('"${compose[@]}" stop --timeout 90')
+    update_code = deployment.index('git merge --ff-only "$target_commit"')
+    migrate_and_start = deployment.index('"${compose[@]}" up -d --force-recreate')
+
+    assert account_check < stop_services < update_code < migrate_and_start
+    assert '"primary:live-strategy"' in deployment
+    for service in (
+        "live-strategy-account-2",
+        "live-strategy-account-3",
+        "live-strategy-account-4",
+    ):
+        assert service in deployment
+    assert "fetch_open_orders()" in deployment
+    assert "sleep 30" in deployment
+    assert '"${compose[@]}" build' in deployment
+    assert "historical_fill" not in deployment
+    assert "canary" not in deployment
 
 
 def test_strategy_runtime_path_is_classified_without_market_restart() -> None:
@@ -770,7 +765,7 @@ def test_post_deploy_image_prune_is_configured() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     prune_idx = script.index("docker image prune -f")
     total_idx = script.index('echo "phase=total')
-    deploy_commit_idx = script.index('echo "deployed_commit=')
+    deploy_commit_idx = script.rindex('echo "deployed_commit=')
 
     assert total_idx < prune_idx < deploy_commit_idx
 

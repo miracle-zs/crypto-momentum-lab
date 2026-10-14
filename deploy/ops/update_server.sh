@@ -24,11 +24,10 @@ Environment:
   CML_SYNC_DASHBOARD  force sync dashboard image to runtime commit (default: 0)
   CML_SSH_PASSWORD  optional password for sshpass; prefer an SSH key
 
-The live profile is never touched unless --live is supplied. Live updates restart
-only currently running accounts. Health checks run immediately after each restart
-and report its structured readiness snapshot.
-The additional-account overlay is loaded only when an account-2/3/4
-service is already running; stopped accounts are not started implicitly.
+Normal deployments stop and recreate the running application services together.
+When any Live strategy is running, the script waits until all four exchange
+accounts have no open positions or orders before stopping services. --live
+forces this account check.
 No Paper runner is deployed. Retired Paper containers from older checkouts
 are archived, stopped, and removed during the update.
 --execution-accounts-only is a recovery rollout for already-running read-only
@@ -101,36 +100,6 @@ while (( $# > 0 )); do
   shift
 done
 
-if [[ "$sync_dashboard" != 0 && "$sync_dashboard" != 1 ]]; then
-  echo "Invalid CML_SYNC_DASHBOARD: $sync_dashboard" >&2
-  exit 64
-fi
-
-
-
-if [[ "$execution_accounts_only" == 1 && "$live_update" != 1 ]]; then
-  echo "--execution-accounts-only requires --live" >&2
-  exit 64
-fi
-
-if [[ "$execution_accounts_only" == 1 && "$target_ref_set" == 0 ]]; then
-  echo "--execution-accounts-only requires an explicit git-ref" >&2
-  usage >&2
-  exit 64
-fi
-
-
-if [[ "$dashboard_only" == 1 && "$live_update" == 1 ]]; then
-  echo "--dashboard-only cannot be combined with --live" >&2
-  exit 64
-fi
-
-
-if [[ "$dashboard_only" == 1 && "$execution_accounts_only" == 1 ]]; then
-  echo "--dashboard-only cannot be combined with --execution-accounts-only" >&2
-  exit 64
-fi
-
 server_user="${CML_SERVER_USER:-root}"
 remote_dir="${CML_REMOTE_DIR:-/opt/crypto-momentum-lab}"
 live_concurrency="${CML_LIVE_CONCURRENCY:-2}"
@@ -146,33 +115,49 @@ dashboard_required="${CML_DASHBOARD_REQUIRED:-1}"
 dashboard_proxy_url="${CML_DASHBOARD_PROXY_URL:-http://127.0.0.1/momentum/api/health}"
 crash_log_directory="${CML_CRASH_LOG_DIRECTORY:-/var/lib/crypto-momentum-lab/crash-logs}"
 
-if [[ "$dashboard_required" != 0 && "$dashboard_required" != 1 ]]; then
-  echo "Invalid CML_DASHBOARD_REQUIRED: $dashboard_required" >&2
-  exit 64
-fi
-
-if [[ -z "$dashboard_proxy_url" ]]; then
-  echo "Invalid CML_DASHBOARD_PROXY_URL: value must not be empty" >&2
-  exit 64
-fi
-if [[ -z "$crash_log_directory" ]]; then
-  echo "Invalid CML_CRASH_LOG_DIRECTORY: value must not be empty" >&2
-  exit 64
-fi
-
-for timeout_value in \
-  "$deploy_wait_timeout" \
-  "$market_data_wait_timeout" \
-  "$consumer_wait_timeout" \
-  "$live_wait_timeout" \
-  "$live_stop_timeout" \
-  "$deploy_operation_timeout" \
-  "$deploy_build_timeout"; do
-  if ! [[ "$timeout_value" =~ ^[1-9][0-9]*$ ]]; then
-    echo "Invalid deployment timeout: $timeout_value" >&2
+if [[ "$dashboard_only" == 1 || "$execution_accounts_only" == 1 ]]; then
+  if [[ "$sync_dashboard" != 0 && "$sync_dashboard" != 1 ]]; then
+    echo "Invalid CML_SYNC_DASHBOARD: $sync_dashboard" >&2
     exit 64
   fi
-done
+  if [[ "$execution_accounts_only" == 1 && "$live_update" != 1 ]]; then
+    echo "--execution-accounts-only requires --live" >&2
+    exit 64
+  fi
+  if [[ "$execution_accounts_only" == 1 && "$target_ref_set" == 0 ]]; then
+    usage >&2
+    exit 64
+  fi
+  if [[ "$dashboard_only" == 1 && "$live_update" == 1 ]]; then
+    echo "--dashboard-only cannot be combined with --live" >&2
+    exit 64
+  fi
+  if [[ "$dashboard_only" == 1 && "$execution_accounts_only" == 1 ]]; then
+    echo "--dashboard-only cannot be combined with --execution-accounts-only" >&2
+    exit 64
+  fi
+  if [[ "$dashboard_required" != 0 && "$dashboard_required" != 1 ]]; then
+    echo "Invalid CML_DASHBOARD_REQUIRED: $dashboard_required" >&2
+    exit 64
+  fi
+  if [[ -z "$dashboard_proxy_url" || -z "$crash_log_directory" ]]; then
+    echo "Dashboard proxy URL and crash log directory must not be empty" >&2
+    exit 64
+  fi
+  for timeout_value in \
+    "$deploy_wait_timeout" \
+    "$market_data_wait_timeout" \
+    "$consumer_wait_timeout" \
+    "$live_wait_timeout" \
+    "$live_stop_timeout" \
+    "$deploy_operation_timeout" \
+    "$deploy_build_timeout"; do
+    if ! [[ "$timeout_value" =~ ^[1-9][0-9]*$ ]]; then
+      echo "Invalid deployment timeout: $timeout_value" >&2
+      exit 64
+    fi
+  done
+fi
 
 runner=()
 if [[ "$server_host" == "local" || "$server_host" == "localhost" || ( "$server_host" == "127.0.0.1" && -z "${CML_FORCE_SSH:-}" ) ]]; then
@@ -224,6 +209,7 @@ crash_log_directory="${15}"
 sync_dashboard="${16}"
 execution_accounts_only="${17}"
 dashboard_only="${18}"
+if [[ "$dashboard_only" == 1 || "$execution_accounts_only" == 1 ]]; then
 for timeout_name in \
   CML_DEPLOY_WAIT_TIMEOUT_SECONDS \
   CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS \
@@ -290,7 +276,219 @@ if ! command -v timeout >/dev/null 2>&1; then
   echo "Refusing deployment: timeout is required for bounded operations" >&2
   exit 69
 fi
+fi
 cd "$remote_dir"
+
+# A normal deployment is one maintenance window: if Live accounts are running,
+# wait until every exchange account is flat, stop the running app stack, deploy,
+# then start the same services together. Dashboard-only and execution-account
+# recovery commands retain their separate scope.
+simple_deployment=0
+if [[ "$dashboard_only" != 1 && "$execution_accounts_only" != 1 ]]; then
+  simple_deployment=1
+fi
+
+if [[ "$simple_deployment" == 1 ]]; then
+  if [[ ! -f .env.server ]]; then
+    echo "Refusing deployment: .env.server is missing" >&2
+    exit 1
+  fi
+  if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+    echo "Refusing deployment: tracked changes exist in $remote_dir" >&2
+    git status --short
+    exit 1
+  fi
+  if [[ "$(git branch --show-current)" != main ]]; then
+    echo "Refusing deployment: checkout must be on main" >&2
+    exit 1
+  fi
+
+  git_dir="$(git rev-parse --git-dir)"
+  exec 9>"$git_dir/cml-deploy.lock"
+  if ! flock -n 9; then
+    echo "Refusing deployment: another deployment is already running" >&2
+    exit 75
+  fi
+
+  compose=(docker compose --env-file .env.server -f compose.server.yaml \
+    -f compose.live.accounts.yaml --profile live)
+  flat_check_python=$(cat <<'PY'
+import asyncio, json, os, sys
+from crypto_momentum_lab.execution_account.binance.client import BinanceUsdMPrivateReadClient
+
+async def main():
+    account = sys.argv[1]
+    client = BinanceUsdMPrivateReadClient(
+        api_key=os.environ["BINANCE_READ_API_KEY"],
+        api_secret=os.environ["BINANCE_READ_API_SECRET"],
+        environment="live",
+        account_label=account,
+    )
+    try:
+        positions, orders = await asyncio.gather(
+            client.fetch_positions(), client.fetch_open_orders()
+        )
+        open_positions = [
+            {"symbol": p.symbol, "side": p.position_side, "quantity": str(p.position_amt)}
+            for p in positions if p.position_amt != 0
+        ]
+        open_orders = [{"symbol": order.symbol} for order in orders]
+        print(json.dumps({"account": account, "positions": open_positions, "orders": open_orders}))
+        return 0 if not open_positions and not open_orders else 3
+    except Exception as error:
+        print(json.dumps({"account": account, "query_error": type(error).__name__}))
+        return 4
+    finally:
+        await client.aclose()
+
+raise SystemExit(asyncio.run(main()))
+PY
+)
+
+  accounts=(
+    "primary:live-strategy"
+    "account-2:live-strategy-account-2"
+    "account-3:live-strategy-account-3"
+    "account-4:live-strategy-account-4"
+  )
+  live_accounts_running=0
+  for item in "${accounts[@]}"; do
+    service="${item#*:}"
+    if docker ps -q \
+      --filter label=com.docker.compose.project=crypto-momentum-lab \
+      --filter "label=com.docker.compose.service=$service" | grep -q .; then
+      live_accounts_running=1
+    fi
+  done
+  if [[ "$live_update" == 1 || "$live_accounts_running" == 1 ]]; then
+    while :; do
+      all_flat=1
+      for item in "${accounts[@]}"; do
+        account="${item%%:*}"
+        service="${item#*:}"
+        container="$(docker ps -q \
+          --filter label=com.docker.compose.project=crypto-momentum-lab \
+          --filter "label=com.docker.compose.service=$service" | head -n 1)"
+        if [[ -z "$container" ]]; then
+          echo "Cannot check exchange state: account=$account service=$service is not running" >&2
+          exit 1
+        fi
+        if output="$(docker exec "$container" python -c "$flat_check_python" "$account" 2>&1)"; then
+          echo "$output"
+        else
+          status=$?
+          echo "$output"
+          if (( status != 3 && status != 4 )); then
+            echo "Exchange state query could not run: account=$account status=$status" >&2
+            exit "$status"
+          fi
+          all_flat=0
+        fi
+      done
+      if (( all_flat == 1 )); then
+        break
+      fi
+      echo "Waiting for all four exchange accounts to have no positions or open orders; retrying in 30 seconds."
+      sleep 30
+    done
+  fi
+
+  active_services=()
+  for service in dashboard market-data research-collector \
+    live-strategy live-strategy-account-2 live-strategy-account-3 live-strategy-account-4; do
+    if docker ps -q \
+      --filter label=com.docker.compose.project=crypto-momentum-lab \
+      --filter "label=com.docker.compose.service=$service" | grep -q .; then
+      active_services+=("$service")
+    fi
+  done
+
+  git fetch --prune origin main
+  previous_commit="$(git rev-parse HEAD)"
+  target_commit="$(git rev-parse "$target_ref^{commit}")"
+  if [[ "$target_commit" != "$previous_commit" ]] && \
+    [[ "$(git merge-base "$previous_commit" "$target_commit")" != "$previous_commit" ]]; then
+    echo "Refusing deployment: target must fast-forward main" >&2
+    exit 1
+  fi
+
+  for service in \
+    execution-account-live execution-account-live-account-2 \
+    execution-account-live-account-3 execution-account-live-account-4; do
+    legacy_id="$(docker ps -q \
+      --filter label=com.docker.compose.project=crypto-momentum-lab \
+      --filter "label=com.docker.compose.service=$service" | head -n 1)"
+    if [[ -n "$legacy_id" ]]; then
+      docker stop --time 90 "$legacy_id" >/dev/null
+    fi
+  done
+  if ((${#active_services[@]} > 0)); then
+    "${compose[@]}" stop --timeout 90 "${active_services[@]}"
+  fi
+  if [[ "$target_commit" != "$previous_commit" ]]; then
+    git merge --ff-only "$target_commit"
+  fi
+
+  set_env_value() {
+    local key="$1" value="$2"
+    if grep -q "^${key}=" .env.server; then
+      sed -i "s#^${key}=.*#${key}=${value}#" .env.server
+    else
+      printf '\n%s=%s\n' "$key" "$value" >> .env.server
+    fi
+  }
+  set_env_value CML_CODE_COMMIT "$target_commit"
+  set_env_value CML_DASHBOARD_IMAGE "crypto-momentum-lab-app:${target_commit}"
+  chmod 600 .env.server
+  "${compose[@]}" config --quiet
+  "${compose[@]}" build
+  "${compose[@]}" up -d postgres
+  if ((${#active_services[@]} > 0)); then
+    "${compose[@]}" up -d --force-recreate "${active_services[@]}"
+  fi
+
+  deadline=$(( $(date +%s) + 900 ))
+  while :; do
+    all_healthy=1
+    for service in "${active_services[@]}"; do
+      container="$("${compose[@]}" ps -q "$service")"
+      if [[ -z "$container" ]]; then
+        echo "Deployment failed: service=$service has no container" >&2
+        exit 1
+      fi
+      state="$(docker inspect -f '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container")"
+      if [[ "$state" == "running|unhealthy" || "$state" == "exited|"* || "$state" == "dead|"* ]]; then
+        echo "Deployment failed: service=$service state=$state" >&2
+        "${compose[@]}" logs --no-color --tail=120 "$service" >&2 || true
+        exit 1
+      fi
+      if [[ "$state" != "running|healthy" && "$state" != "running|none" ]]; then
+        all_healthy=0
+      fi
+      image="$(docker inspect -f '{{.Config.Image}}' "$container")"
+      if [[ "$image" != "crypto-momentum-lab-app:${target_commit}" ]]; then
+        echo "Deployment failed: service=$service image=$image" >&2
+        exit 1
+      fi
+    done
+    if (( all_healthy == 1 )); then
+      break
+    fi
+    if (( $(date +%s) >= deadline )); then
+      echo "Deployment failed: service health wait timed out" >&2
+      exit 1
+    fi
+    sleep 10
+  done
+  if [[ " ${active_services[*]} " == *" dashboard "* ]]; then
+    curl --fail --silent --show-error --max-time 10 \
+      http://127.0.0.1:8765/api/health >/dev/null
+  fi
+  echo "deployed_commit=$target_commit"
+  "${compose[@]}" ps
+  exit 0
+fi
+
 deploy_started_at="$(date +%s)"
 deploy_phase=checkout
 
