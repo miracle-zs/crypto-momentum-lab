@@ -493,7 +493,7 @@ def test_unowned_current_entry_cannot_borrow_old_strategy_ownership(mixed):
 
 
 @pytest.mark.parametrize(
-    "corruption", [None, "facts_hash", "epoch", "reservation", "quantity"]
+    "corruption", [None, "projection", "epoch", "reservation", "quantity"]
 )
 async def test_strict_reload_validates_before_publishing_book(corruption):
     from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
@@ -507,8 +507,8 @@ async def test_strict_reload_validates_before_publishing_book(corruption):
     payload = dict(plan.head_payload)
     epoch = "epoch"
     expected_quantity = request.expected_quantity
-    if corruption == "facts_hash":
-        payload["position_state"]["projection"]["total_active_quantity"] = "9"
+    if corruption == "projection":
+        payload["position_state"]["projection"]["unallocated_quantity"] = "9"
     if corruption == "epoch":
         epoch = "other"
     if corruption == "reservation":

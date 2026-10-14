@@ -152,7 +152,7 @@ class PositionBook:
         if facts.fills or facts.late_fills:
             raise RuntimeError("current position state must not contain fill history")
         return {
-            "projection": encode_projection(self._projection),
+            "projection": encode_projection(self._projection, include_derived=False),
             "episode_sequence": self._projection.episode_sequence,
             "batch_sequence": self._projection.batch_sequence,
             "verification": PositionRecoveryCodec.encode_facts(facts),
@@ -541,7 +541,6 @@ def _current_projection(
     return replace(
         projection,
         active_episode=active_episode,
-        active_batches=active_batches,
         archived_episodes=(),
     )
 

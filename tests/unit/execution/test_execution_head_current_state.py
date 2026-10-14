@@ -5,12 +5,19 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+import crypto_momentum_lab.domain.execution.projection_codec as projection_codec
 from crypto_momentum_lab.domain.account import AccountFillEvent
 from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
 from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
 from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+from crypto_momentum_lab.domain.execution.execution_head import (
+    decode_execution_head_state,
+)
 from crypto_momentum_lab.domain.execution.observation_models import Applied, Duplicate
 from crypto_momentum_lab.domain.execution.ports import ExecutionHeadSnapshot
+from crypto_momentum_lab.domain.execution.position_ledger_models import (
+    AccountFactStreamScope,
+)
 from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
 
 START = datetime(2026, 9, 29, tzinfo=UTC)
@@ -97,15 +104,36 @@ async def test_observation_advances_current_head_without_fill_history() -> None:
     )
     assert isinstance(first, Applied)
     payload = uow.tx.head.state_payload
-    assert payload["schema_version"] == 3
+    assert payload["schema_version"] == 4
     first_position_state = payload["position_state"]
+    assert "active_batches" not in first_position_state["projection"]
+    assert "total_active_quantity" not in first_position_state["projection"]
     first_projection = PositionRecoveryCodec.decode_projection(
         first_position_state["projection"]
     )
     assert first_projection.total_active_quantity == Decimal("0.001")
-    assert PositionRecoveryCodec.decode_facts(
-        first_position_state["verification"]
-    ).fills == ()
+    assert (
+        PositionRecoveryCodec.decode_facts(first_position_state["verification"]).fills
+        == ()
+    )
+
+    legacy_payload = dict(payload)
+    legacy_payload["schema_version"] = 3
+    legacy_position_state = dict(first_position_state)
+    legacy_position_state["projection"] = projection_codec.encode_projection(
+        first_projection
+    )
+    legacy_payload["position_state"] = legacy_position_state
+    legacy_book = decode_execution_head_state(
+        legacy_payload,
+        key=first_projection.position_key,
+        scope=AccountFactStreamScope.for_position_key(
+            first_projection.position_key,
+            stream_id="trade-source",
+            stream_epoch="one",
+        ),
+    )
+    assert legacy_book.projection == first_projection
 
     second = await book.observe(
         ExecutionEvidence(

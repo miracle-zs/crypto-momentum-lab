@@ -225,15 +225,6 @@ class PositionRecoveryCheckpoint:
                 != self.key.canonical_id
             ):
                 raise ValueError("checkpoint active episode position key mismatch")
-            if (
-                self.projection.active_batches
-                != self.projection.active_episode.active_batches
-            ):
-                raise ValueError(
-                    "checkpoint active batches disagree with active episode"
-                )
-        elif self.projection.active_batches:
-            raise ValueError("checkpoint batches exist without an active episode")
         if any(episode.is_active for episode in self.projection.archived_episodes):
             raise ValueError("checkpoint archived episode is marked active")
         if any(
@@ -241,14 +232,6 @@ class PositionRecoveryCheckpoint:
             for episode in self.projection.archived_episodes
         ):
             raise ValueError("checkpoint archived episode position key mismatch")
-        expected_quantity = sum(
-            (batch.quantity for batch in self.projection.active_batches),
-            start=Decimal("0"),
-        )
-        if expected_quantity != self.projection.total_active_quantity:
-            raise ValueError("checkpoint total quantity disagrees with active batches")
-        if self.projection.total_active_quantity < 0:
-            raise ValueError("checkpoint total active quantity must be non-negative")
         if self.projection.unallocated_quantity < 0:
             raise ValueError("checkpoint unallocated quantity must be non-negative")
         batch_ids = [

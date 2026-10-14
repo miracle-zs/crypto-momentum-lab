@@ -1398,8 +1398,6 @@ class PositionLedger:
         return PositionLedgerProjection(
             position_key=self._position_key,
             active_episode=final_active_episode,
-            active_batches=active_batches,
-            total_active_quantity=total_active_qty,
             unallocated_quantity=unallocated_quantity,
             reconciliation_gap=reconciliation_gap,
             high_watermark_trade_at=high_watermark,

@@ -5,8 +5,8 @@ from decimal import Decimal
 
 from crypto_momentum_lab.domain.account import AccountFillEvent
 from crypto_momentum_lab.domain.execution.execution_head import (
-    EXECUTION_HEAD_SCHEMA_VERSION,
     decode_execution_head_state,
+    is_supported_execution_head_schema,
 )
 from crypto_momentum_lab.domain.execution.ports import (
     DecisionCommitConflict,
@@ -171,13 +171,18 @@ def recover_durable_position(state: DurableExecutionPositionState) -> RecoveredP
     head = state.head
     if head is not None:
         payload = head.state_payload
-        if head.revision < 1 or payload.get("schema_version") != EXECUTION_HEAD_SCHEMA_VERSION:
+        if head.revision < 1:
             raise DecisionCommitConflict("durable execution head format is unsupported")
         try:
             book = decode_execution_head_state(payload, key=key, scope=scope)
         except Exception as err:
-            raise DecisionCommitConflict(
+            message = (
                 "durable execution head position state is malformed"
+                if is_supported_execution_head_schema(payload.get("schema_version"))
+                else "durable execution head format is unsupported"
+            )
+            raise DecisionCommitConflict(
+                message
             ) from err
         stored_reservations = payload.get("active_reservation_ids")
         recovery_command_ids = payload.get("recovery_command_ids")

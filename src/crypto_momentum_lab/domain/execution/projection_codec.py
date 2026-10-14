@@ -130,12 +130,12 @@ def encode_discrepancy(
 
 def encode_projection(
     projection: PositionLedgerProjection,
+    *,
+    include_derived: bool = True,
 ) -> dict[str, object]:
-    return {
+    payload = {
         "position_key": encode_position_key(projection.position_key),
         "active_episode": encode_episode(projection.active_episode),
-        "active_batches": [encode_batch(item) for item in projection.active_batches],
-        "total_active_quantity": _decimal(projection.total_active_quantity),
         "unallocated_quantity": _decimal(projection.unallocated_quantity),
         "reconciliation_gap": _decimal(projection.reconciliation_gap),
         "high_watermark_trade_at": (
@@ -162,6 +162,12 @@ def encode_projection(
             else None
         ),
     }
+    if include_derived:
+        payload["active_batches"] = [
+            encode_batch(item) for item in projection.active_batches
+        ]
+        payload["total_active_quantity"] = _decimal(projection.total_active_quantity)
+    return payload
 
 
 def _decimal(value: Decimal) -> str:

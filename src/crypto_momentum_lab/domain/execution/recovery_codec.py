@@ -693,27 +693,24 @@ class PositionRecoveryCodec:
     @classmethod
     def decode_projection(cls, value: object) -> PositionLedgerProjection:
         data = _mapping(value, "projection")
-        _require_keys(
-            data,
-            {
-                "position_key",
-                "active_episode",
-                "active_batches",
-                "total_active_quantity",
-                "unallocated_quantity",
-                "reconciliation_gap",
-                "high_watermark_trade_at",
-                "archived_episodes",
-                "diagnostics",
-                "health_status",
-                "event_cut",
-                "discrepancy",
-                "is_comparable",
-                "projection_version",
-                "stream_scope",
-            },
-            "projection",
-        )
+        current_keys = {
+            "position_key",
+            "active_episode",
+            "unallocated_quantity",
+            "reconciliation_gap",
+            "high_watermark_trade_at",
+            "archived_episodes",
+            "diagnostics",
+            "health_status",
+            "event_cut",
+            "discrepancy",
+            "is_comparable",
+            "projection_version",
+            "stream_scope",
+        }
+        derived_keys = {"active_batches", "total_active_quantity"}
+        if set(data) not in (current_keys, current_keys | derived_keys):
+            _require_keys(data, current_keys, "projection")
         high_watermark = data.get("high_watermark_trade_at")
         event_cut = data.get("event_cut")
         version = data.get("projection_version")
@@ -723,13 +720,26 @@ class PositionRecoveryCodec:
             raise RecoverySchemaError("is_comparable must be a boolean")
         if version is not None and not isinstance(version, str):
             raise RecoverySchemaError("projection_version must be a string or null")
+        active_episode = cls.decode_episode(data.get("active_episode"))
+        active_batches = active_episode.active_batches if active_episode else ()
+        total_active_quantity = sum(
+            (batch.quantity for batch in active_batches), start=Decimal("0")
+        )
+        if derived_keys <= set(data):
+            stored_batches = tuple(
+                cls.decode_batch(item) for item in _array(data, "active_batches")
+            )
+            stored_quantity = _decimal_value(data, "total_active_quantity")
+            if (
+                stored_batches != active_batches
+                or stored_quantity != total_active_quantity
+            ):
+                raise RecoverySchemaError(
+                    "legacy projection derived fields disagree with active episode"
+                )
         return PositionLedgerProjection(
             position_key=cls.decode_position_key(data.get("position_key")),
-            active_episode=cls.decode_episode(data.get("active_episode")),
-            active_batches=tuple(
-                cls.decode_batch(item) for item in _array(data, "active_batches")
-            ),
-            total_active_quantity=_decimal_value(data, "total_active_quantity"),
+            active_episode=active_episode,
             unallocated_quantity=_decimal_value(data, "unallocated_quantity"),
             reconciliation_gap=_decimal_value(data, "reconciliation_gap"),
             high_watermark_trade_at=(

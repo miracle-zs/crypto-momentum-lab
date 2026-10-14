@@ -206,7 +206,6 @@ def test_checkpoint_event_cut_rejects_future_batch_and_boundary() -> None:
     future_batch = replace(projection.active_batches[0], opened_at=_time(2))
     bad_projection = replace(
         projection,
-        active_batches=(future_batch,),
         active_episode=replace(
             projection.active_episode,
             batches=(future_batch,),

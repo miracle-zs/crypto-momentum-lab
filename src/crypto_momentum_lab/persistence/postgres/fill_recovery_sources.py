@@ -10,8 +10,8 @@ from crypto_momentum_lab.domain.account.models import (
     AccountPositionSnapshot,
 )
 from crypto_momentum_lab.domain.execution.execution_head import (
-    EXECUTION_HEAD_SCHEMA_VERSION,
     decode_execution_head_state,
+    is_supported_execution_head_schema,
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
@@ -59,7 +59,7 @@ async def load_fill_recovery_sources(
         }
         for head in heads:
             payload = head.state_payload or {}
-            if payload.get("schema_version") != EXECUTION_HEAD_SCHEMA_VERSION:
+            if not is_supported_execution_head_schema(payload.get("schema_version")):
                 if position_keys is None:
                     continue
                 raise ValueError(

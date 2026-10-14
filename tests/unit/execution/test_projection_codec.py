@@ -56,7 +56,7 @@ def test_fact_token_is_excluded_from_digest_without_mutating_projection(baseline
 @pytest.mark.parametrize(
     "field,value",
     [
-        ("total_active_quantity", Decimal("7.00")),
+        ("unallocated_quantity", Decimal("7.00")),
         ("diagnostics", ("different",)),
         ("stream_scope", None),
         ("archived_episodes", ()),
@@ -72,12 +72,21 @@ def test_decimal_scale_and_timezone_encoding_remain_exact(baseline):
     projection = PositionRecoveryCodec.decode_projection(baseline["payload"])
     event_cut = datetime(2026, 9, 30, 12, tzinfo=timezone(timedelta(hours=8)))
     changed = replace(
-        projection, total_active_quantity=Decimal("2.000"), event_cut=event_cut
+        projection, unallocated_quantity=Decimal("2.000"), event_cut=event_cut
     )
     payload = projection_codec.encode_projection(changed)
-    assert payload["total_active_quantity"] == "2.000"
+    assert payload["unallocated_quantity"] == "2.000"
     assert payload["event_cut"] == "2026-09-30T12:00:00+08:00"
     assert PositionRecoveryCodec.decode_projection(payload) == changed
+
+
+def test_current_projection_encoding_omits_derived_fields(baseline):
+    projection = PositionRecoveryCodec.decode_projection(baseline["payload"])
+    payload = projection_codec.encode_projection(projection, include_derived=False)
+
+    assert "active_batches" not in payload
+    assert "total_active_quantity" not in payload
+    assert PositionRecoveryCodec.decode_projection(payload) == projection
 
 
 def test_naive_datetime_remains_rejected(baseline):
@@ -88,7 +97,7 @@ def test_naive_datetime_remains_rejected(baseline):
         )
 
 
-def test_projection_requires_every_schema_array(baseline):
+def test_projection_rejects_partial_legacy_derived_fields(baseline):
     payload = dict(baseline["payload"])
     del payload["active_batches"]
 

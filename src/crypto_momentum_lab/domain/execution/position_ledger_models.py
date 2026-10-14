@@ -691,8 +691,6 @@ class PositionLedgerProjection:
 
     position_key: PositionKey
     active_episode: PositionEpisode | None
-    active_batches: tuple[PositionLedgerBatch, ...]
-    total_active_quantity: Decimal
     unallocated_quantity: Decimal
     reconciliation_gap: Decimal
     high_watermark_trade_at: datetime | None
@@ -706,6 +704,16 @@ class PositionLedgerProjection:
     stream_scope: AccountFactStreamScope | None = None
     episode_sequence: int = field(default=0, compare=False)
     batch_sequence: int = field(default=0, compare=False)
+
+    @property
+    def active_batches(self) -> tuple[PositionLedgerBatch, ...]:
+        return self.active_episode.active_batches if self.active_episode else ()
+
+    @property
+    def total_active_quantity(self) -> Decimal:
+        return sum(
+            (batch.quantity for batch in self.active_batches), start=Decimal("0")
+        )
 
 
 @dataclass(frozen=True, slots=True)

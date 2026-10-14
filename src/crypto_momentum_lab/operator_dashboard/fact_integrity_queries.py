@@ -7,11 +7,11 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.execution_head import (
-    EXECUTION_HEAD_SCHEMA_VERSION,
     decode_execution_head_state,
+    is_supported_execution_head_schema,
 )
+from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
     PositionKey,
@@ -89,10 +89,9 @@ async def load_fact_integrity(
                 or payload.get("recovery_command_ids")
                 or payload.get("external_recovery_ids")
             )
-            if payload.get("schema_version") != EXECUTION_HEAD_SCHEMA_VERSION:
-                # Old diagnostic heads do not represent current exposure. Any
-                # live exchange position still appears in the account-level
-                # count below and therefore remains unknown until migrated.
+            if not is_supported_execution_head_schema(payload.get("schema_version")):
+                # Unknown head formats cannot prove current exposure. Any live
+                # exchange position still appears in the account-level count.
                 continue
             try:
                 key = PositionKey(

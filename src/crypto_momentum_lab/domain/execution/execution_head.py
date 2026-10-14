@@ -18,7 +18,11 @@ if TYPE_CHECKING:
     from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 
 
-EXECUTION_HEAD_SCHEMA_VERSION = 3
+EXECUTION_HEAD_SCHEMA_VERSION = 4
+
+
+def is_supported_execution_head_schema(value: object) -> bool:
+    return type(value) is int and value in {3, EXECUTION_HEAD_SCHEMA_VERSION}
 
 
 def build_execution_head_payload(
@@ -63,8 +67,8 @@ def decode_execution_head_state(
     key: PositionKey,
     scope: AccountFactStreamScope,
 ) -> PositionBook:
-    if not isinstance(payload, dict) or payload.get("schema_version") != (
-        EXECUTION_HEAD_SCHEMA_VERSION
+    if not isinstance(payload, dict) or not is_supported_execution_head_schema(
+        payload.get("schema_version")
     ):
         raise ValueError("unsupported execution head schema")
     if payload.get("position_key") != encode_position_key(key):

@@ -37,6 +37,7 @@ from crypto_momentum_lab.domain.execution.execution_head import (
     EXECUTION_HEAD_SCHEMA_VERSION,
     decode_current_facts,
     decode_execution_head_state,
+    is_supported_execution_head_schema,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
@@ -111,7 +112,7 @@ class ExecutionTransaction:
                 f"position {key.canonical_id} has no matching current head"
             )
         payload = head.state_payload
-        if payload.get("schema_version") != EXECUTION_HEAD_SCHEMA_VERSION:
+        if not is_supported_execution_head_schema(payload.get("schema_version")):
             raise _DecisionCommitConflict(
                 "execution head requires offline format migration"
             )
@@ -153,7 +154,7 @@ class ExecutionTransaction:
         ):
             return None
         payload = head.state_payload
-        if payload.get("schema_version") != EXECUTION_HEAD_SCHEMA_VERSION:
+        if not is_supported_execution_head_schema(payload.get("schema_version")):
             raise _DecisionCommitConflict(
                 "execution head requires offline format migration"
             )
