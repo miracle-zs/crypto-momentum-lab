@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from crypto_momentum_lab.operator_dashboard.fact_integrity_queries import (
     load_fact_integrity,
@@ -27,6 +28,7 @@ class _Session:
         self, heads, checkpoints, suffix_rows, *, coverage_rows=None
     ) -> None:
         self._scalars = [heads, checkpoints]
+        self.executed_statements = []
         if coverage_rows is None:
             self._executes = [suffix_rows]
         else:
@@ -35,7 +37,8 @@ class _Session:
     async def scalars(self, _statement):
         return _Result(self._scalars.pop(0))
 
-    async def execute(self, _statement):
+    async def execute(self, statement):
+        self.executed_statements.append(statement)
         return _Result(self._executes.pop(0))
 
 
@@ -143,8 +146,11 @@ def _run(
     accounts,
     checkpoint_for,
     coverage_rows=None,
+    executed_statements=None,
 ):
     session = _Session(heads, checkpoints, suffix_rows, coverage_rows=coverage_rows)
+    if executed_statements is not None:
+        session.executed_statements = executed_statements
     with patch(
         "crypto_momentum_lab.operator_dashboard.fact_integrity_queries"
         ".PositionRecoveryCodec.decode_checkpoint",
@@ -159,6 +165,47 @@ def _run(
         return asyncio.run(
             load_fact_integrity(_Sessions(session), accounts=accounts, now=NOW)
         )
+
+
+def test_suffix_queries_join_current_heads_without_expanding_tuple_lists(
+) -> None:
+    statements = []
+    _run(
+        heads=[
+            _head(
+                account="primary",
+                symbol="BTWUSDT",
+                side="LONG",
+                revision=10,
+                active_hint=True,
+                unresolved=False,
+            )
+        ],
+        checkpoints=[_checkpoint_row("primary", "BTWUSDT", "LONG")],
+        suffix_rows=[],
+        coverage_rows=[],
+        accounts={"primary": SimpleNamespace(position_count=0)},
+        checkpoint_for=lambda payload: _checkpoint(
+            account="primary",
+            symbol="BTWUSDT",
+            side="LONG",
+            active_quantity=Decimal("0"),
+        ),
+        executed_statements=statements,
+    )
+
+    compiled = [
+        str(statement.compile(dialect=postgresql.dialect()))
+        for statement in statements
+    ]
+    assert len(compiled) == 2
+    assert all("bound_checkpoints AS MATERIALIZED" in sql for sql in compiled)
+    assert all("execution_book_heads" in sql for sql in compiled)
+    assert all("position_recovery_checkpoints" in sql for sql in compiled)
+    assert all(
+        "source_revision <= bound_checkpoints.head_revision" in sql
+        for sql in compiled
+    )
 
 
 def test_closed_historical_object_does_not_unknown_current_health() -> None:

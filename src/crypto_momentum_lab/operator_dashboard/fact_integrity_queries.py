@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import func, select, tuple_
+from sqlalchemy import BigInteger, and_, case, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.execution.evidence_codec import (
@@ -53,6 +53,75 @@ class FactIntegritySummary:
     reasons: tuple[str, ...] = ()
     unknown_scopes: tuple[str, ...] = ()
     historical_reasons: tuple[str, ...] = ()
+
+
+def _checkpoint_suffix_source(
+    account_labels: tuple[str, ...],
+):
+    head = ExecutionBookHeadRow
+    cuts = PositionRecoveryCheckpointRow
+    events = PositionFactJournalEventRow
+    checkpoint_id = head.state_payload["recovery_checkpoint"][
+        "checkpoint_id"
+    ].astext
+    revision_text = head.state_payload["journal_revision"].astext
+    revision_is_integer = and_(
+        func.jsonb_typeof(head.state_payload["journal_revision"]) == "number",
+        revision_text.op("~")(r"^-?[0-9]+$"),
+    )
+    head_revision = case(
+        (revision_is_integer, cast(revision_text, BigInteger)),
+        else_=None,
+    )
+    bound = (
+        select(
+            head.environment.label("environment"),
+            head.account_label.label("account_label"),
+            head.symbol.label("symbol"),
+            head.position_side.label("position_side"),
+            head.stream_id.label("stream_id"),
+            head.stream_epoch.label("stream_epoch"),
+            cuts.source_revision.label("checkpoint_revision"),
+            head_revision.label("head_revision"),
+        )
+        .select_from(head)
+        .join(
+            cuts,
+            and_(
+                cuts.environment == head.environment,
+                cuts.account_label == head.account_label,
+                cuts.symbol == head.symbol,
+                cuts.position_side == head.position_side,
+                cuts.stream_id == head.stream_id,
+                cuts.stream_epoch == head.stream_epoch,
+                cuts.checkpoint_id == checkpoint_id,
+            ),
+        )
+        .where(
+            head.environment == "live",
+            head.account_label.in_(account_labels),
+            checkpoint_id.is_not(None),
+            checkpoint_id != "",
+        )
+        .cte("bound_checkpoints")
+        .prefix_with("MATERIALIZED", dialect="postgresql")
+    )
+    return bound.join(
+        events,
+        and_(
+            events.environment == bound.c.environment,
+            events.account_label == bound.c.account_label,
+            events.symbol == bound.c.symbol,
+            events.position_side == bound.c.position_side,
+            events.stream_id == bound.c.stream_id,
+            events.stream_epoch == bound.c.stream_epoch,
+            events.source_revision > bound.c.checkpoint_revision,
+            or_(
+                bound.c.head_revision.is_(None),
+                events.source_revision <= bound.c.head_revision,
+            ),
+        ),
+    )
 
 
 @dataclass(slots=True)
@@ -129,19 +198,38 @@ async def load_fact_integrity(
                         binding["checkpoint_id"],
                     )
                 )
+        checkpoint_id = ExecutionBookHeadRow.state_payload[
+            "recovery_checkpoint"
+        ]["checkpoint_id"].astext
         rows = (
             (
                 await session.scalars(
-                    select(PositionRecoveryCheckpointRow).where(
-                        PositionRecoveryCheckpointRow.environment == "live",
-                        tuple_(
-                            PositionRecoveryCheckpointRow.account_label,
-                            PositionRecoveryCheckpointRow.symbol,
-                            PositionRecoveryCheckpointRow.position_side,
-                            PositionRecoveryCheckpointRow.stream_id,
-                            PositionRecoveryCheckpointRow.stream_epoch,
-                            PositionRecoveryCheckpointRow.checkpoint_id,
-                        ).in_(bindings),
+                    select(PositionRecoveryCheckpointRow)
+                    .select_from(ExecutionBookHeadRow)
+                    .join(
+                        PositionRecoveryCheckpointRow,
+                        and_(
+                            PositionRecoveryCheckpointRow.environment
+                            == ExecutionBookHeadRow.environment,
+                            PositionRecoveryCheckpointRow.account_label
+                            == ExecutionBookHeadRow.account_label,
+                            PositionRecoveryCheckpointRow.symbol
+                            == ExecutionBookHeadRow.symbol,
+                            PositionRecoveryCheckpointRow.position_side
+                            == ExecutionBookHeadRow.position_side,
+                            PositionRecoveryCheckpointRow.stream_id
+                            == ExecutionBookHeadRow.stream_id,
+                            PositionRecoveryCheckpointRow.stream_epoch
+                            == ExecutionBookHeadRow.stream_epoch,
+                            PositionRecoveryCheckpointRow.checkpoint_id
+                            == checkpoint_id,
+                        ),
+                    )
+                    .where(
+                        ExecutionBookHeadRow.environment == "live",
+                        ExecutionBookHeadRow.account_label.in_(tuple(accounts)),
+                        checkpoint_id.is_not(None),
+                        checkpoint_id != "",
                     )
                 )
             ).all()
@@ -163,13 +251,11 @@ async def load_fact_integrity(
         # cut are actually persisted, instead of replaying every suffix event.
         # The join is pinned to the exact referenced checkpoints so an older
         # checkpoint of the same scope cannot widen another scope's suffix.
+        # Since that exact checkpoint set joins on every scope column, a second
+        # event-scope tuple list would be redundant and doubles the bind count.
         suffix_by_scope: dict[tuple[str, str, str, str, str], SuffixFacts] = {}
         if bindings:
             events = PositionFactJournalEventRow
-            cuts = PositionRecoveryCheckpointRow
-            scope_keys = tuple(
-                {(b[0], b[1], b[2], b[3], b[4]) for b in bindings}
-            )
             suffix_rows = (
                 await session.execute(
                     select(
@@ -182,37 +268,9 @@ async def load_fact_integrity(
                         func.max(events.source_revision),
                         func.max(events.occurred_at),
                     )
-                    .select_from(events)
-                    .join(
-                        cuts,
-                        (events.environment == cuts.environment)
-                        & (events.account_label == cuts.account_label)
-                        & (events.symbol == cuts.symbol)
-                        & (events.position_side == cuts.position_side)
-                        & (events.stream_id == cuts.stream_id)
-                        & (events.stream_epoch == cuts.stream_epoch)
-                        & (
-                            events.source_revision
-                            > cuts.source_revision
-                        ),
-                    )
+                    .select_from(_checkpoint_suffix_source(tuple(accounts)))
                     .where(
                         events.environment == "live",
-                        tuple_(
-                            cuts.account_label,
-                            cuts.symbol,
-                            cuts.position_side,
-                            cuts.stream_id,
-                            cuts.stream_epoch,
-                            cuts.checkpoint_id,
-                        ).in_(bindings),
-                        tuple_(
-                            events.account_label,
-                            events.symbol,
-                            events.position_side,
-                            events.stream_id,
-                            events.stream_epoch,
-                        ).in_(scope_keys),
                     )
                     .group_by(
                         events.account_label,
@@ -237,7 +295,7 @@ async def load_fact_integrity(
             # for each scope, decoding its real payload to obtain the
             # actual coverage end_at — not a proxy from occurred_at.
             newest_coverage_by_scope = await _load_suffix_coverage(
-                session, bindings, scope_keys, checkpoints, heads
+                session, bindings, checkpoints, heads, tuple(accounts)
             )
             for scope_key, coverage_end_at in newest_coverage_by_scope.items():
                 if scope_key in suffix_by_scope:
@@ -414,11 +472,11 @@ def _record_unknown(proof: _AccountProof, scope: str, reason: str) -> None:
 async def _load_suffix_coverage(
     session: AsyncSession,
     bindings: list[tuple[str, str, str, str, str, str]],
-    scope_keys: tuple[tuple[str, str, str, str, str], ...],
     checkpoints: dict[
         tuple[str, str, str, str, str, str], PositionRecoveryCheckpointRow
     ],
     heads: list[ExecutionBookHeadRow],
+    account_labels: tuple[str, ...],
 ) -> dict[tuple[str, str, str, str, str], datetime]:
     """Load the newest authoritative coverage end_at from suffix coverage events.
 
@@ -431,7 +489,6 @@ async def _load_suffix_coverage(
     preventing watermark regression.
     """
     events = PositionFactJournalEventRow
-    cuts = PositionRecoveryCheckpointRow
     coverage_rows = (
         await session.execute(
             select(
@@ -443,38 +500,10 @@ async def _load_suffix_coverage(
                 events.payload,
                 events.source_revision,
             )
-            .select_from(events)
-            .join(
-                cuts,
-                (events.environment == cuts.environment)
-                & (events.account_label == cuts.account_label)
-                & (events.symbol == cuts.symbol)
-                & (events.position_side == cuts.position_side)
-                & (events.stream_id == cuts.stream_id)
-                & (events.stream_epoch == cuts.stream_epoch)
-                & (
-                    events.source_revision
-                    > cuts.source_revision
-                ),
-            )
+            .select_from(_checkpoint_suffix_source(account_labels))
             .where(
                 events.environment == "live",
                 events.event_kind == "coverage",
-                tuple_(
-                    cuts.account_label,
-                    cuts.symbol,
-                    cuts.position_side,
-                    cuts.stream_id,
-                    cuts.stream_epoch,
-                    cuts.checkpoint_id,
-                ).in_(bindings),
-                tuple_(
-                    events.account_label,
-                    events.symbol,
-                    events.position_side,
-                    events.stream_id,
-                    events.stream_epoch,
-                ).in_(scope_keys),
             )
         )
     ).all()
