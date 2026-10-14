@@ -42,9 +42,10 @@ from crypto_momentum_lab.domain.execution.recovery_models import (
 
 
 @dataclass(frozen=True, slots=True)
-class _CurrentFacts:
-    """Small verification state kept beside the current position projection."""
+class _CurrentPositionState:
+    """One current position and the source facts needed to continue it."""
 
+    projection: PositionLedgerProjection
     coverage: FactCoverageInterval | None = None
     latest_snapshot: AccountPositionSnapshot | None = None
     source_anchor_snapshot: AccountPositionSnapshot | None = None
@@ -78,13 +79,14 @@ class PositionBook:
         self._policy_version = policy_version
         self._schema_version = schema_version
         self._stream_scope = stream_scope
-        self._facts = _CurrentFacts()
         self._revision = 0
-        self._projection = self._ledger.project(
-            AccountFacts(
-                position_key=position_key,
-                stream_scope=stream_scope,
-                prefix_facts_complete=True,
+        self._state = _CurrentPositionState(
+            projection=self._ledger.project(
+                AccountFacts(
+                    position_key=position_key,
+                    stream_scope=stream_scope,
+                    prefix_facts_complete=True,
+                )
             )
         )
         self._durable_projection_version: str | None = None
@@ -121,29 +123,32 @@ class PositionBook:
 
     @property
     def projection(self) -> PositionLedgerProjection:
-        return self._projection
+        return self._state.projection
 
     @property
     def latest_trade_at(self) -> datetime | None:
-        return self._projection.high_watermark_trade_at
+        return self._state.projection.high_watermark_trade_at
 
     def adopt_stream_scope(self, scope: AccountFactStreamScope) -> None:
         if not scope.matches(self._position_key):
             raise ValueError("stream scope does not match position key")
         self._stream_scope = scope
-        self._projection = replace(self._projection, stream_scope=scope)
+        self._state = replace(
+            self._state,
+            projection=replace(self._state.projection, stream_scope=scope),
+        )
         self._revision += 1
         self._view_version_changed()
 
     def remove_exit_boundaries(self, client_order_id: str) -> None:
         boundaries = tuple(
             item
-            for item in self._facts.exit_boundaries
+            for item in self._state.exit_boundaries
             if item.client_order_id != client_order_id
         )
-        if boundaries == self._facts.exit_boundaries:
+        if boundaries == self._state.exit_boundaries:
             return
-        self._facts = replace(self._facts, exit_boundaries=boundaries)
+        self._state = replace(self._state, exit_boundaries=boundaries)
         self._revision += 1
         self._view_version_changed()
 
@@ -152,9 +157,11 @@ class PositionBook:
         if facts.fills or facts.late_fills:
             raise RuntimeError("current position state must not contain fill history")
         return {
-            "projection": encode_projection(self._projection, include_derived=False),
-            "episode_sequence": self._projection.episode_sequence,
-            "batch_sequence": self._projection.batch_sequence,
+            "projection": encode_projection(
+                self._state.projection, include_derived=False
+            ),
+            "episode_sequence": self._state.projection.episode_sequence,
+            "batch_sequence": self._state.projection.batch_sequence,
             "verification": PositionRecoveryCodec.encode_facts(facts),
         }
 
@@ -191,47 +198,50 @@ class PositionBook:
             policy_version=policy_version,
             schema_version=schema_version,
         )
-        book._projection = _current_projection(
+        projection = _current_projection(
             replace(
                 projection,
                 episode_sequence=episode_sequence,
                 batch_sequence=batch_sequence,
             )
         )
-        book._facts = _merge_current_facts(_CurrentFacts(), verification)
+        book._state = _merge_current_state(
+            replace(book._state, projection=projection), verification
+        )
         book._revision += 1
         return book
 
     @property
     def current_facts(self) -> AccountFacts:
         """Return the bounded metadata needed to verify the current projection."""
-        snapshots = _current_snapshots(self._facts)
+        state = self._state
+        snapshots = _current_snapshots(state)
         return AccountFacts(
             position_key=self._position_key,
             snapshots=snapshots,
-            exit_boundaries=self._facts.exit_boundaries,
-            coverage=self._facts.coverage,
-            has_synthetic_fills=self._facts.has_synthetic_fills,
+            exit_boundaries=state.exit_boundaries,
+            coverage=state.coverage,
+            has_synthetic_fills=state.has_synthetic_fills,
             conflicting_fills=(
-                (self._facts.conflicting_fill,)
-                if self._facts.conflicting_fill is not None
+                (state.conflicting_fill,)
+                if state.conflicting_fill is not None
                 else ()
             ),
-            has_late_events=self._facts.has_late_events,
+            has_late_events=state.has_late_events,
             stream_scope=self._stream_scope,
-            recovery_checkpoint=self._facts.recovery_checkpoint,
+            recovery_checkpoint=state.recovery_checkpoint,
             fact_conflicts=(
-                (self._facts.fact_conflict,)
-                if self._facts.fact_conflict is not None
+                (state.fact_conflict,)
+                if state.fact_conflict is not None
                 else ()
             ),
             integrity_issues=(
-                (self._facts.integrity_issue,)
-                if self._facts.integrity_issue is not None
+                (state.integrity_issue,)
+                if state.integrity_issue is not None
                 else ()
             ),
-            fill_load_provenance=self._facts.fill_load_provenance,
-            fill_cursor_provenance=self._facts.fill_cursor_provenance,
+            fill_load_provenance=state.fill_load_provenance,
+            fill_cursor_provenance=state.fill_cursor_provenance,
             prefix_facts_complete=False,
         )
 
@@ -239,12 +249,13 @@ class PositionBook:
         if not scope.matches(self._position_key):
             raise ValueError("stream scope does not match position key")
         self._stream_scope = scope
-        self._facts = _CurrentFacts()
-        self._projection = self._ledger.project(
-            AccountFacts(
-                position_key=self._position_key,
-                stream_scope=scope,
-                prefix_facts_complete=True,
+        self._state = _CurrentPositionState(
+            projection=self._ledger.project(
+                AccountFacts(
+                    position_key=self._position_key,
+                    stream_scope=scope,
+                    prefix_facts_complete=True,
+                )
             )
         )
         self._revision += 1
@@ -254,8 +265,12 @@ class PositionBook:
     def replace_from_facts(self, facts: AccountFacts) -> None:
         self._validate_facts(facts)
         self._stream_scope = facts.stream_scope
-        self._projection = _current_projection(self._ledger.project(facts))
-        self._facts = _merge_current_facts(_CurrentFacts(), facts)
+        self._state = _merge_current_state(
+            _CurrentPositionState(
+                projection=_current_projection(self._ledger.project(facts))
+            ),
+            facts,
+        )
         self._revision += 1
         self._zero_confirmed_override = False
         self._view_version_changed()
@@ -265,8 +280,9 @@ class PositionBook:
         if self._stream_scope is not None and facts.stream_scope != self._stream_scope:
             raise ValueError("fact delta stream scope does not match current state")
         self._stream_scope = facts.stream_scope or self._stream_scope
-        high_watermark = self._projection.high_watermark_trade_at
-        checkpoint = self._facts.recovery_checkpoint
+        state = self._state
+        high_watermark = state.projection.high_watermark_trade_at
+        checkpoint = state.recovery_checkpoint
         late_fill_arrived = any(
             (high_watermark is not None and fill.trade_at < high_watermark)
             or (checkpoint is not None and fill.trade_at <= checkpoint.event_cut)
@@ -283,42 +299,44 @@ class PositionBook:
             ),
             has_late_events=facts.has_late_events or late_fill_arrived,
         )
-        current_facts = _merge_current_facts(self._facts, facts)
+        current_state = _merge_current_state(state, facts)
         delta = AccountFacts(
             position_key=self._position_key,
             fills=facts.fills,
-            snapshots=_current_snapshots(current_facts),
-            exit_boundaries=current_facts.exit_boundaries,
-            coverage=current_facts.coverage,
-            has_synthetic_fills=current_facts.has_synthetic_fills,
+            snapshots=_current_snapshots(current_state),
+            exit_boundaries=current_state.exit_boundaries,
+            coverage=current_state.coverage,
+            has_synthetic_fills=current_state.has_synthetic_fills,
             conflicting_fills=(
-                (current_facts.conflicting_fill,)
-                if current_facts.conflicting_fill is not None
+                (current_state.conflicting_fill,)
+                if current_state.conflicting_fill is not None
                 else ()
             ),
-            has_late_events=current_facts.has_late_events,
+            has_late_events=current_state.has_late_events,
             stream_scope=self._stream_scope,
             fact_conflicts=(
-                (current_facts.fact_conflict,)
-                if current_facts.fact_conflict is not None
+                (current_state.fact_conflict,)
+                if current_state.fact_conflict is not None
                 else ()
             ),
             integrity_issues=(
-                (current_facts.integrity_issue,)
-                if current_facts.integrity_issue is not None
+                (current_state.integrity_issue,)
+                if current_state.integrity_issue is not None
                 else ()
             ),
             late_fills=facts.late_fills,
             fill_cursor_provenance=(
-                facts.fill_cursor_provenance or current_facts.fill_cursor_provenance
+                facts.fill_cursor_provenance or current_state.fill_cursor_provenance
             ),
-            fill_load_provenance=current_facts.fill_load_provenance,
+            fill_load_provenance=current_state.fill_load_provenance,
             prefix_facts_complete=False,
         )
-        self._projection = _current_projection(
-            self._ledger.apply_delta(self._projection, delta)
+        self._state = replace(
+            current_state,
+            projection=_current_projection(
+                self._ledger.apply_delta(state.projection, delta)
+            ),
         )
-        self._facts = current_facts
         self._revision += 1
         self._zero_confirmed_override = False
         self._view_version_changed()
@@ -357,9 +375,11 @@ class PositionBook:
     ) -> None:
         if projection.position_key != self._position_key:
             raise ValueError("durable projection position key does not match book")
-        self._projection = _current_projection(projection)
+        self._state = _CurrentPositionState(
+            projection=_current_projection(projection),
+            coverage=view_coverage,
+        )
         self._stream_scope = stream_scope or projection.stream_scope
-        self._facts = _CurrentFacts(coverage=view_coverage)
         self._revision += 1
         self._zero_confirmed_override = zero_confirmed
         version_id = projection_version or projection.projection_version or "v1"
@@ -376,7 +396,7 @@ class PositionBook:
         requirement: FreshnessRequirement | None = None,
         now: datetime | None = None,
     ) -> PositionView:
-        projection = self._projection
+        projection = self._state.projection
         if (
             cut is not None
             and projection.event_cut is not None
@@ -496,9 +516,10 @@ class PositionBook:
     ) -> str:
         facts = self.current_facts
         view_coverage = facts.coverage if coverage is None else coverage
-        status = health_status or self._projection.health_status
+        projection = self._state.projection
+        status = health_status or projection.health_status
         comparable = (
-            self._projection.is_comparable
+            projection.is_comparable
             if is_comparable is None
             else is_comparable
         )
@@ -509,7 +530,7 @@ class PositionBook:
         )
         return _execution_state_version(
             facts=facts,
-            projection=self._projection,
+            projection=projection,
             health_status=status,
             is_comparable=comparable,
             coverage=view_coverage,
@@ -545,7 +566,10 @@ def _current_projection(
     )
 
 
-def _merge_current_facts(current: _CurrentFacts, facts: AccountFacts) -> _CurrentFacts:
+def _merge_current_state(
+    current: _CurrentPositionState,
+    facts: AccountFacts,
+) -> _CurrentPositionState:
     latest_snapshot = current.latest_snapshot
     source_anchor = current.source_anchor_snapshot
     if facts.snapshots:
@@ -567,7 +591,8 @@ def _merge_current_facts(current: _CurrentFacts, facts: AccountFacts) -> _Curren
         )
     boundaries = {item.order_id: item for item in current.exit_boundaries}
     boundaries.update({item.order_id: item for item in facts.exit_boundaries})
-    return _CurrentFacts(
+    return replace(
+        current,
         coverage=facts.coverage or current.coverage,
         latest_snapshot=latest_snapshot,
         source_anchor_snapshot=source_anchor,
@@ -597,9 +622,11 @@ def _merge_current_facts(current: _CurrentFacts, facts: AccountFacts) -> _Curren
     )
 
 
-def _current_snapshots(facts: _CurrentFacts) -> tuple[AccountPositionSnapshot, ...]:
-    anchor = facts.source_anchor_snapshot
-    latest = facts.latest_snapshot
+def _current_snapshots(
+    state: _CurrentPositionState,
+) -> tuple[AccountPositionSnapshot, ...]:
+    anchor = state.source_anchor_snapshot
+    latest = state.latest_snapshot
     if anchor is None:
         return (latest,) if latest is not None else ()
     if latest is None or latest.observed_at == anchor.observed_at:

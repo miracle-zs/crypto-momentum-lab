@@ -698,13 +698,13 @@ primary 新进程启动暴露两个接线问题：账户读取硬编码 Multi-As
 优化顺序：
 
 1. 收敛 gate/readiness 的状态和展示副本；保留账户事实未就绪、行情未就绪、人工暂停、风险暂停和计划窗口等现有业务原因，但不要再维护两份可独立变化的最终 gate。复用现有 gate、Dashboard 和 scheduled-window 测试。
-2. 将 `execution_book_heads` 的持仓部分改成唯一当前 `PositionState`，仅附带确有下游读取的最小成交游标/来源范围。覆盖空仓冷启动、非零仓恢复、退出批次和成交增量；不引入 Journal 或新审计链。
+2. 让 `PositionBook` 以唯一当前 `PositionState` 更新持仓，并只保存下游确实读取的来源证据。覆盖空仓冷启动、非零仓恢复、退出批次和成交增量；不引入 Journal 或新审计链。
 3. 将成交扫描完整性压成一个权威结果，去除 `AccountFillLoadProvenance` 与 `FactCoverageInterval` 的重复字段及重复校验。用现有分页、缺口和非零仓恢复用例确认行为不变。
 4. 清理剩余确认过的重复 validator 和 pass-through 模块；执行命令、接纳订单/成交、持仓 CAS 的事务边界保持原样。
 5. 只对实测有重复工作的自愈/重试路径做裁剪；用同一线上负载记录启动读取数、恢复重试数和决策延迟。沿用 §8.11 的 `_staged_copy(key)`、Dashboard 和装配测量，不增加预设性能目标。
 
 第 1 项已于 2026-10-14 收敛：运行时 readiness 只在 `tradeability` 发布 entry gate，不再重复发布顶层 entry 字段；删除与 `observed_at` 相同的 `published_at`、空的 `stream_readiness`，以及运行时并不拥有的 `unmanaged_risk_clear=true` / `halt_active=false` 占位值。Dashboard 将缺少的这两项显示为未知，当前 halt 仍以数据库状态为准，并兼容滚动期间较旧快照显式报告的 halt。实际交易门控、计划窗口和在途提交处理没有改变；readiness 只是状态快照，不是第二个下单 authority。
 
-第 2 项已开始：持仓 head schema 4 不再分别保存 `active_episode.batches`、`active_batches` 和 `total_active_quantity`；后两者从活动 episode 即时推导。旧 schema 3 仍可恢复，恢复 checkpoint 的摘要编码保持原样。账户 facts schema 4 在 `coverage.load_provenance` 与顶层值完全相同时省去顶层重复副本；schema 3 的旧 facts 仍可解码。分页完整性只由 `AccountFillLoadProvenance` 表达；`CoverageEvidence` 和 `FactCoverageInterval` 不再复制分页完成/截断标记，旧 coverage payload 仍可解码。当前 head 仍保存精简投影和继续增量更新所需的核验事实；这些改动尚未完成唯一 `PositionState` 收敛，尚未部署。
+第 2 项已收敛当前内存状态：持仓 head schema 4 不再分别保存 `active_episode.batches`、`active_batches` 和 `total_active_quantity`；后两者从活动 episode 即时推导。旧 schema 3 仍可恢复，恢复 checkpoint 的摘要编码保持原样。`PositionBook` 用一个不可变 `_CurrentPositionState` 整体替换当前投影与续接所需的来源事实，不再分别维护可变的 `_projection` 和 `_facts`。当前数量、批次、成本和退出责任由投影表达；最近账户快照、覆盖范围、成交 provenance、恢复锚点和退出边界是该状态的来源证据，增量成交接纳、空仓确认和后续完整扫描仍会读取。head 已用单个 `position_state` 持久化当前状态，其中 `projection` 与 `verification` 承载上述两类字段；本次没有改写 head schema 或丢弃仍被读取的来源证据。账户 facts schema 4 在 `coverage.load_provenance` 与顶层值完全相同时省去顶层重复副本；schema 3 的旧 facts 仍可解码。分页完整性只由 `AccountFillLoadProvenance` 表达；`CoverageEvidence` 和 `FactCoverageInterval` 不再复制分页完成/截断标记，旧 coverage payload 仍可解码。未部署。
 
 必须保留的核心行为：单进程账户前提下不恢复 trading lease；当前持仓不恢复 position journal；订单累计成交只推进该订单状态/预留，账户成交才改变持仓；网络提交结果不确定时保留原命令身份并查证，避免重复 POST；成交 ID 去重、持仓版本/CAS、真实挂单冲突、账户流连续性、风险限额及明确的 pause/drain/halt 都直接对应真实业务约束。以上是审查边界，不授权额外增加校验。
