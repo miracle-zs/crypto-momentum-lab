@@ -12,6 +12,7 @@ from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResu
 from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.domain.strategy import StrategyDecision
 from crypto_momentum_lab.live_rollout.context import LiveDaemonRuntimeContext
+from crypto_momentum_lab.live_rollout.entry_control import TradingGateState
 from crypto_momentum_lab.live_rollout.entry_lane import (
     EntryExecutionLane,
     EntryLaneConfig,
@@ -74,10 +75,11 @@ async def test_symbol_level_isolation_allows_healthy_symbol_entry_when_other_sym
             run_id="run-live-1",
         ),
         clock=lambda: NOW,
-        entry_enabled=lambda: True,
         entry_enabled_reason=lambda: "ready",
         execute_candidate=mock_execute,
         invalidate_context=lambda: None,
+        trading_gate_state=lambda: TradingGateState.ACTIVE,
+        is_symbol_entry_allowed=lambda _symbol: (True, "entry_allowed"),
     )
 
     state = replace(_state(), symbol="ESPORTSUSDT")

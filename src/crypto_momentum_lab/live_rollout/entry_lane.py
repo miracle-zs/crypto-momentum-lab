@@ -103,6 +103,7 @@ class EntryLaneOutcome:
 class _EntryPolicyEvaluation:
     """One immutable policy evaluation shared by execution and telemetry."""
 
+    entry_enabled: bool
     decisions: tuple[CandidatePolicyDecision, ...] = ()
     skip_reason: str | None = None
     universe_snapshot_error: str | None = None
@@ -135,18 +136,16 @@ class EntryExecutionLane:
         *,
         config: EntryLaneConfig,
         clock: Callable[[], datetime],
-        entry_enabled: Callable[[], bool],
         entry_enabled_reason: Callable[[], str],
         execute_candidate: EntryCandidateExecutor,
         invalidate_context: Callable[[], None],
         telemetry: LiveTelemetrySink | None = None,
         signal_recorder: LiveSignalRecorderPort | None = None,
-        trading_gate_state: Callable[[], TradingGateState] | None = None,
-        is_symbol_entry_allowed: Callable[[str], tuple[bool, str]] | None = None,
+        trading_gate_state: Callable[[], TradingGateState],
+        is_symbol_entry_allowed: Callable[[str], tuple[bool, str]],
     ) -> None:
         self._config = config
         self._clock = clock
-        self._entry_enabled = entry_enabled
         self._entry_enabled_reason = entry_enabled_reason
         self._execute_candidate = execute_candidate
         self._invalidate_context = invalidate_context
@@ -183,6 +182,9 @@ class EntryExecutionLane:
         if recorder is None:
             return
         if policy_evaluation is None:
+            entry_enabled = (
+                self._trading_gate_state() == TradingGateState.ACTIVE
+            )
             policy_evaluation = self._evaluate_entry_policy(
                 decision=decision,
                 state=state,
@@ -192,6 +194,7 @@ class EntryExecutionLane:
                 entry_symbols=entry_symbols,
                 entry_filter_context=entry_filter_context,
                 filter_context=filter_context,
+                entry_enabled=entry_enabled,
             )
         candidate_filter_results: dict[str, object] = {}
         for candidate in decision.candidates:
@@ -256,7 +259,7 @@ class EntryExecutionLane:
         }
         details.update(
             {
-                "entry_enabled": self._entry_enabled(),
+                "entry_enabled": policy_evaluation.entry_enabled,
                 "entry_enabled_reason": self._entry_enabled_reason(),
                 "entry_long_only": self._config.entry_long_only,
                 "entry_symbol_pool_configured": entry_symbols is not None,
@@ -323,22 +326,16 @@ class EntryExecutionLane:
         gate_reasons: tuple[str, ...] = (),
         recorded_at: datetime,
     ) -> EntryLaneOutcome:
-        gate_active = (
-            self._trading_gate_state() == TradingGateState.ACTIVE
-            if self._trading_gate_state is not None
-            else True
-        )
+        gate_state = self._trading_gate_state()
+        gate_active = gate_state == TradingGateState.ACTIVE
         effective_gate_reasons = tuple(gate_reasons)
-        if self._trading_gate_state is not None:
-            gate_state = self._trading_gate_state()
-            if gate_state != TradingGateState.ACTIVE:
-                reason = self._entry_enabled_reason() or str(gate_state.value)
-                if reason not in effective_gate_reasons:
-                    effective_gate_reasons = (*effective_gate_reasons, reason)
+        if not gate_active:
+            reason = self._entry_enabled_reason() or str(gate_state.value)
+            if reason not in effective_gate_reasons:
+                effective_gate_reasons = (*effective_gate_reasons, reason)
 
         has_entry_candidates = (
             gate_active
-            and self._entry_enabled()
             and any(not candidate.reduce_only for candidate in decision.candidates)
         )
         if has_entry_candidates and self._config.entry_symbol_loader is not None:
@@ -412,6 +409,7 @@ class EntryExecutionLane:
             gate_reasons=effective_gate_reasons,
             entry_symbols=self._entry_symbols,
             entry_filter_context=entry_filter_context,
+            entry_enabled=gate_active,
             filter_context={
                 "context_available": True,
                 "gate_approved": True,
@@ -458,19 +456,16 @@ class EntryExecutionLane:
                         reason="position_facts_not_ready",
                     )
                     continue
-                if self._is_symbol_entry_allowed is not None:
-                    allowed, reason = self._is_symbol_entry_allowed(
-                        candidate.symbol
+                allowed, reason = self._is_symbol_entry_allowed(candidate.symbol)
+                if not allowed:
+                    log.info(
+                        "entry_candidate_rejected_by_symbol_gate",
+                        run_id=self._config.run_id,
+                        symbol=candidate.symbol,
+                        candidate_id=candidate.candidate_id,
+                        reason=reason,
                     )
-                    if not allowed:
-                        log.info(
-                            "entry_candidate_rejected_by_symbol_gate",
-                            run_id=self._config.run_id,
-                            symbol=candidate.symbol,
-                            candidate_id=candidate.candidate_id,
-                            reason=reason,
-                        )
-                        continue
+                    continue
                 evaluation = policy_evaluation.decision_for(candidate.candidate_id)
                 if (
                     policy_evaluation.skip_reason is not None
@@ -516,13 +511,17 @@ class EntryExecutionLane:
         entry_symbols: frozenset[str] | None,
         entry_filter_context: LiveEntryFilterContext | None,
         filter_context: Mapping[str, object] | None,
+        entry_enabled: bool,
     ) -> _EntryPolicyEvaluation:
         context_available = (filter_context or {}).get(
             "context_available",
             context is not None,
         )
         if context_available is False:
-            return _EntryPolicyEvaluation(skip_reason="context_unavailable")
+            return _EntryPolicyEvaluation(
+                skip_reason="context_unavailable",
+                entry_enabled=entry_enabled,
+            )
 
         universe_snapshot: UniverseRankingSnapshot | None = None
         universe_snapshot_error: str | None = None
@@ -544,12 +543,6 @@ class EntryExecutionLane:
         )
         ema5 = None if entry_filter_context is None else entry_filter_context.ema5
         ema10 = None if entry_filter_context is None else entry_filter_context.ema10
-        gate_active = (
-            self._trading_gate_state() == TradingGateState.ACTIVE
-            if self._trading_gate_state is not None
-            else True
-        )
-        effective_entry_enabled = gate_active and self._entry_enabled()
         source_trace = state_trace_id(state, LIVE_LANE_ENTRY)
         decisions: list[CandidatePolicyDecision] = []
         for candidate in decision.candidates:
@@ -570,17 +563,14 @@ class EntryExecutionLane:
                     *candidate_gate_reasons,
                     f"symbol_fact_pending:{candidate.symbol}",
                 )
-            if self._is_symbol_entry_allowed is not None:
-                allowed, symbol_reason = self._is_symbol_entry_allowed(
-                    candidate.symbol
-                )
-                if not allowed and symbol_reason not in candidate_gate_reasons:
-                    candidate_gate_reasons = (*candidate_gate_reasons, symbol_reason)
+            allowed, symbol_reason = self._is_symbol_entry_allowed(candidate.symbol)
+            if not allowed and symbol_reason not in candidate_gate_reasons:
+                candidate_gate_reasons = (*candidate_gate_reasons, symbol_reason)
             evaluation = evaluate_entry_candidate(
                 candidate=candidate,
                 source_trace_id=source_trace,
                 gate_reasons=candidate_gate_reasons,
-                entry_enabled=effective_entry_enabled,
+                entry_enabled=entry_enabled,
                 entry_long_only=self._config.entry_long_only,
                 entry_symbols=entry_symbols,
                 universe_snapshot=universe_snapshot,
@@ -610,6 +600,7 @@ class EntryExecutionLane:
         return _EntryPolicyEvaluation(
             decisions=tuple(decisions),
             universe_snapshot_error=universe_snapshot_error,
+            entry_enabled=entry_enabled,
         )
 
 

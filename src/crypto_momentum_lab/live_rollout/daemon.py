@@ -364,7 +364,6 @@ class LiveStrategyDaemon:
         self._entry_lane = EntryExecutionLane(
             config=config,
             clock=self._clock,
-            entry_enabled=lambda: self.entry_enabled,
             entry_enabled_reason=lambda: self.entry_enabled_reason,
             execute_candidate=self._submission.execute,
             invalidate_context=self._context_runtime.invalidate,
