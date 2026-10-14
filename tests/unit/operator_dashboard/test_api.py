@@ -443,3 +443,32 @@ def test_api_endpoints_return_x_cache_status_header() -> None:
         resp3 = client.get("/api/overview", auth=DASHBOARD_BASIC_AUTH)
         assert resp3.status_code == 200
         assert resp3.headers.get("X-Cache-Status") == "STALE"
+
+
+def test_risk_execution_poll_does_not_return_an_expired_cache_snapshot(
+    monkeypatch,
+) -> None:
+    import time
+
+    from crypto_momentum_lab.operator_dashboard import api
+
+    # Match a dashboard poll that arrives after the short default cache TTL.
+    # Safety data should be refreshed synchronously instead of being labeled
+    # stale on every normal poll while an invisible background refresh runs.
+    monkeypatch.setattr(api, "_RISK_EXECUTION_CACHE_TTL_SECONDS", 0.02)
+    with TestClient(
+        create_dashboard_app(
+            queries=FakeQueries(),
+            default_stale_grace_seconds=1.0,
+            **DASHBOARD_AUTH_KWARGS,
+        )
+    ) as client:
+        first = client.get("/api/risk-execution", auth=DASHBOARD_BASIC_AUTH)
+        assert first.status_code == 200
+        assert first.headers.get("X-Cache-Status") == "MISS"
+
+        time.sleep(0.03)
+        next_poll = client.get("/api/risk-execution", auth=DASHBOARD_BASIC_AUTH)
+
+    assert next_poll.status_code == 200
+    assert next_poll.headers.get("X-Cache-Status") != "STALE"

@@ -64,6 +64,10 @@ _PAPER_EQUITY_CACHE_TTL_SECONDS = 30.0
 _PAPER_EQUITY_STALE_GRACE_SECONDS = 60.0
 _DEFAULT_STALE_GRACE_SECONDS = 60.0
 _OVERVIEW_CACHE_TTL_SECONDS = 15.0
+# The risk panel polls every 15 seconds. Keep its cached read model aligned
+# with that cadence and wait for a fresh snapshot after expiry instead of
+# labeling the normal next poll stale while a background refresh runs.
+_RISK_EXECUTION_CACHE_TTL_SECONDS = 15.0
 _OVERVIEW_QUERY_TIMEOUT_SECONDS = 10.0
 # Performance aggregates decision SLO + checkpoint + market + host reads.
 # A cold 24h SLO scan can exceed a browser poll interval; keep a longer TTL
@@ -777,7 +781,8 @@ def create_dashboard_app(
         return await response_cache.get(
             "risk-execution",
             query_service().risk_execution,
-            stale_while_revalidate_seconds=default_stale_grace_seconds,
+            ttl_seconds=_RISK_EXECUTION_CACHE_TTL_SECONDS,
+            stale_while_revalidate_seconds=0.0,
         )
 
     @dashboard.get(
