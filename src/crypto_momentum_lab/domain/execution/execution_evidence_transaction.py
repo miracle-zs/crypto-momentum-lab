@@ -135,6 +135,9 @@ async def observe_evidence_transaction(
                 ),
                 has_active_commands=_has_active_commands(book, key),
             )
+            authoritative_flat_rebase = (
+                evidence.account_snapshot_is_flat and can_rollover
+            )
             if recovery_proof_required:
                 return WaitingForEvidence(
                     evidence_id=evidence.evidence_id,
@@ -196,7 +199,7 @@ async def observe_evidence_transaction(
                                 )
                             )
                         current_book = candidate._books.get(canon)
-                        if (
+                        if not authoritative_flat_rebase and (
                             current_book is None
                             or current_book.get_view().projection_version
                             != head.projection_version
@@ -218,7 +221,11 @@ async def observe_evidence_transaction(
                                 )
                     else:
                         current_view = candidate._ensure_book(key).get_view()
-                        if current_view.projection_version != head.projection_version:
+                        if (
+                            not authoritative_flat_rebase
+                            and current_view.projection_version
+                            != head.projection_version
+                        ):
                             reloaded = await candidate._reload_position(key)
                             if (
                                 reloaded is None

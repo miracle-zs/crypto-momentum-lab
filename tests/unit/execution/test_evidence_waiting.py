@@ -23,6 +23,7 @@ from crypto_momentum_lab.domain.execution.observation_models import (
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
 )
+from crypto_momentum_lab.domain.execution.recovery_models import AccountFacts
 from crypto_momentum_lab.domain.execution.snapshot_encoding import (
     stable_snapshot_anchor_id,
 )
@@ -170,6 +171,56 @@ async def test_empty_account_snapshot_without_position_rows_resets_known_head():
         assert view.stream_scope == AccountFactStreamScope.for_position_key(
             SCOPE.to_position_key(), stream_id="hub", stream_epoch="next"
         )
+    finally:
+        await coordinator.aclose()
+
+
+async def test_empty_account_snapshot_replaces_local_projection_mismatched_with_head():
+    book = await restored_book()
+    key = SCOPE.to_position_key()
+    old_scope = AccountFactStreamScope.for_position_key(
+        key, stream_id="hub", stream_epoch="epoch"
+    )
+    book._books[key.canonical_id].apply_delta(
+        AccountFacts(
+            position_key=key,
+            fills=(fill("unpersisted-local-fill", "1", entry=True),),
+            stream_scope=old_scope,
+            prefix_facts_complete=False,
+        )
+    )
+    observed_at = NOW + timedelta(seconds=2)
+    account_snapshot = AccountSnapshot(
+        config=AccountConfigSnapshot(
+            environment="live",
+            account_label="primary",
+            multi_assets_mode=False,
+            hedge_mode=False,
+            fee_tier=None,
+            observed_at=observed_at,
+            raw_payload={},
+        ),
+        balances=(),
+        positions=(snapshot("0"),),
+        open_orders=(),
+    )
+    coordinator = OrderExecutionCoordinator(
+        backend=SimpleNamespace(),
+        account_label="primary",
+        environment="live",
+        execution_book=book,
+    )
+    try:
+        await coordinator.observe_account_snapshot(
+            account_snapshot,
+            stream_id="hub",
+            stream_epoch="next",
+            sequence=1,
+        )
+
+        view = await book.read(SCOPE, stream_id="hub", stream_epoch="next")
+        assert view.total_quantity == Decimal("0")
+        assert book._execution_unit_of_work.head.stream_epoch == "next"
     finally:
         await coordinator.aclose()
 
