@@ -150,6 +150,9 @@ class LiveEntryControlGate:
             raise TypeError("enabled must be a bool")
         if not reason.strip():
             raise ValueError("reason must not be empty")
+        self._apply_entry_enabled(enabled, reason=reason)
+
+    def _apply_entry_enabled(self, enabled: bool, *, reason: str) -> None:
         if self._entry_enabled == enabled and self._entry_enabled_reason == reason:
             return
         state_changed = self._entry_enabled != enabled
@@ -194,18 +197,18 @@ class LiveEntryControlGate:
             raise ValueError("market_state_unavailable_reason must not be empty")
 
         if session_draining:
-            self.set_entry_enabled(False, reason="session_draining")
+            self._apply_entry_enabled(False, reason="session_draining")
         elif not strategy_warmup_ready:
-            self.set_entry_enabled(False, reason=strategy_warmup_reason)
+            self._apply_entry_enabled(False, reason=strategy_warmup_reason)
         elif not market_state_available:
-            self.set_entry_enabled(
+            self._apply_entry_enabled(
                 False,
                 reason=market_state_unavailable_reason,
             )
         elif not self._entry_filter_cache_ready:
-            self.set_entry_enabled(False, reason="entry_cache_warming")
+            self._apply_entry_enabled(False, reason="entry_cache_warming")
         else:
-            self.set_entry_enabled(
+            self._apply_entry_enabled(
                 True,
                 reason="live_entry_prerequisites_ready",
             )

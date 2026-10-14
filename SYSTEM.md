@@ -707,4 +707,6 @@ primary 新进程启动暴露两个接线问题：账户读取硬编码 Multi-As
 
 第 2 项已收敛当前内存状态：持仓 head schema 4 不再分别保存 `active_episode.batches`、`active_batches` 和 `total_active_quantity`；后两者从活动 episode 即时推导。旧 schema 3 仍可恢复，恢复 checkpoint 的摘要编码保持原样。`PositionBook` 用一个不可变 `_CurrentPositionState` 整体替换当前投影与续接所需的来源事实，不再分别维护可变的 `_projection` 和 `_facts`。当前数量、批次、成本和退出责任由投影表达；最近账户快照、覆盖范围、成交 provenance、恢复锚点和退出边界是该状态的来源证据，增量成交接纳、空仓确认和后续完整扫描仍会读取。head 已用单个 `position_state` 持久化当前状态，其中 `projection` 与 `verification` 承载上述两类字段；本次没有改写 head schema 或丢弃仍被读取的来源证据。账户 facts schema 4 在 `coverage.load_provenance` 与顶层值完全相同时省去顶层重复副本；schema 3 的旧 facts 仍可解码。分页完整性只由 `AccountFillLoadProvenance` 表达；`CoverageEvidence` 和 `FactCoverageInterval` 不再复制分页完成/截断标记，旧 coverage payload 仍可解码。未部署。
 
+第 4 项已移除一个重复 validator：`LiveEntryControlGate.refresh_entry_prerequisites` 在入口验证参数后，直接应用选出的状态，不再调用会重复检查同一原因与内部布尔值的公开 setter；公开 `set_entry_enabled` 仍验证自己的调用输入。`tests/unit/live_rollout/test_entry_control.py` 与状态矩阵测试共 11 项通过。检查过的 daemon 转发方法仍是运行时使用的公开接口，当前没有删除依据；尚未找到可直接删掉且不改变边界的 pass-through 模块。
+
 必须保留的核心行为：单进程账户前提下不恢复 trading lease；当前持仓不恢复 position journal；订单累计成交只推进该订单状态/预留，账户成交才改变持仓；网络提交结果不确定时保留原命令身份并查证，避免重复 POST；成交 ID 去重、持仓版本/CAS、真实挂单冲突、账户流连续性、风险限额及明确的 pause/drain/halt 都直接对应真实业务约束。以上是审查边界，不授权额外增加校验。
