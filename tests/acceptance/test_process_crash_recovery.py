@@ -87,6 +87,7 @@ from crypto_momentum_lab.domain.execution.order_submission import (
     OrderSubmissionPreparation,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
+from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
 from crypto_momentum_lab.domain.execution.trade_command import TradeCommandType
 from crypto_momentum_lab.domain.trading import TradeSide
 from crypto_momentum_lab.execution_account.orders.coordinator import (
@@ -97,6 +98,7 @@ from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
     ExecutionTransaction,
 )
 from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
+    ExecutionBookHeadRow,
     ExecutionTradeIdentityRow,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
@@ -107,9 +109,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
 )
 from crypto_momentum_lab.persistence.postgres.order_submission_repository import (
     PostgresOrderSubmissionRepository,
-)
-from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
-    PositionFactJournalEventRow,
 )
 from crypto_momentum_lab.persistence.postgres.session import (
     create_async_database_engine,
@@ -863,16 +862,21 @@ async def test_committed_facts_restore_quantity_cost_and_deduplication(
             ("facts-trade-1", "ord-facts", Decimal("1.5"), Decimal("100")),
             ("facts-trade-2", "ord-facts", Decimal("0.5"), Decimal("120")),
         }
-        # Two real fills were committed; a restart must not synthesize a third.
-        assert (
-            await _row_count(
-                factory,
-                PositionFactJournalEventRow,
-                PositionFactJournalEventRow.account_label == account,
-                PositionFactJournalEventRow.event_kind == "fill",
+        # The head stores current exposure; stable trade identities live apart.
+        async with factory() as session:
+            head = await session.get(
+                ExecutionBookHeadRow,
+                ("live", account, "BTCUSDT", "BOTH"),
             )
-            == 2
+        assert head is not None
+        position_state = head.state_payload["position_state"]
+        projection = PositionRecoveryCodec.decode_projection(
+            position_state["projection"]
         )
+        assert projection.total_active_quantity == Decimal("2")
+        assert PositionRecoveryCodec.decode_facts(
+            position_state["verification"]
+        ).fills == ()
 
         # An already-seen trade stays counted exactly once after the restart.
         for index in (0, 1):
@@ -941,8 +945,8 @@ async def test_commit_before_publication_restores_from_postgres_without_resend(
         assert reservations[0].active_quantity == Decimal("1")
         assert reservations[0].batch_id == view.batches[0].batch_id
 
-        # No re-synthesis: exactly the real trade identities and fact rows that
-        # the lost-publication transaction committed.
+        # The permanent trade identities and one complete head committed with
+        # the lost-publication transaction.
         async with factory() as session:
             identity_rows = (
                 await session.scalars(
@@ -953,25 +957,20 @@ async def test_commit_before_publication_restores_from_postgres_without_resend(
             ).all()
         assert len(identity_rows) == 1
         assert identity_rows[0].trade_id == "before_publication-trade-1"
-        assert (
-            await _row_count(
-                factory,
-                PositionFactJournalEventRow,
-                PositionFactJournalEventRow.account_label == account,
-                PositionFactJournalEventRow.event_kind == "fill",
+        async with factory() as session:
+            head = await session.get(
+                ExecutionBookHeadRow,
+                ("live", account, "BTCUSDT", "BOTH"),
             )
-            == 1
+        assert head is not None
+        position_state = head.state_payload["position_state"]
+        projection = PositionRecoveryCodec.decode_projection(
+            position_state["projection"]
         )
-        # The exit boundary was committed in that same unpublished transaction.
-        assert (
-            await _row_count(
-                factory,
-                PositionFactJournalEventRow,
-                PositionFactJournalEventRow.account_label == account,
-                PositionFactJournalEventRow.event_kind == "boundary",
-            )
-            == 1
-        )
+        assert projection.total_active_quantity == Decimal("2")
+        facts = PositionRecoveryCodec.decode_facts(position_state["verification"])
+        assert facts.fills == ()
+        assert len(facts.exit_boundaries) == 1
 
         # No re-send: the durable unknown identity must never be re-prepared.
         calls: list[object] = []

@@ -10,7 +10,6 @@ from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
     AccountPositionSnapshot,
 )
-from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.ports import (
     DecisionCommitConflict,
@@ -325,16 +324,7 @@ class MemoryRepairUow:
 
 
 def reloaded_view(plan):
-    return PositionBook(
-        AccountJournal.from_durable_cut(
-            DurableJournalCut(
-                scope=plan.request.scope,
-                facts=plan.facts,
-                revision=plan.revision,
-                as_of=NOW,
-            )
-        )
-    ).get_view()
+    return PositionBook.from_facts(plan.facts).get_view()
 
 
 @pytest.mark.parametrize(
@@ -363,9 +353,7 @@ async def test_unproven_repair_rolls_back_without_reload(reason):
     if reason == "wrong_scope":
         other_scope = replace(request.scope, stream_epoch="other")
         prov = (
-            replace(
-                loaded.cut.facts.fill_load_provenance, stream_scope=other_scope
-            )
+            replace(loaded.cut.facts.fill_load_provenance, stream_scope=other_scope)
             if loaded.cut.facts.fill_load_provenance
             else None
         )
@@ -426,7 +414,10 @@ async def test_repair_reloads_only_after_commit_and_is_idempotent():
         replace(
             loaded,
             cut=DurableJournalCut(
-                scope=request.scope, facts=plan.facts, revision=plan.revision, as_of=NOW
+                scope=request.scope,
+                facts=plan.facts,
+                revision=plan.expected_head_revision + int(plan.needs_write),
+                as_of=NOW,
             ),
             head=ExecutionHeadSnapshot(
                 1, "hub", "epoch", plan.projection_version, plan.head_payload
@@ -483,9 +474,7 @@ def test_unowned_current_entry_cannot_borrow_old_strategy_ownership(mixed):
     if mixed:
         external = replace(external, trade_id="manual-fill", quantity=Decimal("1"))
         request = replace(request, expected_quantity=Decimal("3"))
-        cur_snap = replace(
-            loaded.cut.facts.snapshots[1], position_amt=Decimal("3")
-        )
+        cur_snap = replace(loaded.cut.facts.snapshots[1], position_amt=Decimal("3"))
         loaded = replace(
             loaded,
             cut=replace(
@@ -508,6 +497,9 @@ def test_unowned_current_entry_cannot_borrow_old_strategy_ownership(mixed):
 )
 async def test_strict_reload_validates_before_publishing_book(corruption):
     from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+    from crypto_momentum_lab.domain.execution.execution_head import (
+        decode_execution_head_state,
+    )
     from crypto_momentum_lab.domain.execution.ports import DurableExecutionPositionState
 
     request, loaded = repair_case()
@@ -516,7 +508,7 @@ async def test_strict_reload_validates_before_publishing_book(corruption):
     epoch = "epoch"
     expected_quantity = request.expected_quantity
     if corruption == "facts_hash":
-        payload["facts_hash"] = "corrupt"
+        payload["position_state"]["projection"]["total_active_quantity"] = "9"
     if corruption == "epoch":
         epoch = "other"
     if corruption == "reservation":
@@ -526,7 +518,12 @@ async def test_strict_reload_validates_before_publishing_book(corruption):
     state = DurableExecutionPositionState(
         scope=request.scope,
         cut=DurableJournalCut(
-            scope=request.scope, facts=plan.facts, revision=plan.revision, as_of=NOW
+            scope=request.scope,
+            facts=decode_execution_head_state(
+                payload, key=request.key, scope=request.scope
+            ).current_facts,
+            revision=plan.expected_head_revision,
+            as_of=NOW,
         ),
         head=ExecutionHeadSnapshot(1, "hub", epoch, plan.projection_version, payload),
         trade_ids=("fill-1",),
@@ -570,9 +567,6 @@ async def test_postgres_adapter_uses_normal_trade_fact_and_head_cas_contract():
     receipt = await PostgresPositionRepairTransaction(tx).persist_repair(plan)
     assert receipt.changed and receipt.head_revision == 1
     tx.record_trade.assert_awaited_once()
-    tx.persist_facts.assert_awaited_once_with(
-        scope=request.scope, facts=plan.facts, revision=plan.revision, delta=plan.delta
-    )
     head = tx.persist_head.await_args.kwargs
     assert head["expected_revision"] == 0
     assert head["stream_epoch"] == "epoch"
@@ -582,7 +576,6 @@ async def test_postgres_adapter_uses_normal_trade_fact_and_head_cas_contract():
         replace(plan, needs_write=False)
     )
     tx.record_trade.assert_not_awaited()
-    tx.persist_facts.assert_not_awaited()
     tx.persist_head.assert_not_awaited()
 
 
@@ -640,7 +633,6 @@ async def test_repair_reads_exact_account_run_and_hedge_side():
     tx = AsyncMock()
     tx.session.scalars.side_effect = results
     tx.load_head.return_value = None
-    tx.load_recovery.return_value = loaded.cut
     actual = await adapter.PostgresPositionRepairTransaction(tx).load_repair_facts(
         request
     )
@@ -654,7 +646,7 @@ async def test_repair_reads_exact_account_run_and_hedge_side():
     assert "reduce_only IS false" in str(queries[0])
     assert set(queries[1].params.values()) == {"live", "account-3", "TESTUSDT"}
     tx.load_head.assert_awaited_once_with(request.key)
-    assert tx.load_recovery.await_args.kwargs["scope"] == request.scope
+    tx.load_current_cut.assert_not_awaited()
 
 
 async def test_repair_filters_checkpoint_fills_without_forging_cursor_coverage():
@@ -781,8 +773,13 @@ async def test_repair_filters_checkpoint_fills_without_forging_cursor_coverage()
     tx = AsyncMock()
     tx.session.scalars.side_effect = results
     tx.session.scalar.return_value = cursor_row
-    tx.load_head.return_value = None
-    tx.load_recovery.return_value = cut_with_checkpoint
+    from types import SimpleNamespace
+
+    tx.load_head.return_value = SimpleNamespace(
+        stream_id=request.scope.stream_id,
+        stream_epoch=request.scope.stream_epoch,
+    )
+    tx.load_current_cut.return_value = cut_with_checkpoint
 
     actual = await adapter.PostgresPositionRepairTransaction(tx).load_repair_facts(
         request

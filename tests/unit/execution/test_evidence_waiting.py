@@ -401,7 +401,7 @@ async def test_partial_scan_waits_but_complete_inconsistent_scan_is_a_conflict(
     )
     if complete:
         assert isinstance(result, EvidenceConflict)
-        assert "validated recovery checkpoint" in result.reason
+        assert "ready checkpoint" in result.reason
     else:
         assert isinstance(result, WaitingForEvidence)
         assert result.reason is EvidencePendingReason.STREAM_RECOVERY_PROOF_REQUIRED

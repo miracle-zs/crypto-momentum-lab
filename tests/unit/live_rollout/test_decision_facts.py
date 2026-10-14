@@ -474,7 +474,7 @@ async def test_newly_committed_exit_defers_without_stopping_market_consumer(
     elif mismatch == "dispatch_recovery":
         handler.side_effect = RuntimeError(
             "ExecutionBook applied order facts but reservation settlement "
-            "requires recovery: Filled terminal lacks complete account trade facts"
+            "requires recovery: cumulative fill exceeds linked active reservations"
         )
     else:
         handler.side_effect = OSError("exchange response is unknown")

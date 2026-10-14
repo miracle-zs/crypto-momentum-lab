@@ -57,15 +57,14 @@ async def test_reads_obey_cut_account_and_stream_identity():
             )
         )
     current = await book.read(scope, stream_id="trades", stream_epoch="one")
-    historical = await book.read(
-        scope,
-        event_cut=start + timedelta(seconds=1),
-        stream_id="trades",
-        stream_epoch="one",
-    )
     assert current.total_quantity == Decimal("2")
-    assert historical.total_quantity == Decimal("1")
-    assert historical.projection_version != current.projection_version
+    with pytest.raises(ValueError, match="historical position cuts are not held in memory"):
+        await book.read(
+            scope,
+            event_cut=start + timedelta(seconds=1),
+            stream_id="trades",
+            stream_epoch="one",
+        )
     assert (
         await book.list_position_views(environment="live", account_label="someone-else")
         == ()

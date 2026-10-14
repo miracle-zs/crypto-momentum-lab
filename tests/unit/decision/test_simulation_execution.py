@@ -2,8 +2,7 @@
 
 Tests:
 1. Versioned FillModel validation and slippage calculations (BUY vs SELL);
-2. Entry execution creating canonical AccountFillEvent and AccountPositionSnapshot
-   in AccountJournal;
+2. Entry execution updating the current position state;
 3. Exit execution against reserved lots and coordinator fill reconciliation;
 4. Enforcement of invariants (e.g. non-exit commands rejected).
 """
@@ -13,18 +12,23 @@ from decimal import Decimal
 
 import pytest
 
+from crypto_momentum_lab.domain.account import (
+    AccountFillEvent,
+    AccountPositionSnapshot,
+)
 from crypto_momentum_lab.domain.decision.simulation_execution import (
     FillModel,
     SimulationExecutionAdapter,
 )
-from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
+from crypto_momentum_lab.domain.execution.position_book import PositionBook
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionHealthStatus,
     PositionKey,
     PositionLedgerBatch,
     PositionView,
 )
+from crypto_momentum_lab.domain.execution.recovery_models import AccountFacts
 from crypto_momentum_lab.domain.execution.reservation_registry import (
     ReservationRegistry,
 )
@@ -128,7 +132,7 @@ def test_simulation_execution_entry_flow() -> None:
         symbol="BTCUSDT",
         position_side=FuturesPositionSide.BOTH,
     )
-    journal = AccountJournal(pos_key)
+    position = PositionBook(pos_key)
     adapter = SimulationExecutionAdapter()
 
     intent = OrderIntentCandidate(
@@ -150,7 +154,7 @@ def test_simulation_execution_entry_flow() -> None:
         features={"score": 1.0},
     )
 
-    fill_result = adapter.execute_entry(intent, menv, journal)
+    fill_result = adapter.execute_entry(intent, menv, position)
 
     assert fill_result.symbol == "BTCUSDT"
     assert fill_result.side == "BUY"
@@ -158,13 +162,8 @@ def test_simulation_execution_entry_flow() -> None:
     assert fill_result.price > Decimal("65000.00")  # slippage added
     assert fill_result.fee > Decimal("0")
 
-    # Verify journal facts
-    facts = journal.read_cut()
-    assert len(facts.fills) == 1
-    assert facts.fills[0].trade_id == fill_result.fill_id
-    assert facts.fills[0].quantity == fill_result.quantity
-    assert len(facts.snapshots) == 1
-    assert facts.snapshots[0].position_amt == fill_result.quantity
+    assert position.projection.total_active_quantity == fill_result.quantity
+    assert position.current_facts.snapshots[0].position_amt == fill_result.quantity
 
 
 def test_simulation_execution_exit_flow_with_reservation() -> None:
@@ -177,7 +176,43 @@ def test_simulation_execution_exit_flow_with_reservation() -> None:
         symbol="BTCUSDT",
         position_side=FuturesPositionSide.BOTH,
     )
-    journal = AccountJournal(pos_key)
+    opening_fill = AccountFillEvent(
+        environment="paper",
+        account_label="paper_account",
+        symbol="BTCUSDT",
+        trade_id="seed-long",
+        order_id="seed-order-long",
+        side="BUY",
+        price=Decimal("65000.00"),
+        quantity=Decimal("0.5"),
+        realized_pnl=Decimal("0"),
+        fee=Decimal("0"),
+        fee_asset="USDT",
+        trade_at=t0 - timedelta(hours=1),
+        raw_payload={"positionSide": "BOTH"},
+    )
+    opening_snapshot = AccountPositionSnapshot(
+        environment="paper",
+        account_label="paper_account",
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("0.5"),
+        entry_price=Decimal("65000.00"),
+        mark_price=Decimal("65000.00"),
+        unrealized_pnl=Decimal("0"),
+        notional=Decimal("32500.00"),
+        leverage=1,
+        margin_type="cross",
+        observed_at=t0 - timedelta(hours=1),
+        raw_payload={},
+    )
+    position = PositionBook.from_facts(
+        AccountFacts(
+            position_key=pos_key,
+            fills=(opening_fill,),
+            snapshots=(opening_snapshot,),
+        )
+    )
     coordinator = ReservationRegistry()
     adapter = SimulationExecutionAdapter()
 
@@ -239,7 +274,7 @@ def test_simulation_execution_exit_flow_with_reservation() -> None:
     fill_result = adapter.execute_exit(
         cmd,
         menv,
-        journal,
+        position,
         coordinator,
         reservation_id=reservations[0].reservation_id,
     )
@@ -250,7 +285,7 @@ def test_simulation_execution_exit_flow_with_reservation() -> None:
     expected_pnl = (fill_result.price - Decimal("65000.00")) * Decimal("0.5")
     assert fill_result.realized_pnl == expected_pnl
     assert fill_result.realized_pnl < Decimal("0")
-    assert journal.read_cut().fills[0].realized_pnl == expected_pnl
+    assert position.projection.total_active_quantity == 0
 
     # 3. Test SHORT exit (SHORT exit -> BUY)
     short_pos_key = PositionKey(
@@ -259,7 +294,24 @@ def test_simulation_execution_exit_flow_with_reservation() -> None:
         symbol="BTCUSDT",
         position_side=FuturesPositionSide.SHORT,
     )
-    short_journal = AccountJournal(short_pos_key)
+    short_opening_fill = AccountFillEvent(
+        environment="paper",
+        account_label="paper_account",
+        symbol="BTCUSDT",
+        trade_id="seed-short",
+        order_id="seed-order-short",
+        side="SELL",
+        price=Decimal("66000.00"),
+        quantity=Decimal("0.5"),
+        realized_pnl=Decimal("0"),
+        fee=Decimal("0"),
+        fee_asset="USDT",
+        trade_at=t0 - timedelta(hours=1),
+        raw_payload={"positionSide": "SHORT"},
+    )
+    short_position = PositionBook.from_facts(
+        AccountFacts(position_key=short_pos_key, fills=(short_opening_fill,))
+    )
     short_alloc = ExitAllocationPlan(
         position_key=short_pos_key,
         allocations=(
@@ -288,7 +340,7 @@ def test_simulation_execution_exit_flow_with_reservation() -> None:
     short_fill = adapter.execute_exit(
         short_cmd,
         menv,
-        short_journal,
+        short_position,
         coordinator,
     )
     assert short_fill.side == "BUY"
@@ -312,4 +364,4 @@ def test_simulation_execution_exit_flow_with_reservation() -> None:
         created_at=t0,
     )
     with pytest.raises(ValueError, match="execute_exit requires EXIT command_type"):
-        adapter.execute_exit(non_exit_cmd, menv, journal, coordinator)
+        adapter.execute_exit(non_exit_cmd, menv, position, coordinator)

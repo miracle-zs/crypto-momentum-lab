@@ -19,9 +19,6 @@ from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
     AccountPositionSnapshot,
 )
-from crypto_momentum_lab.domain.execution.account_journal import (
-    AccountJournal,
-)
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_book import PositionBook
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
@@ -36,6 +33,7 @@ from crypto_momentum_lab.domain.execution.reservation_registry import (
     ReservationRegistry,
     VersionConflictError,
 )
+from crypto_momentum_lab.domain.execution.recovery_models import AccountFacts
 from crypto_momentum_lab.domain.execution.trade_command import (
     ExitPolicyMode,
     TradeCommand,
@@ -80,7 +78,6 @@ def _exit_command(
 
 def _setup_two_batch_book() -> tuple[PositionBook, PositionKey]:
     key = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
-    journal = AccountJournal(key)
     t1 = _dt(10, 0)
     t_exit = _dt(10, 15)
     t2 = _dt(10, 30)
@@ -139,19 +136,19 @@ def _setup_two_batch_book() -> tuple[PositionBook, PositionKey]:
         observed_at=t2,
         raw_payload={},
     )
-    journal.append_fill(f1)
-    journal.record_boundary(boundary)
-    journal.append_fill(f2)
-    journal.record_snapshot(snap)
-    journal.set_coverage(
-        FactCoverageInterval(
-            start_at=t1,
-            end_at=t2,
-            status=FactCoverageStatus.CONFIRMED,
+    book = PositionBook.from_facts(
+        AccountFacts(
+            position_key=key,
+            fills=(f1, f2),
+            snapshots=(snap,),
+            exit_boundaries=(boundary,),
+            coverage=FactCoverageInterval(
+                start_at=t1,
+                end_at=t2,
+                status=FactCoverageStatus.CONFIRMED,
+            ),
         )
     )
-
-    book = PositionBook(journal)
     return book, key
 
 
@@ -252,7 +249,6 @@ def test_cas_version_fencing_rejects_stale_command() -> None:
         trade_at=t_new,
         raw_payload={"positionSide": "LONG", "is_system": True},
     )
-    book._journal.append_fill(f3)
     snap_new = AccountPositionSnapshot(
         environment="live",
         account_label="primary",
@@ -268,12 +264,17 @@ def test_cas_version_fencing_rejects_stale_command() -> None:
         observed_at=t_new,
         raw_payload={},
     )
-    book._journal.record_snapshot(snap_new)
-    book._journal.set_coverage(
-        FactCoverageInterval(
-            start_at=_dt(10, 0),
-            end_at=t_new,
-            status=FactCoverageStatus.CONFIRMED,
+    book.apply_delta(
+        AccountFacts(
+            position_key=key,
+            fills=(f3,),
+            snapshots=(snap_new,),
+            coverage=FactCoverageInterval(
+                start_at=_dt(10, 0),
+                end_at=t_new,
+                status=FactCoverageStatus.CONFIRMED,
+            ),
+            prefix_facts_complete=False,
         )
     )
     newer_view = book.get_view(now=t_new)

@@ -185,9 +185,7 @@ class A3aExchange:
     ) -> None:
         pass
 
-    async def submit_order(
-        self, plan: OrderExecutionPlan
-    ) -> ExchangeOrderSnapshot:
+    async def submit_order(self, plan: OrderExecutionPlan) -> ExchangeOrderSnapshot:
         if not plan.reduce_only:
             self.entry_posts += 1
             self.calls.append(f"submit_entry:{plan.client_order_id}")
@@ -214,8 +212,9 @@ class A3aExchange:
 
 
 @pytest.mark.asyncio
-async def test_a3a_entry_timeout_releases_key_worker_and_exit_posts_before_get_releases(
-) -> None:
+async def test_a3a_entry_timeout_releases_key_worker_and_exit_posts_before_get_releases() -> (
+    None
+):
     recovery_gate = asyncio.Event()
     exit_reached = asyncio.Event()
     exchange = A3aExchange(recovery_gate, exit_reached)
@@ -306,10 +305,7 @@ async def test_a3a_entry_timeout_releases_key_worker_and_exit_posts_before_get_r
         reference_price=Decimal("50000"),
     )
     assert entry_result is not None
-    assert (
-        entry_result.state
-        is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
-    )
+    assert entry_result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
     assert exchange.entry_posts == 1
     assert pending_registry.has_uncertain_entry("BTCUSDT")
     notional, symbols = pending_registry.reservation(())
@@ -369,9 +365,7 @@ async def test_a3b_all_io_entrypoints_assert_no_application_locks_held() -> None
         ) -> None:
             pass
 
-        async def submit_order(
-            self, plan: OrderExecutionPlan
-        ) -> ExchangeOrderSnapshot:
+        async def submit_order(self, plan: OrderExecutionPlan) -> ExchangeOrderSnapshot:
             assert not position_locks.is_locked(pos_key)
             self.post_count += 1
             return ExchangeOrderSnapshot(
@@ -510,9 +504,7 @@ async def test_a3b_all_io_entrypoints_assert_no_application_locks_held() -> None
                 is_replay=False,
             )
 
-        async def mark_exit_dispatched(
-            self, decision_id: str, command_id: str
-        ) -> bool:
+        async def mark_exit_dispatched(self, decision_id: str, command_id: str) -> bool:
             assert not self._source._commit_lock.locked()
             return True
 
@@ -692,9 +684,7 @@ async def test_a3b_all_io_entrypoints_assert_no_application_locks_held() -> None
             self.persisted_heads: dict[str, Any] = {}
 
         @asynccontextmanager
-        async def transaction(
-            self, key: PositionKey, account_scope: str | None = None
-        ):
+        async def transaction(self, key: PositionKey, account_scope: str | None = None):
             # Assert application mutation lock is NOT held during database transaction!
             assert not self._book._mutation_lock(key).locked()
             self.tx_count += 1
@@ -720,9 +710,6 @@ async def test_a3b_all_io_entrypoints_assert_no_application_locks_held() -> None
 
             tx.load_head = AsyncMock(side_effect=_load_head)
             tx.save_reservations = AsyncMock()
-            tx.persist_facts = AsyncMock(
-                return_value=MagicMock(has_conflicts=False, revision=1)
-            )
             tx.persist_watermark = AsyncMock()
             tx.persist_head = AsyncMock(side_effect=_persist_head)
             tx.record_evidence = AsyncMock(
@@ -930,12 +917,21 @@ async def test_a3b_all_io_entrypoints_assert_no_application_locks_held() -> None
                 repair.projection_version,
                 repair.head_payload,
             )
+            from crypto_momentum_lab.domain.execution.execution_head import (
+                decode_execution_head_state,
+            )
+
+            current_book = decode_execution_head_state(
+                repair.head_payload,
+                key=repair.request.key,
+                scope=repair.request.scope,
+            )
             uow_checker.position_state = DurableExecutionPositionState(
                 repair.request.scope,
                 DurableJournalCut(
                     scope=repair.request.scope,
-                    facts=repair.facts,
-                    revision=repair.revision,
+                    facts=current_book.current_facts,
+                    revision=receipt.head_revision,
                     as_of=NOW,
                 ),
                 head,
@@ -967,8 +963,9 @@ async def test_a3b_all_io_entrypoints_assert_no_application_locks_held() -> None
 
 
 @pytest.mark.asyncio
-async def test_a3c_concurrent_exits_atomic_reservation_allows_at_most_one_post(
-) -> None:
+async def test_a3c_concurrent_exits_atomic_reservation_allows_at_most_one_post() -> (
+    None
+):
     # 1. Concurrent exits: only one can atomically reserve batch quantity 40.7
     book = ExecutionBook()
     scope = ExecutionScope("live", "primary", "ORCAUSDT", FuturesPositionSide.LONG)
@@ -1026,9 +1023,7 @@ async def test_a3c_concurrent_exits_atomic_reservation_allows_at_most_one_post(
         ) -> None:
             pass
 
-        async def submit_order(
-            self, plan: OrderExecutionPlan
-        ) -> ExchangeOrderSnapshot:
+        async def submit_order(self, plan: OrderExecutionPlan) -> ExchangeOrderSnapshot:
             nonlocal post_count
             post_count += 1
             return ExchangeOrderSnapshot(
@@ -1083,9 +1078,7 @@ async def test_a3c_concurrent_exits_atomic_reservation_allows_at_most_one_post(
                 created_at=NOW,
             )
             prep_acc = OrderSubmissionPreparation(
-                intent=replace(
-                    _intent(), candidate_id=req_id, reduce_only=True
-                ),
+                intent=replace(_intent(), candidate_id=req_id, reduce_only=True),
                 evaluation=RiskEvaluation(
                     evaluation_id=f"ev-a3c-{req_id}",
                     candidate_id=req_id,
@@ -1208,9 +1201,7 @@ async def test_a3d_caller_cancellation_and_missing_fill_price() -> None:
         ),
     )
 
-    task = asyncio.create_task(
-        coordinator.prepare_and_execute(plan, preparation=prep)
-    )
+    task = asyncio.create_task(coordinator.prepare_and_execute(plan, preparation=prep))
     await asyncio.wait_for(post_started.wait(), timeout=5.0)
 
     # Cancel the caller task.
@@ -1240,9 +1231,7 @@ async def test_a3d_caller_cancellation_and_missing_fill_price() -> None:
         ) -> None:
             pass
 
-        async def submit_order(
-            self, plan: OrderExecutionPlan
-        ) -> ExchangeOrderSnapshot:
+        async def submit_order(self, plan: OrderExecutionPlan) -> ExchangeOrderSnapshot:
             self.post_count += 1
             # Exchange POST returns filled quantity 0.5 but price 0
             return ExchangeOrderSnapshot(

@@ -1,20 +1,12 @@
-"""Recovery calculation independent of ExecutionBook, transactions and storage.
-
-Callers own loading, locks and publication. Only newly built journal/book values
-are mutated here; migration diagnostics are returned to the caller.
-"""
+"""Recovery calculations over the current position state."""
 
 from dataclasses import dataclass, replace
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.account import AccountFillEvent
-from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
-from crypto_momentum_lab.domain.execution.evidence_codec import (
-    recovery_checkpoint_head_binding,
-)
-from crypto_momentum_lab.domain.execution.evidence_digest import (
-    trade_payload_digest,
-    view_projection_digest,
+from crypto_momentum_lab.domain.execution.execution_head import (
+    EXECUTION_HEAD_SCHEMA_VERSION,
+    decode_execution_head_state,
 )
 from crypto_momentum_lab.domain.execution.ports import (
     DecisionCommitConflict,
@@ -26,7 +18,6 @@ from crypto_momentum_lab.domain.execution.position_ledger import (
     checkpoint_suffix_facts,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    AccountFactStreamScope,
     AccountFillLoadProvenance,
     CoverageEvidence,
     FactCoverageStatus,
@@ -34,168 +25,92 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
 )
 from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
 from crypto_momentum_lab.domain.execution.recovery_models import (
-    DurableJournalCut,
+    AccountFacts,
     PositionRecoveryCheckpoint,
     StreamCheckpointAdoption,
 )
 
-# Bound the durable suffix independently of poll frequency and process restarts.
-RECOVERY_CHECKPOINT_MAX_AGE_SECONDS = 900
-RECOVERY_CHECKPOINT_MAX_INCREMENTAL_EVENTS = 64
-
-
-def rebuild_ordered_scan_journal(
+def create_current_state_checkpoint(
     *,
-    journal: AccountJournal,
+    book: PositionBook,
     proof: CoverageEvidence,
     provenance: AccountFillLoadProvenance,
     scanned_fills: tuple[AccountFillEvent, ...],
-) -> AccountJournal:
-    """Reconstruct arrival-order lateness only from an exhaustive matching scan.
-
-    Facts at/before a folded checkpoint and conflicting facts cannot be healed
-    by replay. Missing previously observed trades also invalidate the scan.
-    The caller must still validate and commit the resulting checkpoint.
-    """
-    facts = journal.read_cut()
-    start, end = provenance.source_anchor_event_cut, proof.checkpoint_event_cut
-    if (
-        not facts.has_late_events
-        or not facts.late_fills
-        or facts.conflicting_fills
-        or facts.fact_conflicts
-        or facts.has_synthetic_fills
-        or facts.integrity_issues
-        or proof.load_provenance != provenance
-        or journal.stream_scope != provenance.stream_scope
-        or end is None
-        or not proof.proves_complete(start, end, expected_scope=journal.stream_scope)
-    ):
-        return journal
-    checkpoint = facts.recovery_checkpoint
-    if any(
-        not (start < fill.trade_at <= end)
-        or (checkpoint is not None and fill.trade_at <= checkpoint.event_cut)
-        for fill in facts.late_fills
-    ):
-        return journal
-    scanned: dict[str, str] = {}
-    for fill in scanned_fills:
-        digest = trade_payload_digest(fill)
-        if fill.trade_id in scanned and scanned[fill.trade_id] != digest:
-            return journal
-        scanned[fill.trade_id] = digest
-    if any(
-        scanned.get(fill.trade_id) != trade_payload_digest(fill)
-        for fill in facts.fills
-        if start < fill.trade_at <= end
-    ):
-        return journal
-    # Re-run normal journal ingestion in event-time order. No facts are deleted,
-    # and no source coverage, conflicts or checkpoint prefix are manufactured.
-    ordered = AccountJournal(facts.position_key, stream_scope=journal.stream_scope)
-    for fill in sorted(facts.fills, key=lambda item: (item.trade_at, item.trade_id)):
-        ordered.append_fill(fill)
-    rebuilt = replace(
-        facts,
-        has_late_events=ordered.read_cut().has_late_events,
-        late_fills=ordered.read_cut().late_fills,
-    )
-    assert journal.stream_scope is not None
-    return AccountJournal.from_durable_cut(
-        DurableJournalCut(
-            scope=journal.stream_scope,
-            facts=rebuilt,
-            revision=journal.revision,
-            as_of=end,
-            checkpoint=checkpoint,
-        )
-    )
-
-
-def create_verified_recovery_checkpoint(
-    *,
-    key: PositionKey,
-    scope: AccountFactStreamScope,
-    journal: AccountJournal,
-    proof: CoverageEvidence | None,
-    provenance: AccountFillLoadProvenance | None,
     adoption: StreamCheckpointAdoption | None,
     adopting_epoch: bool,
-    force_checkpoint: bool = False,
-) -> PositionRecoveryCheckpoint | None:
-    if proof is None or provenance is None:
-        return None
+    source_revision: int,
+) -> PositionRecoveryCheckpoint:
+    """Build a checkpoint from one complete scan and the current state only."""
+    key = book.position_key
+    scope = book.stream_scope
+    if scope is None or proof.load_provenance != provenance:
+        raise ValueError("checkpoint scan identity is incomplete")
     coverage_start = provenance.source_anchor_event_cut
+    coverage_end = proof.checkpoint_event_cut
     if (
-        proof.load_provenance != provenance
-        or proof.stream_scope != scope
+        proof.stream_scope != scope
         or provenance.stream_scope != scope
         or not provenance.is_complete
-        or not proof.page_exhausted
-        or not proof.not_truncated
-        or proof.fill_load_start is None
-        or proof.checkpoint_event_cut is None
         or not proof.proves_complete(
-            coverage_start,
-            proof.checkpoint_event_cut,
-            expected_scope=scope,
+            coverage_start, coverage_end, expected_scope=scope
         )
     ):
-        return None
+        raise ValueError("checkpoint scan does not prove complete coverage")
 
-    facts = journal.read_cut()
-    previous_checkpoint = facts.recovery_checkpoint
-    if previous_checkpoint is not None and (
-        previous_checkpoint.event_cut >= proof.checkpoint_event_cut
-    ):
+    current = book.current_facts
+    parent = adoption.parent_checkpoint if adoption is not None else current.recovery_checkpoint
+    if parent is not None and adoption is None and coverage_end <= parent.event_cut:
+        return None
+    latest_snapshot = max(
+        current.snapshots, key=lambda snapshot: snapshot.observed_at, default=None
+    )
+    if latest_snapshot is None or latest_snapshot.observed_at != coverage_end:
         return None
     if provenance.source_anchor_kind == "recovery_checkpoint":
-        if adoption is not None:
-            parent = adoption.parent_checkpoint
-            if (
-                parent.checkpoint_id != provenance.source_anchor_id
-                or parent.event_cut != provenance.source_anchor_event_cut
-                or parent.key.canonical_id != key.canonical_id
-            ):
-                return None
-        elif (
-            previous_checkpoint is None
-            or previous_checkpoint.checkpoint_id != provenance.source_anchor_id
-            or previous_checkpoint.event_cut != provenance.source_anchor_event_cut
+        if (
+            parent is None
+            or parent.checkpoint_id != provenance.source_anchor_id
+            or parent.event_cut != provenance.source_anchor_event_cut
+            or parent.key != key
         ):
-            return None
+            raise ValueError("checkpoint scan parent does not match its anchor")
     elif provenance.source_anchor_kind == "zero_snapshot":
-        if adopting_epoch and previous_checkpoint is not None:
-            return None
+        if parent is not None and adopting_epoch:
+            raise ValueError("zero-snapshot adoption cannot replace a checkpoint")
     else:
-        return None
+        raise ValueError("unsupported checkpoint source anchor")
 
-    checkpoint_facts = facts
+    facts = AccountFacts(
+        position_key=key,
+        fills=tuple(sorted(scanned_fills, key=lambda fill: (fill.trade_at, fill.trade_id))),
+        snapshots=current.snapshots,
+        exit_boundaries=current.exit_boundaries,
+        coverage=current.coverage,
+        stream_scope=scope,
+        recovery_checkpoint=(
+            None if adoption is not None else parent
+        ),
+        fill_cursor_provenance=current.fill_cursor_provenance,
+        fill_load_provenance=provenance,
+        prefix_facts_complete=parent is None,
+    )
+    if parent is not None:
+        facts = checkpoint_suffix_facts(facts, parent.event_cut)
     if adoption is not None:
-        checkpoint_facts = replace(facts, prefix_facts_complete=False)
-    elif (
-        provenance.source_anchor_kind == "recovery_checkpoint"
-        and previous_checkpoint is not None
-    ):
-        checkpoint_facts = replace(
-            checkpoint_suffix_facts(facts, previous_checkpoint.event_cut),
-            recovery_checkpoint=previous_checkpoint,
-        )
+        facts = replace(facts, prefix_facts_complete=False)
+    elif parent is not None:
+        facts = replace(facts, recovery_checkpoint=parent)
     checkpoint = PositionLedger(key).create_recovery_checkpoint(
-        checkpoint_facts,
-        source_revision=journal.revision,
-        event_cut=proof.checkpoint_event_cut,
+        facts,
+        source_revision=source_revision,
+        event_cut=coverage_end,
         stream_adoption=adoption,
     )
     if (
         checkpoint.coverage is None
         or checkpoint.coverage.status != FactCoverageStatus.CONFIRMED
         or checkpoint.coverage.stream_scope != scope
-        or not checkpoint.coverage.covers_range(
-            coverage_start,
-            proof.checkpoint_event_cut,
-        )
+        or not checkpoint.coverage.covers_range(coverage_start, coverage_end)
         or checkpoint.has_conflicts
         or checkpoint.has_synthetic_fills
         or checkpoint.has_late_events
@@ -204,87 +119,40 @@ def create_verified_recovery_checkpoint(
         or checkpoint.projection.health_status.value != "READY"
         or checkpoint.projection.reconciliation_gap != Decimal("0")
     ):
-        return None
+        raise ValueError("complete source scan did not produce a ready checkpoint")
 
-    facts_at_cut = journal.read_cut(proof.checkpoint_event_cut)
-    anchor_snapshots = tuple(
+    anchors = tuple(
         snapshot
-        for snapshot in facts_at_cut.snapshots
+        for snapshot in current.snapshots
         if snapshot.observed_at == provenance.source_anchor_event_cut
-        and snapshot.environment == key.environment
-        and snapshot.account_label == key.account_label
-        and snapshot.symbol == key.symbol
-        and snapshot.position_side == key.position_side.value
     )
     if provenance.source_anchor_kind == "zero_snapshot":
-        if proof.fill_load_start > provenance.source_anchor_event_cut or not any(
-            snapshot.position_amt == Decimal("0") for snapshot in anchor_snapshots
-        ):
-            return None
-    elif adoption is not None:
-        if (
-            adoption.target_scope != scope
-            or adoption.fill_load_provenance != provenance
-            or adoption.target_event_cut != proof.checkpoint_event_cut
-            or adoption.parent_checkpoint.event_cut
-            != provenance.source_anchor_event_cut
-            or adoption.parent_checkpoint.checkpoint_id != provenance.source_anchor_id
-        ):
-            return None
-    elif not anchor_snapshots and previous_checkpoint is None:
-        return None
-
-    latest_snapshot = max(
-        facts_at_cut.snapshots,
-        key=lambda snapshot: snapshot.observed_at,
-        default=None,
-    )
-    if (
-        latest_snapshot is None
-        or latest_snapshot.observed_at != proof.checkpoint_event_cut
+        if proof.fill_load_start is None or proof.fill_load_start > provenance.source_anchor_event_cut:
+            raise ValueError("zero-snapshot scan begins after its source anchor")
+        if not any(snapshot.position_amt == 0 for snapshot in anchors):
+            raise ValueError("zero-snapshot source anchor is missing")
+    if adoption is not None and (
+        adoption.target_scope != scope
+        or adoption.fill_load_provenance != provenance
+        or adoption.target_event_cut != coverage_end
+        or adoption.parent_checkpoint != parent
     ):
-        return None
-    if latest_snapshot.position_amt == Decimal("0"):
-        if checkpoint.projection.total_active_quantity != Decimal("0"):
-            return None
+        raise ValueError("checkpoint adoption does not match the complete scan")
+
+    if latest_snapshot.position_amt == 0:
+        if checkpoint.projection.total_active_quantity != 0:
+            raise ValueError("flat snapshot disagrees with checkpoint projection")
     elif (
         checkpoint.projection.total_active_quantity != abs(latest_snapshot.position_amt)
         or not checkpoint.projection.active_batches
     ):
-        return None
-    # Verification still runs for every complete scan. Only the durable seed
-    # is deferred; fresh snapshots, coverage and scan provenance remain facts.
-    if (
-        not force_checkpoint
-        and not adopting_epoch
-        and adoption is None
-        and previous_checkpoint is not None
-        and provenance.source_anchor_kind == "recovery_checkpoint"
-        and checkpoint.stream_scope == previous_checkpoint.stream_scope
-        and (checkpoint.event_cut - previous_checkpoint.event_cut).total_seconds()
-        < RECOVERY_CHECKPOINT_MAX_AGE_SECONDS
-        and 0
-        < journal.revision - previous_checkpoint.source_revision
-        < RECOVERY_CHECKPOINT_MAX_INCREMENTAL_EVENTS
-        and not checkpoint_facts.fills
-        and not checkpoint_facts.exit_boundaries
-        and len(checkpoint_facts.snapshots) < RECOVERY_CHECKPOINT_MAX_INCREMENTAL_EVENTS
-        and not checkpoint_facts.conflicting_fills
-        and not checkpoint_facts.fact_conflicts
-        and not checkpoint_facts.late_fills
-        and replace(checkpoint.projection, event_cut=None, projection_version=None)
-        == replace(
-            previous_checkpoint.projection, event_cut=None, projection_version=None
-        )
-    ):
-        return None
+        raise ValueError("account snapshot disagrees with checkpoint projection")
     return checkpoint
 
 
 @dataclass(frozen=True, slots=True)
 class RecoveredPosition:
     key: PositionKey
-    journal: AccountJournal
     book: PositionBook
     head_revision: int
     projection_digest: str | None
@@ -298,17 +166,19 @@ def recover_durable_position(state: DurableExecutionPositionState) -> RecoveredP
     key = PositionKey(
         scope.environment, scope.account_label, scope.symbol, scope.position_side
     )
-    diagnostics: list[tuple[str, dict[str, object]]] = []
-    projection_digest = None
-    reservation_ids: set[str] = set()
-    last_sequence = None
     if state.cut.scope != scope or state.cut.facts.position_key != key:
         raise RuntimeError("durable position recovery identity mismatch")
-    journal = AccountJournal.from_durable_cut(state.cut)
-    book = PositionBook(journal)
     head = state.head
     if head is not None:
         payload = head.state_payload
+        if head.revision < 1 or payload.get("schema_version") != EXECUTION_HEAD_SCHEMA_VERSION:
+            raise DecisionCommitConflict("durable execution head format is unsupported")
+        try:
+            book = decode_execution_head_state(payload, key=key, scope=scope)
+        except Exception as err:
+            raise DecisionCommitConflict(
+                "durable execution head position state is malformed"
+            ) from err
         stored_reservations = payload.get("active_reservation_ids")
         recovery_command_ids = payload.get("recovery_command_ids")
         external_recovery_ids = payload.get("external_recovery_ids")
@@ -323,15 +193,10 @@ def recover_durable_position(state: DurableExecutionPositionState) -> RecoveredP
             "stream_epoch": scope.stream_epoch,
         }
         if (
-            head.revision < 1
-            or payload.get("schema_version") != 1
-            or payload.get("position_key") != expected_key
+            payload.get("position_key") != expected_key
             or (payload.get("stream_scope") != expected_scope)
-            or (not isinstance(payload.get("facts_hash"), str))
-            or (not isinstance(payload.get("projection_digest"), str))
-            or (not isinstance(payload.get("view_digest"), str))
-            or (type(payload.get("journal_revision")) is not int)
-            or (payload.get("journal_revision") != journal.revision)
+            or book.current_facts != state.cut.facts
+            or book.stream_scope != scope
             or "last_sequence" not in payload
             or (
                 payload["last_sequence"] is not None
@@ -356,111 +221,48 @@ def recover_durable_position(state: DurableExecutionPositionState) -> RecoveredP
             )
         ):
             raise RuntimeError("durable execution head is malformed")
-        facts = journal.read_cut()
-        expected_checkpoint = recovery_checkpoint_head_binding(
-            facts.recovery_checkpoint
-        )
-        if payload.get("recovery_checkpoint") != expected_checkpoint:
-            diagnostics.append(
-                (
-                    "execution_head_recovery_checkpoint_migrated",
-                    {
-                        "account_label": key.account_label,
-                        "symbol": key.symbol,
-                        "position_side": key.position_side.value,
-                        "old_checkpoint": payload.get("recovery_checkpoint"),
-                        "new_checkpoint": expected_checkpoint,
-                    },
-                )
+        if not all(
+            isinstance(value, list)
+            for value in (
+                stored_reservations,
+                recovery_command_ids,
+                external_recovery_ids,
             )
-        if (
-            # Historical + suffix digests differ by construction when a
-            # checkpoint folds the prefix, so this comparison only applies to a
-            # fully-loaded fact set.  The checkpoint branch is covered instead
-            # by the load-time identity audit against durable trade identities
-            # (persistence/postgres/execution_unit_of_work.py), which does not
-            # depend on the payload's own digest.
-            facts.prefix_facts_complete
-            and payload.get("facts_hash")
-            and payload["facts_hash"] != facts.compute_facts_hash()
         ):
-            raise DecisionCommitConflict(
-                f"execution head facts digest mismatch for {key.canonical_id}: "
-                f"stored={payload['facts_hash']} computed={facts.compute_facts_hash()}"
+            raise RuntimeError("durable execution head recovery links are malformed")
+        if any(
+            not isinstance(value, str) or not value
+            for values in (
+                stored_reservations,
+                recovery_command_ids,
+                external_recovery_ids,
             )
-        if "projection" in payload:
-            projection = PositionRecoveryCodec.decode_projection(payload["projection"])
-            coverage = (
-                PositionRecoveryCodec.decode_coverage(payload["coverage"])
-                if payload.get("coverage")
-                else None
-            )
-            zero_confirmed = bool(
-                payload.get("zero_position_snapshot_confirmed", False)
-            )
-            projection_version = (
-                head.projection_version.strip()
-                if head.projection_version and head.projection_version.strip()
-                else (projection.projection_version or "v1")
-            )
-            book.seed_durable_view(
-                projection=projection,
-                view_coverage=coverage,
-                zero_confirmed=zero_confirmed,
-                stream_scope=scope,
-                projection_version=projection_version,
-                event_cut=projection.event_cut,
-            )
-            projection_digest = PositionRecoveryCodec.compute_projection_digest(
-                projection
-            )
-            if payload.get("projection_digest") != projection_digest:
-                raise DecisionCommitConflict(
-                    f"execution head projection digest mismatch for {key.canonical_id}: "
-                    f"stored={payload.get('projection_digest')} computed={projection_digest}"
-                )
-            view = book.get_view()
-            if payload.get("view_digest") != view_projection_digest(view):
-                raise DecisionCommitConflict(
-                    f"execution head view digest mismatch for {key.canonical_id}: "
-                    f"stored={payload.get('view_digest')} computed={view_projection_digest(view)}"
-                )
-        else:
-            projection = PositionLedger(key).project(facts)
-            projection_digest = PositionRecoveryCodec.compute_projection_digest(
-                projection
-            )
-            if payload["projection_digest"] != projection_digest:
-                raise DecisionCommitConflict(
-                    f"execution head projection digest mismatch for {key.canonical_id}: "
-                    f"stored={payload['projection_digest']} computed={projection_digest}"
-                )
-            view = book.get_view()
-            if payload["view_digest"] != view_projection_digest(view):
-                raise DecisionCommitConflict(
-                    f"execution head view digest mismatch for {key.canonical_id}: "
-                    f"stored={payload['view_digest']} computed={view_projection_digest(view)}"
-                )
-            projection_version = (
-                head.projection_version.strip()
-                if head.projection_version and head.projection_version.strip()
-                else view.projection_version
-            )
-            book.use_durable_projection_version(
-                projection_version, event_cut=view.event_cut
-            )
+            for value in values
+        ):
+            raise RuntimeError("durable execution head recovery links are malformed")
         last_sequence = payload["last_sequence"]
         head_revision = head.revision
         reservation_ids = set(stored_reservations)
+        view = book.get_view()
+        book.use_durable_projection_version(
+            head.projection_version,
+            event_cut=view.event_cut,
+        )
+        projection_digest = PositionRecoveryCodec.compute_projection_digest(
+            book.projection
+        )
     else:
+        book = PositionBook.from_facts(state.cut.facts)
         head_revision = 0
+        projection_digest = None
+        reservation_ids = set()
+        last_sequence = None
     return RecoveredPosition(
         key,
-        journal,
         book,
         head_revision,
         projection_digest,
         frozenset(reservation_ids),
         last_sequence,
-        tuple(diagnostics),
+        (),
     )

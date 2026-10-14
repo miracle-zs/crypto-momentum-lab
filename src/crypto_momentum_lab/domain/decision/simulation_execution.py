@@ -1,9 +1,9 @@
-"""SimulationExecution adapter driving AccountJournal with explicit FillModel.
+"""SimulationExecution adapter applying fills to the current position book.
 
 Obeys Astra Architecture Blueprint 2026-09-25:
 - Explicit versioned FillModel (slippage and fee);
 - No magical 'hit price = fill at mid' shortcuts;
-- Generates reproducible AccountFillEvent driving authoritative AccountJournal;
+- Generates reproducible AccountFillEvent for the current position state;
 - Shared batch attribution and reconciliation contract across live and paper.
 """
 
@@ -18,7 +18,8 @@ from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
     AccountPositionSnapshot,
 )
-from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
+from crypto_momentum_lab.domain.execution.position_book import PositionBook
+from crypto_momentum_lab.domain.execution.recovery_models import AccountFacts
 from crypto_momentum_lab.domain.execution.reservation_registry import (
     ReservationRegistry,
 )
@@ -84,7 +85,7 @@ class SimulatedFillResult:
 
 
 class SimulationExecutionAdapter:
-    """Simulates realistic exchange execution driving canonical AccountJournal."""
+    """Simulates an exchange fill and applies it to the current position book."""
 
     def __init__(self, default_fill_model: FillModel | None = None) -> None:
         self._fill_model = default_fill_model or FillModel()
@@ -93,11 +94,11 @@ class SimulationExecutionAdapter:
         self,
         intent: OrderIntentCandidate,
         envelope: MarketEnvelope,
-        journal: AccountJournal,
+        position: PositionBook,
         *,
         fill_model: FillModel | None = None,
     ) -> SimulatedFillResult:
-        """Executes an entry order intent into canonical AccountJournal."""
+        """Execute an entry intent and advance the current position state."""
         model = fill_model or self._fill_model
         state = envelope.state
         base_price = state.last_ask_price or state.close_price
@@ -127,8 +128,8 @@ class SimulationExecutionAdapter:
         order_id = f"sim_ord_{intent.candidate_id[-12:]}"
 
         fill_event = AccountFillEvent(
-            environment=journal.position_key.environment,
-            account_label=journal.position_key.account_label,
+            environment=position.position_key.environment,
+            account_label=position.position_key.account_label,
             symbol=intent.symbol,
             trade_id=trade_id,
             order_id=order_id,
@@ -141,27 +142,32 @@ class SimulationExecutionAdapter:
             trade_at=fill_time,
             raw_payload={
                 "fill_model": model.model_version,
-                "positionSide": journal.position_key.position_side.value,
+                "positionSide": position.position_key.position_side.value,
             },
         )
-        journal.append_fill(fill_event)
 
-        # Update position snapshot
-        journal.record_snapshot(
-            AccountPositionSnapshot(
-                environment=journal.position_key.environment,
-                account_label=journal.position_key.account_label,
-                symbol=intent.symbol,
-                position_side=journal.position_key.position_side.value,
-                position_amt=quantity,
-                entry_price=exec_price,
-                mark_price=exec_price,
-                unrealized_pnl=Decimal("0.00"),
-                notional=quantity * exec_price,
-                leverage=1,
-                margin_type="cross",
-                observed_at=fill_time,
-                raw_payload={"fill_model": model.model_version},
+        snapshot = AccountPositionSnapshot(
+            environment=position.position_key.environment,
+            account_label=position.position_key.account_label,
+            symbol=intent.symbol,
+            position_side=position.position_key.position_side.value,
+            position_amt=quantity,
+            entry_price=exec_price,
+            mark_price=exec_price,
+            unrealized_pnl=Decimal("0.00"),
+            notional=quantity * exec_price,
+            leverage=1,
+            margin_type="cross",
+            observed_at=fill_time,
+            raw_payload={"fill_model": model.model_version},
+        )
+        position.apply_delta(
+            AccountFacts(
+                position_key=position.position_key,
+                fills=(fill_event,),
+                snapshots=(snapshot,),
+                stream_scope=position.stream_scope,
+                prefix_facts_complete=False,
             )
         )
 
@@ -183,7 +189,7 @@ class SimulationExecutionAdapter:
         self,
         command: TradeCommand,
         envelope: MarketEnvelope,
-        journal: AccountJournal,
+        position: PositionBook,
         coordinator: ReservationRegistry | None = None,
         *,
         reservation_id: str | None = None,
@@ -192,8 +198,8 @@ class SimulationExecutionAdapter:
         """Executes an exit TradeCommand against reserved lots."""
         if command.command_type != TradeCommandType.EXIT:
             raise ValueError("execute_exit requires EXIT command_type")
-        if command.position_key.canonical_id != journal.position_key.canonical_id:
-            raise ValueError("Exit command position key does not match account journal")
+        if command.position_key != position.position_key:
+            raise ValueError("Exit command position key does not match position book")
 
         model = fill_model or self._fill_model
         state = envelope.state
@@ -255,8 +261,8 @@ class SimulationExecutionAdapter:
         order_id = f"sim_exit_{command.command_id[-12:]}"
 
         fill_event = AccountFillEvent(
-            environment=journal.position_key.environment,
-            account_label=journal.position_key.account_label,
+            environment=position.position_key.environment,
+            account_label=position.position_key.account_label,
             symbol=command.position_key.symbol,
             trade_id=trade_id,
             order_id=order_id,
@@ -269,27 +275,32 @@ class SimulationExecutionAdapter:
             trade_at=fill_time,
             raw_payload={
                 "fill_model": model.model_version,
-                "positionSide": journal.position_key.position_side.value,
+                "positionSide": position.position_key.position_side.value,
             },
         )
-        journal.append_fill(fill_event)
 
-        # Update position snapshot to 0
-        journal.record_snapshot(
-            AccountPositionSnapshot(
-                environment=journal.position_key.environment,
-                account_label=journal.position_key.account_label,
-                symbol=command.position_key.symbol,
-                position_side=journal.position_key.position_side.value,
-                position_amt=Decimal("0.00"),
-                entry_price=Decimal("0.00"),
-                mark_price=exec_price,
-                unrealized_pnl=Decimal("0.00"),
-                notional=Decimal("0.00"),
-                leverage=1,
-                margin_type="cross",
-                observed_at=fill_time,
-                raw_payload={"fill_model": model.model_version},
+        snapshot = AccountPositionSnapshot(
+            environment=position.position_key.environment,
+            account_label=position.position_key.account_label,
+            symbol=command.position_key.symbol,
+            position_side=position.position_key.position_side.value,
+            position_amt=Decimal("0.00"),
+            entry_price=Decimal("0.00"),
+            mark_price=exec_price,
+            unrealized_pnl=Decimal("0.00"),
+            notional=Decimal("0.00"),
+            leverage=1,
+            margin_type="cross",
+            observed_at=fill_time,
+            raw_payload={"fill_model": model.model_version},
+        )
+        position.apply_delta(
+            AccountFacts(
+                position_key=position.position_key,
+                fills=(fill_event,),
+                snapshots=(snapshot,),
+                stream_scope=position.stream_scope,
+                prefix_facts_complete=False,
             )
         )
 

@@ -44,9 +44,6 @@ from crypto_momentum_lab.domain.execution.reservation_registry import (
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator,
 )
-from crypto_momentum_lab.persistence.postgres.account_journal_store import (
-    JournalFactConflict,
-)
 from tests.fixtures.prepared_submission import submit_prepared
 from tests.unit.execution.test_terminal_settlement import (
     ObservationTransaction,
@@ -56,6 +53,10 @@ from tests.unit.execution.test_terminal_settlement import (
 pytestmark = pytest.mark.contract
 
 NOW = datetime(2026, 10, 12, 18, 0, tzinfo=UTC)
+
+
+class InjectedProjectionFailure(ConnectionError):
+    """Test-only transient failure injected at the persistence boundary."""
 
 
 class TimeoutBackend(OrderExecutionPort):
@@ -231,11 +232,11 @@ async def test_projection_conflict_with_failed_unknown_transition_is_visible() -
     conflicts: list[str] = []
 
     async def conflicting_observe(evidence):
-        raise JournalFactConflict("durable fact identity conflict")
+        raise InjectedProjectionFailure("durable fact identity conflict")
 
     async def conflicting_unknown(command_id, *args, **kwargs):
         conflicts.append(command_id)
-        raise JournalFactConflict("durable outbox transition conflict")
+        raise InjectedProjectionFailure("durable outbox transition conflict")
 
     book.observe = conflicting_observe
     book.mark_unknown = conflicting_unknown
@@ -320,7 +321,7 @@ async def test_compensation_chain_with_real_fsm(
     Same-DI construction.  The ``_FailingUoW`` arms one transaction failure
     triggered by the first WS event through the real consumer chain:
 
-    * ``projection``: two ``JournalFactConflict`` with distinct texts — original
+    * ``projection``: two injected persistence failures with distinct texts — original
       projection failure + UNKNOWN compensation failure.  Both rollbacks
       verified via ``structlog.testing.capture_logs``.
     * ``sql``: one ``SELECT 1/0`` after the real SQL executes, producing a real
@@ -371,9 +372,6 @@ async def test_compensation_chain_with_real_fsm(
         LiveRuntimeSupervisor,
         LiveRuntimeTasks,
     )
-    from crypto_momentum_lab.persistence.postgres.account_journal_store import (
-        PostgresAccountJournalStore,
-    )
     from crypto_momentum_lab.persistence.postgres.command_repository import (
         PostgresCommandRepository,
     )
@@ -419,7 +417,7 @@ async def test_compensation_chain_with_real_fsm(
     class _FailingUoW(AsyncPostgresExecutionUnitOfWork):
         """Inject failures after real SQL executes, before commit.
 
-        For ``projection``: raises ``JournalFactConflict`` with a labeled text.
+        For ``projection``: raises a test-only transient persistence failure.
         For ``sql``: executes ``SELECT 1/0`` producing a real PG division error.
         """
 
@@ -441,7 +439,7 @@ async def test_compensation_chain_with_real_fsm(
                     if label == "sql":
                         await tx.session.execute(text("SELECT 1/0"))
                     else:
-                        raise JournalFactConflict(error_text)
+                        raise InjectedProjectionFailure(error_text)
 
     # ── Blocking source ──
     class _BlockingSource:
@@ -522,7 +520,6 @@ async def test_compensation_chain_with_real_fsm(
         )
         failing_uow = _FailingUoW(
             factory,
-            journal_store=PostgresAccountJournalStore(),
             command_repository=commands,
             reservation_repository=reservations,
         )
@@ -674,9 +671,18 @@ async def test_compensation_chain_with_real_fsm(
                 client_order_id=cid,
                 symbols=("BTCUSDT",),
                 order_update={
-                    "c": cid, "s": "BTCUSDT", "S": "SELL", "o": "MARKET",
-                    "q": "0.001", "p": "0", "R": True, "ps": "BOTH",
-                    "i": 12345 + seq, "X": "NEW", "z": "0", "ap": "0",
+                    "c": cid,
+                    "s": "BTCUSDT",
+                    "S": "SELL",
+                    "o": "MARKET",
+                    "q": "0.001",
+                    "p": "0",
+                    "R": True,
+                    "ps": "BOTH",
+                    "i": 12345 + seq,
+                    "X": "NEW",
+                    "z": "0",
+                    "ap": "0",
                     "T": int(now.timestamp() * 1000),
                 },
                 sequence=seq,
@@ -702,7 +708,7 @@ async def test_compensation_chain_with_real_fsm(
             order_reconciliation=reconciliation,
             run_id="strict-test",
             is_transient_error=lambda err: isinstance(
-                err, (JournalFactConflict, ConnectionError)
+                err, ConnectionError
             ),
             on_account_snapshot=_on_snapshot,
             on_account_snapshot_recovery=lambda reason: None,
@@ -743,24 +749,18 @@ async def test_compensation_chain_with_real_fsm(
             assert failing_uow.consumed == ["original", "compensation"], (
                 "both projection rollbacks must have been consumed"
             )
-            error_logs = [
-                e for e in cap_logs if e.get("log_level") == "error"
-            ]
+            error_logs = [e for e in cap_logs if e.get("log_level") == "error"]
             assert any(
-                "projection_conflict_original_failure" in str(e)
-                for e in error_logs
+                "projection_conflict_original_failure" in str(e) for e in error_logs
             ), "original projection failure must be logged"
-            assert any(
-                "unknown_compensation_failure" in str(e)
-                for e in error_logs
-            ), "compensation failure must be logged"
+            assert any("unknown_compensation_failure" in str(e) for e in error_logs), (
+                "compensation failure must be logged"
+            )
         else:
             assert failing_uow.consumed == ["sql"], (
                 "SQL failure must have been consumed exactly once"
             )
-            error_logs = [
-                e for e in cap_logs if e.get("log_level") == "error"
-            ]
+            error_logs = [e for e in cap_logs if e.get("log_level") == "error"]
             # The real PG division error must appear in the error channel.
             assert any(
                 "division" in str(e).lower() or "DivisionByZero" in str(e)
@@ -775,7 +775,8 @@ async def test_compensation_chain_with_real_fsm(
             cmd1 = await session.get(ExecutionCommandRow, prepared_orders[0])
             assert cmd1 is not None
             assert cmd1.status in (
-                DispatchState.DISPATCHING.value, DispatchState.UNKNOWN.value
+                DispatchState.DISPATCHING.value,
+                DispatchState.UNKNOWN.value,
             ), "failed command must retain unresolved dispatch responsibility"
             # Reservation must not be released by the failed transaction.
             for rid in reservation_ids:
@@ -794,8 +795,7 @@ async def test_compensation_chain_with_real_fsm(
             cmd2 = await session.get(ExecutionCommandRow, prepared_orders[1])
             assert cmd2 is not None
             assert cmd2.status == "acknowledged", (
-                f"second command must be exactly 'acknowledged', got "
-                f"{cmd2.status}"
+                f"second command must be exactly 'acknowledged', got {cmd2.status}"
             )
             # CAS head revision must have advanced.
             head_after = await session.scalar(
@@ -816,9 +816,7 @@ async def test_compensation_chain_with_real_fsm(
                     )
                 )
             ).all()
-            assert len(receipts) > 0, (
-                "at least one evidence receipt must be persisted"
-            )
+            assert len(receipts) > 0, "at least one evidence receipt must be persisted"
 
         # ── 13. Supervisor still alive ──
         assert not account_task.done()

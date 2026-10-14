@@ -51,9 +51,6 @@ from crypto_momentum_lab.execution_account.orders.coordinator import (
 from crypto_momentum_lab.live_rollout.order_reconciliation import (
     LiveOrderReconciliation,
 )
-from crypto_momentum_lab.persistence.postgres.account_journal_store import (
-    PostgresAccountJournalStore,
-)
 from crypto_momentum_lab.persistence.postgres.command_repository import (
     PostgresCommandRepository,
 )
@@ -92,7 +89,6 @@ async def _setup_book_and_repos(factory, account: str):
     )
     uow = AsyncPostgresExecutionUnitOfWork(
         factory,
-        journal_store=PostgresAccountJournalStore(),
         command_repository=commands,
         reservation_repository=reservations,
     )

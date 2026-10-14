@@ -32,9 +32,6 @@ from crypto_momentum_lab.domain.execution.trade_command import (
     TradeCommandType,
 )
 from crypto_momentum_lab.domain.strategy.models import EntryType, StrategySide
-from crypto_momentum_lab.persistence.postgres.account_journal_store import (
-    PostgresAccountJournalStore,
-)
 from crypto_momentum_lab.persistence.postgres.command_repository import (
     PostgresCommandRepository,
 )
@@ -61,7 +58,6 @@ def _book(factory, uow_type=AsyncPostgresExecutionUnitOfWork):
     )
     uow = uow_type(
         factory,
-        journal_store=PostgresAccountJournalStore(),
         command_repository=commands,
         reservation_repository=reservations,
     )
@@ -101,7 +97,7 @@ def _evidence(account, identity, quantity="1"):
     )
 
 
-async def test_committed_exit_reservation_survives_restart_until_real_trade_proof(
+async def test_committed_exit_reservation_settles_from_order_progress(
     async_database_url,
 ):
     from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
@@ -175,13 +171,16 @@ async def test_committed_exit_reservation_survives_restart_until_real_trade_proo
             ),
         )
         assert isinstance(await book.observe(report), Applied)
-        assert book.command_requires_recovery(command_id)
+        assert not book.command_requires_recovery(command_id)
         restored = _book(factory)
         await restored.restore(account_label=account)
         assert not restored.get_active_reservations()
-        assert restored.coordinator.get_reservation(
-            reservation.reservation_id
-        ).consumed_quantity == Decimal("1")
+        async with factory() as session:
+            persisted_reservation = await session.get(
+                PositionReservationRow, reservation.reservation_id
+            )
+        assert persisted_reservation is not None
+        assert persisted_reservation.consumed_quantity == Decimal("1")
         closing = replace(
             opening,
             evidence_id="real-exit-trade",
@@ -224,9 +223,8 @@ async def test_book_nonzero_restore_preserves_token_and_evidence_identity(
         view = await restored.read(evidence.scope)
         assert view.total_quantity == Decimal("2")
         assert view.projection_version == original.projection_version
-        historical = await restored.read(evidence.scope, event_cut=historical_cut)
-        assert historical.total_quantity == Decimal("1")
-        assert historical.projection_version != view.projection_version
+        with pytest.raises(ValueError, match="historical position cuts are not held"):
+            await restored.read(evidence.scope, event_cut=historical_cut)
         assert isinstance(await restored.observe(evidence), Duplicate)
         assert (await restored.read(evidence.scope)).total_quantity == Decimal("2")
     finally:
@@ -268,7 +266,8 @@ async def test_legacy_dispatch_without_head_restores_unknown_atomically(
             scope.to_position_key(), as_of=datetime.now(UTC)
         )
         assert state.head.revision >= 1
-        assert state.cut.facts.fills[0].trade_id == "1"
+        assert "1" in state.trade_ids
+        assert not state.cut.facts.fills
         assert (await restored.read(scope)).total_quantity == Decimal("1")
 
         # Missing or corrupted durable head with responsibilities must explicitly block recovery
@@ -288,7 +287,7 @@ async def test_legacy_dispatch_without_head_restores_unknown_atomically(
 
 
 @pytest.mark.asyncio
-async def test_terminal_command_identity_and_trade_wait_survive_process_restart(
+async def test_terminal_order_needs_no_recovery_after_process_restart(
     async_database_url,
 ):
     engine = create_async_database_engine(async_database_url)
@@ -330,8 +329,7 @@ async def test_terminal_command_identity_and_trade_wait_survive_process_restart(
         assert isinstance(await book.observe(report), Applied)
         restored = _book(factory)
         await restored.restore(account_label=account)
-        assert restored.get_outbox(command.command_id).external_order_id == "1332041709"
-        assert command.command_id in restored._recovery_required_commands
+        assert command.command_id not in restored._recovery_required_commands
         trade = replace(
             first,
             evidence_id="true-trade",
@@ -363,7 +361,8 @@ async def test_terminal_command_identity_and_trade_wait_survive_process_restart(
         event.remove(engine.sync_engine, "before_cursor_execute", record_read)
         assert not reads, "direct recovery must not query journal or checkpoint tables"
         assert state.scope.matches(scope.to_position_key())
-        assert state.cut.facts.fills[0].order_id == "1332041709"
+        assert state.cut.facts.fills == ()
+        assert "1" in state.trade_ids
     finally:
         await engine.dispose()
 

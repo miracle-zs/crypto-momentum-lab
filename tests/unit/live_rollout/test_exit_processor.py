@@ -93,7 +93,7 @@ async def test_durable_stale_projection_guard_defers_exit_without_crashing():
 
     book = ExecutionBook(execution_unit_of_work=Uow())
     book._persistence_failed = False
-    book._journal_for_scope(key, stream)
+    book._book_for_scope(key, stream)
     book._head_revisions[key.canonical_id] = 1
     view = await book.read(scope)
     execution_request = ExecutionRequest(

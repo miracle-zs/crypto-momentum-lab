@@ -100,13 +100,13 @@ from crypto_momentum_lab.domain.execution.trade_command import (
     PositionReservation,
     TradeCommandType,
 )
-from crypto_momentum_lab.persistence.postgres.risk_repository import (
-    LeaseOwnershipError,
-)
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.domain.trading import TradeSide
 from crypto_momentum_lab.execution_account.orders.fill_scan_evidence import (
     coverage_from_scan,
+)
+from crypto_momentum_lab.persistence.postgres.risk_repository import (
+    LeaseOwnershipError,
 )
 
 if TYPE_CHECKING:
@@ -142,7 +142,7 @@ class DispatchOwnership:
     code_generation: str | None = None
 
     def __post_init__(self) -> None:
-        for value, field_name in (
+        for value, _field_name in (
             (self.owner, "owner"),
             (self.lease_id, "lease_id"),
         ):
@@ -829,6 +829,7 @@ class OrderExecutionCoordinator:
                     ",".join(fill.trade_id for fill in scoped_fills),
                     "" if pos is None else pos.observed_at.isoformat(),
                     "" if pos is None else str(pos.position_amt),
+                    "" if sequence is None else str(sequence),
                 )
             )
             scoped_evidence_id = (
@@ -1094,9 +1095,7 @@ class OrderExecutionCoordinator:
         preparation: OrderSubmissionPreparation,
         ownership: DispatchOwnership | None,
     ) -> PreparedOrderSubmission | None:
-        ownership = self._require_ownership(
-            ownership, action="prepare submission"
-        )
+        ownership = self._require_ownership(ownership, action="prepare submission")
         if self._submission_repository is None:
             raise OrderPreSubmissionError("submission repository is not configured")
         if not self._execution_book.has_execution_unit_of_work:
@@ -1189,8 +1188,6 @@ class OrderExecutionCoordinator:
         self,
         plan: OrderExecutionPlan,
         res: OrderExecutionResult | None,
-        *,
-        settlement_fills: tuple[AccountFillEvent, ...] = (),
     ) -> None:
         if res is None:
             return
@@ -1228,7 +1225,6 @@ class OrderExecutionCoordinator:
             details={
                 "account_label": self._account_label,
                 "symbol": plan.symbol,
-                **({"side": plan.side} if settlement_fills else {}),
                 "executed_quantity": str(cumulative_quantity),
                 "cumulative_quote_quantity": str(cumulative_quote),
                 "average_price": str(average_price)
@@ -1278,7 +1274,6 @@ class OrderExecutionCoordinator:
                     observed_at=now_dt,
                 )
             ),
-            settlement_fills=settlement_fills,
         )
         evidence_id = content_addressed_evidence_id(evidence, prefix="order")
         evidence = replace(
@@ -1355,6 +1350,7 @@ class OrderExecutionCoordinator:
                     submission_repository=self._submission_repository,
                 )
             else:
+
                 def _is_identity_collision(err: BaseException | None) -> bool:
                     if err is None:
                         return False
@@ -1491,9 +1487,9 @@ class OrderExecutionCoordinator:
                 self._observation_timestamps.popleft()
                 self._observation_dequeued_count += 1
                 if self._observation_timestamps:
-                    self._observation_oldest_enqueued_at = (
-                        self._observation_timestamps[0]
-                    )
+                    self._observation_oldest_enqueued_at = self._observation_timestamps[
+                        0
+                    ]
                 else:
                     self._observation_oldest_enqueued_at = None
                 try:
@@ -1561,7 +1557,6 @@ class OrderExecutionCoordinator:
                 average_price=receipt.average_price,
                 plan=plan,
             ),
-            settlement_fills=receipt.account_fills,
         )
 
     async def submit(

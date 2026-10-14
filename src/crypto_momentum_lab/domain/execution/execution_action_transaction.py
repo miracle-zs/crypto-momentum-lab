@@ -32,6 +32,7 @@ from crypto_momentum_lab.domain.execution.ports import ExecutionTransactionPort
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     ExitOrderSubmissionFact,
 )
+from crypto_momentum_lab.domain.execution.recovery_models import AccountFacts
 from crypto_momentum_lab.domain.execution.trade_command import TradeCommandType
 
 log = structlog.get_logger(__name__)
@@ -71,8 +72,7 @@ async def accept_action_transaction(
         base_head_revision = book._head_revisions.get(canon, 0)
         current_view = candidate._ensure_book(key).get_view()
         is_candidate_flat = (
-            current_view.total_quantity == Decimal("0")
-            and not current_view.batches
+            current_view.total_quantity == Decimal("0") and not current_view.batches
         )
 
     # Phase 2: Lock-free durable I/O and CAS commit (I2: never hold locks across I/O)
@@ -140,45 +140,33 @@ async def accept_action_transaction(
             if prepare_submission is not None:
                 prepared = await prepare_submission(tx)
                 if (
-                    prepared.plan.reduce_only
-                    or request.action is TradeCommandType.EXIT
+                    prepared.plan.reduce_only or request.action is TradeCommandType.EXIT
                 ) and request.target_batch_ids:
-                    journal = candidate._ensure_journal(key)
                     for batch_id in dict.fromkeys(request.target_batch_ids):
-                        journal.record_boundary(
-                            ExitOrderSubmissionFact(
+                        candidate._ensure_book(key).apply_delta(
+                            AccountFacts(
+                                position_key=key,
+                                stream_scope=stream_scope,
+                                exit_boundaries=(ExitOrderSubmissionFact(
                                 order_id=f"{request.request_id}:{batch_id}",
                                 submitted_at=prepared.plan.created_at,
                                 symbol=key.symbol,
                                 position_side=key.position_side,
                                 client_order_id=request.request_id,
                                 target_batch_id=batch_id,
+                                ),),
+                                prefix_facts_complete=False,
                             )
                         )
-                    boundary_facts = journal.read_cut()
-                    persisted = await tx.persist_facts(
-                        scope=stream_scope,
-                        facts=boundary_facts,
-                        revision=journal.revision,
-                        checkpoint=boundary_facts.recovery_checkpoint,
-                        delta=journal.pending_fact_delta(),
-                    )
-                    if persisted.has_conflicts:
-                        raise RuntimeError("exit boundary persistence conflict")
-                    candidate._journal_revisions[canon] = persisted.revision
                 await candidate._apply_command_transition(
                     request.request_id,
                     DispatchState.DISPATCHING,
                     at=prepared.submitting_event.occurred_at,
                 )
                 result = replace(result, prepared_submission=prepared)
-            facts = candidate._ensure_journal(key).read_cut()
             head_payload = build_execution_head_payload(
                 candidate,
                 key,
-                facts.compute_facts_hash(),
-                ensure_book=candidate._ensure_book,
-                ensure_journal=candidate._ensure_journal,
                 active_reservations=candidate.get_active_reservations,
             )
             next_revision = await tx.persist_head(

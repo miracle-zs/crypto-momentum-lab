@@ -15,13 +15,10 @@ from crypto_momentum_lab.domain.execution.order_submission import (
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
-    JournalFactDelta,
     PositionKey,
 )
 from crypto_momentum_lab.domain.execution.recovery_models import (
-    AccountFacts,
     DurableJournalCut,
-    JournalPersistResult,
     PositionRecoveryCheckpoint,
 )
 from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
@@ -82,31 +79,14 @@ class DurableExecutionPositionState:
 class ExecutionTransactionPort(Protocol):
     """Operations that must commit atomically for one position mutation."""
 
-    async def persist_facts(
-        self,
-        *,
-        scope: AccountFactStreamScope,
-        facts: AccountFacts,
-        revision: int,
-        checkpoint: PositionRecoveryCheckpoint | None = None,
-        delta: JournalFactDelta | None = None,
-    ) -> JournalPersistResult: ...
-
-    async def filter_known_facts(
-        self,
-        *,
-        scope: AccountFactStreamScope,
-        delta: JournalFactDelta,
-    ) -> JournalFactDelta: ...
-
-    async def load_recovery(
+    async def load_current_cut(
         self,
         *,
         scope: AccountFactStreamScope,
         as_of: datetime,
     ) -> DurableJournalCut: ...
 
-    async def load_checkpoint_by_id(
+    async def load_checkpoint_from_head(
         self,
         *,
         scope: AccountFactStreamScope,
@@ -204,13 +184,6 @@ class ExecutionUnitOfWorkPort(Protocol):
         *,
         as_of: datetime,
     ) -> DurableExecutionPositionState | None: ...
-
-    async def load_journal_cut(
-        self,
-        *,
-        scope: AccountFactStreamScope,
-        as_of: datetime,
-    ) -> DurableJournalCut: ...
 
     async def load_positions(
         self,

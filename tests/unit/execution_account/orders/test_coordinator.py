@@ -18,6 +18,7 @@ from crypto_momentum_lab.domain.execution.order_submission import (
     OrderPreSubmissionError,
     OrderSubmissionPreparation,
 )
+from crypto_momentum_lab.domain.execution.recovery_models import AccountFacts
 from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator as _RealOrderExecutionCoordinator,
@@ -1843,19 +1844,20 @@ async def test_dispatch_persistence_failure_prevents_exchange_post() -> None:
         PositionKey,
     )
 
-    journal = book._ensure_journal(
-        PositionKey(
-            environment=coordinator._environment,
-            account_label=coordinator._account_label,
-            symbol="BTCUSDT",
-            position_side=FuturesPositionSide.BOTH,
-        )
+    key = PositionKey(
+        environment=coordinator._environment,
+        account_label=coordinator._account_label,
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.BOTH,
     )
-    journal.set_coverage(
-        FactCoverageInterval(
-            start_at=NOW,
-            end_at=NOW,
-            status=FactCoverageStatus.CONFIRMED,
+    book._ensure_book(key).replace_from_facts(
+        AccountFacts(
+            position_key=key,
+            coverage=FactCoverageInterval(
+                start_at=NOW,
+                end_at=NOW,
+                status=FactCoverageStatus.CONFIRMED,
+            ),
         )
     )
 
@@ -2547,23 +2549,18 @@ async def test_cumulative_fill_reconciliation_exact_deltas() -> None:
     assert repo.res.consumed_quantity == Decimal("10.0")
     assert repo.res.active_quantity == Decimal("0.0")
 
-    order_fills = [
-        fill
-        for fill in coord._execution_book._ensure_journal(
-            PositionKey(
-                environment="live",
-                account_label="primary",
-                symbol="BTCUSDT",
-                position_side=FuturesPositionSide.BOTH,
-            )
-        )
-        .read_cut()
-        .fills
-        if fill.order_id == plan.client_order_id
-    ]
+    position_key = PositionKey(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.BOTH,
+    )
+    position_facts = coord._execution_book._books[
+        position_key.canonical_id
+    ].current_facts
     # Under RFC 2026-09-25 authoritative model, cumulative order reports settle
-    # reservations but do not fabricate synthetic AccountFillEvent into the journal.
-    assert order_fills == []
+    # reservations but do not fabricate synthetic AccountFillEvent into state.
+    assert position_facts.fills == ()
 
     await coord.aclose()
 
@@ -2623,12 +2620,15 @@ async def test_execution_book_observes_monotonic_cumulative_fill_facts() -> None
         observed_at=NOW,
         raw_payload={},
     )
-    journal = book._ensure_journal(scope.to_position_key())
-    journal.set_coverage(
-        FactCoverageInterval(
-            start_at=NOW,
-            end_at=NOW,
-            status=FactCoverageStatus.CONFIRMED,
+    key = scope.to_position_key()
+    book._ensure_book(key).replace_from_facts(
+        AccountFacts(
+            position_key=key,
+            coverage=FactCoverageInterval(
+                start_at=NOW,
+                end_at=NOW,
+                status=FactCoverageStatus.CONFIRMED,
+            ),
         )
     )
     await book.observe(
@@ -2688,13 +2688,10 @@ async def test_execution_book_observes_monotonic_cumulative_fill_facts() -> None
     await observe(ExchangeOrderState.FILLED, "10")
     await observe(ExchangeOrderState.PARTIALLY_FILLED, "7")
 
-    facts = journal.read_cut()
-    order_fills = [
-        fill for fill in facts.fills if fill.order_id == plan.client_order_id
-    ]
+    facts = book._books[key.canonical_id].current_facts
     # Under RFC 2026-09-25 authoritative model, cumulative order reports settle
-    # reservations but do not fabricate synthetic AccountFillEvent into the journal.
-    assert order_fills == []
+    # reservations but do not fabricate synthetic AccountFillEvent into state.
+    assert facts.fills == ()
     reservations = book.get_active_reservations(scope.to_position_key())
     assert reservations == ()
 
@@ -3329,30 +3326,12 @@ async def test_a6a_order_observation_capacity_bounded_queue_and_overflow_recover
 
     # Overflowed command can be recovered from durable receipt
     assert coordinator.execution_book.command_requires_recovery("cid-4")
-    from crypto_momentum_lab.domain.account.models import AccountFillEvent
-
-    fill4 = AccountFillEvent(
-        environment="live",
-        account_label="primary",
-        symbol="BTCUSDT",
-        trade_id="t-1",
-        order_id="cid-4",
-        side="BUY",
-        price=Decimal("50000"),
-        quantity=Decimal("0.001"),
-        realized_pnl=Decimal("0"),
-        fee=Decimal("0"),
-        fee_asset="USDT",
-        trade_at=NOW,
-        raw_payload={"positionSide": "BOTH"},
-    )
     receipt4 = PersistedOrderReceipt(
         client_order_id="cid-4",
         state=ExchangeOrderState.FILLED,
         exchange_order_id="ex-4",
         executed_quantity=Decimal("0.001"),
         average_price=Decimal("50000"),
-        account_fills=(fill4,),
     )
     await coordinator.observe_recovered_receipt(plan4, receipt4)
     assert not coordinator.execution_book.command_requires_recovery("cid-4")

@@ -2013,7 +2013,6 @@ async def test_current_exposure_is_not_repaired_at_a_historical_market_cut(
 ) -> None:
 
     from crypto_momentum_lab.domain.account import AccountFillEvent
-    from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
     from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
     from crypto_momentum_lab.domain.execution.position_book import PositionBook
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
@@ -2022,7 +2021,6 @@ async def test_current_exposure_is_not_repaired_at_a_historical_market_cut(
     )
     from crypto_momentum_lab.domain.execution.recovery_models import (
         AccountFacts,
-        DurableJournalCut,
     )
 
     key = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
@@ -2045,15 +2043,10 @@ async def test_current_exposure_is_not_repaired_at_a_historical_market_cut(
         trade_at=fill_at,
         raw_payload={"positionSide": "LONG"},
     )
-    journal = AccountJournal.from_durable_cut(
-        DurableJournalCut(
-            scope=scope,
-            facts=AccountFacts(position_key=key, stream_scope=scope, fills=(fill,)),
-            revision=1,
-            as_of=fill_at,
-        )
+    facts = AccountFacts(position_key=key, stream_scope=scope, fills=(fill,))
+    book = ExecutionBook(
+        books_by_key={key.canonical_id: PositionBook.from_facts(facts)}
     )
-    book = ExecutionBook(books_by_key={key.canonical_id: PositionBook(journal)})
     repair_requests = []
 
     class Sessions:
@@ -2094,12 +2087,12 @@ async def test_current_exposure_is_not_repaired_at_a_historical_market_cut(
     assert all(not request.unmanaged_position_symbols for request in repair_requests)
     # Current operational classification must not change historical decision
     # reads or let a future fill leak into an earlier frozen decision.
-    historical = await book.list_position_views(
-        environment="live",
-        account_label="primary",
-        event_cut=NOW,
-    )
-    assert historical[0].total_quantity == Decimal("0")
+    with pytest.raises(ValueError, match="historical position cuts are not held"):
+        await book.list_position_views(
+            environment="live",
+            account_label="primary",
+            event_cut=NOW,
+        )
 
 
 @pytest.mark.parametrize("operation", ["context", "drift"])

@@ -139,7 +139,10 @@ async def probe_context(case: str) -> dict:
         SimpleNamespace(bucket_end=NOW),
     )
     if case == "cache_fact_update":
-        assert result.pending_position_symbols == frozenset({"BTCUSDT"})
+        # An order's FILLED/cumulative report is not an account fill. Until
+        # the account stream delivers the trade identity, this snapshot has
+        # no position batch that the execution book can manage.
+        assert "BTCUSDT" in result.unmanaged_position_symbols
         await book.observe(
             evidence(
                 "real-trade",
@@ -157,6 +160,8 @@ async def probe_context(case: str) -> dict:
         passed = (
             bool(result.managed_positions) and not result.unmanaged_position_symbols
         )
+    elif case == "receipt_before_trade":
+        passed = "BTCUSDT" in result.unmanaged_position_symbols
     else:
         passed = (
             "BTCUSDT" in result.pending_position_symbols

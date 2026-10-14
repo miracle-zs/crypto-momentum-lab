@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
+from crypto_momentum_lab.domain.execution.position_book import PositionBook
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
     PositionKey,
@@ -16,7 +16,7 @@ from crypto_momentum_lab.domain.execution.recovery_models import (
 
 async def load_recovery_checkpoint(
     *,
-    journals: dict[str, AccountJournal],
+    books: dict[str, PositionBook],
     unit_of_work: object | None,
     scope: AccountFactStreamScope,
     as_of: datetime | None = None,
@@ -32,15 +32,15 @@ async def load_recovery_checkpoint(
     if as_of.tzinfo is None or as_of.utcoffset() is None:
         raise ValueError("checkpoint read as_of must be timezone-aware")
     if unit_of_work is None:
-        journal = journals.get(key.canonical_id)
-        if journal is None or journal.stream_scope != scope:
+        book = books.get(key.canonical_id)
+        if book is None or book.stream_scope != scope:
             return None
-        checkpoint = journal.read_cut().recovery_checkpoint
+        checkpoint = book.current_facts.recovery_checkpoint
     else:
-        cut = await unit_of_work.load_journal_cut(scope=scope, as_of=as_of)
-        if cut.scope != scope or cut.facts.position_key != key:
-            raise RuntimeError("durable checkpoint read returned another scope")
-        checkpoint = cut.checkpoint
+        state = await unit_of_work.load_position(key, as_of=as_of)
+        if state is None or state.scope != scope:
+            return None
+        checkpoint = state.cut.checkpoint
     if checkpoint is not None and (
         checkpoint.stream_scope != scope
         or checkpoint.key.canonical_id != key.canonical_id

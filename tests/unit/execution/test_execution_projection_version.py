@@ -187,7 +187,7 @@ async def test_quote_only_change_and_decimal_scale_keep_execution_version():
 
 
 @pytest.mark.asyncio
-async def test_equal_refresh_preserves_restored_legacy_head_token():
+async def test_equal_refresh_replaces_restored_legacy_token_with_current_state_token():
     book, scope, before, fill, snapshot = await seeded_position()
     position_book = book._ensure_book(scope.to_position_key())
     position_book.use_durable_projection_version(
@@ -205,8 +205,10 @@ async def test_equal_refresh_preserves_restored_legacy_head_token():
             snapshot=refreshed,
         )
     )
-    assert (await book.read(scope)).projection_version == "pv_legacy"
-    assert isinstance(await book.act(exit_request(scope, before)), Accepted)
+    refreshed_view = await book.read(scope)
+    assert refreshed_view.projection_version != "pv_legacy"
+    assert refreshed_view.projection_version.startswith("pv_exec1_")
+    assert isinstance(await book.act(exit_request(scope, before)), StaleView)
 
 
 @pytest.mark.asyncio

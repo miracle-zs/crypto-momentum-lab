@@ -7,27 +7,18 @@ from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
 from crypto_momentum_lab.domain.execution.command_models import (
-    DispatchState,
     OutboxEntry,
 )
 from crypto_momentum_lab.domain.execution.cumulative_report import (
     plan_cumulative_report,
-    plan_watermark_publication,
 )
 from crypto_momentum_lab.domain.execution.evidence_lifecycle import (
     plan_order_event,
-    settlement_trade_facts,
-    terminal_settlement_is_confirmed,
 )
 from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
 from crypto_momentum_lab.domain.execution.evidence_rules import _evidence_identity
-from crypto_momentum_lab.domain.execution.evidence_settlement import account_trade_delta
-from crypto_momentum_lab.domain.execution.fill_attribution import (
-    is_exit_fill,
-    plan_fill_observation,
-)
+from crypto_momentum_lab.domain.execution.fill_attribution import plan_fill_observation
 
 if TYPE_CHECKING:
     from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
@@ -39,12 +30,12 @@ from crypto_momentum_lab.domain.execution.observation_models import (
     ExecutionObserveResult,
     WaitingForEvidence,
 )
-from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.domain.execution.position_book import PositionBook
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
     PositionKey,
 )
+from crypto_momentum_lab.domain.execution.recovery_models import AccountFacts
 from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
 
 
@@ -53,10 +44,8 @@ class EvidenceMutationDependencies:
     """Boundary services required by one evidence mutation."""
 
     ensure_book: Callable[[PositionKey], PositionBook]
-    ensure_journal: Callable[[PositionKey], AccountJournal]
-    journal_for_scope: Callable[[PositionKey, AccountFactStreamScope], AccountJournal]
+    book_for_scope: Callable[[PositionKey, AccountFactStreamScope], PositionBook]
     command_order_id: Callable[[PositionKey, str], str]
-    command_order_ids: Callable[[PositionKey, str], frozenset[str]]
     order_watermark_key: Callable[[PositionKey, str], str]
     active_reservations_for_command: Callable[[str], tuple[PositionReservation, ...]]
     active_reservations: Callable[[PositionKey], tuple[PositionReservation, ...]]
@@ -66,7 +55,6 @@ class EvidenceMutationDependencies:
     persist_transition: Callable[[OutboxEntry], Awaitable[None]]
     release_command_reservations: Callable[..., Awaitable[Decimal]]
     persist_outbox_state: Callable[[OutboxEntry], Awaitable[None]]
-    durable: bool
     in_transaction: bool
 
 
@@ -75,7 +63,6 @@ def is_unfilled_terminal_order(evidence: ExecutionEvidence) -> bool:
     return (
         event is not None
         and event.state.terminal
-        and not evidence.settlement_fills
         and not evidence.fills
         and evidence.fill is None
         and (
@@ -99,33 +86,6 @@ def reservations_held_by_terminal_order(
     )
 
 
-def is_terminal_settlement_recovery(
-    execution_book: ExecutionBook, evidence: ExecutionEvidence
-) -> bool:
-    """An exact terminal retry may prove settlement without replaying facts."""
-    event = evidence.order_event
-    if event is None or event.state is not ExchangeOrderState.FILLED:
-        return False
-    pending = execution_book._outbox_by_command_id.get(event.client_order_id)
-    return bool(
-        pending is not None
-        and pending.state is DispatchState.TERMINAL
-        and pending.scope == evidence.scope
-        and event.client_order_id in execution_book._recovery_required_commands
-        and evidence.settlement_fills
-        and evidence.cumulative_order is not None
-        and not evidence.fill
-        and not evidence.fills
-        and evidence.snapshot is None
-        and evidence.source_anchor_snapshot is None
-        and evidence.boundary is None
-        and evidence.coverage is None
-        and evidence.coverage_evidence is None
-        and evidence.fill_load_provenance is None
-        and evidence.stream_checkpoint_adoption is None
-    )
-
-
 async def mutate_evidence(
     execution_book: ExecutionBook,
     dependencies: EvidenceMutationDependencies,
@@ -133,9 +93,7 @@ async def mutate_evidence(
 ) -> ExecutionObserveResult:
     """Idempotently ingest exchange evidence and settle allocations."""
     identity = _evidence_identity(evidence)
-    if identity in execution_book._seen_evidence_ids and not is_terminal_settlement_recovery(
-        execution_book, evidence
-    ):
+    if identity in execution_book._seen_evidence_ids:
         key = evidence.scope.to_position_key()
         book = dependencies.ensure_book(key)
         return Duplicate(
@@ -179,29 +137,20 @@ async def mutate_evidence(
             )
             if can_rollover:
                 execution_book._stream_scopes[key.canonical_id] = scope
-                journal = execution_book._journals.get(key.canonical_id)
-                if journal is not None:
-                    journal.adopt_stream_scope(scope)
+                if current_book is not None:
+                    current_book.adopt_stream_scope(scope)
                 execution_book._last_sequences.pop(key.canonical_id, None)
-            elif terminal_without_fill:
-                pass
-            else:
+            elif not terminal_without_fill:
                 return WaitingForEvidence(
                     evidence_id=evidence.evidence_id,
                     reason=EvidencePendingReason.STREAM_RECOVERY_PROOF_REQUIRED,
                 )
         try:
-            journal = dependencies.journal_for_scope(key, scope)
+            book = dependencies.book_for_scope(key, scope)
         except RuntimeError as err:
-            if terminal_without_fill:
-                journal = dependencies.ensure_journal(key)
-            else:
-                return EvidenceConflict(evidence.evidence_id, str(err))
+            return EvidenceConflict(evidence.evidence_id, str(err))
     else:
-        journal = dependencies.ensure_journal(key)
-    book = dependencies.ensure_book(key)
-    if evidence.fill_load_provenance is not None:
-        journal.record_fill_load_provenance(evidence.fill_load_provenance)
+        book = dependencies.ensure_book(key)
 
     consumed_qty = Decimal("0")
     released_qty = Decimal("0")
@@ -209,6 +158,7 @@ async def mutate_evidence(
     diagnostics: tuple[str, ...] = ()
     pending_watermark: tuple[str, Decimal, Decimal] | None = None
     dispatch_reconciled_command_id: str | None = None
+    applied_fills = []
 
     # Bind exchange identity before processing trades or cumulative reports.
     # Late/terminal observations still supply missing identity, but never
@@ -232,155 +182,28 @@ async def mutate_evidence(
             if entry.external_order_id is None:
                 bound = replace(entry, external_order_id=event.exchange_order_id)
                 await dependencies.persist_transition(bound)
-                watermark_key = dependencies.order_watermark_key(key, entry.command_id)
-                trade_delta = account_trade_delta(
-                    entry.command_id,
-                    previous_quantity=execution_book._order_cumulative_fills.get(
-                        watermark_key, Decimal("0")
-                    ),
-                    previous_quote=execution_book._order_cumulative_quotes.get(
-                        watermark_key, Decimal("0")
-                    ),
-                    account_fills=journal.read_cut().fills,
-                    order_ids=frozenset({entry.command_id, event.exchange_order_id}),
-                )
-                if trade_delta.watermark is not None:
-                    quantity, quote = trade_delta.watermark
-                    if entry.command.reduce_only:
-                        (
-                            consumed,
-                            needs_recovery,
-                            diagnostic,
-                        ) = await dependencies.settle_reservation_quantity(
-                            entry.command_id,
-                            trade_delta.quantity,
-                            reported_quantity=quantity,
-                            key=key,
-                        )
-                        consumed_qty += consumed
-                        settlement_recovery_required = needs_recovery
-                        if diagnostic:
-                            diagnostics = (diagnostic,)
-                    # These real trades predate the identity receipt. Their
-                    # canonical watermark prevents the report counting them
-                    # a second time in this same transaction.
-                    execution_book._order_cumulative_fills[watermark_key] = quantity
-                    execution_book._order_cumulative_quotes[watermark_key] = quote
-                    pending_watermark = (watermark_key, quantity, quote)
 
     # 1. Process Fill
     if evidence.fill is not None:
         fill = evidence.fill
         trade_id = fill.trade_id
-        order_id = dependencies.command_order_id(key, fill.order_id)
-        existing_trade = next(
-            (prior for prior in journal.read_cut().fills if prior.trade_id == trade_id),
-            None,
-        )
-        watermark_key = dependencies.order_watermark_key(key, order_id)
         try:
             fill_plan = plan_fill_observation(
                 fill,
-                existing_trade=existing_trade,
                 trade_seen=trade_id in execution_book._seen_trade_ids,
-                previous_quantity=execution_book._order_cumulative_fills.get(
-                    watermark_key, Decimal("0")
-                ),
-                previous_quote=execution_book._order_cumulative_quotes.get(
-                    watermark_key, Decimal("0")
-                ),
                 can_adopt_prefix=(
                     dependencies.in_transaction
-                    and execution_book._recovery_adoption_scope == journal.stream_scope
-                    and journal.stream_scope is not None
+                    and execution_book._recovery_adoption_scope == book.stream_scope
+                    and book.stream_scope is not None
                 ),
             )
         except ValueError as error:
             return EvidenceConflict(evidence.evidence_id, str(error))
-        delta_qty = fill_plan.quantity
-        settlement_delta_qty = fill_plan.settlement_quantity
-        cumulative_qty = fill_plan.cumulative_quantity
-        applied_fill = fill_plan.fill
-        is_cumulative = fill_plan.is_cumulative
-        is_new_trade = fill_plan.is_new_trade
-        adopted_prefix_trade = fill_plan.adopted_prefix_trade
-        if fill_plan.watermark is not None:
-            pending_watermark = (watermark_key, *fill_plan.watermark)
+        if fill_plan.is_new_trade:
+            applied_fills.append(fill_plan.fill)
+            if not fill_plan.adopted_prefix_trade:
+                execution_book._seen_trade_ids.add(fill.trade_id)
 
-        if is_new_trade:
-            if delta_qty > Decimal("0"):
-                accepted = journal.append_fill(applied_fill)
-                if not accepted and journal.has_conflicts:
-                    return EvidenceConflict(
-                        evidence_id=evidence.evidence_id,
-                        reason=(
-                            f"Fill {fill.trade_id} conflicted with "
-                            "existing journal records"
-                        ),
-                    )
-                if not adopted_prefix_trade:
-                    execution_book._seen_trade_ids.add(trade_id)
-            elif not is_cumulative:
-                execution_book._seen_trade_ids.add(trade_id)
-
-        if not is_cumulative and is_new_trade and not adopted_prefix_trade:
-            watermark_key = dependencies.order_watermark_key(key, order_id)
-            previous_quantity = execution_book._order_cumulative_fills.get(
-                watermark_key, Decimal("0")
-            )
-            previous_quote = execution_book._order_cumulative_quotes.get(
-                watermark_key, Decimal("0")
-            )
-            try:
-                trade_delta = account_trade_delta(
-                    order_id,
-                    previous_quantity=previous_quantity,
-                    previous_quote=previous_quote,
-                    account_fills=journal.read_cut().fills,
-                    order_ids=dependencies.command_order_ids(key, order_id),
-                )
-            except ValueError as error:
-                return EvidenceConflict(evidence.evidence_id, str(error))
-            settlement_delta_qty = trade_delta.quantity
-            if trade_delta.watermark is not None:
-                pending_watermark = (watermark_key, *trade_delta.watermark)
-
-        active_episode = book.get_view().active_episode
-        if is_exit_fill(
-            fill,
-            position_side=key.position_side,
-            episode_side=active_episode.side if active_episode is not None else None,
-            has_active_reservations=bool(
-                dependencies.active_reservations_for_command(order_id)
-            ),
-            order_event=evidence.order_event,
-        ) and settlement_delta_qty > Decimal("0"):
-            (
-                consumed,
-                needs_recovery,
-                settlement_diagnostic,
-            ) = await dependencies.settle_reservation_quantity(
-                order_id,
-                settlement_delta_qty,
-                reported_quantity=(
-                    cumulative_qty if is_cumulative else settlement_delta_qty
-                ),
-                key=key,
-            )
-            consumed_qty += consumed
-            settlement_recovery_required = (
-                settlement_recovery_required or needs_recovery
-            )
-            if settlement_diagnostic:
-                diagnostics = (settlement_diagnostic,)
-
-    try:
-        settlement_facts = settlement_trade_facts(
-            journal.read_cut().fills,
-            evidence.settlement_fills,
-        )
-    except ValueError as error:
-        return EvidenceConflict(evidence.evidence_id, str(error))
     report = evidence.cumulative_order
     if report is not None:
         report = replace(
@@ -390,12 +213,13 @@ async def mutate_evidence(
         previous_quantity = execution_book._order_cumulative_fills.get(
             watermark_key, Decimal("0")
         )
-        previous_quote = execution_book._order_cumulative_quotes.get(watermark_key, Decimal("0"))
+        previous_quote = execution_book._order_cumulative_quotes.get(
+            watermark_key, Decimal("0")
+        )
         try:
             report_plan = plan_cumulative_report(
                 report,
                 previous_watermark=(previous_quantity, previous_quote),
-                account_fills=settlement_facts,
                 outbox=execution_book._outbox_by_command_id.get(report.order_id),
                 has_active_reservations=bool(
                     dependencies.active_reservations_for_command(report.order_id)
@@ -424,17 +248,6 @@ async def mutate_evidence(
                     diagnostics = (settlement_diagnostic,)
 
     # 2. Process Snapshot
-    if evidence.snapshot is not None:
-        journal.record_snapshot(evidence.snapshot)
-
-    # 2b. Process Coverage
-    if evidence.coverage is not None:
-        journal.set_coverage(evidence.coverage)
-
-    # 3. Process Boundary
-    if evidence.boundary is not None:
-        journal.record_boundary(evidence.boundary)
-
     # 4. Process Order Event
     if evidence.order_event is not None:
         cmd_id = evidence.order_event.client_order_id
@@ -443,11 +256,6 @@ async def mutate_evidence(
             outbox,
             evidence.order_event,
             observed_at=evidence.observed_at,
-            account_fills=settlement_facts,
-            durable=dependencies.durable,
-            has_active_reservations=bool(
-                dependencies.active_reservations_for_command(cmd_id)
-            ),
         )
         if event_plan.updated is not None:
             assert outbox is not None
@@ -459,83 +267,71 @@ async def mutate_evidence(
                     cmd_id,
                     reason=event_plan.release_reason,
                 )
-            if event_plan.pending_trade_diagnostic is not None:
-                # Keep admission closed while real position facts lag, but
-                # let the account consumer continue receiving those facts.
-                execution_book._recovery_required_commands.add(cmd_id)
-                if not diagnostics:
-                    diagnostics = (event_plan.pending_trade_diagnostic,)
-            if event_plan.recovery_diagnostic is not None:
-                execution_book._recovery_required_commands.add(cmd_id)
-                settlement_recovery_required = True
-                diagnostics = (event_plan.recovery_diagnostic,)
             if event_plan.dispatch_reconciled:
                 dispatch_reconciled_command_id = cmd_id
+        if (
+            evidence.order_event.state.terminal
+            and not settlement_recovery_required
+        ):
+            execution_book._recovery_required_commands.discard(cmd_id)
 
     if pending_watermark is not None:
         watermark_key, cumulative_qty, cumulative_quote = pending_watermark
         execution_book._order_cumulative_fills[watermark_key] = cumulative_qty
         execution_book._order_cumulative_quotes[watermark_key] = cumulative_quote
-        publication = plan_watermark_publication(
-            evidence,
-            outbox_by_command_id=execution_book._outbox_by_command_id,
-        )
-        if publication.outbox is not None:
-            await dependencies.persist_outbox_state(publication.outbox)
-        elif publication.recovery_diagnostic is not None:
-            execution_book._recovery_required_commands.add(publication.command_id)
-            settlement_recovery_required = True
-            diagnostics = (publication.recovery_diagnostic,)
+        if report is not None:
+            outbox = execution_book._outbox_by_command_id.get(report.order_id)
+            if outbox is not None:
+                await dependencies.persist_outbox_state(outbox)
 
     if dispatch_reconciled_command_id is not None:
         execution_book._dispatch_reconciliation_required_commands.discard(
             dispatch_reconciled_command_id
         )
 
-    recovery_commands = execution_book._recovery_required_commands | {
-        entry.command_id
-        for entry in execution_book._outbox_by_command_id.values()
-        if entry.scope.to_position_key() == key
-        and (
-            entry.external_order_id in execution_book._recovery_required_commands
-            or "external:"
-            + dependencies.order_watermark_key(key, entry.external_order_id)
-            in execution_book._recovery_required_commands
-        )
-    }
-    for command_id in recovery_commands:
-        pending = execution_book._outbox_by_command_id.get(command_id)
-        if pending is None or pending.scope.to_position_key() != key:
-            continue
-        reservations = tuple(
-            execution_book._coordinator.get_reservation(reservation_id)
-            for reservation_id in execution_book._command_reservations.get(command_id, ())
-        )
-        if terminal_settlement_is_confirmed(
-            pending,
-            account_fills=settlement_facts,
-            cumulative_quantity=execution_book._order_cumulative_fills.get(
-                dependencies.order_watermark_key(key, command_id), Decimal("0")
-            ),
-            reservations=reservations,
-            allow_active_reservations=True,
-        ):
-            # A terminal reduce-only order can execute less than its original
-            # request. Release only after real trades prove the final watermark
-            # and every linked reservation's consumed quantity agrees.
-            if any(r is not None and r.active_quantity > 0 for r in reservations):
-                released_qty += await dependencies.release_command_reservations(
-                    command_id, reason="terminal_quantity_confirmed"
+    delta_snapshots = tuple(
+        snapshot
+        for snapshot in (evidence.source_anchor_snapshot, evidence.snapshot)
+        if snapshot is not None
+    )
+    if (
+        applied_fills
+        or delta_snapshots
+        or evidence.coverage is not None
+        or evidence.boundary is not None
+        or evidence.fill_load_provenance is not None
+    ):
+        try:
+            book.apply_delta(
+                AccountFacts(
+                position_key=key,
+                fills=tuple(applied_fills),
+                snapshots=delta_snapshots,
+                exit_boundaries=(
+                    (evidence.boundary,) if evidence.boundary is not None else ()
+                ),
+                coverage=evidence.coverage,
+                has_synthetic_fills=any(
+                    bool(fill.raw_payload.get("synthetic_from_order", False))
+                    for fill in applied_fills
+                    if isinstance(fill.raw_payload, dict)
+                ),
+                stream_scope=book.stream_scope,
+                fill_load_provenance=evidence.fill_load_provenance,
+                prefix_facts_complete=False,
                 )
-            execution_book._recovery_required_commands.discard(command_id)
-            if pending.external_order_id is not None:
-                execution_book._recovery_required_commands.discard(pending.external_order_id)
-                watermark = dependencies.order_watermark_key(
-                    key, pending.external_order_id
-                )
-                external_identity = f"external:{watermark}"
-                execution_book._recovery_required_commands.discard(external_identity)
-                execution_book._external_recovery_positions.pop(external_identity, None)
+            )
+        except ValueError as error:
+            return EvidenceConflict(evidence.evidence_id, str(error))
+
+    if (
+        evidence.order_event is not None
+        and evidence.order_event.state.terminal
+        and not dependencies.active_reservations_for_command(
+            evidence.order_event.client_order_id
+        )
+    ):
+        book.remove_exit_boundaries(evidence.order_event.client_order_id)
 
     execution_book._seen_evidence_ids.add(identity)
     updated_view = book.get_view(now=evidence.observed_at)
@@ -543,9 +339,9 @@ async def mutate_evidence(
     # An external exit has no command or reservation lifecycle. Resolve
     # its position-scoped quarantine only from complete real facts and a
     # subsequent matching account cut, never merely from an order receipt.
-    facts = journal.read_cut()
+    facts = book.current_facts
     latest_snapshot = max(facts.snapshots, key=lambda s: s.observed_at, default=None)
-    latest_trade_at = max((f.trade_at for f in facts.fills), default=None)
+    latest_trade_at = book.latest_trade_at
     coverage = updated_view.coverage
     if (
         updated_view.is_ready_for_trade
@@ -558,7 +354,9 @@ async def mutate_evidence(
         and coverage.is_authoritative
         and coverage.end_at >= latest_trade_at
     ):
-        for identity, position in tuple(execution_book._external_recovery_positions.items()):
+        for identity, position in tuple(
+            execution_book._external_recovery_positions.items()
+        ):
             if position == key:
                 execution_book._external_recovery_positions.pop(identity)
                 execution_book._recovery_required_commands.discard(identity)

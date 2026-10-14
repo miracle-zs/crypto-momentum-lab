@@ -9,22 +9,16 @@ from sqlalchemy import (
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import crypto_momentum_lab.domain.execution.order_read_models as order_read_models
-from crypto_momentum_lab.domain.account.models import extract_fill_position_side
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     ExitAllocation,
     FuturesPositionSide,
     OrderExecutionPlan,
 )
-from crypto_momentum_lab.persistence.postgres.account_fact_rows import (
-    account_fill_from_row,
-)
 from crypto_momentum_lab.persistence.postgres.models import (
-    AccountFillEventRow,
     ExchangeFillRow,
     ExchangeOrderEventRow,
     ExchangeOrderRow,
-    ExecutionCommandRow,
     LiveExposureClaimRow,
     OrderIntentExecutionRow,
 )
@@ -146,7 +140,6 @@ class PostgresOrderReadRepository:
             receipt = None
             if order.state.terminal:
                 quantity = order.executed_quantity
-                settlement_fills = ()
                 average = Decimal(0) if quantity == 0 else None
                 if quantity > 0:
                     events = (
@@ -193,57 +186,6 @@ class PostgresOrderReadRepository:
                                 )
                                 / quantity
                             )
-                    if order.exchange_order_id is not None:
-                        scope = await session.scalar(
-                            select(ExecutionCommandRow.details["scope"]).where(
-                                ExecutionCommandRow.command_id == client_order_id,
-                            )
-                        )
-                        if scope is not None:
-                            if (
-                                scope["symbol"] != row.symbol
-                                or scope["position_side"] != row.position_side
-                            ):
-                                raise ValueError(
-                                    "persisted command and order position disagree"
-                                )
-                            account_fills = (
-                                await session.scalars(
-                                    select(AccountFillEventRow).where(
-                                        AccountFillEventRow.environment
-                                        == scope["environment"],
-                                        AccountFillEventRow.account_label
-                                        == scope["account_label"],
-                                        AccountFillEventRow.symbol == row.symbol,
-                                        AccountFillEventRow.order_id
-                                        == order.exchange_order_id,
-                                        AccountFillEventRow.side == row.side,
-                                    )
-                                )
-                            ).all()
-                            matching_fills = [
-                                fill
-                                for fill in account_fills
-                                if (
-                                    extract_fill_position_side(fill.raw_payload)
-                                    or "BOTH"
-                                )
-                                == row.position_side
-                            ]
-                            traded_quantity = sum(
-                                (fill.quantity for fill in matching_fills), Decimal(0)
-                            )
-                            traded_quote = sum(
-                                (fill.quantity * fill.price for fill in matching_fills),
-                                Decimal(0),
-                            )
-                            if traded_quantity == quantity:
-                                settlement_fills = tuple(
-                                    account_fill_from_row(fill)
-                                    for fill in matching_fills
-                                )
-                                if average is None:
-                                    average = traded_quote / quantity
                 if average is not None:
                     receipt = order_read_models.PersistedOrderReceipt(
                         client_order_id,
@@ -251,7 +193,6 @@ class PostgresOrderReadRepository:
                         order.exchange_order_id,
                         quantity,
                         average,
-                        settlement_fills,
                     )
             return replace(order, terminal_receipt=receipt)
 

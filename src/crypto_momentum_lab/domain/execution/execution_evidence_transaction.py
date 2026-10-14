@@ -26,7 +26,6 @@ from crypto_momentum_lab.domain.execution.evidence_rules import (
     _scoped_evidence_identity,
 )
 from crypto_momentum_lab.domain.execution.execution_evidence_processor import (
-    is_terminal_settlement_recovery,
     is_unfilled_terminal_order,
 )
 from crypto_momentum_lab.domain.execution.execution_evidence_state import (
@@ -53,13 +52,12 @@ from crypto_momentum_lab.domain.execution.ports import (
 from crypto_momentum_lab.domain.execution.position_book import PositionBook
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
-    JournalFactDelta,
 )
 from crypto_momentum_lab.domain.execution.position_recovery import (
-    create_verified_recovery_checkpoint,
-    rebuild_ordered_scan_journal,
+    create_current_state_checkpoint,
 )
 from crypto_momentum_lab.domain.execution.recovery_models import (
+    AccountFacts,
     StreamCheckpointAdoption,
 )
 
@@ -81,10 +79,6 @@ async def observe_evidence_transaction(
             observe_one=book._observe_mutating,
             forget_identity=book._seen_evidence_ids.discard,
         )
-        # Without a durable transaction there is nothing to persist, so the
-        # append-only delta must not accumulate in memory.
-        for journal in book._journals.values():
-            journal.mark_facts_persisted()
         book._context_revision += 1
         return result
     try:
@@ -118,7 +112,7 @@ async def observe_evidence_transaction(
                 return flat_result
 
             # A restored non-flat position from an earlier stream cannot be adopted by
-            # an ordinary snapshot. Reject it before cloning its journal or
+            # an ordinary snapshot. Reject it before cloning current state or
             # opening a transaction; account snapshots may contain thousands
             # of historical symbols on every refresh.
             terminal_without_fill = is_unfilled_terminal_order(evidence)
@@ -134,7 +128,9 @@ async def observe_evidence_transaction(
                 active_reservations=book._coordinator.get_active_reservations(key),
                 evidence=evidence,
                 is_unfilled_terminal_order=terminal_without_fill,
-                requires_verified_stream_adoption=book._requires_verified_stream_adoption(key),
+                requires_verified_stream_adoption=book._requires_verified_stream_adoption(
+                    key
+                ),
             )
             if recovery_proof_required:
                 return WaitingForEvidence(
@@ -272,7 +268,7 @@ async def observe_evidence_transaction(
                             stream_epoch=head.stream_epoch,
                         )
                         if parent_scope != scope:
-                            persisted_parent = await tx.load_checkpoint_by_id(
+                            persisted_parent = await tx.load_checkpoint_from_head(
                                 scope=parent_scope,
                                 checkpoint_id=prov.source_anchor_id,
                             )
@@ -293,11 +289,11 @@ async def observe_evidence_transaction(
                                         ),
                                     )
                                 )
-                            local_journal = candidate._journals.get(canon)
+                            local_book = candidate._books.get(canon)
                             local_parent = (
-                                local_journal.read_cut().recovery_checkpoint
-                                if local_journal is not None
-                                and local_journal.stream_scope == parent_scope
+                                local_book.current_facts.recovery_checkpoint
+                                if local_book is not None
+                                and local_book.stream_scope == parent_scope
                                 else None
                             )
                             if (
@@ -356,11 +352,11 @@ async def observe_evidence_transaction(
                         stream_id=head.stream_id,
                         stream_epoch=head.stream_epoch,
                     )
-                    local_journal = candidate._journals.get(canon)
+                    local_book = candidate._books.get(canon)
                     local_parent = (
-                        local_journal.read_cut().recovery_checkpoint
-                        if local_journal is not None
-                        and local_journal.stream_scope == parent_scope
+                        local_book.current_facts.recovery_checkpoint
+                        if local_book is not None
+                        and local_book.stream_scope == parent_scope
                         else None
                     )
                     if (
@@ -380,7 +376,7 @@ async def observe_evidence_transaction(
                                 ),
                             )
                         )
-                    persisted_parent = await tx.load_checkpoint_by_id(
+                    persisted_parent = await tx.load_checkpoint_from_head(
                         scope=parent_scope,
                         checkpoint_id=adoption.parent_checkpoint.checkpoint_id,
                     )
@@ -404,7 +400,7 @@ async def observe_evidence_transaction(
                         is_unfilled_terminal_order=terminal_without_fill,
                     )
                 else:
-                    candidate._journal_for_scope(key, scope)
+                    candidate._book_for_scope(key, scope)
                 try:
                     accepted = await tx.record_evidence(
                         key=key,
@@ -419,9 +415,7 @@ async def observe_evidence_transaction(
                             reason=str(err),
                         )
                     ) from err
-                if not accepted and not is_terminal_settlement_recovery(
-                    candidate, evidence
-                ):
+                if not accepted:
                     return Duplicate(
                         evidence_id=evidence.evidence_id,
                         view_token=candidate._ensure_book(key)
@@ -454,20 +448,21 @@ async def observe_evidence_transaction(
 
                 if evidence.source_anchor_snapshot is not None:
                     # Only an explicit flat source row may seed a new baseline.
-                    candidate._ensure_journal(key).record_snapshot(
-                        evidence.source_anchor_snapshot
+                    candidate._ensure_book(key).apply_delta(
+                        AccountFacts(
+                            position_key=key,
+                            snapshots=(evidence.source_anchor_snapshot,),
+                            stream_scope=scope,
+                            prefix_facts_complete=False,
+                        )
                     )
-                facts_before = candidate._ensure_journal(key).read_cut()
+                book_before = candidate._ensure_book(key)
+                facts_before = book_before.current_facts
+                position_state_before = book_before.encode_current_state()
                 fills_to_record = evidence.fills or (
                     (evidence.fill,) if evidence.fill is not None else ()
                 )
-                omitted_prefix_trade_ids: set[str] = set()
-                candidate_journal = candidate._journals.get(canon)
-                checkpoint = (
-                    candidate_journal.read_cut().recovery_checkpoint
-                    if candidate_journal is not None
-                    else None
-                )
+                checkpoint = facts_before.recovery_checkpoint
                 for fill in fills_to_record:
                     try:
                         identity_inserted = await tx.record_trade(
@@ -493,55 +488,7 @@ async def observe_evidence_transaction(
                         ) from err
                     if not identity_inserted:
                         candidate._seen_trade_ids.add(fill.trade_id)
-                    prior_fill = next(
-                        (
-                            item
-                            for item in facts_before.fills
-                            if item.trade_id == fill.trade_id
-                        ),
-                        None,
-                    )
-                    if (
-                        not identity_inserted
-                        and prior_fill is None
-                        and not adopting_epoch
-                    ):
-                        if (
-                            checkpoint is not None
-                            and checkpoint.stream_scope == scope
-                            and fill.trade_at <= checkpoint.event_cut
-                        ):
-                            omitted_prefix_trade_ids.add(fill.trade_id)
-                        else:
-                            raise AbortObservation(
-                                EvidenceConflict(
-                                    evidence_id=evidence.evidence_id,
-                                    reason=(
-                                        f"trade {fill.trade_id} was already consumed "
-                                        "but its journal facts are unavailable"
-                                    ),
-                                )
-                            )
-
-                if omitted_prefix_trade_ids:
-                    filtered_fills = tuple(
-                        fill
-                        for fill in evidence.fills
-                        if fill.trade_id not in omitted_prefix_trade_ids
-                    )
-                    filtered_fill = (
-                        evidence.fill
-                        if evidence.fill is not None
-                        and evidence.fill.trade_id not in omitted_prefix_trade_ids
-                        else None
-                    )
-                    observation_evidence = replace(
-                        evidence,
-                        fill=filtered_fill,
-                        fills=filtered_fills,
-                    )
-                else:
-                    observation_evidence = evidence
+                observation_evidence = evidence
 
                 if (
                     not adopting_epoch
@@ -550,47 +497,33 @@ async def observe_evidence_transaction(
                 ):
                     prefix_snapshot = observation_evidence.snapshot
                     prefix_boundary = observation_evidence.boundary
-                    prefix_snapshots = (
-                        (prefix_snapshot,)
-                        if prefix_snapshot is not None
+                    if (
+                        prefix_snapshot is not None
                         and prefix_snapshot.observed_at <= checkpoint.event_cut
-                        else ()
-                    )
-                    prefix_boundaries = (
-                        (prefix_boundary,)
-                        if prefix_boundary is not None
-                        and prefix_boundary.submitted_at <= checkpoint.event_cut
-                        else ()
-                    )
-                    if prefix_snapshots or prefix_boundaries:
-                        try:
-                            retained_delta = await tx.filter_known_facts(
-                                scope=scope,
-                                delta=JournalFactDelta(
-                                    snapshots=prefix_snapshots,
-                                    exit_boundaries=prefix_boundaries,
-                                ),
-                            )
-                        except DecisionCommitConflict as err:
-                            raise AbortObservation(
-                                EvidenceConflict(evidence.evidence_id, str(err))
-                            ) from err
-                        observation_evidence = replace(
-                            observation_evidence,
-                            snapshot=(
-                                None
-                                if prefix_snapshots and not retained_delta.snapshots
-                                else observation_evidence.snapshot
-                            ),
-                            boundary=(
-                                None
-                                if (
-                                    prefix_boundaries
-                                    and not retained_delta.exit_boundaries
-                                )
-                                else observation_evidence.boundary
-                            ),
+                    ):
+                        same_time = tuple(
+                            item
+                            for item in facts_before.snapshots
+                            if item.observed_at == prefix_snapshot.observed_at
                         )
+                        if same_time and prefix_snapshot not in same_time:
+                            raise AbortObservation(
+                                EvidenceConflict(
+                                    evidence_id=evidence.evidence_id,
+                                    reason="snapshot identity conflicts with head facts",
+                                )
+                            )
+                    observation_evidence = replace(
+                        observation_evidence,
+                        snapshot=(
+                            None
+                            if prefix_snapshot is not None
+                            and prefix_snapshot.observed_at <= checkpoint.event_cut
+                            and prefix_snapshot in same_time
+                            else prefix_snapshot
+                        ),
+                        boundary=prefix_boundary,
+                    )
 
                 candidate._active_transaction = tx
                 result = await observe_evidence_group(
@@ -600,17 +533,12 @@ async def observe_evidence_transaction(
                 )
                 if isinstance(result, (EvidenceConflict, WaitingForEvidence)):
                     raise AbortObservation(result)
-                journal = candidate._ensure_journal(key)
-                fact_delta = journal.pending_fact_delta()
-
                 receipt_only = (
                     head is not None
                     and current_scope == scope
                     and not adopting_epoch
-                    and not fact_delta.fills
-                    and not fact_delta.snapshots
-                    and not fact_delta.exit_boundaries
-                    and journal.read_cut() == facts_before
+                    and candidate._ensure_book(key).encode_current_state()
+                    == position_state_before
                     and candidate._outbox_by_command_id == book._outbox_by_command_id
                     and candidate.get_active_reservations(key)
                     == book.get_active_reservations(key)
@@ -634,36 +562,41 @@ async def observe_evidence_transaction(
                         evidence.coverage_evidence is not None
                         and evidence.fill_load_provenance is not None
                     ):
-                        rebuilt = rebuild_ordered_scan_journal(
-                            journal=journal,
-                            proof=evidence.coverage_evidence,
-                            provenance=evidence.fill_load_provenance,
-                            scanned_fills=fills_to_record,
-                        )
-                        rebuilt_order = rebuilt is not journal
-                        if rebuilt is not journal:
-                            journal = rebuilt
-                            candidate._journals[canon] = journal
-                            candidate._books[canon] = PositionBook(journal)
-                        checkpoint = create_verified_recovery_checkpoint(
-                            key=key,
-                            scope=scope,
-                            journal=candidate._ensure_journal(key),
-                            proof=evidence.coverage_evidence,
-                            provenance=evidence.fill_load_provenance,
-                            adoption=adoption,
-                            adopting_epoch=adopting_epoch,
-                            force_checkpoint=rebuilt_order,
-                        )
-                        if rebuilt_order and checkpoint is None:
+                        current_book = candidate._ensure_book(key)
+                        try:
+                            checkpoint = create_current_state_checkpoint(
+                                book=current_book,
+                                proof=evidence.coverage_evidence,
+                                provenance=evidence.fill_load_provenance,
+                                scanned_fills=fills_to_record,
+                                adoption=adoption,
+                                adopting_epoch=adopting_epoch,
+                                source_revision=current_book._revision,
+                            )
+                        except ValueError as err:
                             raise AbortObservation(
                                 EvidenceConflict(
                                     evidence_id=evidence.evidence_id,
-                                    reason=(
-                                        "ordered replay did not produce a"
-                                        " verified checkpoint"
-                                    ),
+                                    reason=str(err),
                                 )
+                            ) from err
+                        if checkpoint is not None:
+                            verification = replace(
+                                current_book.current_facts,
+                                recovery_checkpoint=checkpoint,
+                                has_late_events=False,
+                                has_synthetic_fills=False,
+                                conflicting_fills=(),
+                                fact_conflicts=(),
+                                integrity_issues=(),
+                            )
+                            candidate._books[canon] = PositionBook.from_current_state(
+                                position_key=key,
+                                stream_scope=scope,
+                                projection=checkpoint.projection,
+                                verification=verification,
+                                episode_sequence=checkpoint.projection.episode_sequence,
+                                batch_sequence=checkpoint.projection.batch_sequence,
                             )
                     if adopting_epoch and not can_rollover and checkpoint is None:
                         raise AbortObservation(
@@ -675,9 +608,6 @@ async def observe_evidence_transaction(
                                 ),
                             )
                         )
-                    journal = candidate._ensure_journal(key)
-                    if checkpoint is not None:
-                        journal.set_recovery_checkpoint(checkpoint)
                     if isinstance(result, Applied):
                         result = replace(
                             result,
@@ -685,24 +615,6 @@ async def observe_evidence_transaction(
                             .get_view(now=evidence.observed_at)
                             .projection_version,
                         )
-                    facts = journal.read_cut()
-                    persist_result = await tx.persist_facts(
-                        scope=scope,
-                        facts=facts,
-                        revision=journal.revision,
-                        checkpoint=checkpoint,
-                        delta=fact_delta,
-                    )
-                    if persist_result.has_conflicts:
-                        raise AbortObservation(
-                            EvidenceConflict(
-                                evidence_id=evidence.evidence_id,
-                                reason=(
-                                    "durable account journal reported a fact conflict"
-                                ),
-                            )
-                        )
-                    candidate._journal_revisions[canon] = persist_result.revision
                     if evidence.sequence is not None:
                         candidate._last_sequences[canon] = max(
                             candidate._last_sequences.get(canon, evidence.sequence),
@@ -727,9 +639,6 @@ async def observe_evidence_transaction(
                     head_payload = build_execution_head_payload(
                         candidate,
                         key,
-                        facts.compute_facts_hash(),
-                        ensure_book=candidate._ensure_book,
-                        ensure_journal=candidate._ensure_journal,
                         active_reservations=candidate.get_active_reservations,
                     )
                     candidate._head_revisions[canon] = await tx.persist_head(

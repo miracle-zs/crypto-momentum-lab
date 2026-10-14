@@ -1,10 +1,12 @@
 import asyncio
 from dataclasses import replace
+from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from crypto_momentum_lab.domain.account import AccountFillEvent
 from crypto_momentum_lab.domain.execution.evidence_grouping import (
     observe_evidence_group,
 )
@@ -14,7 +16,38 @@ from crypto_momentum_lab.domain.execution.observation_models import (
     Duplicate,
     EvidenceConflict,
 )
-from tests.unit.execution.test_cumulative_report import NOW, SCOPE, fill, report
+from crypto_momentum_lab.domain.execution.evidence_models import (
+    ExecutionCumulativeOrderReport,
+)
+from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
+from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
+
+NOW = datetime(2026, 9, 30, tzinfo=UTC)
+SCOPE = ExecutionScope("live", "account-3", "TESTUSDT", FuturesPositionSide.LONG)
+
+
+def fill(quantity: str) -> AccountFillEvent:
+    return AccountFillEvent(
+        environment=SCOPE.environment,
+        account_label=SCOPE.account_label,
+        symbol=SCOPE.symbol,
+        trade_id="fill",
+        order_id="order",
+        side="BUY",
+        price=Decimal("10"),
+        quantity=Decimal(quantity),
+        realized_pnl=Decimal("0"),
+        fee=Decimal("0"),
+        fee_asset="USDT",
+        trade_at=NOW,
+        raw_payload={"positionSide": SCOPE.position_side.value},
+    )
+
+
+def report():
+    return ExecutionCumulativeOrderReport(
+        "order", Decimal("6"), Decimal("60"), NOW
+    )
 
 
 def evidence():

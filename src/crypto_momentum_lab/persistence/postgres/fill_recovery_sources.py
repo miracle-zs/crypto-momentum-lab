@@ -1,20 +1,26 @@
-"""Load source anchors without deriving completeness from polling cursors."""
+"""Load fill-scan anchors from the current head and raw exchange snapshots."""
 
-import hashlib
-import json
-from typing import cast as typing_cast
+from typing import cast
 
-from sqlalchemy import Numeric, cast, select, tuple_
+from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.account.models import (
     AccountFillSourceAnchor,
     AccountPositionSnapshot,
 )
-from crypto_momentum_lab.domain.execution.evidence_codec import (
-    recovery_checkpoint_head_binding,
+from crypto_momentum_lab.domain.execution.execution_head import (
+    EXECUTION_HEAD_SCHEMA_VERSION,
+    decode_execution_head_state,
 )
-from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
+from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
+from crypto_momentum_lab.domain.execution.position_ledger_models import (
+    AccountFactStreamScope,
+    PositionKey,
+)
+from crypto_momentum_lab.domain.execution.recovery_models import (
+    PositionRecoveryCheckpoint,
+)
 from crypto_momentum_lab.domain.execution.snapshot_encoding import (
     stable_snapshot_anchor_id,
 )
@@ -23,13 +29,6 @@ from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models impo
     ExecutionBookHeadRow,
 )
 from crypto_momentum_lab.persistence.postgres.models import AccountPositionSnapshotRow
-from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
-    PositionFactJournalEventRow,
-    PositionRecoveryCheckpointRow,
-)
-from crypto_momentum_lab.persistence.postgres.recovery_relevance import (
-    relevant_recovery_head,
-)
 
 
 async def load_fill_recovery_sources(
@@ -39,224 +38,158 @@ async def load_fill_recovery_sources(
     account_label: str,
     position_keys: tuple[tuple[str, str], ...] | None = None,
 ) -> dict[tuple[str, str], AccountFillSourceAnchor | None]:
-    """Use a verified current head checkpoint, otherwise an explicit flat row.
-
-    Empty historical symbols need no private REST scan. A durable Book with
-    real trade history must get a source-backed baseline even if now flat.
-    """
-    async with sessions() as session:
-        heads = (
-            await session.scalars(
-                select(ExecutionBookHeadRow).where(
-                    ExecutionBookHeadRow.environment == environment,
-                    ExecutionBookHeadRow.account_label == account_label,
-                    relevant_recovery_head()
-                    if position_keys is None
-                    else tuple_(
-                        ExecutionBookHeadRow.symbol, ExecutionBookHeadRow.position_side
-                    ).in_(position_keys),
-                )
-            )
-        ).all()
-        if not heads and not position_keys:
+    """Use the current head checkpoint or a real flat exchange observation."""
+    statement = select(ExecutionBookHeadRow).where(
+        ExecutionBookHeadRow.environment == environment,
+        ExecutionBookHeadRow.account_label == account_label,
+    )
+    if position_keys is not None:
+        if not position_keys:
             return {}
-        heads_by_key = {(head.symbol, head.position_side): head for head in heads}
+        statement = statement.where(
+            tuple_(ExecutionBookHeadRow.symbol, ExecutionBookHeadRow.position_side).in_(
+                position_keys
+            )
+        )
+
+    async with sessions() as session:
+        heads = (await session.scalars(statement)).all()
         result: dict[tuple[str, str], AccountFillSourceAnchor | None] = {
-            key: None for key in heads_by_key
+            (symbol, side): None for symbol, side in (position_keys or ())
         }
-        if position_keys is not None:
-            result.update({key: None for key in position_keys if key not in result})
-        bindings = []
         for head in heads:
-            binding = head.state_payload.get("recovery_checkpoint")
-            if isinstance(binding, dict) and binding.get("checkpoint_id"):
-                bindings.append(
-                    (
-                        head.symbol,
-                        head.position_side,
-                        head.stream_id,
-                        head.stream_epoch,
-                        binding["checkpoint_id"],
-                    )
+            payload = head.state_payload or {}
+            if payload.get("schema_version") != EXECUTION_HEAD_SCHEMA_VERSION:
+                if position_keys is None:
+                    continue
+                raise ValueError(
+                    f"execution head {head.symbol}:{head.position_side} "
+                    "requires explicit format migration"
                 )
-        checkpoints = (
-            (
+            key = (head.symbol, head.position_side)
+            position_key = PositionKey(
+                environment,
+                account_label,
+                head.symbol,
+                FuturesPositionSide(head.position_side),
+            )
+            scope = AccountFactStreamScope.for_position_key(
+                position_key,
+                stream_id=head.stream_id,
+                stream_epoch=head.stream_epoch,
+            )
+            try:
+                facts = decode_execution_head_state(
+                    payload, key=position_key, scope=scope
+                ).current_facts
+            except Exception as err:
+                raise ValueError(
+                    f"execution head {head.symbol}:{head.position_side} is invalid"
+                ) from err
+            result.setdefault(key, None)
+
+            checkpoint = facts.recovery_checkpoint
+            if _checkpoint_is_authoritative(
+                checkpoint, environment, account_label, key
+            ):
+                assert checkpoint is not None
+                result[key] = AccountFillSourceAnchor(
+                    key[0],
+                    key[1],
+                    checkpoint.checkpoint_id,
+                    checkpoint.event_cut,
+                    checkpoint.stream_scope.stream_id,
+                    checkpoint.stream_scope.stream_epoch,
+                )
+                continue
+
+            flat_snapshots = [
+                snapshot
+                for snapshot in facts.snapshots
+                if snapshot.position_amt == 0
+                and (snapshot.symbol, snapshot.position_side.upper()) == key
+            ]
+            if flat_snapshots:
+                snapshot = max(flat_snapshots, key=lambda item: item.observed_at)
+                result[key] = _snapshot_anchor(snapshot)
+
+        raw_keys = [key for key, anchor in result.items() if anchor is None]
+        if raw_keys:
+            flat_rows = (
                 await session.scalars(
-                    select(PositionRecoveryCheckpointRow).where(
-                        PositionRecoveryCheckpointRow.environment == environment,
-                        PositionRecoveryCheckpointRow.account_label == account_label,
+                    select(AccountPositionSnapshotRow)
+                    .where(
+                        AccountPositionSnapshotRow.environment == environment,
+                        AccountPositionSnapshotRow.account_label == account_label,
+                        AccountPositionSnapshotRow.position_amt == 0,
                         tuple_(
-                            PositionRecoveryCheckpointRow.symbol,
-                            PositionRecoveryCheckpointRow.position_side,
-                            PositionRecoveryCheckpointRow.stream_id,
-                            PositionRecoveryCheckpointRow.stream_epoch,
-                            PositionRecoveryCheckpointRow.checkpoint_id,
-                        ).in_(bindings),
+                            AccountPositionSnapshotRow.symbol,
+                            AccountPositionSnapshotRow.position_side,
+                        ).in_(raw_keys),
+                    )
+                    .distinct(
+                        AccountPositionSnapshotRow.symbol,
+                        AccountPositionSnapshotRow.position_side,
+                    )
+                    .order_by(
+                        AccountPositionSnapshotRow.symbol,
+                        AccountPositionSnapshotRow.position_side,
+                        AccountPositionSnapshotRow.observed_at.desc(),
                     )
                 )
             ).all()
-            if bindings
-            else []
-        )
-        for row in checkpoints:
-            key = (row.symbol, row.position_side)
-            anchor = _checkpoint_anchor(
-                row, heads_by_key[key], environment, account_label
-            )
-            if anchor is not None:
-                result[key] = anchor
-        keys = [key for key, anchor in result.items() if anchor is None]
-        if not keys:
-            return result
-        flat_rows = (
-            await session.scalars(
-                select(AccountPositionSnapshotRow)
-                .where(
-                    AccountPositionSnapshotRow.environment == environment,
-                    AccountPositionSnapshotRow.account_label == account_label,
-                    AccountPositionSnapshotRow.position_amt == 0,
-                    tuple_(
-                        AccountPositionSnapshotRow.symbol,
-                        AccountPositionSnapshotRow.position_side,
-                    ).in_(keys),
+            for row in flat_rows:
+                key = (row.symbol, row.position_side)
+                if result.get(key) is not None:
+                    continue
+                snapshot = AccountPositionSnapshot(
+                    row.environment,
+                    row.account_label,
+                    row.symbol,
+                    row.position_side,
+                    row.position_amt,
+                    row.entry_price,
+                    row.mark_price,
+                    row.unrealized_pnl,
+                    row.notional,
+                    row.leverage,
+                    row.margin_type,
+                    row.observed_at,
+                    cast(dict[str, JsonValue], row.raw_payload),
                 )
-                .distinct(
-                    AccountPositionSnapshotRow.symbol,
-                    AccountPositionSnapshotRow.position_side,
-                )
-                .order_by(
-                    AccountPositionSnapshotRow.symbol,
-                    AccountPositionSnapshotRow.position_side,
-                    AccountPositionSnapshotRow.observed_at.desc(),
-                )
-            )
-        ).all()
-        # Snapshot-table retention omits unchanged flat rows. The immutable
-        # Book journal is another durable source of actual observations.
-        journal_flat_rows = (
-            await session.scalars(
-                select(PositionFactJournalEventRow)
-                .where(
-                    PositionFactJournalEventRow.environment == environment,
-                    PositionFactJournalEventRow.account_label == account_label,
-                    PositionFactJournalEventRow.event_kind == "snapshot",
-                    cast(
-                        PositionFactJournalEventRow.payload["position_amt"].astext,
-                        Numeric,
-                    )
-                    == 0,
-                    tuple_(
-                        PositionFactJournalEventRow.symbol,
-                        PositionFactJournalEventRow.position_side,
-                    ).in_(keys),
-                )
-                .distinct(
-                    PositionFactJournalEventRow.symbol,
-                    PositionFactJournalEventRow.position_side,
-                )
-                .order_by(
-                    PositionFactJournalEventRow.symbol,
-                    PositionFactJournalEventRow.position_side,
-                    PositionFactJournalEventRow.occurred_at.desc(),
-                    PositionFactJournalEventRow.recorded_at.desc(),
-                )
-            )
-        ).all()
-    for flat_row in flat_rows:
-        key = (flat_row.symbol, flat_row.position_side)
-        if result.get(key) is not None:
-            continue
-        snapshot = AccountPositionSnapshot(
-            flat_row.environment,
-            flat_row.account_label,
-            flat_row.symbol,
-            flat_row.position_side,
-            flat_row.position_amt,
-            flat_row.entry_price,
-            flat_row.mark_price,
-            flat_row.unrealized_pnl,
-            flat_row.notional,
-            flat_row.leverage,
-            flat_row.margin_type,
-            flat_row.observed_at,
-            typing_cast(dict[str, JsonValue], flat_row.raw_payload),
-        )
-        result[key] = AccountFillSourceAnchor(
-            flat_row.symbol,
-            flat_row.position_side,
-            stable_snapshot_anchor_id(snapshot),
-            snapshot.observed_at,
-            "exchange_snapshot",
-            str(flat_row.snapshot_id),
-            zero_snapshot=snapshot,
-        )
-    for journal_row in journal_flat_rows:
-        key = (journal_row.symbol, journal_row.position_side)
-        if result.get(key) is not None:
-            continue
-        encoded = json.dumps(
-            journal_row.payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ).encode("utf-8")
-        if hashlib.sha256(encoded).hexdigest() != journal_row.payload_hash:
-            continue
-        snapshot = PositionRecoveryCodec.decode_snapshot(journal_row.payload)
-        if (
-            snapshot.environment != environment
-            or snapshot.account_label != account_label
-            or (snapshot.symbol, snapshot.position_side) != key
-            or snapshot.observed_at != journal_row.occurred_at
-            or snapshot.position_amt != 0
-        ):
-            continue
-        anchor_id = stable_snapshot_anchor_id(snapshot)
-        result[key] = AccountFillSourceAnchor(
-            journal_row.symbol,
-            journal_row.position_side,
-            anchor_id,
-            snapshot.observed_at,
-            "exchange_snapshot",
-            journal_row.event_record_id,
-            zero_snapshot=snapshot,
-        )
+                result[key] = _snapshot_anchor(snapshot)
     return result
 
 
-def _checkpoint_anchor(
-    row: PositionRecoveryCheckpointRow,
-    head: ExecutionBookHeadRow,
+def _snapshot_anchor(snapshot: AccountPositionSnapshot) -> AccountFillSourceAnchor:
+    anchor_id = stable_snapshot_anchor_id(snapshot)
+    return AccountFillSourceAnchor(
+        snapshot.symbol,
+        snapshot.position_side,
+        anchor_id,
+        snapshot.observed_at,
+        "exchange_snapshot",
+        anchor_id,
+        zero_snapshot=snapshot,
+    )
+
+
+def _checkpoint_is_authoritative(
+    checkpoint: PositionRecoveryCheckpoint | None,
     environment: str,
     account_label: str,
-) -> AccountFillSourceAnchor | None:
-    if (row.stream_id, row.stream_epoch) != (head.stream_id, head.stream_epoch):
-        return None
-    checkpoint = PositionRecoveryCodec.decode_checkpoint(row.payload)
-    binding = head.state_payload.get("recovery_checkpoint")
-    if (
-        not isinstance(binding, dict)
-        or recovery_checkpoint_head_binding(checkpoint) != binding
-        or checkpoint.key.environment != environment
-        or checkpoint.key.account_label != account_label
-        or (checkpoint.key.symbol, checkpoint.key.position_side.value)
-        != (head.symbol, head.position_side)
-    ):
-        return None
-    if (
-        checkpoint.coverage is None
-        or not checkpoint.coverage.is_authoritative
-        or checkpoint.has_conflicts
-        or checkpoint.has_synthetic_fills
-        or checkpoint.has_late_events
-        or checkpoint.integrity_issues
-    ):
-        return None
-    return AccountFillSourceAnchor(
-        row.symbol,
-        row.position_side,
-        checkpoint.checkpoint_id,
-        checkpoint.event_cut,
-        row.stream_id,
-        row.stream_epoch,
+    key: tuple[str, str],
+) -> bool:
+    if checkpoint is None:
+        return False
+    return (
+        checkpoint.key.environment == environment
+        and checkpoint.key.account_label == account_label
+        and (checkpoint.key.symbol, checkpoint.key.position_side.value) == key
+        and checkpoint.coverage is not None
+        and checkpoint.coverage.is_authoritative
+        and not checkpoint.has_conflicts
+        and not checkpoint.has_synthetic_fills
+        and not checkpoint.has_late_events
+        and not checkpoint.integrity_issues
     )

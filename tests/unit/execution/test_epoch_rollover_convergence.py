@@ -217,9 +217,6 @@ async def test_durable_empty_flat_rollover_resets_sequence_monotonicity() -> Non
     from typing import Any
 
     from crypto_momentum_lab.domain.execution.ports import ExecutionHeadSnapshot
-    from crypto_momentum_lab.domain.execution.recovery_models import (
-        JournalPersistResult,
-    )
 
     class _DurableTx:
         def __init__(self) -> None:
@@ -228,7 +225,7 @@ async def test_durable_empty_flat_rollover_resets_sequence_monotonicity() -> Non
         async def load_head(self, key: Any) -> ExecutionHeadSnapshot | None:
             return self.head
 
-        async def load_checkpoint_by_id(self, **kwargs: Any) -> None:
+        async def load_checkpoint_from_head(self, **kwargs: Any) -> None:
             return None
 
         async def record_evidence(self, **kwargs: Any) -> bool:
@@ -239,14 +236,6 @@ async def test_durable_empty_flat_rollover_resets_sequence_monotonicity() -> Non
 
         async def persist_watermark(self, **kwargs: Any) -> None:
             pass
-
-        async def persist_facts(self, **kwargs: Any) -> JournalPersistResult:
-            return JournalPersistResult(
-                inserted_count=1,
-                duplicate_count=0,
-                conflict_count=0,
-                revision=kwargs["revision"],
-            )
 
         async def persist_head(self, **kwargs: Any) -> int:
             self.head = ExecutionHeadSnapshot(

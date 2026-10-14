@@ -34,6 +34,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionLedgerBatch,
     PositionView,
 )
+from crypto_momentum_lab.domain.execution.recovery_models import AccountFacts
 from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
 from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
 from crypto_momentum_lab.domain.strategy.position_exit import PositionExitMode
@@ -63,11 +64,15 @@ async def test_restored_grace_ack_blocks_next_candle_and_keeps_timeout_cancellat
 ):
     scope = ExecutionScope("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
     book = ExecutionBook(reservation_repository=MemoryReservations())
-    book._ensure_journal(scope.to_position_key()).set_coverage(
-        FactCoverageInterval(
-            start_at=NOW,
-            end_at=NOW,
-            status=FactCoverageStatus.CONFIRMED,
+    key = scope.to_position_key()
+    book._ensure_book(key).replace_from_facts(
+        AccountFacts(
+            position_key=key,
+            coverage=FactCoverageInterval(
+                start_at=NOW,
+                end_at=NOW,
+                status=FactCoverageStatus.CONFIRMED,
+            ),
         )
     )
     opening = AccountFillEvent(

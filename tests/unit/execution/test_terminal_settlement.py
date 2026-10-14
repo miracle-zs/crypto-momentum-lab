@@ -1,4 +1,4 @@
-"""Real Book settlement when an order report precedes its account trades."""
+"""Order progress and account position facts advance independently."""
 
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -18,7 +18,7 @@ from crypto_momentum_lab.domain.execution.execution_book import (
     ExecutionBook,
     ExecutionRequest,
 )
-from crypto_momentum_lab.domain.execution.observation_models import Applied, Duplicate
+from crypto_momentum_lab.domain.execution.observation_models import Applied
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
     ExchangeOrderSnapshot,
@@ -49,7 +49,7 @@ class ObservationTransaction:
     async def load_head(self, key):
         return self.head
 
-    async def load_checkpoint_by_id(self, scope, checkpoint_id):
+    async def load_checkpoint_from_head(self, *, scope, checkpoint_id):
         return self.checkpoints.get((scope, checkpoint_id))
 
     async def record_evidence(self, **kwargs):
@@ -57,9 +57,6 @@ class ObservationTransaction:
 
     async def record_trade(self, **kwargs):
         return True
-
-    async def persist_facts(self, **kwargs):
-        return SimpleNamespace(has_conflicts=False, revision=kwargs["revision"])
 
     async def persist_watermark(self, **kwargs):
         pass
@@ -181,9 +178,9 @@ async def test_terminal_report_and_real_trades_settle_without_account_recovery(
     assert isinstance(result, Applied)
     assert not result.recovery_required
     if report_first:
-        # A report settles capacity but must not manufacture position trades.
+        # Order progress consumes the reservation but does not change holdings.
         assert (await book.read(SCOPE)).total_quantity == Decimal("5")
-        assert book.command_requires_recovery("exit")
+        assert not book.command_requires_recovery("exit")
     later = await book.observe(second)
     assert isinstance(later, Applied)
     assert not later.recovery_required
@@ -243,12 +240,13 @@ async def test_external_exit_diagnostics_do_not_block_new_entries():
     other = replace(SCOPE, symbol="ETHUSDT")
     await book.observe(replace(evidence("other-ready"), scope=other))
     assert isinstance(await act(other, "other-position"), Accepted)
-    assert observed.recovery_required
+    assert not observed.recovery_required
+    assert (await book.read(SCOPE)).total_quantity == Decimal("0")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("report_first", [False, True])
-async def test_filled_entry_exchange_identity_clears_trade_wait(report_first):
+async def test_filled_entry_report_does_not_wait_for_position_trade(report_first):
     book = ExecutionBook(execution_unit_of_work=ObservationUnitOfWork())
     book._persistence_failed = False
     await book.observe(evidence("initial"))
@@ -309,152 +307,28 @@ async def test_verified_partial_receipt_resolves_unknown_dispatch_without_releas
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("complete", [False, True])
-async def test_external_exit_recovery_requires_complete_history_and_matching_snapshot(
-    complete,
-):
-    from crypto_momentum_lab.domain.account import AccountPositionSnapshot
-    from crypto_momentum_lab.domain.execution.position_ledger_models import (
-        AccountFactStreamScope,
-        AccountFillLoadProvenance,
-        CoverageEvidence,
-        compose_fact_coverage,
+async def test_external_exit_fill_updates_current_position_directly():
+    book = await reserved_book()
+    result = await book.observe(
+        evidence("manual-exit", fill=fill("manual-close", "2"))
     )
-
-    baseline_at = NOW - timedelta(seconds=1)
-    baseline = AccountPositionSnapshot(
-        "live",
-        "primary",
-        "BTCUSDT",
-        "LONG",
-        Decimal("0"),
-        Decimal("0"),
-        Decimal("100"),
-        Decimal("0"),
-        Decimal("0"),
-        5,
-        "cross",
-        baseline_at,
-        {"positionSide": "LONG", "include_flat": True},
-    )
-    from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
-    from crypto_momentum_lab.domain.execution.ports import DurableExecutionPositionState
-    from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
-    from crypto_momentum_lab.domain.execution.snapshot_encoding import (
-        stable_snapshot_anchor_id,
-    )
-
-    scope = AccountFactStreamScope.for_position_key(
-        SCOPE.to_position_key(), stream_id="hub", stream_epoch="epoch"
-    )
-    journal = AccountJournal(SCOPE.to_position_key(), stream_scope=scope)
-    journal.record_snapshot(baseline)
-
-    class RestoredUnitOfWork(ObservationUnitOfWork):
-        async def load_positions(self, **kwargs):
-            cut = DurableJournalCut(
-                scope=scope,
-                facts=journal.read_cut(),
-                revision=journal.revision,
-                as_of=baseline_at,
-            )
-            return (DurableExecutionPositionState(scope, cut, None, (), (), ()),)
-
-    class Commands:
-        async def load_active_execution_commands(self, **kwargs):
-            return ()
-
-    uow = RestoredUnitOfWork()
-    book = ExecutionBook(execution_unit_of_work=uow, command_repository=Commands())
-    await book.restore(account_label="primary", as_of=baseline_at)
-    await book.observe(evidence("opening", fill=fill("opening", "2", entry=True)))
-    await book.observe(
-        evidence("manual-exit", fill=replace(fill("manual", "2"), order_id="external"))
-    )
-    scope = AccountFactStreamScope.for_position_key(
-        SCOPE.to_position_key(), stream_id="hub", stream_epoch="epoch"
-    )
-    checked = NOW + timedelta(seconds=2)
-    provenance = AccountFillLoadProvenance(
-        stream_scope=scope,
-        load_id="complete-scan",
-        scan_origin_from_id=None,
-        scan_origin_start_time_ms=int(baseline_at.timestamp() * 1000),
-        request_from_id=None,
-        next_from_id=None,
-        page_count=1,
-        page_exhausted=complete,
-        truncated=not complete,
-        checked_through=checked,
-        observed_at=checked,
-        source_anchor_id=stable_snapshot_anchor_id(baseline),
-        source_anchor_event_cut=baseline_at,
-        source_anchor_kind="zero_snapshot",
-    )
-    proof = CoverageEvidence(
-        fill_cursor_id="complete-scan",
-        fill_load_start=baseline_at,
-        fill_checked_through=checked,
-        checkpoint_id="scan-cut",
-        checkpoint_event_cut=checked,
-        stream_scope=scope,
-        evidence_observed_at=checked,
-        page_exhausted=complete,
-        not_truncated=complete,
-        load_provenance=provenance,
-    )
-    snapshot = AccountPositionSnapshot(
-        "live",
-        "primary",
-        "BTCUSDT",
-        "LONG",
-        Decimal("0"),
-        Decimal("0"),
-        Decimal("100"),
-        Decimal("0"),
-        Decimal("0"),
-        5,
-        "cross",
-        checked,
-        {},
-    )
-    observed_cut = await book.observe(
-        replace(
-            evidence("account-cut"),
-            observed_at=checked,
-            snapshot=snapshot,
-            coverage=compose_fact_coverage(
-                proof, start=baseline_at, end=checked, expected_scope=scope
-            ),
-            coverage_evidence=proof,
-            fill_load_provenance=provenance,
-        )
-    )
-    view = await book.read(SCOPE)
-    assert view.total_quantity == Decimal("0")
-    assert bool(uow.head.state_payload["external_recovery_ids"]) is not complete, (
-        view.health_status,
-        view.diagnostics,
-        view.coverage,
-        observed_cut,
-    )
+    assert isinstance(result, Applied)
+    assert not result.recovery_required
+    assert (await book.read(SCOPE)).total_quantity == Decimal("3")
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("quantity", ["1", "3"])
-async def test_incomplete_or_excess_terminal_settlement_still_requires_recovery(
-    quantity,
+@pytest.mark.parametrize(("quantity", "recovery"), [("1", False), ("3", True)])
+async def test_terminal_order_progress_settles_or_reports_reservation_overfill(
+    quantity, recovery
 ):
     book = await reserved_book()
     result = await book.observe(terminal_report(quantity))
     assert isinstance(result, Applied)
-    assert result.recovery_required
-    assert book.command_requires_recovery("exit")
+    assert result.recovery_required is recovery
+    assert book.command_requires_recovery("exit") is recovery
     if quantity == "1":
-        assert sum(
-            r.active_quantity
-            for r in book.get_active_reservations(SCOPE.to_position_key())
-        ) == Decimal("1")
+        assert not book.get_active_reservations(SCOPE.to_position_key())
     else:
         assert "exceeds" in result.diagnostics[0]
 
@@ -511,7 +385,7 @@ async def test_observed_filled_order_reaches_real_book_before_account_trade():
         assert result.state is ExchangeOrderState.FILLED
         assert not book.get_active_reservations(SCOPE.to_position_key())
         assert (await book.read(SCOPE)).total_quantity == Decimal("5")
-        assert book.command_requires_recovery("exit")
+        assert not book.command_requires_recovery("exit")
         trade = await book.observe(evidence("closing", fill=fill("closing", "2")))
         assert isinstance(trade, Applied) and not trade.recovery_required
         assert trade.consumed_quantity == Decimal("0")
@@ -522,12 +396,12 @@ async def test_observed_filled_order_reaches_real_book_before_account_trade():
 
 
 @pytest.mark.asyncio
-async def test_partial_trades_keep_gate_until_exact_settlement_is_confirmed():
+async def test_trade_facts_update_position_without_a_second_settlement_gate():
     book = await reserved_book()
     await book.observe(terminal_report())
     first = await book.observe(evidence("trade-1", fill=fill("trade-1", "1")))
     assert isinstance(first, Applied) and not first.recovery_required
-    assert book.command_requires_recovery("exit")
+    assert not book.command_requires_recovery("exit")
     assert (await book.read(SCOPE)).total_quantity == Decimal("4")
     await book.observe(evidence("trade-2", fill=fill("trade-2", "1")))
     assert not book.command_requires_recovery("exit")
@@ -543,13 +417,13 @@ async def test_overfill_is_not_healed_by_late_real_trades():
 
 
 @pytest.mark.asyncio
-async def test_failed_trade_commit_does_not_publish_settlement_completion():
+async def test_failed_position_trade_commit_does_not_publish_position_change():
     book = await reserved_book()
     await book.observe(terminal_report())
     book._execution_unit_of_work.fail_commit = True
     with pytest.raises(RuntimeError, match="injected commit failure"):
         await book.observe(evidence("closing", fill=fill("closing", "2")))
-    assert book.command_requires_recovery("exit")
+    assert not book.command_requires_recovery("exit")
     # The previous published facts survive the failed candidate transaction.
     assert (await book.read(SCOPE)).total_quantity == Decimal("5")
 
@@ -565,7 +439,7 @@ async def test_missing_reservation_identity_cannot_be_healed_by_matching_trades(
 
 
 @pytest.mark.asyncio
-async def test_entry_report_waits_for_account_trades_without_exit_reservations():
+async def test_entry_report_does_not_wait_for_account_position_facts():
     book = ExecutionBook(execution_unit_of_work=ObservationUnitOfWork())
     book._persistence_failed = False
     command = TradeCommand(
@@ -581,7 +455,7 @@ async def test_entry_report_waits_for_account_trades_without_exit_reservations()
     book.register_prepared_command(command, SCOPE, [])
     result = await book.observe(terminal_report())
     assert isinstance(result, Applied) and not result.recovery_required
-    assert book.command_requires_recovery("exit")
+    assert not book.command_requires_recovery("exit")
     assert (await book.read(SCOPE)).total_quantity == Decimal("0")
     trade = replace(
         fill("opening", "2"),
@@ -605,10 +479,8 @@ async def test_filled_reduce_only_smaller_than_requested_releases_unused_capacit
     first, second = (report, trades) if report_first else (trades, report)
     await book.observe(first)
     if report_first:
-        assert book.command_requires_recovery("exit")
-        assert book.coordinator.get_reservation(
-            "reservation"
-        ).active_quantity == Decimal("1")
+        assert not book.command_requires_recovery("exit")
+        assert book.coordinator.get_reservation("reservation").active_quantity == 0
         assert (await book.read(SCOPE)).total_quantity == Decimal("5")
     await book.observe(second)
     reservation = book.coordinator.get_reservation("reservation")
@@ -618,64 +490,3 @@ async def test_filled_reduce_only_smaller_than_requested_releases_unused_capacit
     assert not book.command_requires_recovery("exit")
     assert (await book.read(SCOPE)).total_quantity == Decimal("4")
     assert book.get_outbox("exit").state == DispatchState.TERMINAL
-
-
-async def test_historical_short_terminal_releases_without_replaying_position():
-    book = await reserved_book()
-    await book.observe(terminal_report("1"))
-    replay = replace(
-        terminal_report("1"),
-        evidence_id="historical-settlement",
-        observed_at=NOW + timedelta(seconds=2),
-        settlement_fills=(fill("historical-close", "1"),),
-    )
-    result = await book.observe(replay)
-    assert isinstance(result, Applied)
-    assert result.released_quantity == Decimal("1")
-    assert not book.command_requires_recovery("exit")
-    assert (await book.read(SCOPE)).total_quantity == Decimal("5")
-    reservations_before = book.get_active_reservations(SCOPE.to_position_key())
-    repeated = await book.observe(replace(replay, evidence_id="historical-again"))
-    assert isinstance(repeated, Duplicate)
-    assert book.get_active_reservations(SCOPE.to_position_key()) == reservations_before
-    assert (await book.read(SCOPE)).total_quantity == Decimal("5")
-    assert not book.command_requires_recovery("exit")
-    assert book.coordinator.get_reservation("reservation").released_quantity == Decimal(
-        "1"
-    )
-
-
-async def test_duplicate_historical_receipt_can_complete_pending_settlement():
-    book = await reserved_book()
-    await book.observe(terminal_report("1"))
-    uow = book._execution_unit_of_work
-
-    class DuplicateTransaction(ObservationTransaction):
-        async def record_evidence(self, **kwargs):
-            return False
-
-    class DuplicateUow:
-        @asynccontextmanager
-        async def transaction(self, key):
-            tx = DuplicateTransaction(uow.head)
-            yield tx
-            uow.head = tx.head
-
-    book._execution_unit_of_work = DuplicateUow()
-    replay = replace(
-        terminal_report("1"),
-        observed_at=NOW + timedelta(seconds=2),
-        settlement_fills=(fill("historical-close", "1"),),
-    )
-    result = await book.observe(replay)
-    assert isinstance(result, Applied)
-    assert result.released_quantity == Decimal("1")
-    assert not book.command_requires_recovery("exit")
-    assert (await book.read(SCOPE)).total_quantity == Decimal("5")
-    repeated = await book.observe(replay)
-    from crypto_momentum_lab.domain.execution.observation_models import Duplicate
-
-    assert isinstance(repeated, Duplicate)
-    assert book.coordinator.get_reservation("reservation").released_quantity == Decimal(
-        "1"
-    )

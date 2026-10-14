@@ -30,16 +30,6 @@ def prepare_durable_evidence(evidence: ExecutionEvidence) -> DurableEvidenceInpu
         raise DurableEvidenceConflict(
             "durable execution evidence requires stream identity"
         )
-    fills = evidence.fills or ((evidence.fill,) if evidence.fill else ())
-    if any(
-        isinstance(fill.raw_payload, dict)
-        and (fill.raw_payload.get("is_cumulative") or "cum_qty" in fill.raw_payload)
-        for fill in fills
-    ):
-        raise DurableEvidenceConflict(
-            "cumulative order reports cannot be recorded as account trades; "
-            "use cumulative_order"
-        )
     scope = AccountFactStreamScope.for_position_key(
         evidence.scope.to_position_key(),
         stream_id=evidence.stream_id,

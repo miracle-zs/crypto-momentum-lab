@@ -1,11 +1,4 @@
-"""PositionBook domain service providing authoritative, point-in-time PositionView.
-
-Obays RFC 2026-09-25:
-1. Translates immutable account facts into deterministic PositionView;
-2. Strict separation between facts, strategy attribution, and observations;
-3. No silent quantity clipping or heuristics;
-4. Enforces freshness requirements before approving execution readiness.
-"""
+"""Current position state and its immutable read view."""
 
 from __future__ import annotations
 
@@ -17,7 +10,16 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
 
-from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
+from crypto_momentum_lab.domain.account.models import (
+    AccountFillEvent,
+    AccountFillReconciliationCursor,
+    AccountPositionSnapshot,
+)
+from crypto_momentum_lab.domain.execution.position_ledger_models import (
+    AccountFactConflict,
+    AccountFillLoadProvenance,
+    ExitOrderSubmissionFact,
+)
 from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
@@ -29,49 +31,297 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionLedgerProjection,
     PositionView,
 )
+from crypto_momentum_lab.domain.execution.projection_codec import (
+    encode_projection,
+)
+from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
 from crypto_momentum_lab.domain.execution.recovery_models import (
     AccountFacts,
-    DurableJournalCut,
+    PositionRecoveryCheckpoint,
 )
 
 
 @dataclass(frozen=True, slots=True)
-class _CachedBaseView:
-    projection: PositionLedgerProjection
-    version_id: str
-    input_revision: int
-    base_health_status: PositionHealthStatus
-    is_comparable: bool
-    base_diagnostics: tuple[str, ...]
-    view_coverage: FactCoverageInterval | None
-    zero_confirmed: bool
-    stream_scope: AccountFactStreamScope | None
+class _CurrentFacts:
+    """Small verification state kept beside the current position projection."""
+
+    coverage: FactCoverageInterval | None = None
+    latest_snapshot: AccountPositionSnapshot | None = None
+    source_anchor_snapshot: AccountPositionSnapshot | None = None
+    fill_cursor_provenance: AccountFillReconciliationCursor | None = None
+    fill_load_provenance: AccountFillLoadProvenance | None = None
+    recovery_checkpoint: PositionRecoveryCheckpoint | None = None
+    exit_boundaries: tuple[ExitOrderSubmissionFact, ...] = ()
+    conflicting_fill: AccountFillEvent | None = None
+    fact_conflict: AccountFactConflict | None = None
+    has_synthetic_fills: bool = False
+    has_late_events: bool = False
+    integrity_issue: str | None = None
 
 
 class PositionBook:
-    """Domain service managing lifecycle projection and authoritative PositionView."""
+    """Own one current projection; event history belongs to durable identities."""
 
     def __init__(
         self,
-        journal: AccountJournal,
+        position_key: PositionKey,
         *,
+        stream_scope: AccountFactStreamScope | None = None,
         ledger: PositionLedger | None = None,
         policy_version: str = "v1",
         schema_version: str = "v1",
     ) -> None:
-        self._journal = journal
-        self._position_key = journal.position_key
-        self._ledger = ledger or PositionLedger(self._position_key)
+        if stream_scope is not None and not stream_scope.matches(position_key):
+            raise ValueError("stream scope does not match position key")
+        self._position_key = position_key
+        self._ledger = ledger or PositionLedger(position_key)
         self._policy_version = policy_version
         self._schema_version = schema_version
+        self._stream_scope = stream_scope
+        self._facts = _CurrentFacts()
+        self._revision = 0
+        self._projection = self._ledger.project(
+            AccountFacts(
+                position_key=position_key,
+                stream_scope=stream_scope,
+                prefix_facts_complete=True,
+            )
+        )
         self._durable_projection_version: str | None = None
         self._durable_projection_event_cut: datetime | None = None
         self._durable_execution_state_version: str | None = None
-        self._view_cache: dict[tuple[object, ...], _CachedBaseView] = {}
+        self._zero_confirmed_override = False
+
+    @classmethod
+    def from_facts(
+        cls,
+        facts: AccountFacts,
+        *,
+        ledger: PositionLedger | None = None,
+        policy_version: str = "v1",
+        schema_version: str = "v1",
+    ) -> PositionBook:
+        book = cls(
+            facts.position_key,
+            stream_scope=facts.stream_scope,
+            ledger=ledger,
+            policy_version=policy_version,
+            schema_version=schema_version,
+        )
+        book.replace_from_facts(facts)
+        return book
 
     @property
     def position_key(self) -> PositionKey:
         return self._position_key
+
+    @property
+    def stream_scope(self) -> AccountFactStreamScope | None:
+        return self._stream_scope
+
+    @property
+    def projection(self) -> PositionLedgerProjection:
+        return self._projection
+
+    @property
+    def latest_trade_at(self) -> datetime | None:
+        return self._projection.high_watermark_trade_at
+
+    def adopt_stream_scope(self, scope: AccountFactStreamScope) -> None:
+        if not scope.matches(self._position_key):
+            raise ValueError("stream scope does not match position key")
+        self._stream_scope = scope
+        self._projection = replace(self._projection, stream_scope=scope)
+        self._revision += 1
+        self._view_version_changed()
+
+    def remove_exit_boundaries(self, client_order_id: str) -> None:
+        boundaries = tuple(
+            item
+            for item in self._facts.exit_boundaries
+            if item.client_order_id != client_order_id
+        )
+        if boundaries == self._facts.exit_boundaries:
+            return
+        self._facts = replace(self._facts, exit_boundaries=boundaries)
+        self._revision += 1
+        self._view_version_changed()
+
+    def encode_current_state(self) -> dict[str, object]:
+        facts = self.current_facts
+        if facts.fills or facts.late_fills:
+            raise RuntimeError("current position state must not contain fill history")
+        return {
+            "projection": encode_projection(self._projection),
+            "episode_sequence": self._projection.episode_sequence,
+            "batch_sequence": self._projection.batch_sequence,
+            "verification": PositionRecoveryCodec.encode_facts(facts),
+        }
+
+    @classmethod
+    def from_current_state(
+        cls,
+        *,
+        position_key: PositionKey,
+        stream_scope: AccountFactStreamScope,
+        projection: PositionLedgerProjection,
+        verification: AccountFacts,
+        episode_sequence: int,
+        batch_sequence: int,
+        policy_version: str = "v1",
+        schema_version: str = "v1",
+    ) -> PositionBook:
+        if projection.position_key != position_key:
+            raise ValueError("projection position key does not match book")
+        if projection.stream_scope != stream_scope:
+            raise ValueError("projection stream scope does not match book")
+        if verification.position_key != position_key:
+            raise ValueError("verification position key does not match book")
+        if verification.stream_scope != stream_scope:
+            raise ValueError("verification stream scope does not match book")
+        if verification.fills or verification.late_fills:
+            raise ValueError("current position state must not contain fill history")
+        if type(episode_sequence) is not int or episode_sequence < 0:
+            raise ValueError("episode sequence must be a non-negative integer")
+        if type(batch_sequence) is not int or batch_sequence < 0:
+            raise ValueError("batch sequence must be a non-negative integer")
+        book = cls(
+            position_key,
+            stream_scope=stream_scope,
+            policy_version=policy_version,
+            schema_version=schema_version,
+        )
+        book._projection = _current_projection(
+            replace(
+                projection,
+                episode_sequence=episode_sequence,
+                batch_sequence=batch_sequence,
+            )
+        )
+        book._facts = _merge_current_facts(_CurrentFacts(), verification)
+        book._revision += 1
+        return book
+
+    @property
+    def current_facts(self) -> AccountFacts:
+        """Return the bounded metadata needed to verify the current projection."""
+        snapshots = _current_snapshots(self._facts)
+        return AccountFacts(
+            position_key=self._position_key,
+            snapshots=snapshots,
+            exit_boundaries=self._facts.exit_boundaries,
+            coverage=self._facts.coverage,
+            has_synthetic_fills=self._facts.has_synthetic_fills,
+            conflicting_fills=(
+                (self._facts.conflicting_fill,)
+                if self._facts.conflicting_fill is not None
+                else ()
+            ),
+            has_late_events=self._facts.has_late_events,
+            stream_scope=self._stream_scope,
+            recovery_checkpoint=self._facts.recovery_checkpoint,
+            fact_conflicts=(
+                (self._facts.fact_conflict,)
+                if self._facts.fact_conflict is not None
+                else ()
+            ),
+            integrity_issues=(
+                (self._facts.integrity_issue,)
+                if self._facts.integrity_issue is not None
+                else ()
+            ),
+            fill_load_provenance=self._facts.fill_load_provenance,
+            fill_cursor_provenance=self._facts.fill_cursor_provenance,
+            prefix_facts_complete=False,
+        )
+
+    def reset_stream(self, scope: AccountFactStreamScope) -> None:
+        if not scope.matches(self._position_key):
+            raise ValueError("stream scope does not match position key")
+        self._stream_scope = scope
+        self._facts = _CurrentFacts()
+        self._projection = self._ledger.project(
+            AccountFacts(
+                position_key=self._position_key,
+                stream_scope=scope,
+                prefix_facts_complete=True,
+            )
+        )
+        self._revision += 1
+        self._zero_confirmed_override = False
+        self._view_version_changed()
+
+    def replace_from_facts(self, facts: AccountFacts) -> None:
+        self._validate_facts(facts)
+        self._stream_scope = facts.stream_scope
+        self._projection = _current_projection(self._ledger.project(facts))
+        self._facts = _merge_current_facts(_CurrentFacts(), facts)
+        self._revision += 1
+        self._zero_confirmed_override = False
+        self._view_version_changed()
+
+    def apply_delta(self, facts: AccountFacts) -> None:
+        self._validate_facts(facts)
+        if self._stream_scope is not None and facts.stream_scope != self._stream_scope:
+            raise ValueError("fact delta stream scope does not match current state")
+        self._stream_scope = facts.stream_scope or self._stream_scope
+        high_watermark = self._projection.high_watermark_trade_at
+        checkpoint = self._facts.recovery_checkpoint
+        late_fill_arrived = any(
+            (high_watermark is not None and fill.trade_at < high_watermark)
+            or (checkpoint is not None and fill.trade_at <= checkpoint.event_cut)
+            for fill in facts.fills
+        )
+        facts = replace(
+            facts,
+            has_synthetic_fills=(
+                facts.has_synthetic_fills
+                or any(
+                    bool(fill.raw_payload.get("synthetic_from_order", False))
+                    for fill in facts.fills
+                )
+            ),
+            has_late_events=facts.has_late_events or late_fill_arrived,
+        )
+        current_facts = _merge_current_facts(self._facts, facts)
+        delta = AccountFacts(
+            position_key=self._position_key,
+            fills=facts.fills,
+            snapshots=_current_snapshots(current_facts),
+            exit_boundaries=current_facts.exit_boundaries,
+            coverage=current_facts.coverage,
+            has_synthetic_fills=current_facts.has_synthetic_fills,
+            conflicting_fills=(
+                (current_facts.conflicting_fill,)
+                if current_facts.conflicting_fill is not None
+                else ()
+            ),
+            has_late_events=current_facts.has_late_events,
+            stream_scope=self._stream_scope,
+            fact_conflicts=(
+                (current_facts.fact_conflict,)
+                if current_facts.fact_conflict is not None
+                else ()
+            ),
+            integrity_issues=(
+                (current_facts.integrity_issue,)
+                if current_facts.integrity_issue is not None
+                else ()
+            ),
+            late_fills=facts.late_fills,
+            fill_cursor_provenance=(
+                facts.fill_cursor_provenance or current_facts.fill_cursor_provenance
+            ),
+            fill_load_provenance=current_facts.fill_load_provenance,
+            prefix_facts_complete=False,
+        )
+        self._projection = _current_projection(
+            self._ledger.apply_delta(self._projection, delta)
+        )
+        self._facts = current_facts
+        self._revision += 1
+        self._zero_confirmed_override = False
+        self._view_version_changed()
 
     def use_durable_projection_version(
         self,
@@ -79,8 +329,7 @@ class PositionBook:
         *,
         event_cut: datetime | None = None,
     ) -> None:
-        """Preserve a restored CAS token while execution state remains equivalent."""
-        self._view_cache.clear()
+        self._view_version_changed()
         if token is None:
             self._durable_projection_version = None
             self._durable_projection_event_cut = None
@@ -92,10 +341,7 @@ class PositionBook:
             event_cut.tzinfo is None or event_cut.utcoffset() is None
         ):
             raise ValueError("durable projection event cut must be timezone-aware")
-        self._durable_execution_state_version = None
-        self._durable_projection_version = None
-        self._durable_execution_state_version = self.get_view().projection_version
-        self._view_cache.clear()
+        self._durable_execution_state_version = self._execution_version()
         self._durable_projection_version = token
         self._durable_projection_event_cut = event_cut
 
@@ -109,66 +355,20 @@ class PositionBook:
         projection_version: str | None = None,
         event_cut: datetime | None = None,
     ) -> None:
-        """Seed authoritative view directly from durable head without ledger replay."""
+        if projection.position_key != self._position_key:
+            raise ValueError("durable projection position key does not match book")
+        self._projection = _current_projection(projection)
+        self._stream_scope = stream_scope or projection.stream_scope
+        self._facts = _CurrentFacts(coverage=view_coverage)
+        self._revision += 1
+        self._zero_confirmed_override = zero_confirmed
         version_id = projection_version or projection.projection_version or "v1"
         self._durable_projection_version = version_id
         self._durable_projection_event_cut = event_cut or projection.event_cut
-        self._durable_execution_state_version = version_id
+        self._durable_execution_state_version = self._execution_version()
 
-        cached = _CachedBaseView(
-            projection=projection,
-            version_id=version_id,
-            input_revision=self._journal.revision,
-            base_health_status=projection.health_status,
-            is_comparable=projection.is_comparable,
-            base_diagnostics=tuple(projection.diagnostics),
-            view_coverage=view_coverage,
-            zero_confirmed=zero_confirmed,
-            stream_scope=stream_scope or self._journal.stream_scope,
-        )
-        cache_key = (
-            self._journal.revision,
-            self._journal.facts_generation,
-            None,
-            self._policy_version,
-            self._schema_version,
-            version_id,
-        )
-        self._view_cache[cache_key] = cached
-
-    def get_historical_view(
-        self,
-        durable_cut: DurableJournalCut,
-        *,
-        event_cut: datetime,
-        requirement: FreshnessRequirement | None = None,
-        now: datetime | None = None,
-    ) -> PositionView:
-        """Project a persisted cut with this book's rules and independent view state."""
-        historical = PositionBook(
-            AccountJournal.from_durable_cut(durable_cut),
-            ledger=self._ledger,
-            policy_version=self._policy_version,
-            schema_version=self._schema_version,
-        )
-        return historical.get_view(cut=event_cut, requirement=requirement, now=now)
-
-    def copy_for_transaction(
-        self, journal: AccountJournal | None = None
-    ) -> PositionBook:
-        """Copy publication state for a transaction candidate.
-
-        The ledger is stateless and cached projections are immutable, so the
-        candidate only needs its own view-cache mapping, plus the candidate's
-        journal, to stay isolated from the published book. Passing ``journal``
-        keeps ``book._journal`` pointing at the copy instead of the published
-        journal.
-        """
-        candidate = copy.copy(self)
-        if journal is not None:
-            candidate._journal = journal
-        candidate._view_cache = dict(self._view_cache)
-        return candidate
+    def copy_for_transaction(self) -> PositionBook:
+        return copy.copy(self)
 
     def get_view(
         self,
@@ -176,186 +376,255 @@ class PositionBook:
         requirement: FreshnessRequirement | None = None,
         now: datetime | None = None,
     ) -> PositionView:
-        """Projects the authoritative PositionView at an explicit event cut."""
-        max_ts = self._journal.latest_event_at
+        projection = self._projection
+        if (
+            cut is not None
+            and projection.event_cut is not None
+            and cut < projection.event_cut
+        ):
+            raise ValueError("historical position cuts are not held in memory")
 
-        effective_cut = (
-            None if (cut is not None and (max_ts is None or cut >= max_ts)) else cut
+        facts = self.current_facts
+        coverage_is_verified = _coverage_anchor_is_verified(facts)
+        view_coverage = facts.coverage
+        health_status = projection.health_status
+        is_comparable = projection.is_comparable
+        diagnostics = list(projection.diagnostics)
+        if (
+            facts.stream_scope is not None
+            and facts.stream_scope.environment == "live"
+            and facts.coverage is not None
+            and facts.coverage.status == FactCoverageStatus.CONFIRMED
+            and not coverage_is_verified
+        ):
+            view_coverage = replace(facts.coverage, status=FactCoverageStatus.PENDING)
+            health_status = PositionHealthStatus.INCOMPLETE
+            is_comparable = False
+            diagnostics.append(
+                "Coverage source anchor is missing or does not match this position cut"
+            )
+
+        zero_confirmed = self._zero_confirmed_override or _zero_is_confirmed(
+            self._position_key,
+            projection,
+            facts,
         )
-        cache_key = (
-            self._journal.revision,
-            # Applying a recovery checkpoint changes the facts without moving the
-            # revision, so the generation must be part of the identity.
-            self._journal.facts_generation,
-            effective_cut,
-            self._policy_version,
-            self._schema_version,
-            self._durable_projection_version,
+        version = self._execution_version(
+            health_status=health_status,
+            is_comparable=is_comparable,
+            coverage=view_coverage,
+            zero_confirmed=zero_confirmed,
         )
-        cached = self._view_cache.get(cache_key)
-        if cached is None:
-            facts = self._journal.read_cut(effective_cut)
-            projection = self._ledger.project(facts)
+        durable_cut_is_current = cut is None or (
+            self._durable_projection_event_cut is not None
+            and cut >= self._durable_projection_event_cut
+        )
+        version_id = version
+        if (
+            self._durable_projection_version is not None
+            and durable_cut_is_current
+            and version == self._durable_execution_state_version
+        ):
+            version_id = self._durable_projection_version
 
-            input_revision = self._journal.revision
-
-            health_status = projection.health_status
-            is_comparable = projection.is_comparable
-            diagnostics = list(projection.diagnostics)
-            coverage_is_verified = _coverage_anchor_is_verified(facts)
-            view_coverage = facts.coverage
-            if (
-                facts.stream_scope is not None
-                and facts.stream_scope.environment == "live"
-                and facts.coverage is not None
-                and facts.coverage.status == FactCoverageStatus.CONFIRMED
-                and not coverage_is_verified
-            ):
-                view_coverage = replace(
-                    facts.coverage, status=FactCoverageStatus.PENDING
-                )
-                health_status = PositionHealthStatus.INCOMPLETE
-                is_comparable = False
-                diagnostics.append(
-                    "Coverage source anchor is missing or does not match this "
-                    "position cut"
-                )
-
-            latest_snapshot = max(
-                facts.snapshots,
-                key=lambda snapshot: snapshot.observed_at,
-                default=None,
-            )
-            zero_confirmed = bool(
-                len(projection.active_batches) == 0
-                and latest_snapshot is not None
-                and latest_snapshot.environment == self._position_key.environment
-                and latest_snapshot.account_label == self._position_key.account_label
-                and latest_snapshot.symbol == self._position_key.symbol
-                and latest_snapshot.position_side
-                == self._position_key.position_side.value
-                and latest_snapshot.position_amt == Decimal("0")
-                and (
-                    projection.event_cut is None
-                    or latest_snapshot.observed_at >= projection.event_cut
-                )
-                and (
-                    facts.stream_scope is None
-                    or (
-                        facts.coverage is not None
-                        and facts.coverage.status == FactCoverageStatus.CONFIRMED
-                        and not facts.coverage.has_known_gaps
-                        and facts.coverage.stream_scope == facts.stream_scope
-                        and facts.coverage.evidence_observed_at is not None
-                        and facts.coverage.covers(latest_snapshot.observed_at)
-                        and coverage_is_verified
-                        and (
-                            projection.event_cut is None
-                            or facts.coverage.covers(projection.event_cut)
-                        )
-                    )
-                )
-            )
-            execution_state_version = _execution_state_version(
-                facts=facts,
-                projection=projection,
-                health_status=health_status,
-                is_comparable=is_comparable,
-                coverage=view_coverage,
-                zero_confirmed=zero_confirmed,
-                policy_version=self._policy_version,
-                schema_version=self._schema_version,
-            )
-            version_id = execution_state_version
-            durable_cut_is_current_or_later = effective_cut is None or (
-                self._durable_projection_event_cut is not None
-                and effective_cut >= self._durable_projection_event_cut
-            )
-            if (
-                self._durable_projection_version is not None
-                and durable_cut_is_current_or_later
-                and execution_state_version == self._durable_execution_state_version
-            ):
-                version_id = self._durable_projection_version
-            cached = _CachedBaseView(
-                projection=projection,
-                version_id=version_id,
-                input_revision=input_revision,
-                base_health_status=health_status,
-                is_comparable=is_comparable,
-                base_diagnostics=tuple(diagnostics),
-                view_coverage=view_coverage,
-                zero_confirmed=zero_confirmed,
-                stream_scope=facts.stream_scope,
-            )
-            if len(self._view_cache) >= 16:
-                self._view_cache.pop(next(iter(self._view_cache)))
-            self._view_cache[cache_key] = cached
-
-        health_status = cached.base_health_status
-        is_comparable = cached.is_comparable
-        diagnostics = list(cached.base_diagnostics)
-
-        # Freshness evaluation if requested
         now_dt = now or datetime.now(UTC)
         if requirement is not None:
-            if requirement.min_event_cut is not None:
-                if (
-                    cached.projection.event_cut is None
-                    or cached.projection.event_cut < requirement.min_event_cut
-                ):
-                    health_status = PositionHealthStatus.CATCHING_UP
-                    diagnostics.append(
-                        f"Event cut ({cached.projection.event_cut}) is behind minimum "
-                        f"required cut ({requirement.min_event_cut})"
-                    )
-
-            if cached.projection.event_cut is not None:
-                staleness = now_dt - cached.projection.event_cut
+            if requirement.min_event_cut is not None and (
+                projection.event_cut is None
+                or projection.event_cut < requirement.min_event_cut
+            ):
+                health_status = PositionHealthStatus.CATCHING_UP
+                diagnostics.append(
+                    f"Event cut ({projection.event_cut}) is behind minimum required "
+                    f"cut ({requirement.min_event_cut})"
+                )
+            if projection.event_cut is not None:
+                staleness = now_dt - projection.event_cut
                 if (
                     staleness > requirement.max_staleness
                     and health_status == PositionHealthStatus.READY
                 ):
                     health_status = PositionHealthStatus.CATCHING_UP
                     diagnostics.append(
-                        f"Projection staleness ({staleness.total_seconds():.1f}s)"
-                        "exceeds"
-                        f"max allowed"
-                        f"({requirement.max_staleness.total_seconds():.1f}s)"
+                        f"Projection staleness ({staleness.total_seconds():.1f}s) "
+                        f"exceeds max allowed ({requirement.max_staleness.total_seconds():.1f}s)"
                     )
-
             if requirement.require_comparable and not is_comparable:
                 if health_status == PositionHealthStatus.READY:
                     health_status = PositionHealthStatus.CATCHING_UP
 
-        reconciliation_status = (
-            "OK" if health_status == PositionHealthStatus.READY else health_status.value
-        )
-
         return PositionView(
             key=self._position_key,
-            projection_version=cached.version_id,
-            input_revision=cached.input_revision,
-            event_cut=cached.projection.event_cut,
+            projection_version=version_id,
+            input_revision=self._revision,
+            event_cut=projection.event_cut,
             policy_version=self._policy_version,
             schema_version=self._schema_version,
-            coverage=cached.view_coverage,
-            active_episode=cached.projection.active_episode,
-            batches=cached.projection.active_batches,
-            unallocated_quantity=cached.projection.unallocated_quantity,
-            reservations=(),
-            observation_id=None,
-            reconciliation_status=reconciliation_status,
-            reconciliation_gap=cached.projection.reconciliation_gap
-            if is_comparable
-            else None,
+            coverage=view_coverage,
+            active_episode=projection.active_episode,
+            batches=projection.active_batches,
+            unallocated_quantity=projection.unallocated_quantity,
+            reconciliation_status=(
+                "OK" if health_status == PositionHealthStatus.READY else health_status.value
+            ),
+            reconciliation_gap=(
+                projection.reconciliation_gap if is_comparable else None
+            ),
             health_status=health_status,
             diagnostics=tuple(diagnostics),
-            discrepancy=cached.projection.discrepancy,
+            discrepancy=projection.discrepancy,
             is_comparable=is_comparable,
-            zero_position_snapshot_confirmed=cached.zero_confirmed,
-            stream_scope=cached.stream_scope,
+            zero_position_snapshot_confirmed=zero_confirmed,
+            stream_scope=self._stream_scope,
         )
+
+    def _validate_facts(self, facts: AccountFacts) -> None:
+        if facts.position_key != self._position_key:
+            raise ValueError("facts position key does not match book")
+        if facts.stream_scope is not None and not facts.stream_scope.matches(
+            self._position_key
+        ):
+            raise ValueError("fact stream scope does not match book")
+
+    def _execution_version(
+        self,
+        *,
+        health_status: PositionHealthStatus | None = None,
+        is_comparable: bool | None = None,
+        coverage: FactCoverageInterval | None = None,
+        zero_confirmed: bool | None = None,
+    ) -> str:
+        facts = self.current_facts
+        view_coverage = facts.coverage if coverage is None else coverage
+        status = health_status or self._projection.health_status
+        comparable = (
+            self._projection.is_comparable
+            if is_comparable is None
+            else is_comparable
+        )
+        confirmed_zero = (
+            self._zero_confirmed_override
+            if zero_confirmed is None
+            else zero_confirmed
+        )
+        return _execution_state_version(
+            facts=facts,
+            projection=self._projection,
+            health_status=status,
+            is_comparable=comparable,
+            coverage=view_coverage,
+            zero_confirmed=confirmed_zero,
+            policy_version=self._policy_version,
+            schema_version=self._schema_version,
+        )
+
+    def _view_version_changed(self) -> None:
+        self._durable_projection_version = None
+        self._durable_projection_event_cut = None
+        self._durable_execution_state_version = None
+
+
+def _current_projection(
+    projection: PositionLedgerProjection,
+) -> PositionLedgerProjection:
+    """Keep only active batches and the counters needed for the next update."""
+    active_episode = projection.active_episode
+    if active_episode is not None:
+        active_batches = tuple(batch for batch in active_episode.batches if batch.quantity > 0)
+        active_episode = replace(
+            active_episode,
+            batches=active_batches,
+            reductions=(),
+        )
+    else:
+        active_batches = ()
+    return replace(
+        projection,
+        active_episode=active_episode,
+        active_batches=active_batches,
+        archived_episodes=(),
+    )
+
+
+def _merge_current_facts(current: _CurrentFacts, facts: AccountFacts) -> _CurrentFacts:
+    latest_snapshot = current.latest_snapshot
+    source_anchor = current.source_anchor_snapshot
+    if facts.snapshots:
+        latest_snapshot = max(facts.snapshots, key=lambda item: item.observed_at)
+    provenance = facts.fill_load_provenance or current.fill_load_provenance
+    if provenance is not None and facts.snapshots:
+        from crypto_momentum_lab.domain.execution.snapshot_encoding import (
+            stable_snapshot_anchor_id,
+        )
+
+        source_anchor = next(
+            (
+                snapshot
+                for snapshot in facts.snapshots
+                if snapshot.observed_at == provenance.source_anchor_event_cut
+                and stable_snapshot_anchor_id(snapshot) == provenance.source_anchor_id
+            ),
+            source_anchor,
+        )
+    boundaries = {item.order_id: item for item in current.exit_boundaries}
+    boundaries.update({item.order_id: item for item in facts.exit_boundaries})
+    return _CurrentFacts(
+        coverage=facts.coverage or current.coverage,
+        latest_snapshot=latest_snapshot,
+        source_anchor_snapshot=source_anchor,
+        fill_load_provenance=provenance,
+        fill_cursor_provenance=(
+            facts.fill_cursor_provenance or current.fill_cursor_provenance
+        ),
+        recovery_checkpoint=facts.recovery_checkpoint or current.recovery_checkpoint,
+        exit_boundaries=tuple(boundaries.values()),
+        conflicting_fill=(
+            facts.conflicting_fills[-1]
+            if facts.conflicting_fills
+            else current.conflicting_fill
+        ),
+        fact_conflict=(
+            facts.fact_conflicts[-1]
+            if facts.fact_conflicts
+            else current.fact_conflict
+        ),
+        has_synthetic_fills=current.has_synthetic_fills or facts.has_synthetic_fills,
+        has_late_events=current.has_late_events or facts.has_late_events,
+        integrity_issue=(
+            facts.integrity_issues[-1]
+            if facts.integrity_issues
+            else current.integrity_issue
+        ),
+    )
+
+
+def _current_snapshots(facts: _CurrentFacts) -> tuple[AccountPositionSnapshot, ...]:
+    anchor = facts.source_anchor_snapshot
+    latest = facts.latest_snapshot
+    if anchor is None:
+        return (latest,) if latest is not None else ()
+    if latest is None or latest.observed_at == anchor.observed_at:
+        return (anchor,)
+    return anchor, latest
+
+
+def _zero_is_confirmed(
+    key: PositionKey,
+    projection: PositionLedgerProjection,
+    facts: AccountFacts,
+) -> bool:
+    latest = max(facts.snapshots, key=lambda item: item.observed_at, default=None)
+    return bool(
+        not projection.active_batches
+        and latest is not None
+        and latest.environment == key.environment
+        and latest.account_label == key.account_label
+        and latest.symbol == key.symbol
+        and latest.position_side == key.position_side.value
+        and latest.position_amt == Decimal("0")
+        and (projection.event_cut is None or latest.observed_at >= projection.event_cut)
+        and (facts.stream_scope is None or facts.stream_scope.matches(key))
+    )
 
 
 def _coverage_anchor_is_verified(facts: AccountFacts) -> bool:
@@ -413,8 +682,7 @@ def _coverage_anchor_is_verified(facts: AccountFacts) -> bool:
                 )
                 or (
                     checkpoint.parent_checkpoint_id == provenance.source_anchor_id
-                    and checkpoint.parent_event_cut
-                    == provenance.source_anchor_event_cut
+                    and checkpoint.parent_event_cut == provenance.source_anchor_event_cut
                 )
             )
         )
@@ -432,12 +700,6 @@ def _execution_state_version(
     policy_version: str,
     schema_version: str,
 ) -> str:
-    """CAS identity for execution economics, independent of observation timestamps.
-
-    Journal revision and the complete facts hash remain the audit and persistence
-    identities. Reservation capacity is checked independently in the locked
-    acceptance transaction. Unhealthy facts retain their full identity.
-    """
     latest = max(facts.snapshots, key=lambda item: item.observed_at, default=None)
     episode = projection.active_episode
     material = {
@@ -473,12 +735,7 @@ def _execution_state_version(
         if latest is None
         else {
             name: getattr(latest, name)
-            for name in (
-                "position_amt",
-                "entry_price",
-                "leverage",
-                "margin_type",
-            )
+            for name in ("position_amt", "entry_price", "leverage", "margin_type")
         },
         "coverage": None
         if coverage is None
@@ -489,7 +746,12 @@ def _execution_state_version(
         },
     }
     if health_status != PositionHealthStatus.READY or not is_comparable:
-        material["unhealthy_facts_hash"] = facts.compute_facts_hash()
+        material["current_fact_flags"] = {
+            "synthetic": facts.has_synthetic_fills,
+            "late": facts.has_late_events,
+            "conflicts": bool(facts.conflicting_fills or facts.fact_conflicts),
+            "integrity_issue": bool(facts.integrity_issues),
+        }
     raw = json.dumps(
         material, sort_keys=True, separators=(",", ":"), default=_version_scalar
     ).encode()

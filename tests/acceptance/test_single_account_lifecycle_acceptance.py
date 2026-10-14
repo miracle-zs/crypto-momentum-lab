@@ -9,15 +9,19 @@ Proves:
 
 from __future__ import annotations
 
+import asyncio
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
+from websockets.asyncio.server import serve
 
 from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
@@ -37,26 +41,42 @@ from crypto_momentum_lab.domain.execution.observation_models import (
     Applied,
     Duplicate,
 )
-from crypto_momentum_lab.domain.execution.order_state import ExitAllocation
-from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    PositionKey,
+from crypto_momentum_lab.domain.execution.order_result import (
+    OrderExecutionResult,
+)
+from crypto_momentum_lab.domain.execution.order_state import (
+    ExchangeOrderSnapshot,
+    ExchangeOrderState,
+    ExitAllocation,
+    FuturesPositionSide,
+    OrderExecutionPlan,
+)
+from crypto_momentum_lab.domain.execution.order_submission import (
+    OrderSubmissionPreparation,
 )
 from crypto_momentum_lab.domain.execution.ports import (
     DecisionCommitConflict,
 )
-from crypto_momentum_lab.domain.execution.recovery_codec import (
-    PositionRecoveryCodec,
+from crypto_momentum_lab.domain.execution.position_ledger_models import (
+    PositionKey,
 )
-from crypto_momentum_lab.domain.execution.recovery_models import (
-    PositionRecoveryCheckpoint,
-)
-from crypto_momentum_lab.domain.execution.evidence_codec import (
-    recovery_checkpoint_head_binding,
-)
-from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 from crypto_momentum_lab.domain.execution.trade_command import (
     ExitPolicyMode,
     TradeCommandType,
+)
+from crypto_momentum_lab.domain.live_rollout import RollbackCommand
+from crypto_momentum_lab.domain.live_rollout.authorization import (
+    CANCEL_ALL_OPEN_ENTRIES_COMMAND,
+    CANCEL_ALL_OPEN_ENTRIES_CONFIRMATION,
+    EMERGENCY_FLATTEN_COMMAND,
+    EMERGENCY_FLATTEN_CONFIRMATION,
+)
+from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation
+from crypto_momentum_lab.domain.risk.models import TradingLease, TradingLeaseState
+from crypto_momentum_lab.domain.strategy import (
+    EntryType,
+    OrderIntentCandidate,
+    StrategySide,
 )
 from crypto_momentum_lab.execution_account.expectations import (
     AccountPositionExpectation,
@@ -66,28 +86,29 @@ from crypto_momentum_lab.execution_account.hub import (
     AccountEvent,
     InProcessAccountEventSource,
 )
-from crypto_momentum_lab.domain.live_rollout import RollbackCommand
-from crypto_momentum_lab.domain.live_rollout.authorization import (
-    CANCEL_ALL_OPEN_ENTRIES_COMMAND,
-    CANCEL_ALL_OPEN_ENTRIES_CONFIRMATION,
-    EMERGENCY_FLATTEN_COMMAND,
-    EMERGENCY_FLATTEN_CONFIRMATION,
+from crypto_momentum_lab.execution_account.in_process_producer import (
+    InProcessAccountStreamProducer,
+)
+from crypto_momentum_lab.execution_account.orders.coordinator import (
+    DispatchOwnership,
+    OrderExecutionCoordinator,
 )
 from crypto_momentum_lab.execution_account.risk_control_hub import (
     RiskControlAction,
     RiskControlEvent,
 )
-from crypto_momentum_lab.live_rollout.risk_control import (
-    RiskControlCommandDispatcher,
-)
-from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
-    PostgresLiveRolloutRepository,
+from crypto_momentum_lab.live_rollout.entry_control import (
+    LiveEntryControlGate,
 )
 from crypto_momentum_lab.live_rollout.entry_expectations import (
     DirectPositionExpectationPublisher,
 )
-from crypto_momentum_lab.persistence.postgres.account_journal_store import (
-    PostgresAccountJournalStore,
+from crypto_momentum_lab.live_rollout.order_reconciliation import (
+    ReconciliationPassResult,
+)
+from crypto_momentum_lab.live_rollout.risk_control import (
+    LiveRiskControlRuntime,
+    RiskControlCommandDispatcher,
 )
 from crypto_momentum_lab.persistence.postgres.command_repository import (
     PostgresCommandRepository,
@@ -98,7 +119,13 @@ from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
 from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
     ExecutionBookHeadRow,
     ExecutionEvidenceReceiptRow,
-    ExecutionOrderWatermarkRow,
+    ExecutionTradeIdentityRow,
+)
+from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
+    PostgresLiveRolloutRepository,
+)
+from crypto_momentum_lab.persistence.postgres.order_submission_repository import (
+    PostgresOrderSubmissionRepository,
 )
 from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
     PositionFactJournalEventRow,
@@ -106,44 +133,6 @@ from crypto_momentum_lab.persistence.postgres.position_fact_journal_models impor
 )
 from crypto_momentum_lab.persistence.postgres.position_reservation_repository import (
     AsyncPostgresPositionReservationRepository,
-)
-import asyncio
-import json
-from unittest.mock import AsyncMock
-from websockets.asyncio.server import serve
-from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation
-from crypto_momentum_lab.domain.risk.models import TradingLease, TradingLeaseState
-from crypto_momentum_lab.domain.strategy import OrderIntentCandidate
-from crypto_momentum_lab.domain.execution.order_state import (
-    ExchangeOrderSnapshot,
-    ExchangeOrderState,
-    FuturesPositionSide,
-    OrderExecutionPlan,
-)
-from crypto_momentum_lab.domain.execution.order_submission import (
-    OrderSubmissionPreparation,
-)
-from crypto_momentum_lab.domain.execution.order_result import (
-    OrderExecutionResult,
-)
-from crypto_momentum_lab.execution_account.in_process_producer import (
-    InProcessAccountStreamProducer,
-)
-from crypto_momentum_lab.execution_account.orders.coordinator import (
-    DispatchOwnership,
-    OrderExecutionCoordinator,
-)
-from crypto_momentum_lab.live_rollout.entry_control import (
-    LiveEntryControlGate,
-)
-from crypto_momentum_lab.live_rollout.order_reconciliation import (
-    ReconciliationPassResult,
-)
-from crypto_momentum_lab.live_rollout.risk_control import (
-    LiveRiskControlRuntime,
-)
-from crypto_momentum_lab.persistence.postgres.order_submission_repository import (
-    PostgresOrderSubmissionRepository,
 )
 from crypto_momentum_lab.persistence.postgres.risk_repository import (
     DispatchLeaseToken,
@@ -166,14 +155,15 @@ def _scope(key: PositionKey) -> ExecutionScope:
     )
 
 
-def _book(factory: async_sessionmaker) -> tuple[ExecutionBook, AsyncPostgresPositionReservationRepository]:
+def _book(
+    factory: async_sessionmaker,
+) -> tuple[ExecutionBook, AsyncPostgresPositionReservationRepository]:
     commands = PostgresCommandRepository(factory)
     reservations = AsyncPostgresPositionReservationRepository(
         factory, strategy_name="lifecycle-acceptance"
     )
     uow = AsyncPostgresExecutionUnitOfWork(
         factory,
-        journal_store=PostgresAccountJournalStore(),
         command_repository=commands,
         reservation_repository=reservations,
     )
@@ -228,7 +218,15 @@ def _fill_evidence(
         evidence_id=f"fill-{trade_id}",
         scope=_scope(key),
         observed_at=at,
-        fill=_fill(key, trade_id=trade_id, order_id=order_id, quantity=quantity, price=price, side=side, at=at),
+        fill=_fill(
+            key,
+            trade_id=trade_id,
+            order_id=order_id,
+            quantity=quantity,
+            price=price,
+            side=side,
+            at=at,
+        ),
         stream_id="test-stream",
         stream_epoch=stream_epoch,
         sequence=sequence,
@@ -482,7 +480,8 @@ async def test_multi_symbol_partial_corruption_and_new_account_are_distinguished
                 ),
                 Applied,
             )
-        # Also leave durable evidence receipts / watermarks for the damaged key.
+        # The current position head and its trade identity survive a damaged
+        # key independently of the account's other symbols.
         async with factory() as session:
             receipts = (
                 await session.scalars(
@@ -492,16 +491,16 @@ async def test_multi_symbol_partial_corruption_and_new_account_are_distinguished
                     )
                 )
             ).all()
-            watermarks = (
+            trade_symbols = (
                 await session.scalars(
-                    select(ExecutionOrderWatermarkRow.symbol).where(
-                        ExecutionOrderWatermarkRow.environment == "live",
-                        ExecutionOrderWatermarkRow.account_label == account,
+                    select(ExecutionTradeIdentityRow.symbol).where(
+                        ExecutionTradeIdentityRow.environment == "live",
+                        ExecutionTradeIdentityRow.account_label == account,
                     )
                 )
             ).all()
         assert "ETHUSDT" in receipts
-        assert "ETHUSDT" in watermarks
+        assert "ETHUSDT" in trade_symbols
 
         async with factory() as session:
             deleted = await session.execute(
@@ -531,7 +530,7 @@ async def test_corrupted_or_missing_head_with_responsibilities_explicitly_blocks
     account = f"corrupt-head-{uuid4().hex}"
     key = PositionKey("live", account, "BTCUSDT")
 
-    try:        # Step 1: Create state with fill in Book 1
+    try:  # Step 1: Create state with fill in Book 1
         book1, _ = _book(factory)
         await book1.restore(account_label=account)
         applied = await book1.observe(
@@ -560,7 +559,7 @@ async def test_corrupted_or_missing_head_with_responsibilities_explicitly_blocks
         book2, _ = _book(factory)
         with pytest.raises(
             DecisionCommitConflict,
-            match="has existing journal streams but no durable head; recovery blocked",
+            match="no durable head; recovery blocked",
         ):
             await book2.restore(account_label=account)
     finally:
@@ -877,9 +876,12 @@ async def test_durable_risk_control_operator_command_consumption(
 
 
 @pytest.mark.asyncio
-async def test_in_process_event_queue_overflow_marks_gap_blocks_risk_and_reconciles() -> None:
+async def test_in_process_event_queue_overflow_marks_gap_blocks_risk_and_reconciles() -> (
+    None
+):
     """InProcessAccountEventSource queue overflow marks gap, blocks new risk, triggers bounded reconciliation, and clears gap after."""
     import asyncio
+
     small_queue: asyncio.Queue[AccountEvent] = asyncio.Queue(maxsize=1)
     reconciled_symbols: list[tuple[str, ...]] = []
 
@@ -950,6 +952,7 @@ async def test_real_assembled_lifecycle_with_fake_ws_exchange(
 ) -> None:
     """Full lifecycle executed from fake exchange WebSocket, InProcessAccountStreamProducer, InProcessAccountEventSource through coordinator to clean shutdown."""
     import asyncio
+
     engine = create_async_database_engine(async_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     account = f"e2e-ws-{uuid4().hex[:12]}"
@@ -988,7 +991,9 @@ async def test_real_assembled_lifecycle_with_fake_ws_exchange(
                 plan=plan,
             )
 
-        async def reconcile_order(self, plan: OrderExecutionPlan) -> OrderExecutionResult:
+        async def reconcile_order(
+            self, plan: OrderExecutionPlan
+        ) -> OrderExecutionResult:
             return OrderExecutionResult(
                 client_order_id=plan.client_order_id,
                 state=ExchangeOrderState.ACKNOWLEDGED,
@@ -996,17 +1001,23 @@ async def test_real_assembled_lifecycle_with_fake_ws_exchange(
                 plan=plan,
             )
 
-        async def apply_observed_snapshot(self, plan: OrderExecutionPlan, snapshot: Any) -> OrderExecutionResult:
+        async def apply_observed_snapshot(
+            self, plan: OrderExecutionPlan, snapshot: Any
+        ) -> OrderExecutionResult:
             return OrderExecutionResult(
                 client_order_id=plan.client_order_id,
                 state=ExchangeOrderState.FILLED,
                 exchange_order_id=getattr(snapshot, "exchange_order_id", "1002"),
-                executed_quantity=getattr(snapshot, "executed_quantity", Decimal("0.5")),
+                executed_quantity=getattr(
+                    snapshot, "executed_quantity", Decimal("0.5")
+                ),
                 average_price=getattr(snapshot, "average_price", Decimal("60000")),
                 plan=plan,
             )
 
-        async def mark_reconciliation_pending(self, plan: OrderExecutionPlan) -> OrderExecutionResult:
+        async def mark_reconciliation_pending(
+            self, plan: OrderExecutionPlan
+        ) -> OrderExecutionResult:
             return OrderExecutionResult(
                 client_order_id=plan.client_order_id,
                 state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
@@ -1014,7 +1025,9 @@ async def test_real_assembled_lifecycle_with_fake_ws_exchange(
                 plan=plan,
             )
 
-        async def mark_absent_reconciled(self, plan: OrderExecutionPlan, *, details: Any) -> OrderExecutionResult:
+        async def mark_absent_reconciled(
+            self, plan: OrderExecutionPlan, *, details: Any
+        ) -> OrderExecutionResult:
             return OrderExecutionResult(
                 client_order_id=plan.client_order_id,
                 state=ExchangeOrderState.ABSENT_RECONCILED,
@@ -1086,7 +1099,9 @@ async def test_real_assembled_lifecycle_with_fake_ws_exchange(
                 ),
             )
 
-        async def fetch_positions(self, *, include_flat: bool = False) -> tuple[Any, ...]:
+        async def fetch_positions(
+            self, *, include_flat: bool = False
+        ) -> tuple[Any, ...]:
             return ()
 
         async def fetch_open_orders(self) -> tuple[Any, ...]:
@@ -1096,7 +1111,9 @@ async def test_real_assembled_lifecycle_with_fake_ws_exchange(
         def incomplete_fill_symbols(self) -> frozenset[str]:
             return frozenset()
 
-        async def fetch_recent_fills(self, symbols: Any = (), **kwargs: Any) -> tuple[Any, ...]:
+        async def fetch_recent_fills(
+            self, symbols: Any = (), **kwargs: Any
+        ) -> tuple[Any, ...]:
             return ()
 
         async def fetch_fills_with_provenance(self, symbol: str, **kwargs: Any) -> Any:
@@ -1184,7 +1201,9 @@ async def test_real_assembled_lifecycle_with_fake_ws_exchange(
                             executed_quantity=Decimal("0.5"),
                             average_price=Decimal("60000"),
                         )
-                        await coordinator.apply_observed_snapshot(exit_plan_ref[0], snap)
+                        await coordinator.apply_observed_snapshot(
+                            exit_plan_ref[0], snap
+                        )
                     if consumer_stopping.is_set():
                         break
             except asyncio.CancelledError:
@@ -1335,7 +1354,9 @@ async def test_real_assembled_lifecycle_with_fake_ws_exchange(
         verified_lease_owner: list[str | None] = [None]
 
         async def _refresh_verified_lease() -> None:
-            active = await risk_repo.load_active_lease("live", account, datetime.now(tz=UTC))
+            active = await risk_repo.load_active_lease(
+                "live", account, datetime.now(tz=UTC)
+            )
             verified_lease_owner[0] = None if active is None else active.owner
 
         await _refresh_verified_lease()
@@ -1432,7 +1453,9 @@ async def test_real_assembled_lifecycle_with_fake_ws_exchange(
 
         # book.act does NOT mean exit is completed on exchange:
         view_after_act = await book.read(scope)
-        assert view_after_act.total_quantity == Decimal("0.5")  # Position is still held!
+        assert view_after_act.total_quantity == Decimal(
+            "0.5"
+        )  # Position is still held!
         active_res = book.get_active_reservations(key)
         assert len(active_res) == 1
         assert active_res[0].reserved_quantity == Decimal("0.5")  # But reserved!
@@ -1500,11 +1523,17 @@ async def test_real_assembled_lifecycle_with_fake_ws_exchange(
         }
         await ws.send(json.dumps(exit_account_msg))
 
-        # Wait for consumer to process exit fill and settle position to 0
+        # Account fills update the position; order cumulative reports settle
+        # reservation capacity. They are separate inputs and may be consumed
+        # in either order, so wait for both effects before asserting the end.
         view_final = None
         for _ in range(50):
             view_final = await book.read(scope)
-            if view_final.total_quantity == Decimal("0"):
+            active_reservations = book.get_active_reservations(key)
+            if view_final.total_quantity == Decimal("0") and not any(
+                reservation.active_quantity != Decimal("0")
+                for reservation in active_reservations
+            ):
                 break
             await asyncio.sleep(0.05)
 
@@ -1837,7 +1866,9 @@ async def test_dispatcher_lease_ownership_atomic_protection(
     future_time = now_dt + timedelta(hours=1)
     async with factory() as session:
         async with session.begin():
-            with pytest.raises(LeaseOwnershipError, match="no active trading lease held"):
+            with pytest.raises(
+                LeaseOwnershipError, match="no active trading lease held"
+            ):
                 await sub_repo.prepare_submission_in_session(
                     session,
                     intent=intent2,
@@ -1868,10 +1899,11 @@ async def test_dispatcher_lease_ownership_atomic_protection(
 
     exchange = _MockExchange()
     commands = PostgresCommandRepository(factory)
-    reservations = AsyncPostgresPositionReservationRepository(factory, strategy_name="test")
+    reservations = AsyncPostgresPositionReservationRepository(
+        factory, strategy_name="test"
+    )
     uow = AsyncPostgresExecutionUnitOfWork(
         factory,
-        journal_store=PostgresAccountJournalStore(),
         command_repository=commands,
         reservation_repository=reservations,
     )
@@ -1893,14 +1925,13 @@ async def test_dispatcher_lease_ownership_atomic_protection(
     # Lease is lost
     lease_held = False
     with pytest.raises(
-            LeaseOwnershipError,
-            match="cannot cancel order before exchange cancel: trading lease expired",
-        ):
+        LeaseOwnershipError,
+        match="cannot cancel order before exchange cancel: trading lease expired",
+    ):
         await coordinator.cancel_order(plan)
     assert not exchange.cancelled  # Exchange DELETE was blocked before call!
     await coordinator.aclose()
     await engine.dispose()
-
 
 
 async def _seed_single_fill_head(
@@ -1932,134 +1963,36 @@ async def _seed_single_fill_head(
         return key, dict(head.state_payload)
 
 
-async def _attach_checkpoint_binding(
-    factory: async_sessionmaker,
-    *,
-    account: str,
-    symbol: str,
-    payload: dict[str, Any],
-) -> dict[str, Any]:
-    """Bind a synthetic-but-valid recovery checkpoint onto a real head payload.
-
-    The checkpoint row is intentionally absent so recovery must fall back to the
-    binding carried by the head, which is exactly the branch where
-    ``prefix_facts_complete`` is False and the facts digest cannot be recomputed
-    from the payload alone.
-    """
-
-    projection = PositionRecoveryCodec.decode_projection(payload["projection"])
-    coverage = (
-        PositionRecoveryCodec.decode_coverage(payload["coverage"])
-        if payload.get("coverage")
-        else None
-    )
-    key = PositionKey(
-        environment="live",
-        account_label=account,
-        symbol=symbol,
-        position_side=FuturesPositionSide.BOTH,
-    )
-    checkpoint = PositionRecoveryCheckpoint(
-        key=key,
-        stream_scope=projection.stream_scope,
-        event_cut=projection.event_cut,
-        projection=projection,
-        coverage=coverage,
-        facts_hash=str(payload["facts_hash"]),
-        source_revision=int(payload["journal_revision"]),
-        checkpoint_id="cp-synthetic-1",
-    )
-    payload = dict(payload)
-    payload["recovery_checkpoint"] = recovery_checkpoint_head_binding(checkpoint)
-    return payload
-
-
 @pytest.mark.asyncio
-async def test_checkpoint_branch_validates_active_fill_identities(
+async def test_position_head_keeps_trade_facts_out_of_the_position_projection(
     async_database_url: str,
 ) -> None:
-    """A checkpoint does not excuse tampered, missing or duplicated active fills."""
+    """Trade identity is stored once; the current-position head has no fill list."""
 
     engine = create_async_database_engine(async_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
     try:
-        # 1. Tampered quantity: the durable trade identity disagrees.
-        tamper_account = f"cp-tamper-{uuid4().hex}"
-        _key, tampered = await _seed_single_fill_head(
-            factory, account=tamper_account
-        )
-        tampered = await _attach_checkpoint_binding(
-            factory,
-            account=tamper_account,
-            symbol="BTCUSDT",
-            payload=tampered,
-        )
-        tampered["active_fills"][0]["quantity"] = "9"
-        async with factory() as session:
-            head = await session.get(
-                ExecutionBookHeadRow,
-                ("live", tamper_account, "BTCUSDT", "BOTH"),
-            )
-            assert head is not None
-            head.state_payload = tampered
-            await session.commit()
-        tamper_book, _ = _book(factory)
-        with pytest.raises(DecisionCommitConflict, match="durable"):
-            await tamper_book.restore(account_label=tamper_account)
-
-        # 2. Duplicate identity: two active fills claim the same trade id.
         duplicate_account = f"cp-dupe-{uuid4().hex}"
-        _key2, duplicated = await _seed_single_fill_head(
+        key, payload = await _seed_single_fill_head(
             factory, account=duplicate_account
         )
-        duplicated = await _attach_checkpoint_binding(
-            factory,
-            account=duplicate_account,
-            symbol="BTCUSDT",
-            payload=duplicated,
-        )
-        duplicated["active_fills"].append(dict(duplicated["active_fills"][0]))
-        duplicated["active_trade_ids"] = [
-            *duplicated["active_trade_ids"],
-            duplicated["active_trade_ids"][0],
-        ]
+        assert "fills" not in payload
+        assert "position_state" in payload
         async with factory() as session:
-            head = await session.get(
-                ExecutionBookHeadRow,
-                ("live", duplicate_account, "BTCUSDT", "BOTH"),
-            )
-            assert head is not None
-            head.state_payload = duplicated
-            await session.commit()
-        duplicate_book, _ = _book(factory)
-        with pytest.raises(DecisionCommitConflict, match="duplicate fill identities"):
-            await duplicate_book.restore(account_label=duplicate_account)
+            trade_rows = (
+                await session.scalars(
+                    select(ExecutionTradeIdentityRow.trade_id).where(
+                        ExecutionTradeIdentityRow.environment == key.environment,
+                        ExecutionTradeIdentityRow.account_label == key.account_label,
+                        ExecutionTradeIdentityRow.symbol == key.symbol,
+                        ExecutionTradeIdentityRow.position_side
+                        == key.position_side.value,
+                    )
+                )
+            ).all()
+        assert trade_rows == ["trade-BTCUSDT-1"]
 
-        # 3. Missing identity: an active fill that has no durable trade identity.
-        missing_account = f"cp-missing-{uuid4().hex}"
-        _key3, missing = await _seed_single_fill_head(
-            factory, account=missing_account
-        )
-        missing = await _attach_checkpoint_binding(
-            factory,
-            account=missing_account,
-            symbol="BTCUSDT",
-            payload=missing,
-        )
-        missing["active_fills"][0]["trade_id"] = "fabricated-trade"
-        missing["active_trade_ids"] = ["fabricated-trade"]
-        async with factory() as session:
-            head = await session.get(
-                ExecutionBookHeadRow,
-                ("live", missing_account, "BTCUSDT", "BOTH"),
-            )
-            assert head is not None
-            head.state_payload = missing
-            await session.commit()
-        missing_book, _ = _book(factory)
-        with pytest.raises(DecisionCommitConflict, match="no durable trade identity"):
-            await missing_book.restore(account_label=missing_account)
     finally:
         await engine.dispose()
 
@@ -2150,7 +2083,9 @@ async def test_dispatch_ownership_requires_verified_lease_at_every_write(
         verified: list[str | None] = [None]
 
         async def _refresh() -> None:
-            active = await risk_repo.load_active_lease("live", account, datetime.now(tz=UTC))
+            active = await risk_repo.load_active_lease(
+                "live", account, datetime.now(tz=UTC)
+            )
             verified[0] = None if active is None else active.owner
 
         def _verifier() -> DispatchOwnership | None:
@@ -2194,7 +2129,9 @@ async def test_dispatch_ownership_requires_verified_lease_at_every_write(
         await risk_repo.acquire_lease(lease)
         await _refresh()
         assert await coordinator._current_ownership() is not None
-        active_lease = await risk_repo.load_active_lease("live", account, datetime.now(tz=UTC))
+        active_lease = await risk_repo.load_active_lease(
+            "live", account, datetime.now(tz=UTC)
+        )
         assert active_lease is not None
         await risk_repo.renew_lease(
             lease_id=active_lease.lease_id,
@@ -2240,9 +2177,7 @@ async def test_dispatch_ownership_requires_verified_lease_at_every_write(
         )
         await risk_repo.acquire_lease(replacement)
         verified[0] = None
-        replaced_lease = await risk_repo.load_active_lease(
-            "live", account, takeover_at
-        )
+        replaced_lease = await risk_repo.load_active_lease("live", account, takeover_at)
         assert replaced_lease is not None and replaced_lease.owner == "owner-new"
         # The new owner is verified; the stale token from the old writer is not.
         verified[0] = replaced_lease.owner
@@ -2374,84 +2309,6 @@ async def test_executing_operator_command_is_recovered_after_restart(
 
 
 @pytest.mark.asyncio
-async def test_head_active_fills_must_match_named_trade_identities(
-    async_database_url: str,
-) -> None:
-    """A dropped or renamed active fill must block, not silently shrink the position."""
-
-    engine = create_async_database_engine(async_database_url)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-
-    try:
-        # 1. A named trade identity with no carried fill is incomplete.
-        missing_account = f"fills-missing-{uuid4().hex}"
-        _key, payload = await _seed_single_fill_head(
-            factory, account=missing_account
-        )
-        payload["active_trade_ids"] = [
-            *payload["active_trade_ids"],
-            "trade-not-carried",
-        ]
-        async with factory() as session:
-            head = await session.get(
-                ExecutionBookHeadRow,
-                ("live", missing_account, "BTCUSDT", "BOTH"),
-            )
-            assert head is not None
-            head.state_payload = payload
-            await session.commit()
-        book, _ = _book(factory)
-        with pytest.raises(
-            DecisionCommitConflict, match="do not match its active trade identities"
-        ):
-            await book.restore(account_label=missing_account)
-
-        # 2. A carried fill the head does not name is equally incomplete.
-        unnamed_account = f"fills-unnamed-{uuid4().hex}"
-        _key2, payload2 = await _seed_single_fill_head(
-            factory, account=unnamed_account
-        )
-        payload2["active_trade_ids"] = []
-        async with factory() as session:
-            head = await session.get(
-                ExecutionBookHeadRow,
-                ("live", unnamed_account, "BTCUSDT", "BOTH"),
-            )
-            assert head is not None
-            head.state_payload = payload2
-            await session.commit()
-        book2, _ = _book(factory)
-        with pytest.raises(
-            DecisionCommitConflict, match="do not match its active trade identities"
-        ):
-            await book2.restore(account_label=unnamed_account)
-
-        # 3. Repeated named identities are a conflict even when fills agree.
-        repeated_account = f"fills-repeat-{uuid4().hex}"
-        _key3, payload3 = await _seed_single_fill_head(
-            factory, account=repeated_account
-        )
-        payload3["active_trade_ids"] = [
-            payload3["active_trade_ids"][0],
-            payload3["active_trade_ids"][0],
-        ]
-        async with factory() as session:
-            head = await session.get(
-                ExecutionBookHeadRow,
-                ("live", repeated_account, "BTCUSDT", "BOTH"),
-            )
-            assert head is not None
-            head.state_payload = payload3
-            await session.commit()
-        book3, _ = _book(factory)
-        with pytest.raises(
-            DecisionCommitConflict, match="repeats active trade identities"
-        ):
-            await book3.restore(account_label=repeated_account)
-    finally:
-        await engine.dispose()
-
-
 @pytest.mark.asyncio
 async def test_late_fill_across_restart_preserves_quantity_cost_and_batches(
     async_database_url: str,
@@ -2569,7 +2426,9 @@ async def test_dispatch_lease_token_binds_one_process_to_one_lease_generation(
     lease_b_id = f"lease-b-{uuid4().hex[:8]}"
     lease_c_id = f"lease-c-{uuid4().hex[:8]}"
 
-    def _lease(lease_id: str, *, owner: str, generation: str, at: datetime) -> TradingLease:
+    def _lease(
+        lease_id: str, *, owner: str, generation: str, at: datetime
+    ) -> TradingLease:
         return TradingLease(
             lease_id=lease_id,
             environment="live",
@@ -2606,9 +2465,7 @@ async def test_dispatch_lease_token_binds_one_process_to_one_lease_generation(
             await risk_repo.load_dispatch_lease("live", account, now, token=stranger)
         ) is None
         with pytest.raises(DispatchLeaseLostError):
-            await risk_repo.require_dispatch_lease(
-                "live", account, now, token=stranger
-            )
+            await risk_repo.require_dispatch_lease("live", account, now, token=stranger)
 
         # After the old lease expires a new process takes over deliberately.
         takeover_at = now + timedelta(minutes=20)
@@ -2938,12 +2795,12 @@ async def test_prepare_then_immediate_run_acquires_its_own_lease(
     wait for an expiry or force a takeover.
     """
 
-    from crypto_momentum_lab.live_rollout.runtime_orchestrator import (
-        _acquire_dispatch_lease,
-    )
     from crypto_momentum_lab.domain.risk import (
         RiskConfigSnapshot,
         TradingLeaseState,
+    )
+    from crypto_momentum_lab.live_rollout.runtime_orchestrator import (
+        _acquire_dispatch_lease,
     )
 
     engine = create_async_database_engine(async_database_url)
@@ -2966,9 +2823,9 @@ async def test_prepare_then_immediate_run_acquires_its_own_lease(
                 created_at=now,
             )
         )
-        assert (
-            await risk_repo.load_active_lease("live", account, now)
-        ) is None, "prepare must not leave an active dispatch lease behind"
+        assert (await risk_repo.load_active_lease("live", account, now)) is None, (
+            "prepare must not leave an active dispatch lease behind"
+        )
 
         # `run`: immediately acquires its own lease with no waiting/takeover.
         lease = await _acquire_dispatch_lease(

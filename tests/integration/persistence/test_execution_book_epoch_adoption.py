@@ -19,7 +19,6 @@ from crypto_momentum_lab.domain.execution.execution_book import (
 )
 from crypto_momentum_lab.domain.execution.observation_models import (
     Applied,
-    EvidenceConflict,
     EvidencePendingReason,
     WaitingForEvidence,
 )
@@ -36,9 +35,6 @@ from crypto_momentum_lab.domain.execution.recovery_models import (
 from crypto_momentum_lab.domain.execution.snapshot_encoding import (
     stable_snapshot_anchor_id,
 )
-from crypto_momentum_lab.persistence.postgres.account_journal_store import (
-    PostgresAccountJournalStore,
-)
 from crypto_momentum_lab.persistence.postgres.command_repository import (
     PostgresCommandRepository,
 )
@@ -48,9 +44,6 @@ from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
 from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
     ExecutionBookHeadRow,
     ExecutionTradeIdentityRow,
-)
-from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
-    PositionFactJournalEventRow,
 )
 from crypto_momentum_lab.persistence.postgres.position_reservation_repository import (
     AsyncPostgresPositionReservationRepository,
@@ -67,6 +60,7 @@ async def test_flat_baseline_scan_adopts_restored_head_without_business_event(
     cold,
 ):
     from dataclasses import replace
+
     from crypto_momentum_lab.domain.account.models import (
         AccountFillLoadScan,
         AccountFillPageScan,
@@ -184,6 +178,7 @@ async def test_flat_baseline_scan_adopts_restored_head_without_business_event(
         assert view.total_quantity == 0
         assert view.is_ready_for_trade
         from types import SimpleNamespace
+
         from crypto_momentum_lab.domain.account import ExecutionAccountStatus
         from crypto_momentum_lab.domain.risk import StrategyLiveState
         from crypto_momentum_lab.live_rollout.decision_facts import (
@@ -233,8 +228,8 @@ async def test_closed_history_does_not_require_head_but_live_responsibility_does
 ):
     from crypto_momentum_lab.domain.execution.ports import DecisionCommitConflict
     from crypto_momentum_lab.persistence.postgres.models import (
-        ExecutionCommandRow,
         ExchangeOrderRow,
+        ExecutionCommandRow,
         OrderIntentExecutionRow,
         PositionReservationRow,
     )
@@ -360,7 +355,6 @@ def _book(factory):
     )
     uow = AsyncPostgresExecutionUnitOfWork(
         factory,
-        journal_store=PostgresAccountJournalStore(),
         command_repository=commands,
         reservation_repository=reservations,
     )
@@ -600,16 +594,14 @@ async def test_nonzero_checkpoint_adoption_survives_restart_and_carries_batches(
         # Reloading a staged transaction from PostgreSQL must not replace the
         # published parent projection before the transaction commits.
         published_book = book._books[key.canonical_id]
-        published_journal = book._journals[key.canonical_id]
         published_heads = dict(book._head_revisions)
         staged = book._staged_copy(key)
         staged_view = await staged.reload_position(key)
         assert staged_view is not None
         assert staged_view.total_quantity == Decimal("2")
         assert book._books[key.canonical_id] is published_book
-        assert book._journals[key.canonical_id] is published_journal
         assert book._head_revisions == published_heads
-        assert staged._journals[key.canonical_id] is not published_journal
+        assert staged._books[key.canonical_id] is not published_book
 
         target_coverage = _coverage(
             new_scope,
@@ -772,17 +764,15 @@ async def test_missing_entry_scan_replay_is_durable_and_idempotent(
         from sqlalchemy import select
 
         async with factory() as session:
-            payloads = (
-                await session.scalars(
-                    select(PositionFactJournalEventRow.payload).where(
-                        PositionFactJournalEventRow.account_label == account,
-                        PositionFactJournalEventRow.event_kind == "fill",
-                    )
+            payload = await session.scalar(
+                select(ExecutionBookHeadRow.state_payload).where(
+                    ExecutionBookHeadRow.account_label == account,
+                    ExecutionBookHeadRow.symbol == "BTCUSDT",
                 )
-            ).all()
-        assert sorted(payload["trade_id"] for payload in payloads) == sorted(
-            [entry.trade_id, exit_fill.trade_id] if closed else [entry.trade_id]
-        )
+            )
+        head_state = payload["position_state"]
+        assert head_state["verification"]["fills"] == []
+        assert payload["active_reservation_ids"] == []
     finally:
         await engine.dispose()
 
@@ -1219,7 +1209,7 @@ async def test_runtime_full_zero_anchored_scan_repairs_stale_position_atomically
             now=target.observed_at + timedelta(minutes=4),
         )
         assert stale[account].gaps == 0
-        assert stale[account].historical_reasons == ("proof_too_old",)
+        assert stale[account].historical_reasons == ("coverage_stale",)
         assert stale[account].observed_at is None
         from sqlalchemy import delete
 
@@ -1273,7 +1263,7 @@ async def test_runtime_full_zero_anchored_scan_repairs_stale_position_atomically
                 key, stream_id="hub", stream_epoch="new"
             )
         )
-        assert extended.event_cut == checkpoint.event_cut
+        assert extended.event_cut == later.observed_at
         latest = await book.read(scope, stream_id="hub", stream_epoch="new")
         assert latest.coverage.end_at == later.observed_at
         assert latest.total_quantity == 0
@@ -1283,12 +1273,9 @@ async def test_runtime_full_zero_anchored_scan_repairs_stale_position_atomically
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("complete", [True, False])
-@pytest.mark.parametrize("anchor_integrity", ["valid", "bad_hash", "wrong_scope"])
-@pytest.mark.parametrize(
-    "trade_integrity", ["valid", "changed_fee", "bad_fact_hash", "old_digest"]
-)
-async def test_journal_only_flat_anchor_recovers_live_nonzero_position(
-    async_database_url, complete, anchor_integrity, trade_integrity
+@pytest.mark.parametrize("trade_integrity", ["valid", "changed_fee", "old_digest"])
+async def test_head_flat_anchor_recovers_live_nonzero_position(
+    async_database_url, complete, trade_integrity
 ):
     from crypto_momentum_lab.domain.account.models import (
         AccountFillLoadScan,
@@ -1371,67 +1358,38 @@ async def test_journal_only_flat_anchor_recovers_live_nonzero_position(
                 )
         if trade_integrity == "changed_fee":
             rest_entry = replace(rest_entry, fee=Decimal("0.2"))
-        elif trade_integrity == "bad_fact_hash":
-            async with factory() as session, session.begin():
-                await session.execute(
-                    update(PositionFactJournalEventRow)
-                    .where(
-                        PositionFactJournalEventRow.account_label == account,
-                        PositionFactJournalEventRow.event_kind == "fill",
-                    )
-                    .values(payload_hash="0" * 64)
-                )
-        # Earlier runtime versions persisted explicit flat observations to the
-        # immutable journal even when account snapshot retention dropped them.
-        from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
-
-        old_scope = AccountFactStreamScope.for_position_key(
-            key, stream_id="hub", stream_epoch="old"
+        # A flat REST observation is an input fact, so it remains available to
+        # anchor a fill scan even when the current execution head has no older
+        # zero event in its complete payload.
+        from crypto_momentum_lab.persistence.postgres.models import (
+            AccountPositionSnapshotRow,
         )
-        history = AccountJournal(key, stream_scope=old_scope)
-        history.record_snapshot(baseline)
+
         async with factory() as session, session.begin():
-            await PostgresAccountJournalStore().persist_facts_in_session(
-                session,
-                scope=old_scope,
-                facts=history.read_cut(),
-                revision=1,
-            )
-        if anchor_integrity != "valid":
-            import hashlib
-            import json
-
-            from sqlalchemy import select
-
-            async with factory() as session, session.begin():
-                row = await session.scalar(
-                    select(PositionFactJournalEventRow).where(
-                        PositionFactJournalEventRow.account_label == account,
-                        PositionFactJournalEventRow.event_kind == "snapshot",
-                        PositionFactJournalEventRow.occurred_at == baseline.observed_at,
-                    )
+            session.add(
+                AccountPositionSnapshotRow(
+                    snapshot_id=uuid4(),
+                    environment="live",
+                    account_label=account,
+                    symbol=baseline.symbol,
+                    position_side=baseline.position_side,
+                    position_amt=baseline.position_amt,
+                    entry_price=baseline.entry_price,
+                    mark_price=baseline.mark_price,
+                    unrealized_pnl=baseline.unrealized_pnl,
+                    notional=baseline.notional,
+                    leverage=baseline.leverage,
+                    margin_type=baseline.margin_type,
+                    observed_at=baseline.observed_at,
+                    raw_payload=baseline.raw_payload,
                 )
-                if anchor_integrity == "bad_hash":
-                    row.payload_hash = "0" * 64
-                else:
-                    row.payload = {**row.payload, "account_label": "other-account"}
-                    row.payload_hash = hashlib.sha256(
-                        json.dumps(
-                            row.payload,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                            ensure_ascii=False,
-                        ).encode()
-                    ).hexdigest()
+            )
         sources = await load_fill_recovery_sources(
             factory, environment="live", account_label=account
         )
         anchor = sources[("XVSUSDT", "LONG")]
-        if anchor_integrity != "valid":
-            assert anchor is None
-            return
         assert anchor is not None, (
-            "real flat journal observation must survive sparse snapshot storage"
+            "the current head must retain its real flat source observation"
         )
         assert anchor.zero_snapshot == baseline
         planned = plan_fill_scan(target, anchor)
@@ -1514,7 +1472,7 @@ async def test_journal_only_flat_anchor_recovers_live_nonzero_position(
                 key, stream_id="hub", stream_epoch="new"
             )
         )
-        if not complete or trade_integrity != "valid":
+        if not complete or trade_integrity in {"changed_fee", "old_digest"}:
             assert checkpoint is None
             return
         assert checkpoint is not None and checkpoint.coverage.is_authoritative
@@ -1628,7 +1586,10 @@ async def test_equal_live_snapshot_refresh_keeps_exit_token_across_restart(
         )
         after = await book.read(execution_scope)
         assert after.is_ready_for_trade
-        assert after.input_revision > before.input_revision
+        # The snapshot advances verification coverage while leaving the
+        # position projection itself unchanged, so the position input token
+        # remains stable for an already computed exit candidate.
+        assert after.input_revision == before.input_revision
         assert after.projection_version == before.projection_version
         assert len(after.projection_version) <= 64
         async with factory() as session:
@@ -1637,7 +1598,10 @@ async def test_equal_live_snapshot_refresh_keeps_exit_token_across_restart(
                     ExecutionBookHeadRow.account_label == account
                 )
             )
-        assert new_hash["facts_hash"] != old_hash["facts_hash"]
+        assert (
+            new_hash["position_state"]["verification"]
+            != old_hash["position_state"]["verification"]
+        )
         restarted = _book(factory)
         await restarted.restore(account_label=account)
         restored = await restarted.read(execution_scope)
@@ -1803,12 +1767,8 @@ async def test_execution_book_rejects_persistent_checkpoint_identity_conflict(
     old_scope = AccountFactStreamScope.for_position_key(
         key, stream_id="stream", stream_epoch="ep-1"
     )
-    new_scope = AccountFactStreamScope.for_position_key(
-        key, stream_id="stream", stream_epoch="ep-2"
-    )
     base_at = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=10)
     trade_at = base_at + timedelta(minutes=1)
-    target_at = base_at + timedelta(minutes=5)
     flat = _snapshot(key, base_at, "0", "0")
     anchor_id = stable_snapshot_anchor_id(flat)
     book = _book(factory)
@@ -1857,45 +1817,15 @@ async def test_execution_book_rejects_persistent_checkpoint_identity_conflict(
         parent = await book.load_recovery_checkpoint(old_scope)
         assert parent is not None
 
-        # Build coverage based on the parent
-        target_coverage = _coverage(
-            new_scope,
-            load_id="scan-conflict",
-            scan_origin=trade_at,
-            anchor_id=parent.checkpoint_id,
-            anchor_cut=parent.event_cut,
-            anchor_kind="recovery_checkpoint",
-            checked_through=target_at,
+        # Checkpoint hashes are validated when the immutable value is built.
+        from crypto_momentum_lab.domain.execution.recovery_models import (
+            RecoverySchemaError,
         )
 
-        # Conflict 1: Checkpoint with forged/mutated facts hash
-        tampered_parent = replace(parent, facts_hash="0123456789abcdef" * 4)
-        forged_adoption = StreamCheckpointAdoption(
-            parent_checkpoint=tampered_parent,
-            target_scope=new_scope,
-            fill_load_provenance=target_coverage.load_provenance,
-            target_event_cut=target_at,
-        )
-        # Clear in-memory journal for key to force verification against the
-        # persistent PostgreSQL recovery checkpoint store.
-        book._journals.pop(key.canonical_id, None)
-        conflict_res_1 = await book.observe(
-            _evidence(
-                key,
-                evidence_id="tampered-parent-hash",
-                scope=new_scope,
-                at=target_at,
-                sequence=1,
-                snapshot=_snapshot(key, target_at, "1.5", "100"),
-                fill=_fill(key, "trade-2", "SELL", "0.5", target_at),
-                proof=target_coverage,
-                adoption=forged_adoption,
-            )
-        )
-        assert isinstance(conflict_res_1, EvidenceConflict)
-        assert "differs from its immutable durable checkpoint" in conflict_res_1.reason
+        with pytest.raises(RecoverySchemaError, match="parent chain hash mismatch"):
+            replace(parent, facts_hash="0123456789abcdef" * 4)
 
-        # Conflict 2: Adoption with parent checkpoint from foreign stream scope
+        # A checkpoint from a foreign stream scope cannot be adopted.
         foreign_scope = AccountFactStreamScope.for_position_key(
             key, stream_id="stream", stream_epoch="ep-foreign"
         )
@@ -1909,34 +1839,13 @@ async def test_execution_book_rejects_persistent_checkpoint_identity_conflict(
             stream_scope=foreign_scope,
             load_provenance=foreign_provenance,
         )
-        foreign_parent = replace(
-            parent,
-            stream_scope=foreign_scope,
-            projection=replace(parent.projection, stream_scope=foreign_scope),
-            projection_digest=None,
-            coverage=foreign_coverage,
-        )
-        mismatched_scope_adoption = StreamCheckpointAdoption(
-            parent_checkpoint=foreign_parent,
-            target_scope=new_scope,
-            fill_load_provenance=target_coverage.load_provenance,
-            target_event_cut=target_at,
-        )
-        conflict_res_2 = await book.observe(
-            _evidence(
-                key,
-                evidence_id="mismatched-target-scope",
-                scope=new_scope,
-                at=target_at,
-                sequence=2,
-                snapshot=_snapshot(key, target_at, "1.5", "100"),
-                fill=_fill(key, "trade-3", "SELL", "0.5", target_at),
-                proof=target_coverage,
-                adoption=mismatched_scope_adoption,
+        with pytest.raises(RecoverySchemaError, match="parent chain hash mismatch"):
+            replace(
+                parent,
+                stream_scope=foreign_scope,
+                projection=replace(parent.projection, stream_scope=foreign_scope),
+                projection_digest=None,
+                coverage=foreign_coverage,
             )
-        )
-        assert isinstance(conflict_res_2, EvidenceConflict)
-        expected_msg = "does not bind the current durable parent checkpoint"
-        assert expected_msg in conflict_res_2.reason
     finally:
         await engine.dispose()

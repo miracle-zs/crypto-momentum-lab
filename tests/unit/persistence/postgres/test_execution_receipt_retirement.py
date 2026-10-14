@@ -9,6 +9,14 @@ from crypto_momentum_lab.domain.execution.ports import (
     DecisionCommitConflict,
     ExecutionEvidenceIdentity,
 )
+from crypto_momentum_lab.domain.execution.execution_head import (
+    EXECUTION_HEAD_SCHEMA_VERSION,
+)
+from crypto_momentum_lab.domain.execution.position_book import PositionBook
+from crypto_momentum_lab.domain.execution.position_ledger_models import (
+    AccountFactStreamScope,
+)
+from crypto_momentum_lab.domain.execution.projection_codec import encode_position_key
 from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
     ExecutionTransaction,
 )
@@ -17,6 +25,22 @@ NOW = datetime(2026, 10, 7, tzinfo=UTC)
 KEY = ExecutionScope(
     environment="live", account_label="retirement-test", symbol="BTCUSDT"
 ).to_position_key()
+
+
+def head_payload(stream_id: str, stream_epoch: str) -> dict[str, object]:
+    scope = AccountFactStreamScope.for_position_key(
+        KEY, stream_id=stream_id, stream_epoch=stream_epoch
+    )
+    return {
+        "schema_version": EXECUTION_HEAD_SCHEMA_VERSION,
+        "position_key": encode_position_key(KEY),
+        "stream_scope": {"stream_id": stream_id, "stream_epoch": stream_epoch},
+        "position_state": PositionBook(KEY, stream_scope=scope).encode_current_state(),
+        "last_sequence": None,
+        "active_reservation_ids": [],
+        "external_recovery_ids": [],
+        "recovery_command_ids": [],
+    }
 
 
 def transaction(*, retired=False, receipt=None, head=None):
@@ -32,7 +56,6 @@ def transaction(*, retired=False, receipt=None, head=None):
     session = SimpleNamespace(get=AsyncMock(side_effect=get), add=Mock())
     return ExecutionTransaction(
         session,
-        journal_store=AsyncMock(),
         command_repository=AsyncMock(),
         reservation_repository=AsyncMock(),
     )
@@ -60,7 +83,7 @@ async def test_retired_stream_cannot_become_current_head_again():
             stream_epoch="old",
             expected_revision=0,
             projection_version="projection",
-            state_payload={},
+            state_payload=head_payload("source", "old"),
             updated_at=NOW,
             is_flat_adoption=True,
         )
@@ -76,7 +99,7 @@ async def test_validated_rollover_seals_previous_stream_atomically():
         stream_epoch="new",
         expected_revision=1,
         projection_version="projection",
-        state_payload={},
+        state_payload=head_payload("source", "new"),
         updated_at=NOW,
         is_flat_adoption=True,
     )

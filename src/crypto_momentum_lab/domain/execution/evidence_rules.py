@@ -17,8 +17,6 @@ def _canonical_evidence_payload(evidence: ExecutionEvidence) -> dict[str, object
     payload = asdict(evidence)
     # Existing durable receipt hashes must remain replay-compatible when no
     # historical settlement proof was supplied.
-    if not evidence.settlement_fills:
-        payload.pop("settlement_fills", None)
     payload.pop("observed_at", None)
     order_event = payload.get("order_event")
     if isinstance(order_event, dict):

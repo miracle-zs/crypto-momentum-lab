@@ -14,7 +14,6 @@ from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
     AccountPositionSnapshot,
 )
-from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_book import PositionBook
 from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
@@ -77,76 +76,6 @@ def _fill(
         trade_at=at,
         raw_payload={"positionSide": "BOTH"},
     )
-
-
-@pytest.mark.parametrize(
-    "failure",
-    [None, "truncated", "missing_trade", "changed_fee", "before_anchor", "conflict"],
-)
-def test_ordered_recovery_requires_complete_matching_trade_facts(failure):
-    from crypto_momentum_lab.domain.execution.position_recovery import (
-        rebuild_ordered_scan_journal,
-    )
-
-    key = _key()
-    scope = _scope(key)
-    entry = _fill(key, "entry", "BUY", "2", "10", _time(1))
-    closing = _fill(key, "closing", "SELL", "2", "10", _time(2))
-    journal = AccountJournal(key, stream_scope=scope)
-    journal.append_fill(closing)
-    journal.append_fill(entry)
-    assert journal.has_late_events
-    start = _time(2) if failure == "before_anchor" else _time(0)
-    end = _time(3)
-    provenance = AccountFillLoadProvenance(
-        stream_scope=scope,
-        load_id="verified-scan",
-        scan_origin_from_id=None,
-        scan_origin_start_time_ms=int(start.timestamp() * 1000),
-        request_from_id=None,
-        next_from_id=None,
-        page_count=1,
-        page_exhausted=True,
-        truncated=False,
-        checked_through=end,
-        observed_at=end,
-        source_anchor_id="zero-anchor",
-        source_anchor_event_cut=start,
-        source_anchor_kind="zero_snapshot",
-    )
-    proof = CoverageEvidence(
-        fill_cursor_id="verified-scan",
-        fill_load_start=start,
-        fill_checked_through=end,
-        checkpoint_id="scan-cut",
-        checkpoint_event_cut=end,
-        stream_scope=scope,
-        evidence_observed_at=end,
-        page_exhausted=True,
-        not_truncated=failure != "truncated",
-        load_provenance=provenance,
-    )
-    scanned = (entry, closing)
-    if failure == "missing_trade":
-        scanned = (entry,)
-    elif failure == "changed_fee":
-        scanned = (replace(entry, fee=Decimal("0.1")), closing)
-    elif failure == "conflict":
-        journal.append_fill(replace(entry, fee=Decimal("0.1")))
-    rebuilt = rebuild_ordered_scan_journal(
-        journal=journal,
-        proof=proof,
-        provenance=provenance,
-        scanned_fills=scanned,
-    )
-    assert journal.has_late_events  # Never mutate the published journal.
-    if failure is None:
-        assert rebuilt is not journal
-        assert not rebuilt.has_late_events
-        assert rebuilt.read_cut().fills == journal.read_cut().fills
-        assert rebuilt.revision == journal.revision
-    else:
-        assert rebuilt is journal
 
 
 def test_checkpoint_plus_suffix_restores_nonzero_batches_and_cost_basis() -> None:
@@ -336,18 +265,16 @@ def test_durable_projection_token_survives_unchanged_later_cut() -> None:
         source_revision=7,
         event_cut=cut,
     )
-    journal = AccountJournal(key, stream_scope=scope)
-    journal.set_recovery_checkpoint(checkpoint)
-    book = PositionBook(journal)
+    book = PositionBook.from_facts(replace(facts, recovery_checkpoint=checkpoint))
     book.use_durable_projection_version("pv_durable_head", event_cut=cut)
 
     current = book.get_view()
     later = book.get_view(cut + timedelta(minutes=5))
-    historical = book.get_view(cut - timedelta(minutes=1))
+    with pytest.raises(ValueError, match="historical position cuts are not held in memory"):
+        book.get_view(cut - timedelta(minutes=1))
 
     assert current.projection_version == "pv_durable_head"
     assert later.projection_version == "pv_durable_head"
-    assert historical.projection_version != "pv_durable_head"
 
 
 def test_verified_flat_snapshot_can_seed_a_scoped_stream() -> None:
@@ -419,13 +346,72 @@ def test_verified_flat_snapshot_can_seed_a_scoped_stream() -> None:
 
     assert checkpoint.projection.total_active_quantity == Decimal("0")
     assert checkpoint.coverage == coverage
-    journal = AccountJournal(key, stream_scope=scope)
-    journal.record_snapshot(snapshot)
-    journal.record_fill_load_provenance(provenance)
-    journal.set_coverage(coverage)
-    view = PositionBook(journal).get_view()
+    view = PositionBook.from_facts(facts).get_view()
     assert view.zero_position_snapshot_confirmed
     assert view.is_ready_for_trade
+
+
+def test_live_flat_snapshot_needs_no_fill_history_scan() -> None:
+    key = _key()
+    scope = _scope(key)
+    snapshot = AccountPositionSnapshot(
+        environment=key.environment,
+        account_label=key.account_label,
+        symbol=key.symbol,
+        position_side=key.position_side.value,
+        position_amt=Decimal("0"),
+        entry_price=Decimal("0"),
+        mark_price=Decimal("10"),
+        unrealized_pnl=Decimal("0"),
+        notional=Decimal("0"),
+        leverage=1,
+        margin_type="cross",
+        observed_at=_time(2),
+        raw_payload={"include_flat": True},
+    )
+
+    view = PositionBook.from_facts(
+        AccountFacts(
+            position_key=key,
+            stream_scope=scope,
+            snapshots=(snapshot,),
+        )
+    ).get_view()
+
+    assert view.total_quantity == Decimal("0")
+    assert view.zero_position_snapshot_confirmed
+    assert view.is_ready_for_trade
+
+
+def test_live_nonzero_snapshot_still_requires_real_fills() -> None:
+    key = _key()
+    scope = _scope(key)
+    snapshot = AccountPositionSnapshot(
+        environment=key.environment,
+        account_label=key.account_label,
+        symbol=key.symbol,
+        position_side=key.position_side.value,
+        position_amt=Decimal("2"),
+        entry_price=Decimal("10"),
+        mark_price=Decimal("10"),
+        unrealized_pnl=Decimal("0"),
+        notional=Decimal("20"),
+        leverage=1,
+        margin_type="cross",
+        observed_at=_time(2),
+        raw_payload={"include_flat": True},
+    )
+
+    view = PositionBook.from_facts(
+        AccountFacts(
+            position_key=key,
+            stream_scope=scope,
+            snapshots=(snapshot,),
+        )
+    ).get_view()
+
+    assert view.total_quantity == Decimal("0")
+    assert not view.is_ready_for_trade
 
 
 @pytest.mark.parametrize("opening_offset", [timedelta(), timedelta(seconds=-30)])

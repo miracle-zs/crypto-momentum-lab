@@ -76,7 +76,6 @@ async def test_execution_transaction_uses_command_repository_with_same_session()
     session, commands = AsyncMock(), AsyncMock()
     tx = ExecutionTransaction(
         session,
-        journal_store=AsyncMock(),
         command_repository=commands,
         reservation_repository=AsyncMock(),
     )

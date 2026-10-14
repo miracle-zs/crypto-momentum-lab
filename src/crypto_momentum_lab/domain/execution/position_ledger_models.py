@@ -14,7 +14,7 @@ Provides strict identity types:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
@@ -704,6 +704,8 @@ class PositionLedgerProjection:
     is_comparable: bool = True
     projection_version: str | None = None
     stream_scope: AccountFactStreamScope | None = None
+    episode_sequence: int = field(default=0, compare=False)
+    batch_sequence: int = field(default=0, compare=False)
 
 
 @dataclass(frozen=True, slots=True)

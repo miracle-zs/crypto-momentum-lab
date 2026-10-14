@@ -31,6 +31,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     FactCoverageInterval,
     FactCoverageStatus,
 )
+from crypto_momentum_lab.domain.execution.recovery_models import AccountFacts
 from crypto_momentum_lab.domain.execution.trade_command import TradeCommandType
 from crypto_momentum_lab.execution_account.binance.client import BinanceUsdMTradeClient
 from crypto_momentum_lab.execution_account.orders.coordinator import (
@@ -64,9 +65,14 @@ async def test_incomplete_fill_waits_for_price_without_crash_or_second_post(
 ):
     book = ExecutionBook()
     scope = ExecutionScope("live", "account-4", "TRUTHUSDT", FuturesPositionSide.LONG)
-    journal = book._ensure_journal(scope.to_position_key())
-    journal.set_coverage(
-        FactCoverageInterval(NOW, NOW, status=FactCoverageStatus.CONFIRMED)
+    key = scope.to_position_key()
+    book._ensure_book(key).replace_from_facts(
+        AccountFacts(
+            position_key=key,
+            coverage=FactCoverageInterval(
+                NOW, NOW, status=FactCoverageStatus.CONFIRMED
+            ),
+        )
     )
     await book.observe(
         ExecutionEvidence(

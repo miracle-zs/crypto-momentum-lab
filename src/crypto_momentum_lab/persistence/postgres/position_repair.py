@@ -16,11 +16,12 @@ from crypto_momentum_lab.domain.execution.position_repair_models import (
     PositionRepairReceipt,
     PositionRepairRequest,
 )
+from crypto_momentum_lab.domain.execution.recovery_models import (
+    AccountFacts,
+    DurableJournalCut,
+)
 from crypto_momentum_lab.persistence.postgres.account_fact_rows import (
     account_fill_from_row,
-)
-from crypto_momentum_lab.persistence.postgres.account_journal_store import (
-    PostgresAccountJournalStore,
 )
 from crypto_momentum_lab.persistence.postgres.command_repository import (
     PostgresCommandRepository,
@@ -67,7 +68,20 @@ class PostgresPositionRepairTransaction:
             ).all()
             if order_id is not None
         )
-        cut = await tx.load_recovery(scope=request.scope, as_of=datetime.now(UTC))
+        observed_at = datetime.now(UTC)
+        cut = (
+            await tx.load_current_cut(scope=request.scope, as_of=observed_at)
+            if head is not None
+            else DurableJournalCut(
+                scope=request.scope,
+                facts=AccountFacts(
+                    position_key=key,
+                    stream_scope=request.scope,
+                ),
+                revision=0,
+                as_of=observed_at,
+            )
+        )
         checkpoint = cut.checkpoint or cut.facts.recovery_checkpoint
 
         fill_stmt = select(AccountFillEventRow).where(
@@ -121,12 +135,6 @@ class PostgresPositionRepairTransaction:
                     first_seen_at=fill.trade_at,
                 ),
             )
-        await tx.persist_facts(
-            scope=request.scope,
-            facts=repair.facts,
-            revision=repair.revision,
-            delta=repair.delta,
-        )
         revision = await tx.persist_head(
             key=request.key,
             stream_id=request.scope.stream_id,
@@ -147,7 +155,6 @@ class PostgresPositionRepairUnitOfWork:
     ) -> None:
         self._execution = AsyncPostgresExecutionUnitOfWork(
             sessions,
-            journal_store=PostgresAccountJournalStore(),
             command_repository=PostgresCommandRepository(sessions),
             reservation_repository=AsyncPostgresPositionReservationRepository(
                 sessions, strategy_name=strategy_name

@@ -17,6 +17,11 @@ from crypto_momentum_lab.domain.execution.ports import (
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
 )
+from crypto_momentum_lab.domain.execution.execution_head import (
+    EXECUTION_HEAD_SCHEMA_VERSION,
+)
+from crypto_momentum_lab.domain.execution.position_book import PositionBook
+from crypto_momentum_lab.domain.execution.projection_codec import encode_position_key
 from crypto_momentum_lab.persistence.postgres.execution_receipt_retention import (
     PostgresExecutionReceiptRetention,
 )
@@ -34,6 +39,24 @@ from crypto_momentum_lab.persistence.postgres.session import (
 
 NOW = datetime(2026, 10, 7, tzinfo=UTC)
 BEFORE = NOW - timedelta(hours=72)
+
+
+def head_payload(key, stream_id: str, stream_epoch: str) -> dict[str, object]:
+    target_scope = AccountFactStreamScope.for_position_key(
+        key, stream_id=stream_id, stream_epoch=stream_epoch
+    )
+    return {
+        "schema_version": EXECUTION_HEAD_SCHEMA_VERSION,
+        "position_key": encode_position_key(key),
+        "stream_scope": {"stream_id": stream_id, "stream_epoch": stream_epoch},
+        "position_state": PositionBook(
+            key, stream_scope=target_scope
+        ).encode_current_state(),
+        "last_sequence": None,
+        "active_reservation_ids": [],
+        "external_recovery_ids": [],
+        "recovery_command_ids": [],
+    }
 
 
 @pytest.fixture
@@ -60,7 +83,7 @@ async def seeded(async_database_url):
                 stream_epoch="new",
                 revision=2,
                 projection_version="projection",
-                state_payload={},
+                state_payload=head_payload(key, "source", "new"),
                 updated_at=NOW,
             )
         )
@@ -130,7 +153,6 @@ async def test_archive_keeps_current_unsequenced_and_recent_receipts(seeded, tmp
     async with factory() as session, session.begin():
         tx = ExecutionTransaction(
             session,
-            journal_store=None,
             command_repository=None,
             reservation_repository=None,
         )
@@ -308,7 +330,6 @@ async def test_head_rollover_and_retirement_rollback_together(seeded):
         async with factory() as session, session.begin():
             tx = ExecutionTransaction(
                 session,
-                journal_store=None,
                 command_repository=None,
                 reservation_repository=None,
             )
@@ -318,7 +339,7 @@ async def test_head_rollover_and_retirement_rollback_together(seeded):
                 stream_epoch="next",
                 expected_revision=2,
                 projection_version="next",
-                state_payload={},
+                state_payload=head_payload(key, "source", "next"),
                 updated_at=NOW,
                 is_flat_adoption=True,
             )

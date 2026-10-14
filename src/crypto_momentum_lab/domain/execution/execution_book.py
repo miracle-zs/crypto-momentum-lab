@@ -10,9 +10,6 @@ from typing import TypeVar, cast
 
 import structlog
 
-from crypto_momentum_lab.domain.execution.account_journal import (
-    AccountJournal,
-)
 from crypto_momentum_lab.domain.execution.command_codec import encode_outbox_details
 from crypto_momentum_lab.domain.execution.command_models import (
     DispatchState,
@@ -133,8 +130,7 @@ T = TypeVar("T")
 
 
 class ExecutionBook:
-    """Authoritative account execution service coordinating PositionBook, Journal,
-    and Reservations.
+    """Authoritative account service for current positions and reservations.
 
     Implements Section 7 of RFC 2026-09-25:
     - read(scope, requirement) -> PositionView
@@ -146,14 +142,12 @@ class ExecutionBook:
         self,
         *,
         books_by_key: dict[str, PositionBook] | None = None,
-        journals_by_key: dict[str, AccountJournal] | None = None,
         coordinator: ReservationRegistry | None = None,
         reservation_repository: ReservationRepository | None = None,
         command_repository: CommandRepository | None = None,
         execution_unit_of_work: ExecutionUnitOfWorkPort | None = None,
     ) -> None:
         self._books: dict[str, PositionBook] = books_by_key or {}
-        self._journals: dict[str, AccountJournal] = journals_by_key or {}
         # Default coordinator owns memory only. Durable/async restoration is
         # explicitly awaited by restore.
         self._coordinator = coordinator or ReservationRegistry()
@@ -166,7 +160,6 @@ class ExecutionBook:
         self._latest_active_streams: dict[tuple[str, str], tuple[str, str]] = {}
         self._head_revisions: dict[str, int] = {}
         self._head_expected_reservation_ids: dict[str, set[str]] = {}
-        self._journal_revisions: dict[str, int] = {}
         self._last_sequences: dict[str, int] = {}
         self._recovery_adoption_scope: AccountFactStreamScope | None = None
         self._process_mutation_lock = asyncio.Lock()
@@ -183,7 +176,7 @@ class ExecutionBook:
         self._recovery_required_commands: set[str] = set()
         self._external_recovery_positions: dict[str, PositionKey] = {}
         self._dispatch_reconciliation_required_commands: set[str] = set()
-        self._transaction_journal_keys: tuple[str, ...] = ()
+        self._transaction_position_keys: tuple[str, ...] = ()
         self._initial_latest_active_streams: dict[tuple[str, str], tuple[str, str]] = {}
         self._initial_recovery_adoption_scope: AccountFactStreamScope | None = None
         self._staged_recovery_required_commands: set[str] = set()
@@ -211,11 +204,9 @@ class ExecutionBook:
     def clear(self, *, clear_requests: Callable[[], None] | None = None) -> None:
         for values in (
             self._books,
-            self._journals,
             self._stream_scopes,
             self._head_revisions,
             self._head_expected_reservation_ids,
-            self._journal_revisions,
             self._last_sequences,
             self._seen_evidence_ids,
             self._seen_trade_ids,
@@ -426,9 +417,7 @@ class ExecutionBook:
                         continue
                     existing_book = self._books.get(canon)
                     return (
-                        existing_book.get_view()
-                        if existing_book is not None
-                        else None
+                        existing_book.get_view() if existing_book is not None else None
                     )
                 return self._apply_loaded_position(
                     key,
@@ -513,32 +502,18 @@ class ExecutionBook:
         """Copy published domain state before entering a durable transaction."""
         candidate = copy.copy(self)
         candidate._books = dict(self._books)
-        candidate._journals = dict(self._journals)
         if key is not None:
             canon = key.canonical_id
-            journal = self._journals.get(canon)
-            if journal is not None:
-                copied_journal = journal.copy_for_transaction()
-                candidate._journals[canon] = copied_journal
-                copied_book = self._books.get(canon)
-                if copied_book is not None:
-                    candidate._books[canon] = copied_book.copy_for_transaction(
-                        copied_journal
-                    )
+            position_book = self._books.get(canon)
+            if position_book is not None:
+                candidate._books[canon] = position_book.copy_for_transaction()
         else:
-            # Container-level copies for every position: recorded facts are
-            # frozen and never mutated in place, so sharing them keeps the
-            # candidate isolated without an O(history) deepcopy.
-            candidate._journals = {
-                canon: journal.copy_for_transaction()
-                for canon, journal in self._journals.items()
-            }
             candidate._books = {
-                canon: book.copy_for_transaction(candidate._journals.get(canon))
+                canon: book.copy_for_transaction()
                 for canon, book in self._books.items()
             }
-        candidate._transaction_journal_keys = (
-            (key.canonical_id,) if key is not None else tuple(candidate._journals)
+        candidate._transaction_position_keys = (
+            (key.canonical_id,) if key is not None else tuple(candidate._books)
         )
         candidate._requests_by_id = dict(self._requests_by_id)
         candidate._receipts_by_id = dict(self._receipts_by_id)
@@ -560,7 +535,6 @@ class ExecutionBook:
         candidate._head_expected_reservation_ids = dict(
             self._head_expected_reservation_ids
         )
-        candidate._journal_revisions = dict(self._journal_revisions)
         candidate._last_sequences = dict(self._last_sequences)
         candidate._recovery_adoption_scope = self._recovery_adoption_scope
         candidate._initial_latest_active_streams = dict(self._latest_active_streams)
@@ -611,30 +585,19 @@ class ExecutionBook:
         if key is not None:
             canons = (key.canonical_id,)
         else:
-            canons = candidate._transaction_journal_keys or tuple(candidate._journals)
+            canons = candidate._transaction_position_keys or tuple(candidate._books)
 
         for canon in canons:
             current_head = self._head_revisions.get(canon, 0)
             cand_head = candidate._head_revisions.get(canon, 0)
             if cand_head < current_head:
                 continue
-            current_journal = self._journal_revisions.get(canon, 0)
-            cand_journal = candidate._journal_revisions.get(canon, 0)
-            # Journal revisions are scoped to an epoch; a committed newer
-            # head may start a new journal at revision 1. Publish the journal,
-            # projection and scope together rather than retaining old facts.
-            if cand_head == current_head and cand_journal < current_journal:
-                continue
             if canon in candidate._books:
                 self._books[canon] = candidate._books[canon]
-            if canon in candidate._journals:
-                self._journals[canon] = candidate._journals[canon]
             if canon in candidate._stream_scopes:
                 self._stream_scopes[canon] = candidate._stream_scopes[canon]
             if canon in candidate._head_revisions:
                 self._head_revisions[canon] = candidate._head_revisions[canon]
-            if canon in candidate._journal_revisions:
-                self._journal_revisions[canon] = candidate._journal_revisions[canon]
             if canon in candidate._last_sequences:
                 self._last_sequences[canon] = candidate._last_sequences[canon]
             else:
@@ -773,9 +736,7 @@ class ExecutionBook:
                         and cmd_id
                         not in candidate._dispatch_reconciliation_required_commands
                     ):
-                        self._dispatch_reconciliation_required_commands.discard(
-                            cmd_id
-                        )
+                        self._dispatch_reconciliation_required_commands.discard(cmd_id)
         else:
             for k, v in candidate._order_cumulative_fills.items():
                 self._order_cumulative_fills[k] = max(
@@ -791,12 +752,9 @@ class ExecutionBook:
                 candidate, "_staged_recovery_required_commands", set()
             )
             self._recovery_required_commands = (
-                (self._recovery_required_commands - staged_recovery)
-                | candidate._recovery_required_commands
-            )
-            staged_ext = getattr(
-                candidate, "_staged_external_recovery_positions", {}
-            )
+                self._recovery_required_commands - staged_recovery
+            ) | candidate._recovery_required_commands
+            staged_ext = getattr(candidate, "_staged_external_recovery_positions", {})
             self._external_recovery_positions = {
                 k: v
                 for k, v in self._external_recovery_positions.items()
@@ -809,30 +767,19 @@ class ExecutionBook:
                 candidate, "_staged_dispatch_reconciliation_required_commands", set()
             )
             self._dispatch_reconciliation_required_commands = (
-                (
-                    self._dispatch_reconciliation_required_commands
-                    - staged_reconciliation
-                )
-                | candidate._dispatch_reconciliation_required_commands
-            )
+                self._dispatch_reconciliation_required_commands - staged_reconciliation
+            ) | candidate._dispatch_reconciliation_required_commands
 
         self._coordinator.publish_from(candidate._coordinator, key=key)
         self._context_revision += 1
-        # The candidate's append-only delta is now durable, so it must not be
-        # re-sent by the next observation. A candidate that rolled back is
-        # never published, which keeps its pending events queued for retry.
-        for canon in canons:
-            journal = self._journals.get(canon)
-            if journal is not None:
-                journal.mark_facts_persisted()
 
-    def _journal_for_scope(
+    def _book_for_scope(
         self,
         key: PositionKey,
         scope: AccountFactStreamScope,
-    ) -> AccountJournal:
+    ) -> PositionBook:
         canon = key.canonical_id
-        existing = self._journals.get(canon)
+        existing = self._books.get(canon)
         if existing is not None:
             if existing.stream_scope == scope:
                 return existing
@@ -841,23 +788,24 @@ class ExecutionBook:
                     "execution stream changed; a validated recovery checkpoint "
                     "must be adopted before this position can continue"
                 )
-            facts = existing.read_cut()
+            facts = existing.current_facts
             if (
-                facts.fills
-                or facts.snapshots
-                or facts.exit_boundaries
+                existing.projection.high_watermark_trade_at is not None
                 or facts.coverage is not None
                 or facts.fact_conflicts
                 or facts.recovery_checkpoint is not None
+                or any(snapshot.position_amt != 0 for snapshot in facts.snapshots)
             ):
                 raise RuntimeError(
                     "unscoped position facts cannot be adopted by a durable stream"
                 )
-        journal = AccountJournal(key, stream_scope=scope)
-        self._journals[canon] = journal
-        self._books[canon] = PositionBook(journal)
+            existing.reset_stream(scope)
+            position_book = existing
+        else:
+            position_book = PositionBook(key, stream_scope=scope)
+            self._books[canon] = position_book
         self._stream_scopes[canon] = scope
-        return journal
+        return position_book
 
     async def _persist_outbox_state(self, entry: OutboxEntry) -> None:
         command_repository = self._command_repo
@@ -943,29 +891,21 @@ class ExecutionBook:
     def _ensure_book(self, key: PositionKey) -> PositionBook:
         canon = key.canonical_id
         if canon not in self._books:
-            if canon not in self._journals:
-                self._journals[canon] = AccountJournal(key)
-            self._books[canon] = PositionBook(self._journals[canon])
+            self._books[canon] = PositionBook(
+                key, stream_scope=self._stream_scopes.get(canon)
+            )
         return self._books[canon]
 
-    def _ensure_journal(self, key: PositionKey) -> AccountJournal:
-        canon = key.canonical_id
-        if canon not in self._journals:
-            self._journals[canon] = AccountJournal(
-                key,
-                stream_scope=self._stream_scopes.get(canon),
-            )
-        return self._journals[canon]
-
     def _requires_verified_stream_adoption(self, key: PositionKey) -> bool:
-        journal = self._journals.get(key.canonical_id)
-        if self._head_revisions.get(key.canonical_id, 0) == 0 or journal is None:
+        canon = key.canonical_id
+        position_book = self._books.get(canon)
+        if self._head_revisions.get(canon, 0) == 0 or position_book is None:
             return False
-        facts = journal.read_cut()
+        facts = position_book.current_facts
         return bool(
-            facts.fills
+            position_book.projection.high_watermark_trade_at is not None
             or facts.recovery_checkpoint
-            or facts.exit_boundaries
+            or facts.coverage
             or facts.conflicting_fills
             or facts.fact_conflicts
             or facts.integrity_issues
@@ -998,13 +938,6 @@ class ExecutionBook:
         if len(matches) > 1:
             raise ValueError("exchange order identity belongs to multiple commands")
         return matches[0] if matches else order_id
-
-    def _command_order_ids(self, key: PositionKey, order_id: str) -> frozenset[str]:
-        command_id = self._command_order_id(key, order_id)
-        entry = self._outbox_by_command_id.get(command_id)
-        if entry is not None and entry.external_order_id is not None:
-            return frozenset({command_id, entry.external_order_id})
-        return frozenset({command_id})
 
     def get_active_reservations(
         self, key: PositionKey | None = None
@@ -1097,15 +1030,10 @@ class ExecutionBook:
                     key, stream_id=stream_id, stream_epoch=stream_epoch
                 )
                 self._stream_scopes[canon] = target_scope
-                if (
-                    canon not in self._journals
-                    or self._journals[canon].stream_scope != target_scope
-                ):
-                    self._journals[canon] = AccountJournal(
-                        key, stream_scope=target_scope
-                    )
-                    self._books[canon] = PositionBook(self._journals[canon])
-                    self._journal_revisions[canon] = 0
+                if canon not in self._books:
+                    self._books[canon] = PositionBook(key, stream_scope=target_scope)
+                else:
+                    self._books[canon].reset_stream(target_scope)
                     self._last_sequences.pop(canon, None)
                 source_scope = target_scope
             else:
@@ -1114,13 +1042,7 @@ class ExecutionBook:
                 )
         book = self._books.get(canon)
         if book is None:
-            # An unknown position is incomplete; reading it must not create a
-            # journal or silently establish an account stream for future writes.
-            journal = self._journals.get(canon)
-            if journal is not None:
-                book = PositionBook(journal)
-            else:
-                book = PositionBook(AccountJournal(key, stream_scope=source_scope))
+            book = PositionBook(key, stream_scope=source_scope)
         if event_cut is None:
             view = book.get_view(requirement=requirement, now=now)
             entries = self.list_outbox(scope=scope)
@@ -1144,19 +1066,6 @@ class ExecutionBook:
                     )
                 ),
             )
-        current_view = book.get_view(requirement=requirement, now=now)
-        if (
-            self._execution_unit_of_work is not None
-            and source_scope is not None
-            and current_view.event_cut is not None
-            and event_cut < current_view.event_cut
-        ):
-            cut = await self._execution_unit_of_work.load_journal_cut(
-                scope=source_scope, as_of=event_cut
-            )
-            return book.get_historical_view(
-                cut, event_cut=event_cut, requirement=requirement, now=now
-            )
         return book.get_view(cut=event_cut, requirement=requirement, now=now)
 
     async def load_recovery_checkpoint(
@@ -1171,7 +1080,7 @@ class ExecutionBook:
         method never relabels a checkpoint to the caller's new epoch.
         """
         return await read_recovery_checkpoint(
-            journals=self._journals,
+            books=self._books,
             unit_of_work=self._execution_unit_of_work,
             scope=scope,
             as_of=as_of,
@@ -1274,9 +1183,7 @@ class ExecutionBook:
             or command_id in self._dispatch_reconciliation_required_commands
         )
 
-    def flag_projection_divergence(
-        self, command_id: str, *, reason: str = ""
-    ) -> None:
+    def flag_projection_divergence(self, command_id: str, *, reason: str = "") -> None:
         """Domain API: record that command projection diverged from external state
         and requires recovery.
         """
@@ -1376,13 +1283,9 @@ class ExecutionBook:
                         external_order_id=external_order_id,
                         reason=reason,
                     )
-                facts = candidate._ensure_journal(key).read_cut()
                 head_payload = build_execution_head_payload(
                     candidate,
                     key,
-                    facts.compute_facts_hash(),
-                    ensure_book=candidate._ensure_book,
-                    ensure_journal=candidate._ensure_journal,
                     active_reservations=candidate.get_active_reservations,
                 )
                 candidate._head_revisions[canon] = await tx.persist_head(
@@ -1406,9 +1309,7 @@ class ExecutionBook:
                 await self._publish_committed_candidate(
                     candidate,
                     key=key,
-                    after=lambda: self._outbox_by_command_id.get(
-                        command_id, result
-                    ),
+                    after=lambda: self._outbox_by_command_id.get(command_id, result),
                 ),
             )
         except Exception:
@@ -1514,6 +1415,7 @@ class ExecutionBook:
         submission_repository: object | None = None,
     ) -> None:
         """Compensate a submission failure within the engine boundary."""
+
         def _is_identity_collision(err: BaseException | None) -> bool:
             if err is None:
                 return False
@@ -1783,10 +1685,8 @@ class ExecutionBook:
             self,
             EvidenceMutationDependencies(
                 ensure_book=self._ensure_book,
-                ensure_journal=self._ensure_journal,
-                journal_for_scope=self._journal_for_scope,
+                book_for_scope=self._book_for_scope,
                 command_order_id=self._command_order_id,
-                command_order_ids=self._command_order_ids,
                 order_watermark_key=self._order_watermark_key,
                 active_reservations_for_command=(
                     self._find_active_reservations_for_command
@@ -1796,7 +1696,6 @@ class ExecutionBook:
                 persist_transition=self._persist_transition,
                 release_command_reservations=self._release_command_reservations,
                 persist_outbox_state=self._persist_outbox_state,
-                durable=self._execution_unit_of_work is not None,
                 in_transaction=self._active_transaction is not None,
             ),
             evidence,

@@ -2,7 +2,7 @@
 
 Obeys Astra Architecture Blueprint 2026-09-25:
 - Unifies identity and origin of cash flows, fees, funding, and equity observations;
-- Reuses immutable facts from AccountJournal;
+- Reuses normalized immutable account facts;
 - Distinguishes NET_EQUITY_DELTA, CASH_FLOW_ADJUSTED_PNL, TWR, MWR without aliasing;
 - Honors coverage and explicitly marks unverified/insufficient data instead of guessing.
 """

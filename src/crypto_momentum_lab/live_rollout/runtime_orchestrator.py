@@ -103,10 +103,6 @@ from crypto_momentum_lab.domain.account import (
 from crypto_momentum_lab.domain.account.snapshot_models import AccountSnapshot
 from crypto_momentum_lab.domain.account.models import (
     AccountFillLoadScan,
-    AccountFillSourceAnchor,
-)
-from crypto_momentum_lab.domain.execution.snapshot_encoding import (
-    stable_snapshot_anchor_id,
 )
 from crypto_momentum_lab.execution_account.fill_scan_plan import plan_fill_scan
 from crypto_momentum_lab.persistence.postgres.fill_recovery_sources import (
@@ -865,61 +861,36 @@ async def run_live_daemon(
                         if loader is None
                         else await loader(snapshot.config.observed_at)
                     )
-                    ordered_symbols = {order.symbol for order in snapshot.open_orders}
+                    ordered_symbols = {
+                        order.symbol.strip().upper() for order in snapshot.open_orders
+                    }
                     selected = tuple(
                         position
                         for position in snapshot.positions
                         if position.position_amt != 0
                         or symbols is None
-                        or position.symbol in symbols
-                        or position.symbol in ordered_symbols
+                        or position.symbol.strip().upper() in symbols
+                        or position.symbol.strip().upper() in ordered_symbols
                     )
-                    anchors = await load_fill_recovery_sources(
-                        execution_factory,
-                        environment="live",
-                        account_label=account_label,
-                        position_keys=tuple(
-                            (position.symbol, position.position_side.upper())
-                            for position in selected
-                        ),
-                    )
-                    missing = tuple(
+                    recovery_positions = tuple(
                         position
                         for position in selected
-                        if position.position_amt == 0
-                        and anchors.get(
-                            (position.symbol, position.position_side.upper())
-                        )
-                        is None
+                        if position.position_amt != 0
+                        or position.symbol.strip().upper() in ordered_symbols
                     )
-                    if missing:
-                        for position in missing:
-                            anchors[
+                    anchors = (
+                        await load_fill_recovery_sources(
+                            execution_factory,
+                            environment="live",
+                            account_label=account_label,
+                            position_keys=tuple(
                                 (position.symbol, position.position_side.upper())
-                            ] = AccountFillSourceAnchor(
-                                symbol=position.symbol,
-                                position_side=position.position_side.upper(),
-                                checkpoint_id=stable_snapshot_anchor_id(position),
-                                event_cut=position.observed_at,
-                                stream_id="exchange_snapshot",
-                                stream_epoch=event.stream_epoch,
-                                zero_snapshot=position,
-                            )
-                        snapshot = replace(
-                            snapshot,
-                            positions=await read_client.fetch_positions(
-                                include_flat=True
+                                for position in recovery_positions
                             ),
                         )
-                        event = replace(event, account_snapshot=snapshot)
-                        selected = tuple(
-                            position
-                            for position in snapshot.positions
-                            if position.position_amt != 0
-                            or symbols is None
-                            or position.symbol in symbols
-                            or position.symbol in ordered_symbols
-                        )
+                        if recovery_positions
+                        else {}
+                    )
                     scans = []
                     fills = {}
                     plans = tuple(
@@ -932,7 +903,7 @@ async def run_live_daemon(
                                 ),
                             ),
                         )
-                        for position in selected
+                        for position in recovery_positions
                     )
                     ranges = {}
                     for _, plan in plans:

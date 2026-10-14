@@ -4,7 +4,7 @@ Verifies Astra Architecture Blueprint 2026-09-25:
 - Identical DecisionInput slice produces 100% identical decision results
   across Live and Simulation adapters;
 - Zero environment-branching inside pure decision core (R3);
-- Both adapters drive authoritative AccountJournal and respect identical lot boundaries.
+- The simulation adapter applies fills to the same current-position model as live.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -21,7 +21,7 @@ from crypto_momentum_lab.domain.decision.simulation_execution import (
     FillModel,
     SimulationExecutionAdapter,
 )
-from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
+from crypto_momentum_lab.domain.execution.position_book import PositionBook
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionHealthStatus,
     PositionKey,
@@ -188,18 +188,15 @@ def test_pure_decision_multi_adapter_consistency() -> None:
     assert res_live.intent.features == res_sim.intent.features
 
     # 3. Simulate execution in SimulationExecutionAdapter
-    journal_sim = AccountJournal(pos_key_sim)
+    position_sim = PositionBook(pos_key_sim)
     sim_adapter = SimulationExecutionAdapter(
         default_fill_model=FillModel(slippage_bps=Decimal("2.0"))
     )
-    fill_sim = sim_adapter.execute_entry(res_sim.intent, env_market, journal_sim)
+    fill_sim = sim_adapter.execute_entry(res_sim.intent, env_market, position_sim)
 
     assert fill_sim.symbol == "BTCUSDT"
     assert fill_sim.quantity > Decimal("0")
     assert fill_sim.fill_model_version == "conservative_v1"
 
-    # Verify journal recorded fill and position snapshot
-    sim_facts = journal_sim.read_cut()
-    assert len(sim_facts.fills) == 1
-    assert len(sim_facts.snapshots) == 1
-    assert sim_facts.snapshots[0].position_amt == fill_sim.quantity
+    assert position_sim.projection.total_active_quantity == fill_sim.quantity
+    assert position_sim.current_facts.snapshots[0].position_amt == fill_sim.quantity

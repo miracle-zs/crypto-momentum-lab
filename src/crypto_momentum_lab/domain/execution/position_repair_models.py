@@ -10,7 +10,6 @@ from crypto_momentum_lab.domain.account.models import AccountFillEvent
 from crypto_momentum_lab.domain.execution.ports import ExecutionHeadSnapshot
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
-    JournalFactDelta,
     PositionKey,
     PositionView,
 )
@@ -53,8 +52,6 @@ class PositionRepairFacts:
 class PositionRepair:
     request: PositionRepairRequest
     facts: AccountFacts
-    delta: JournalFactDelta
-    revision: int
     expected_head_revision: int
     head_payload: dict[str, object]
     projection_version: str

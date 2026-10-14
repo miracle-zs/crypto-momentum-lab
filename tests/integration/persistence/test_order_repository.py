@@ -202,7 +202,13 @@ async def test_terminal_receipt_requires_exact_priced_execution_facts(
     )
     order = await reads.load_order(plan.client_order_id)
     assert not await reads.load_unresolved_orders(plan.run_id)
-    if price_source in {"missing", "wrong_quantity", "wrong_account"}:
+    if price_source in {
+        "missing",
+        "wrong_quantity",
+        "wrong_account",
+        "account_fills",
+        "nested_account_fills",
+    }:
         assert order.terminal_receipt is None
     else:
         receipt = order.terminal_receipt
@@ -309,11 +315,13 @@ async def test_restored_unknown_with_terminal_order_replays_through_real_postgre
 
 
 @pytest.mark.parametrize("history", ["complete", "partial", "foreign_account"])
-async def test_old_trade_settlement_is_independent_of_current_epoch_position_facts(
+async def test_order_receipt_does_not_use_historical_account_fills_as_position_facts(
     order_repository, history
 ):
+    from crypto_momentum_lab.domain.account import AccountFillEvent
     from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
     from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
+    from crypto_momentum_lab.domain.execution.observation_models import Applied
     from crypto_momentum_lab.domain.execution.trade_command import (
         TradeCommand,
         TradeCommandType,
@@ -393,7 +401,7 @@ async def test_old_trade_settlement_is_independent_of_current_epoch_position_fac
         execution_book=restored,
     )
     try:
-        pending = history != "complete"
+        pending = False
         assert (
             await recover_restored_commands(
                 book=restored, coordinator=coordinator, orders=reads
@@ -402,7 +410,7 @@ async def test_old_trade_settlement_is_independent_of_current_epoch_position_fac
         assert restored.command_requires_recovery(plan.client_order_id) is pending
         assert (await restored.read(scope)).total_quantity == 0
         assert (
-            restored._journals[scope.to_position_key().canonical_id].read_cut().fills
+            restored._books[scope.to_position_key().canonical_id].current_facts.fills
             == ()
         )
         # The head and command transition commit together and survive process loss.
@@ -410,6 +418,36 @@ async def test_old_trade_settlement_is_independent_of_current_epoch_position_fac
         await restarted.restore(account_label=account)
         assert restarted.command_requires_recovery(plan.client_order_id) is pending
         assert (await restarted.read(scope)).total_quantity == 0
+        current_fill = AccountFillEvent(
+            environment=scope.environment,
+            account_label=scope.account_label,
+            symbol=scope.symbol,
+            trade_id=f"current-trade-{history}",
+            order_id="12345",
+            side=plan.side,
+            price=Decimal("100"),
+            quantity=plan.quantity,
+            realized_pnl=Decimal(0),
+            fee=Decimal(0),
+            fee_asset="USDT",
+            trade_at=NOW,
+            raw_payload={"positionSide": plan.position_side.value},
+        )
+        assert isinstance(
+            await restarted.observe(
+                ExecutionEvidence(
+                    f"current-trade-evidence-{history}",
+                    scope,
+                    NOW,
+                    fill=current_fill,
+                    stream_id="hub",
+                    stream_epoch="new",
+                    sequence=2,
+                )
+            ),
+            Applied,
+        )
+        assert (await restarted.read(scope)).total_quantity == plan.quantity
     finally:
         await coordinator.aclose()
 

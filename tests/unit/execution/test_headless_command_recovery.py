@@ -4,7 +4,6 @@ from decimal import Decimal
 
 import pytest
 
-from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
 from crypto_momentum_lab.domain.execution.command_codec import (
     decode_active_commands,
     encode_outbox_details,
@@ -18,7 +17,10 @@ from crypto_momentum_lab.domain.execution.ports import DurableExecutionPositionS
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
 )
-from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
+from crypto_momentum_lab.domain.execution.recovery_models import (
+    AccountFacts,
+    DurableJournalCut,
+)
 from crypto_momentum_lab.domain.execution.trade_command import (
     TradeCommand,
     TradeCommandType,
@@ -52,10 +54,10 @@ class Commands:
 class LegacyUow(ObservationUnitOfWork):
     async def load_positions(self, **kwargs):
         scope = AccountFactStreamScope.for_position_key(SCOPE.to_position_key(), stream_id="hub", stream_epoch="legacy")
-        journal = AccountJournal(SCOPE.to_position_key(), stream_scope=scope)
+        facts = AccountFacts(position_key=SCOPE.to_position_key(), stream_scope=scope)
         # Production restores the historical journal even if it has no head.
         return (DurableExecutionPositionState(
-            scope, DurableJournalCut(scope=scope, facts=journal.read_cut(), revision=journal.revision,
+            scope, DurableJournalCut(scope=scope, facts=facts, revision=0,
                                      as_of=NOW), None, (), (), (),
         ),)
 

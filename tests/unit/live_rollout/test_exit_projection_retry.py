@@ -26,6 +26,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     FactCoverageInterval,
     FactCoverageStatus,
 )
+from crypto_momentum_lab.domain.execution.recovery_models import AccountFacts
 from crypto_momentum_lab.live_rollout.exit_channels import LiveExitChannelRuntime
 from crypto_momentum_lab.live_rollout.exits import (
     LiveExitOrderRequest,
@@ -101,11 +102,15 @@ async def test_prior_exit_settlement_does_not_block_another_exit():
 async def test_candle_exit_rebuilds_quantity_after_real_book_advance(race_at):
     scope = ExecutionScope("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
     book = ExecutionBook(reservation_repository=MemoryReservations())
-    book._ensure_journal(scope.to_position_key()).set_coverage(
-        FactCoverageInterval(
-            start_at=NOW,
-            end_at=NOW,
-            status=FactCoverageStatus.CONFIRMED,
+    key = scope.to_position_key()
+    book._ensure_book(key).replace_from_facts(
+        AccountFacts(
+            position_key=key,
+            coverage=FactCoverageInterval(
+                start_at=NOW,
+                end_at=NOW,
+                status=FactCoverageStatus.CONFIRMED,
+            ),
         )
     )
     opening = AccountFillEvent(
@@ -175,11 +180,17 @@ async def test_candle_exit_rebuilds_quantity_after_real_book_advance(race_at):
             quantity=Decimal("0.5"),
             trade_at=NOW + timedelta(seconds=1),
         )
-        book._ensure_journal(scope.to_position_key()).set_coverage(
-            FactCoverageInterval(
-                start_at=NOW,
-                end_at=closing.trade_at,
-                status=FactCoverageStatus.CONFIRMED,
+        current = book._ensure_book(scope.to_position_key())
+        current.apply_delta(
+            AccountFacts(
+                position_key=scope.to_position_key(),
+                stream_scope=current.stream_scope,
+                coverage=FactCoverageInterval(
+                    start_at=NOW,
+                    end_at=closing.trade_at,
+                    status=FactCoverageStatus.CONFIRMED,
+                ),
+                prefix_facts_complete=False,
             )
         )
         await book.observe(

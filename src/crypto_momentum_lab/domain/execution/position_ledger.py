@@ -252,12 +252,48 @@ class PositionLedger:
         *,
         stream_adoption: StreamCheckpointAdoption | None = None,
     ) -> PositionLedgerProjection:
-        """Project the current ledger state by replaying all fills in AccountFacts."""
+        """Build the position state from a complete fact set."""
+        return self._project(
+            facts,
+            stream_adoption=stream_adoption,
+            initial_projection=None,
+        )
+
+    def apply_delta(
+        self,
+        current: PositionLedgerProjection,
+        facts: AccountFacts,
+    ) -> PositionLedgerProjection:
+        """Apply newly accepted facts to the current position state."""
+        if current.position_key.canonical_id != self._position_key.canonical_id:
+            raise ValueError("Current projection position key does not match ledger")
+        if current.stream_scope is not None and current.stream_scope != facts.stream_scope:
+            raise ValueError("Current projection stream scope does not match facts")
+        if facts.recovery_checkpoint is not None:
+            raise ValueError("A fact delta cannot contain a recovery checkpoint")
+        return self._project(
+            facts,
+            stream_adoption=None,
+            initial_projection=current,
+        )
+
+    def _project(
+        self,
+        facts: AccountFacts,
+        *,
+        stream_adoption: StreamCheckpointAdoption | None,
+        initial_projection: PositionLedgerProjection | None,
+    ) -> PositionLedgerProjection:
         if facts.position_key.canonical_id != self._position_key.canonical_id:
             raise ValueError(
                 f"Facts position key {facts.position_key.canonical_id} does not match "
                 f"ledger key {self._position_key.canonical_id}"
             )
+        if initial_projection is not None:
+            if stream_adoption is not None:
+                raise ValueError(
+                    "A fact delta cannot adopt a recovery checkpoint"
+                )
 
         # 1. Reject facts that cannot be assigned to this exact position leg,
         # then deduplicate immutable exchange fills and retain every conflict.
@@ -329,13 +365,33 @@ class PositionLedger:
                 for fill in all_sorted_fills
                 if fill.trade_at > checkpoint.event_cut
             ]
+        elif initial_projection is not None:
+            seed_cut = initial_projection.event_cut
+            late_delta_fills = tuple(
+                fill
+                for fill in all_sorted_fills
+                if seed_cut is not None and fill.trade_at < seed_cut
+            )
+            sorted_fills = [
+                fill
+                for fill in all_sorted_fills
+                if seed_cut is None or fill.trade_at >= seed_cut
+            ]
         elif not facts.prefix_facts_complete:
+            late_delta_fills = ()
             sorted_fills = []
         else:
+            late_delta_fills = ()
             sorted_fills = all_sorted_fills
+        if checkpoint_usable and checkpoint is not None:
+            late_delta_fills = ()
 
         seed_projection = (
-            checkpoint.projection if checkpoint_usable and checkpoint else None
+            initial_projection
+            if initial_projection is not None
+            else checkpoint.projection
+            if checkpoint_usable and checkpoint
+            else None
         )
         active_episode: PositionEpisode | None = (
             seed_projection.active_episode if seed_projection is not None else None
@@ -353,7 +409,9 @@ class PositionLedger:
             if seed_projection is not None
             else None
         )
-        episode_counter = 0
+        episode_counter = (
+            seed_projection.episode_sequence if seed_projection is not None else 0
+        )
 
         # Ephemeral mutable state for active episode
         current_batches: list[PositionLedgerBatch] = (
@@ -375,13 +433,18 @@ class PositionLedger:
         peak_qty = (
             active_episode.peak_quantity if active_episode is not None else Decimal("0")
         )
-        batch_counter = 0
+        batch_counter = (
+            seed_projection.batch_sequence if seed_projection is not None else 0
+        )
 
         if active_episode is not None:
             episode_counter = _episode_counter(active_episode.episode_id)
             batch_counter = max(
-                (_batch_counter(batch.batch_id) for batch in current_batches),
-                default=0,
+                batch_counter,
+                max(
+                    (_batch_counter(batch.batch_id) for batch in current_batches),
+                    default=0,
+                ),
             )
         elif archived_episodes:
             episode_counter = max(
@@ -923,7 +986,11 @@ class PositionLedger:
         discrepancy: PositionDiscrepancy | None = (
             seed_projection.discrepancy if seed_projection is not None else None
         )
-        if not facts.prefix_facts_complete and not checkpoint_usable:
+        if (
+            not facts.prefix_facts_complete
+            and not checkpoint_usable
+            and initial_projection is None
+        ):
             health_status = PositionHealthStatus.INCOMPLETE
             is_comparable = False
             diagnostics.append(
@@ -944,15 +1011,22 @@ class PositionLedger:
                     "mismatched position scope"
                 )
                 continue
+            seeded_event_cut = (
+                checkpoint.event_cut
+                if checkpoint is not None and checkpoint_usable
+                else initial_projection.event_cut
+                if initial_projection is not None
+                else None
+            )
             if (
-                checkpoint is not None
-                and checkpoint_usable
-                and snapshot.observed_at <= checkpoint.event_cut
+                seeded_event_cut is not None
+                and snapshot.observed_at <= seeded_event_cut
             ):
                 continue
             reconciliation_snapshots_list.append(snapshot)
         reconciliation_snapshots = tuple(reconciliation_snapshots_list)
 
+        snapshot_matches = False
         if reconciliation_snapshots:
             latest_snapshot = max(
                 reconciliation_snapshots,
@@ -964,11 +1038,18 @@ class PositionLedger:
             comparison_start = (
                 checkpoint.event_cut
                 if checkpoint_usable and checkpoint is not None
+                else initial_projection.event_cut
+                if initial_projection is not None
+                and initial_projection.event_cut is not None
                 else min((fill.trade_at for fill in facts.fills), default=snap_time)
             )
             coverage = facts.coverage
             has_complete_cut = (
-                (facts.prefix_facts_complete or checkpoint_usable)
+                (
+                    facts.prefix_facts_complete
+                    or checkpoint_usable
+                    or initial_projection is not None
+                )
                 and coverage is not None
                 and coverage.stream_scope == facts.stream_scope
                 and coverage.covers_range(min(comparison_start, snap_time), snap_time)
@@ -992,41 +1073,52 @@ class PositionLedger:
                 # Fills stream has advanced past snapshot observed_at (mixed cut /
                 # in-flight gap).
                 # Replay and verify cut consistency at snap_time.
-                fills_at_cut = tuple(f for f in facts.fills if f.trade_at <= snap_time)
-                cut_facts = replace(
-                    facts,
-                    fills=fills_at_cut,
-                    snapshots=(),
-                )
-                cut_projection = PositionLedger(
-                    self._position_key,
-                    system_order_ids=self._system_order_ids,
-                ).project(cut_facts)
-                cut_qty = cut_projection.total_active_quantity
-
-                if cut_qty == obs_amt:
-                    # Verified consistent at snapshot cut; delta is in-flight recent
-                    # fills
-                    reconciliation_gap = Decimal("0")
+                if initial_projection is not None:
                     health_status = PositionHealthStatus.CATCHING_UP
                     is_comparable = False
+                    reconciliation_gap = Decimal("0")
+                    discrepancy = None
                     diagnostics.append(
-                        f"Consistent historical cut verified at "
-                        f"{snap_time.isoformat()}:"
-                        f"cut_qty={cut_qty}, obs_amt={obs_amt}. "
-                        f"Recent fills active up to {high_watermark.isoformat()}"
-                        "(status=CATCHING_UP)."
+                        "Snapshot predates the current state cut; "
+                        "awaiting a fresh snapshot"
                     )
                 else:
-                    # True divergence even at historical snapshot cut
-                    reconciliation_gap = obs_amt - cut_qty
-                    health_status = PositionHealthStatus.CONFLICT
-                    is_comparable = True
-                    diagnostics.append(
-                        f"Reconciliation gap at cut {snap_time.isoformat()}: "
-                        f"snapshot={obs_amt}, cut_qty={cut_qty}, "
-                        f"gap={reconciliation_gap}"
+                    fills_at_cut = tuple(
+                        f for f in facts.fills if f.trade_at <= snap_time
                     )
+                    cut_facts = replace(
+                        facts,
+                        fills=fills_at_cut,
+                        snapshots=(),
+                    )
+                    cut_projection = PositionLedger(
+                        self._position_key,
+                        system_order_ids=self._system_order_ids,
+                    ).project(cut_facts)
+                    cut_qty = cut_projection.total_active_quantity
+                    if cut_qty == obs_amt:
+                        # Verified consistent at snapshot cut; delta is in-flight recent
+                        # fills
+                        reconciliation_gap = Decimal("0")
+                        health_status = PositionHealthStatus.CATCHING_UP
+                        is_comparable = False
+                        diagnostics.append(
+                            f"Consistent historical cut verified at "
+                            f"{snap_time.isoformat()}:"
+                            f"cut_qty={cut_qty}, obs_amt={obs_amt}. "
+                            f"Recent fills active up to {high_watermark.isoformat()}"
+                            "(status=CATCHING_UP)."
+                        )
+                    else:
+                        # True divergence even at historical snapshot cut
+                        reconciliation_gap = obs_amt - cut_qty
+                        health_status = PositionHealthStatus.CONFLICT
+                        is_comparable = True
+                        diagnostics.append(
+                            f"Reconciliation gap at cut {snap_time.isoformat()}: "
+                            f"snapshot={obs_amt}, cut_qty={cut_qty}, "
+                            f"gap={reconciliation_gap}"
+                        )
             else:
                 # Snapshot is at or ahead of all fills
                 reconciliation_gap = obs_amt - total_active_qty
@@ -1138,7 +1230,7 @@ class PositionLedger:
             is_comparable = False
             diagnostics.extend(identity_issues)
 
-        if facts.has_late_events or facts.late_fills:
+        if facts.has_late_events or facts.late_fills or late_delta_fills:
             health_status = PositionHealthStatus.INCOMPLETE
             is_comparable = False
             diagnostics.append(
@@ -1278,7 +1370,9 @@ class PositionLedger:
                 diagnostics.append(
                     "Fact coverage ends before the latest applied fill watermark"
                 )
-        elif facts.stream_scope is not None:
+        elif facts.stream_scope is not None and not (
+            total_active_qty == Decimal("0") and snapshot_matches
+        ):
             health_status = _escalate_status(
                 health_status,
                 PositionHealthStatus.CATCHING_UP,
@@ -1287,7 +1381,19 @@ class PositionLedger:
             diagnostics.append("No durable coverage evidence exists for stream scope")
 
         facts_hash = facts.compute_facts_hash()
-        version_id = f"pv_{facts_hash[:60]}"
+        if initial_projection is not None:
+            seed_version = initial_projection.projection_version or (
+                f"{initial_projection.position_key.canonical_id}:"
+                f"{initial_projection.event_cut}:"
+                f"{initial_projection.high_watermark_trade_at}:"
+                f"{initial_projection.total_active_quantity}"
+            )
+            version_hash = hashlib.sha256(
+                f"{seed_version}:{facts_hash}".encode()
+            ).hexdigest()
+            version_id = f"pv_{version_hash[:60]}"
+        else:
+            version_id = f"pv_{facts_hash[:60]}"
 
         return PositionLedgerProjection(
             position_key=self._position_key,
@@ -1305,6 +1411,8 @@ class PositionLedger:
             is_comparable=is_comparable,
             projection_version=version_id,
             stream_scope=facts.stream_scope,
+            episode_sequence=episode_counter,
+            batch_sequence=batch_counter if final_active_episode is not None else 0,
         )
 
 

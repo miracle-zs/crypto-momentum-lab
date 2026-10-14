@@ -91,9 +91,6 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     CoverageEvidence,
     PositionKey,
 )
-from crypto_momentum_lab.domain.execution.recovery_models import (
-    AccountFacts,
-)
 from crypto_momentum_lab.domain.execution.snapshot_encoding import (
     stable_snapshot_anchor_id,
 )
@@ -103,9 +100,6 @@ from crypto_momentum_lab.domain.execution.trade_command import (
 )
 from crypto_momentum_lab.domain.risk import TradingLease, TradingLeaseState
 from crypto_momentum_lab.domain.strategy import StrategySide
-from crypto_momentum_lab.persistence.postgres.account_journal_store import (
-    PostgresAccountJournalStore,
-)
 from crypto_momentum_lab.persistence.postgres.command_repository import (
     PostgresCommandRepository,
 )
@@ -315,7 +309,6 @@ def _book(
     )
     uow = AsyncPostgresExecutionUnitOfWork(
         factory,
-        journal_store=PostgresAccountJournalStore(),
         command_repository=commands,
         reservation_repository=reservations,
     )
@@ -724,7 +717,7 @@ async def test_duplicate_evidence_identity_is_an_idempotent_no_op(
         before = await _durable_row_counts(factory, account)
         assert before["execution_book_heads"] == 1
         assert before["execution_evidence_receipts"] == 2
-        assert before["position_fact_journal_events"] > 0
+        assert before["position_fact_journal_events"] == 0
 
         for _ in range(BURST):
             assert isinstance(await book.observe(opened), Duplicate)
@@ -797,7 +790,7 @@ async def test_redelivered_known_datum_appends_no_durable_state_row(
         await engine.dispose()
 
 
-async def test_redelivered_known_datum_does_not_advance_head_revision(
+async def test_fresh_sequence_for_known_datum_advances_stream_cursor_only(
     async_database_url: str,
 ) -> None:
     """A redelivered known datum returns Duplicate and does not advance head
@@ -825,7 +818,8 @@ async def test_redelivered_known_datum_does_not_advance_head_revision(
             assert head_row is not None
             assert head_row.revision == 2
 
-        # Re-observe known datum with fresh evidence_id and higher sequence
+        # A fresh envelope advances the stream cursor, while the known trade
+        # identity must not be counted again.
         result = await book.observe(
             replace(
                 opened,
@@ -833,9 +827,9 @@ async def test_redelivered_known_datum_does_not_advance_head_revision(
                 sequence=100,
             )
         )
-        assert isinstance(result, Duplicate)
+        assert isinstance(result, Applied)
 
-        # Head revision in DB must still be 2
+        # The durable cursor advances; the known fill must not be counted twice.
         async with factory() as session:
             head_row = await session.get(
                 ExecutionBookHeadRow,
@@ -847,7 +841,7 @@ async def test_redelivered_known_datum_does_not_advance_head_revision(
                 ),
             )
             assert head_row is not None
-            assert head_row.revision == 2
+            assert head_row.revision > 2
 
         # After restart, the restored book knows about sequence 100 and rejects <= 100
         restarted, _ = _book(factory)
@@ -911,7 +905,7 @@ async def test_redelivered_known_datum_does_not_advance_head_revision(
                 ),
             )
             assert head_row is not None
-            assert head_row.revision == 3
+            assert head_row.revision >= 3
     finally:
         await engine.dispose()
 
@@ -931,15 +925,13 @@ async def test_checkpoint_bounded_suffix_and_known_prefix_deduplication(
         restarted, _reservations = _book(factory)
         await restarted.restore(account_label=account)
 
-        journal = restarted._journals.get(key.canonical_id)
-        assert journal is not None
-        assert journal.read_cut().recovery_checkpoint is not None, (
+        position_book = restarted._books.get(key.canonical_id)
+        assert position_book is not None
+        assert position_book.current_facts.recovery_checkpoint is not None, (
             "seed failed to create a verified checkpoint folding the opened trade"
         )
         assert opened.fill is not None
-        assert not any(
-            fill.trade_id == opened.fill.trade_id for fill in journal.read_cut().fills
-        )
+        assert position_book.current_facts.fills == ()
 
         scope = _scope(key)
         view_before = await restarted.read(scope)
@@ -1042,12 +1034,10 @@ async def test_checkpoint_bounded_suffix_and_known_prefix_deduplication(
         await engine.dispose()
 
 
-async def test_full_replay_after_restart_deduplicates_without_advancing_head(
+async def test_full_replay_after_restart_advances_cursor_without_recounting_fill(
     async_database_url: str,
 ) -> None:
-    """Fresh full envelope replay after restart must Duplicate and keep
-    revision stable.
-    """
+    """A fresh envelope advances the cursor but preserves the current position."""
     engine = create_async_database_engine(async_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     account = f"persist-full-replay-{uuid4().hex}"
@@ -1079,7 +1069,7 @@ async def test_full_replay_after_restart_deduplicates_without_advancing_head(
             sequence=100,
         )
         result = await restarted.observe(full_replay)
-        assert isinstance(result, Duplicate)
+        assert isinstance(result, Applied)
 
         async with factory() as session:
             head_after = await session.scalar(
@@ -1090,7 +1080,8 @@ async def test_full_replay_after_restart_deduplicates_without_advancing_head(
                 )
             )
         assert head_after is not None
-        assert head_after.revision == initial_revision
+        assert head_after.revision > initial_revision
+        replay_revision = head_after.revision
 
         view_after = await restarted.read(scope)
         assert view_after.total_quantity == view_before.total_quantity
@@ -1115,7 +1106,7 @@ async def test_full_replay_after_restart_deduplicates_without_advancing_head(
                 )
             )
         assert head_after_conflict is not None
-        assert head_after_conflict.revision == initial_revision
+        assert head_after_conflict.revision == replay_revision
 
         view_after_conflict = await restarted.read(scope)
         assert view_after_conflict.total_quantity == view_before.total_quantity
@@ -1145,11 +1136,11 @@ async def test_checkpoint_known_prefix_with_fresh_coverage_advances_head(
         view_before = await restarted.read(scope)
         assert view_before.total_quantity == Decimal("3")
 
-        journal = restarted._journals.get(key.canonical_id)
-        assert journal is not None
-        cut = journal.read_cut()
-        assert cut.recovery_checkpoint is not None
-        ckpt = cut.recovery_checkpoint
+        position_book = restarted._books.get(key.canonical_id)
+        assert position_book is not None
+        facts = position_book.current_facts
+        assert facts.recovery_checkpoint is not None
+        ckpt = facts.recovery_checkpoint
 
         async with factory() as session:
             head_before = await session.scalar(
@@ -1203,95 +1194,16 @@ async def test_checkpoint_known_prefix_with_fresh_coverage_advances_head(
 
         restarted_again, _ = _book(factory)
         await restarted_again.restore(account_label=account)
-        journal_again = restarted_again._journals.get(key.canonical_id)
-        assert journal_again is not None
-        cut_again = journal_again.read_cut()
-        assert cut_again.coverage is not None
-        assert cut_again.coverage.end_at == adv_checked_through
-        assert cut_again.fill_load_provenance is not None
-        assert cut_again.fill_load_provenance.checked_through == adv_checked_through
+        position_book_again = restarted_again._books.get(key.canonical_id)
+        assert position_book_again is not None
+        facts_again = position_book_again.current_facts
+        assert facts_again.coverage is not None
+        assert facts_again.coverage.end_at == adv_checked_through
+        assert facts_again.fill_load_provenance is not None
+        assert facts_again.fill_load_provenance.checked_through == adv_checked_through
         assert restarted_again._last_sequences[key.canonical_id] == 100
         view_again = await restarted_again.read(scope)
         assert view_again.total_quantity == Decimal("3")
         assert view_again.batches == view_before.batches
-    finally:
-        await engine.dispose()
-
-
-async def test_headless_uncheckpointed_recovery_from_raw_journal(
-    async_database_url: str,
-) -> None:
-    """Old format / uncheckpointed stream with 2 real fills and no HeadRow/checkpoint
-    restores correct quantity, weighted cost basis and batches; duplicate replay
-    does not double-count, and altered payload triggers EvidenceConflict.
-    """
-    engine = create_async_database_engine(async_database_url)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    account = f"persist-headless-{uuid4().hex}"
-    key = PositionKey("live", account, "BTCUSDT")
-    scope = AccountFactStreamScope.for_position_key(
-        key, stream_id="headless-events", stream_epoch="epoch-0"
-    )
-    store = PostgresAccountJournalStore()
-    t1 = NOW - timedelta(minutes=15)
-    t2 = NOW - timedelta(minutes=10)
-
-    f1 = AccountFillEvent(
-        environment=key.environment,
-        account_label=key.account_label,
-        symbol=key.symbol,
-        trade_id="headless-trade-1",
-        order_id="headless-order-1",
-        side="BUY",
-        price=Decimal("100"),
-        quantity=Decimal("2"),
-        realized_pnl=Decimal("0"),
-        fee=Decimal("0"),
-        fee_asset="USDT",
-        trade_at=t1,
-        raw_payload={"positionSide": key.position_side.value},
-    )
-    f2 = AccountFillEvent(
-        environment=key.environment,
-        account_label=key.account_label,
-        symbol=key.symbol,
-        trade_id="headless-trade-2",
-        order_id="headless-order-2",
-        side="BUY",
-        price=Decimal("130"),
-        quantity=Decimal("1"),
-        realized_pnl=Decimal("0"),
-        fee=Decimal("0"),
-        fee_asset="USDT",
-        trade_at=t2,
-        raw_payload={"positionSide": key.position_side.value},
-    )
-    facts = AccountFacts(
-        position_key=key,
-        stream_scope=scope,
-        fills=(f1, f2),
-    )
-
-    try:
-        async with factory() as session, session.begin():
-            await store.persist_facts_in_session(
-                session, scope=scope, facts=facts, revision=2
-            )
-
-        # Confirm no ExecutionBookHeadRow and no PositionRecoveryCheckpoint exist
-        async with factory() as session:
-            head_row = await session.scalar(
-                select(ExecutionBookHeadRow).where(
-                    ExecutionBookHeadRow.account_label == account,
-                )
-            )
-            assert head_row is None
-
-        book, _reservations = _book(factory)
-        from crypto_momentum_lab.domain.execution.ports import DecisionCommitConflict
-
-        # Headless stream with existing responsibilities must explicitly block recovery
-        with pytest.raises(DecisionCommitConflict, match="recovery blocked"):
-            await book.restore(account_label=account)
     finally:
         await engine.dispose()

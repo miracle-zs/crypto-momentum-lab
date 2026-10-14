@@ -15,13 +15,15 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
 from crypto_momentum_lab.domain.execution.command_codec import (
     decode_active_commands,
 )
 from crypto_momentum_lab.domain.execution.command_models import OutboxEntry
 from crypto_momentum_lab.domain.execution.evidence_rules import (
     _scoped_evidence_identity,
+)
+from crypto_momentum_lab.domain.execution.execution_head import (
+    decode_execution_head_state,
 )
 from crypto_momentum_lab.domain.execution.ports import DecisionCommitConflict
 from crypto_momentum_lab.domain.execution.position_book import PositionBook
@@ -129,11 +131,8 @@ async def restore_execution_state(
                         if acc_scope is not None
                         else None
                     )
-                    journal = AccountJournal(pos_key, stream_scope=stream_scope)
-                    book._books[canon] = PositionBook(journal)
-                    book._journals[canon] = journal
+                    book._books[canon] = PositionBook(pos_key, stream_scope=stream_scope)
                     book._head_revisions[canon] = 0
-                    book._journal_revisions[canon] = 0
                     if stream_scope is not None:
                         book._stream_scopes[canon] = stream_scope
         except Exception as err:
@@ -171,11 +170,8 @@ async def restore_execution_state(
                             if acc_scope is not None
                             else None
                         )
-                        journal = AccountJournal(pos_key, stream_scope=stream_scope)
-                        book._books[canon] = PositionBook(journal)
-                        book._journals[canon] = journal
+                        book._books[canon] = PositionBook(pos_key, stream_scope=stream_scope)
                         book._head_revisions[canon] = 0
-                        book._journal_revisions[canon] = 0
                         if stream_scope is not None:
                             book._stream_scopes[canon] = stream_scope
             for command_id, reservation_ids in book._command_reservations.items():
@@ -201,14 +197,14 @@ async def restore_execution_state(
 
     diverged_canons: set[str] = set()
     for canon, expected_ids in book._head_expected_reservation_ids.items():
-        journal = book._journals.get(canon)
-        if journal is None:
-            log.warning("restored_reservation_head_has_no_journal", canonical_id=canon)
+        position_book = book._books.get(canon)
+        if position_book is None:
+            log.warning("restored_reservation_head_has_no_position", canonical_id=canon)
             continue
         actual_ids = {
             reservation.reservation_id
             for reservation in book._coordinator.get_active_reservations(
-                journal.position_key
+                position_book.position_key
             )
         }
         if actual_ids != expected_ids:
@@ -220,7 +216,7 @@ async def restore_execution_state(
             )
             diverged_canons.add(canon)
             identity = f"reservation_divergence:{canon}"
-            book._external_recovery_positions[identity] = journal.position_key
+            book._external_recovery_positions[identity] = position_book.position_key
             book._recovery_required_commands.add(identity)
     for canon in tuple(book._head_expected_reservation_ids):
         if canon not in diverged_canons:
@@ -294,10 +290,8 @@ async def restore_durable_positions(
             )
             if eff_seq is not None:
                 book._last_sequences[canon] = eff_seq
-        book._journals[canon] = recovered.journal
         book._books[canon] = recovered.book
         book._stream_scopes[canon] = scope
-        book._journal_revisions[canon] = durable_state.cut.revision
         book._seen_trade_ids.update(durable_state.trade_ids)
         book._seen_evidence_ids.update(
             _scoped_evidence_identity(scope, evidence_id)
@@ -346,8 +340,14 @@ def apply_loaded_execution_position(
         )
         existing = execution_book._books.get(canon)
         return existing.get_view() if existing is not None else None
-    journal = AccountJournal.from_durable_cut(target_state.cut)
-    book = PositionBook(journal)
+    head = target_state.head
+    book = (
+        decode_execution_head_state(
+            head.state_payload, key=key, scope=target_state.cut.scope
+        )
+        if head is not None
+        else PositionBook.from_facts(target_state.cut.facts)
+    )
     if expected_scope is not None:
         validate_repaired_position(
             state=target_state,
@@ -357,7 +357,6 @@ def apply_loaded_execution_position(
                 r.reservation_id for r in dependencies.active_reservations(key)
             },
         )
-    head = target_state.head
     scope = target_state.cut.scope
     if head is not None:
         payload = head.state_payload
@@ -406,11 +405,9 @@ def apply_loaded_execution_position(
     else:
         execution_book._head_revisions[canon] = 0
 
-    execution_book._journals[canon] = journal
     execution_book._books[canon] = book
     dependencies.advance_context_revision()
     execution_book._stream_scopes[canon] = scope
-    execution_book._journal_revisions[canon] = target_state.cut.revision
     execution_book._seen_trade_ids.update(target_state.trade_ids)
     execution_book._seen_evidence_ids.update(
         _scoped_evidence_identity(scope, identity)
@@ -418,8 +415,12 @@ def apply_loaded_execution_position(
     )
     for watermark in target_state.watermarks:
         watermark_key = dependencies.order_watermark_key(key, watermark.order_id)
-        execution_book._order_cumulative_fills[watermark_key] = watermark.cumulative_quantity
-        execution_book._order_cumulative_quotes[watermark_key] = watermark.cumulative_quote
+        execution_book._order_cumulative_fills[watermark_key] = (
+            watermark.cumulative_quantity
+        )
+        execution_book._order_cumulative_quotes[watermark_key] = (
+            watermark.cumulative_quote
+        )
     return book.get_view()
 
 

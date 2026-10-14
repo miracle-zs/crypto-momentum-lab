@@ -41,7 +41,7 @@ from tests.unit.execution.test_terminal_settlement import (
 @pytest.mark.asyncio
 @pytest.mark.parametrize("priced_receipt", [True, False])
 @pytest.mark.parametrize("trade_in_current_cut", [True, False])
-async def test_historical_account_trades_settle_without_replaying_position_prefix(
+async def test_order_receipt_does_not_replay_historical_account_trades_into_position(
     priced_receipt, trade_in_current_cut
 ):
     """A new epoch can have a flat checkpoint with no old order trades in its cut."""
@@ -101,9 +101,7 @@ async def test_historical_account_trades_settle_without_replaying_position_prefi
     async def rows(query):
         sql = str(query)
         values = []
-        if "FROM account_fill_events" in sql:
-            values = [historical_fill]
-        elif "FROM exchange_order_events" in sql and priced_receipt:
+        if "FROM exchange_order_events" in sql and priced_receipt:
             values = [
                 SimpleNamespace(
                     details={
@@ -112,6 +110,8 @@ async def test_historical_account_trades_settle_without_replaying_position_prefi
                     }
                 )
             ]
+        elif "FROM exchange_fills" in sql and not priced_receipt:
+            values = [SimpleNamespace(quantity=Decimal("1"), price=Decimal("100"))]
         return Mock(all=Mock(return_value=values))
 
     session.scalars.side_effect = rows
@@ -137,10 +137,8 @@ async def test_historical_account_trades_settle_without_replaying_position_prefi
         assert book.get_outbox("legacy").external_order_id == "111"
         # Historical settlement proof must not recreate this closed position.
         assert (await book.read(SCOPE)).total_quantity == int(trade_in_current_cut)
-        expected_fills = (historical_fill,) if trade_in_current_cut else ()
         assert (
-            book._journals[SCOPE.to_position_key().canonical_id].read_cut().fills
-            == expected_fills
+            book._books[SCOPE.to_position_key().canonical_id].current_facts.fills == ()
         )
     finally:
         await coordinator.aclose()
@@ -155,13 +153,9 @@ async def test_terminal_read_model_does_not_hide_restored_dispatch_gate(state):
     book._persistence_failed = False
     quantity = Decimal(1) if state == ExchangeOrderState.FILLED else Decimal(0)
     price = Decimal(100) if quantity else Decimal(0)
+    real_fill = replace(fill("real-trade", "1", entry=True), order_id="111")
     await book.observe(
-        evidence(
-            "legacy-facts",
-            fill=replace(fill("real-trade", "1", entry=True), order_id="111")
-            if quantity
-            else None,
-        )
+        evidence("legacy-facts", fill=real_fill if quantity else None)
     )
     command = TradeCommand(
         "legacy",
@@ -189,7 +183,11 @@ async def test_terminal_read_model_does_not_hide_restored_dispatch_gate(state):
         position_side=SCOPE.position_side,
     )
     receipt = PersistedOrderReceipt(
-        "legacy", state, "111" if quantity else None, quantity, price
+        "legacy",
+        state,
+        "111" if quantity else None,
+        quantity,
+        price,
     )
     persisted = PersistedExchangeOrder(
         plan, state, receipt.exchange_order_id, NOW, quantity, receipt
@@ -230,7 +228,7 @@ async def test_terminal_read_model_does_not_hide_restored_dispatch_gate(state):
 
 
 @pytest.mark.asyncio
-async def test_receipt_without_real_trades_keeps_settlement_gate():
+async def test_terminal_order_receipt_does_not_wait_for_account_position_facts():
     book = ExecutionBook(execution_unit_of_work=ObservationUnitOfWork())
     book._persistence_failed = False
     await book.observe(evidence("no-trades"))
@@ -275,7 +273,7 @@ async def test_receipt_without_real_trades_keeps_settlement_gate():
                 Decimal(100),
             ),
         )
-        assert book.command_requires_recovery("legacy")
+        assert not book.command_requires_recovery("legacy")
         assert (await book.read(SCOPE)).total_quantity == 0
     finally:
         await coordinator.aclose()
@@ -367,7 +365,6 @@ async def test_restored_completed_exit_reservation_can_prove_terminal_settlement
                 "111",
                 Decimal("2"),
                 Decimal("100"),
-                (replace(fill("real-close", "2"), order_id="111"),),
             ),
         )
         assert not book.command_requires_recovery("exit")

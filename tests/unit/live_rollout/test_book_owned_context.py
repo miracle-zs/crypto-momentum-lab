@@ -82,7 +82,6 @@ async def test_book_readiness_controls_cache_and_unowned_exposure_stays_blocked(
     from dataclasses import replace
 
     from crypto_momentum_lab.domain.account import AccountFillEvent
-    from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
     from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
     from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
     from crypto_momentum_lab.domain.execution.position_book import PositionBook
@@ -93,10 +92,7 @@ async def test_book_readiness_controls_cache_and_unowned_exposure_stays_blocked(
         FactCoverageStatus,
         PositionKey,
     )
-    from crypto_momentum_lab.domain.execution.recovery_models import (
-        AccountFacts,
-        DurableJournalCut,
-    )
+    from crypto_momentum_lab.domain.execution.recovery_models import AccountFacts
     from crypto_momentum_lab.domain.execution.snapshot_encoding import (
         stable_snapshot_anchor_id,
     )
@@ -180,22 +176,15 @@ async def test_book_readiness_controls_cache_and_unowned_exposure_stays_blocked(
         page_exhausted=True,
         not_truncated=True,
     )
-    journal = AccountJournal.from_durable_cut(
-        DurableJournalCut(
-            scope=scope,
-            facts=AccountFacts(
-                position_key=key,
-                stream_scope=scope,
-                fills=(opening,) if owned else (),
-                coverage=cov,
-                snapshots=(zero_snap, current_snap),
-                fill_load_provenance=prov,
-            ),
-            revision=1,
-            as_of=NOW,
-        )
+    facts = AccountFacts(
+        position_key=key,
+        stream_scope=scope,
+        fills=(opening,) if owned else (),
+        coverage=cov,
+        snapshots=(zero_snap, current_snap),
+        fill_load_provenance=prov,
     )
-    book = ExecutionBook(books_by_key={key.canonical_id: PositionBook(journal)})
+    book = ExecutionBook(books_by_key={key.canonical_id: PositionBook.from_facts(facts)})
     provider = PostgresLiveContextProvider(
         session_factory=lambda: None,
         account_label="primary",

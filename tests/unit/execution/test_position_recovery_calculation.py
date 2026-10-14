@@ -6,24 +6,21 @@ from datetime import UTC, datetime
 
 import pytest
 
-from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
-from crypto_momentum_lab.domain.execution.evidence_digest import view_projection_digest
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.ports import (
     DecisionCommitConflict,
     DurableExecutionPositionState,
     ExecutionHeadSnapshot,
 )
-from crypto_momentum_lab.domain.execution.position_book import PositionBook
-from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
     PositionKey,
 )
+from crypto_momentum_lab.domain.execution.position_book import PositionBook
+from crypto_momentum_lab.domain.execution.projection_codec import encode_position_key
 from crypto_momentum_lab.domain.execution.position_recovery import (
     recover_durable_position,
 )
-from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
 from crypto_momentum_lab.domain.execution.recovery_models import (
     AccountFacts,
     DurableJournalCut,
@@ -36,27 +33,18 @@ def state():
     scope = AccountFactStreamScope.for_position_key(
         key, stream_id="hub", stream_epoch="epoch"
     )
-    facts = AccountFacts(position_key=key, stream_scope=scope)
+    position_book = PositionBook.from_facts(
+        AccountFacts(position_key=key, stream_scope=scope)
+    )
+    facts = position_book.current_facts
     cut = DurableJournalCut(
         scope=scope, facts=facts, revision=0, as_of=datetime(2026, 9, 30, tzinfo=UTC)
     )
-    view = PositionBook(AccountJournal.from_durable_cut(cut)).get_view()
     payload = dict(
-        schema_version=1,
-        position_key=dict(
-            environment=key.environment,
-            account_label=key.account_label,
-            symbol=key.symbol,
-            position_side="LONG",
-        ),
-        stream_scope=dict(stream_id="hub", stream_epoch="epoch"),
-        facts_hash=facts.compute_facts_hash(),
-        projection_digest=PositionRecoveryCodec.compute_projection_digest(
-            PositionLedger(key).project(facts)
-        ),
-        view_digest=view_projection_digest(view),
-        recovery_checkpoint=None,
-        journal_revision=0,
+        schema_version=3,
+        position_key=encode_position_key(key),
+        stream_scope={"stream_id": "hub", "stream_epoch": "epoch"},
+        position_state=position_book.encode_current_state(),
         active_reservation_ids=["existing-reservation"],
         recovery_command_ids=[],
         external_recovery_ids=[],
@@ -84,24 +72,11 @@ def test_recovery_returns_candidate_without_mutating_durable_input(state):
 
 
 @pytest.mark.parametrize(
-    "field", ["facts_hash", "projection_digest", "view_digest"]
-)
-def test_existing_migration_policy_returns_diagnostic_and_recomputed_digest(
-    state, field
-):
-    payload = dict(state.head.state_payload, **{field: "old-codec-value"})
-    changed = replace(state, head=replace(state.head, state_payload=payload))
-    with pytest.raises(DecisionCommitConflict):
-        recover_durable_position(changed)
-
-
-@pytest.mark.parametrize(
     "field,value",
     [
-        ("schema_version", 2),
         ("position_key", {}),
         ("stream_scope", {}),
-        ("journal_revision", True),
+        ("position_state", {}),
         ("active_reservation_ids", [None]),
         ("active_reservation_ids", None),
         ("active_reservation_ids", ("reservation",)),
@@ -126,6 +101,14 @@ def test_existing_migration_policy_returns_diagnostic_and_recomputed_digest(
 def test_malformed_head_cannot_produce_recovery_candidate(state, field, value):
     payload = dict(state.head.state_payload, **{field: value})
     with pytest.raises(RuntimeError, match="malformed"):
+        recover_durable_position(
+            replace(state, head=replace(state.head, state_payload=payload))
+        )
+
+
+def test_legacy_head_requires_explicit_format_migration(state):
+    payload = dict(state.head.state_payload, schema_version=1)
+    with pytest.raises(DecisionCommitConflict, match="format is unsupported"):
         recover_durable_position(
             replace(state, head=replace(state.head, state_payload=payload))
         )

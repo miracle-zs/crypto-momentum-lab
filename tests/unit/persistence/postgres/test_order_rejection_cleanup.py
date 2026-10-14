@@ -62,7 +62,6 @@ async def test_mark_order_rejected_cascades_cleanup() -> None:
 
     tx = ExecutionTransaction(
         session,
-        journal_store=AsyncMock(),
         command_repository=AsyncMock(),
         reservation_repository=AsyncMock(),
     )
@@ -86,7 +85,6 @@ async def test_mark_order_rejected_reports_absent_and_terminal_rows() -> None:
     session = AsyncMock()
     tx = ExecutionTransaction(
         session,
-        journal_store=AsyncMock(),
         command_repository=AsyncMock(),
         reservation_repository=AsyncMock(),
     )
@@ -443,8 +441,7 @@ async def test_conflicting_retry_does_not_reject_the_owning_command() -> None:
     book.mark_rejected.assert_not_awaited()
     sub_repo.mark_submission_rejected.assert_not_awaited()
     assert (
-        state._outbox_by_command_id[plan_client_id].state
-        is DispatchState.ACKNOWLEDGED
+        state._outbox_by_command_id[plan_client_id].state is DispatchState.ACKNOWLEDGED
     )
 
 
@@ -658,9 +655,7 @@ async def test_terminal_first_projection_conflict_cleanup_interleaving() -> None
 
     # 3. A projection conflict on the next attempt reaches cleanup, which tries
     #    to reject the already terminal command and is refused.
-    book = _CompensationBook(
-        act_error=OrderProjectionConflictError("projection moved")
-    )
+    book = _CompensationBook(act_error=OrderProjectionConflictError("projection moved"))
     coordinator = OrderExecutionCoordinator(
         backend=AsyncMock(),
         environment="live",

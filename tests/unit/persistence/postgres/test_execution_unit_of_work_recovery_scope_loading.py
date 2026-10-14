@@ -6,15 +6,26 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
+from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+from crypto_momentum_lab.domain.execution.execution_head import (
+    build_execution_head_payload,
+)
+from crypto_momentum_lab.domain.execution.ports import DecisionCommitConflict
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
     PositionKey,
 )
+from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
 from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
     AsyncPostgresExecutionUnitOfWork,
 )
 from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
     ExecutionBookHeadRow,
+    ExecutionTradeIdentityRow,
+)
+from crypto_momentum_lab.persistence.postgres.models import (
+    ExecutionCommandRow,
+    PositionReservationRow,
 )
 
 NOW = datetime(2026, 10, 10, tzinfo=UTC)
@@ -26,6 +37,9 @@ class _Rows:
 
     def all(self):
         return self._rows
+
+    def first(self):
+        return self._rows[0] if self._rows else None
 
 
 class _SessionContext:
@@ -40,92 +54,122 @@ class _SessionContext:
 
 
 class _FakeSession:
-    """Session double covering the queries the recovery loader may issue."""
-
-    def __init__(self, *, heads=(), execute_rows=(), get_result=None):
+    def __init__(
+        self,
+        *,
+        heads=(),
+        reservations=(),
+        commands=(),
+        rows_by_model=None,
+        position_key=None,
+    ):
         self._heads = tuple(heads)
-        self._execute_rows = tuple(execute_rows)
+        self._reservations = tuple(reservations)
+        self._commands = tuple(commands)
+        self._rows_by_model = rows_by_model or {}
+        self._position_key = position_key
         self.get_bind = Mock(
             return_value=SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
         )
-        self.get = AsyncMock(return_value=get_result)
+        self.get = AsyncMock(side_effect=self._get)
         self.scalars = AsyncMock(side_effect=self._scalars)
         self.scalar = AsyncMock(return_value=None)
         self.execute = AsyncMock(side_effect=self._execute)
-        self.statements: list[object] = []
+
+    async def _get(self, model, identity, **_kwargs):
+        if model is not ExecutionBookHeadRow:
+            return None
+        for head in self._heads:
+            if (
+                head.environment,
+                head.account_label,
+                head.symbol,
+                head.position_side,
+            ) == tuple(identity):
+                return head
+        return None
 
     async def _scalars(self, statement):
-        self.statements.append(statement)
-        if statement.column_descriptions[0].get("entity") is ExecutionBookHeadRow:
+        entity = statement.column_descriptions[0].get("entity")
+        if entity is ExecutionBookHeadRow:
             return _Rows(list(self._heads))
+        if entity is PositionReservationRow:
+            return _Rows(list(self._reservations))
+        if entity is ExecutionCommandRow:
+            return _Rows(list(self._commands))
+        return _Rows(list(self._rows_by_model.get(entity, ())))
+
+    async def _execute(self, statement):
+        entity = statement.column_descriptions[0].get("entity")
+        if entity is not None:
+            rows = list(self._rows_by_model.get(entity, ()))
+            if self._position_key is not None:
+                rows = [
+                    row
+                    for row in rows
+                    if row
+                    == (
+                        self._position_key.symbol,
+                        self._position_key.position_side.value,
+                    )
+                ]
+            return _Rows(rows)
+        statement_text = str(statement).lower()
+        for model, rows in self._rows_by_model.items():
+            if model.__tablename__ in statement_text:
+                result = list(rows)
+                if self._position_key is not None:
+                    result = [
+                        row
+                        for row in result
+                        if row
+                        == (
+                            self._position_key.symbol,
+                            self._position_key.position_side.value,
+                        )
+                    ]
+                return _Rows(result)
         return _Rows([])
 
-    async def _execute(self, _statement):
-        return _Rows(list(self._execute_rows))
 
-
-@pytest.mark.asyncio
-async def test_bulk_recovery_enumerates_current_heads_without_scanning_journal():
-
-    from crypto_momentum_lab.domain.execution.position_ledger_models import (
-        PositionLedgerProjection,
-    )
-    from crypto_momentum_lab.domain.execution.recovery_codec import (
-        PositionRecoveryCodec,
-    )
-
-    key = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.BOTH)
+def _head(key: PositionKey, *, revision: int = 1, schema_version: int = 3):
     scope = AccountFactStreamScope.for_position_key(
         key, stream_id="account-events", stream_epoch="epoch-1"
     )
-    projection = PositionLedgerProjection(
-        position_key=key,
-        total_active_quantity=Decimal("0"),
-        unallocated_quantity=Decimal("0"),
-        reconciliation_gap=Decimal("0"),
-        high_watermark_trade_at=None,
-        active_batches=(),
-        archived_episodes=(),
-        active_episode=None,
-        event_cut=NOW,
-        stream_scope=scope,
+    book = ExecutionBook()
+    book._stream_scopes[key.canonical_id] = scope
+    payload = build_execution_head_payload(
+        book, key, active_reservations=lambda _key: ()
     )
-    encoded_proj = PositionRecoveryCodec.encode_projection(projection)
-    head = ExecutionBookHeadRow(
+    payload["schema_version"] = schema_version
+    return ExecutionBookHeadRow(
         environment=key.environment,
         account_label=key.account_label,
         symbol=key.symbol,
         position_side=key.position_side.value,
         stream_id=scope.stream_id,
         stream_epoch=scope.stream_epoch,
-        revision=1,
-        projection_version="projection-1",
-        state_payload={
-            "projection": encoded_proj,
-            "facts_hash": "a" * 64,
-            "journal_revision": 1,
-            "active_trade_ids": [],
-        },
+        revision=revision,
+        projection_version=f"projection-{revision}",
+        state_payload=payload,
         updated_at=NOW,
     )
-    statements = []
 
-    async def scalars(statement):
-        statements.append(statement)
-        return _Rows([head] if "execution_book_heads" in str(statement) else [])
 
-    session = _FakeSession(heads=[head], get_result=head)
-    fake_cut = SimpleNamespace(facts=SimpleNamespace(fills=()))
-    journal_store = SimpleNamespace(
-        list_scopes_in_session=AsyncMock(return_value=(scope,)),
-        load_recovery_in_session=AsyncMock(return_value=fake_cut),
-    )
-    unit_of_work = AsyncPostgresExecutionUnitOfWork(
+def _uow(session):
+    return AsyncPostgresExecutionUnitOfWork(
         Mock(return_value=_SessionContext(session)),
-        journal_store=journal_store,
         command_repository=AsyncMock(),
         reservation_repository=AsyncMock(),
     )
+
+
+@pytest.mark.asyncio
+async def test_current_recovery_reads_only_the_head_facts():
+    key = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.BOTH)
+    head = _head(key, revision=4)
+    session = _FakeSession(heads=[head])
+    unit_of_work = _uow(session)
 
     states = await unit_of_work.load_positions(
         environment=key.environment,
@@ -134,120 +178,34 @@ async def test_bulk_recovery_enumerates_current_heads_without_scanning_journal()
     )
 
     assert len(states) == 1
-    assert states[0].scope == scope
-    assert states[0].head is not None
-    assert states[0].head.revision == 1
-    assert states[0].trade_ids == ()
-    assert states[0].evidence_ids == ()
-    assert states[0].latest_evidence_sequence is None
-    # The head-coverage audit must consult the durable journal scopes to prove
-    # that no journal-only position lost its head, even when heads exist.
-    journal_store.list_scopes_in_session.assert_awaited()
-    assert "execution_book_heads" in str(session.statements[0])
-    session.scalar.assert_awaited_once()
-    evidence_query = str(session.scalar.call_args[0][0])
-    assert "max" in evidence_query.lower()
-    assert "execution_evidence_receipts" in evidence_query.lower()
-    for statement in session.statements:
-        assert "execution_evidence_receipts" not in str(statement).lower()
+    assert states[0].scope.stream_id == head.stream_id
+    assert states[0].head.revision == 4
+    assert states[0].cut.revision == 4
+    assert states[0].cut.facts == PositionRecoveryCodec.decode_facts(
+        head.state_payload["position_state"]["verification"]
+    )
 
 
 @pytest.mark.asyncio
-async def test_bulk_recovery_blocks_headless_account_with_existing_journal():
-    from crypto_momentum_lab.domain.execution.ports import DecisionCommitConflict
-
-    key = PositionKey("live", "legacy", "BTCUSDT", FuturesPositionSide.BOTH)
-    scope = AccountFactStreamScope.for_position_key(
-        key, stream_id="account-events", stream_epoch="epoch-1"
-    )
-
-    async def scalars(_statement):
-        return _Rows([])
-
-    session = _FakeSession(heads=[], get_result=None)
-    journal_store = SimpleNamespace(
-        list_scopes_in_session=AsyncMock(return_value=(scope,)),
-    )
-    unit_of_work = AsyncPostgresExecutionUnitOfWork(
-        Mock(return_value=_SessionContext(session)),
-        journal_store=journal_store,
-        command_repository=AsyncMock(),
-        reservation_repository=AsyncMock(),
-    )
-
-    with pytest.raises(
-        DecisionCommitConflict, match="existing journal streams but no durable head"
-    ):
-        await unit_of_work.load_positions(
-            environment=key.environment,
-            account_label=key.account_label,
-            as_of=NOW,
-        )
-
-
-@pytest.mark.asyncio
-async def test_bulk_recovery_returns_empty_for_brand_new_account():
-    key = PositionKey("live", "brand_new", "BTCUSDT", FuturesPositionSide.BOTH)
-
-    async def scalars(_statement):
-        return _Rows([])
-
-    session = _FakeSession(heads=[], get_result=None)
-    journal_store = SimpleNamespace(
-        list_scopes_in_session=AsyncMock(return_value=()),
-    )
-    unit_of_work = AsyncPostgresExecutionUnitOfWork(
-        Mock(return_value=_SessionContext(session)),
-        journal_store=journal_store,
-        command_repository=AsyncMock(),
-        reservation_repository=AsyncMock(),
-    )
+async def test_new_account_without_heads_or_obligations_restores_empty():
+    session = _FakeSession()
+    unit_of_work = _uow(session)
 
     states = await unit_of_work.load_positions(
-        environment=key.environment,
-        account_label=key.account_label,
-        as_of=NOW,
+        environment="live", account_label="new-account", as_of=NOW
     )
+
     assert states == ()
 
 
 @pytest.mark.asyncio
-async def test_corrupted_head_missing_projection_blocks_recovery():
-    from crypto_momentum_lab.domain.execution.ports import DecisionCommitConflict
-
-    key = PositionKey("live", "corrupted", "BTCUSDT", FuturesPositionSide.BOTH)
-    scope = AccountFactStreamScope.for_position_key(
-        key, stream_id="account-events", stream_epoch="epoch-1"
-    )
-    corrupted_head = ExecutionBookHeadRow(
-        environment=key.environment,
-        account_label=key.account_label,
-        symbol=key.symbol,
-        position_side=key.position_side.value,
-        stream_id=scope.stream_id,
-        stream_epoch=scope.stream_epoch,
-        revision=1,
-        projection_version="projection-1",
-        state_payload={},  # missing projection!
-        updated_at=NOW,
-    )
-
-    async def scalars(statement):
-        return _Rows([corrupted_head] if "execution_book_heads" in str(statement) else [])
-
-    session = _FakeSession(heads=[corrupted_head], get_result=corrupted_head)
-    journal_store = SimpleNamespace(
-        list_scopes_in_session=AsyncMock(return_value=(scope,)),
-    )
-    unit_of_work = AsyncPostgresExecutionUnitOfWork(
-        Mock(return_value=_SessionContext(session)),
-        journal_store=journal_store,
-        command_repository=AsyncMock(),
-        reservation_repository=AsyncMock(),
-    )
+async def test_legacy_head_requires_explicit_format_migration():
+    key = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.BOTH)
+    session = _FakeSession(heads=[_head(key, schema_version=1)])
+    unit_of_work = _uow(session)
 
     with pytest.raises(
-        DecisionCommitConflict, match="requires a valid durable head with projection"
+        DecisionCommitConflict, match="unsupported execution head schema"
     ):
         await unit_of_work.load_positions(
             environment=key.environment,
@@ -257,179 +215,13 @@ async def test_corrupted_head_missing_projection_blocks_recovery():
 
 
 @pytest.mark.asyncio
-async def test_head_direct_recovery_does_not_load_journal_cut():
-
-    from crypto_momentum_lab.domain.execution.position_ledger_models import (
-        PositionLedgerProjection,
-    )
-    from crypto_momentum_lab.domain.execution.recovery_codec import (
-        PositionRecoveryCodec,
-    )
-
+async def test_corrupt_head_facts_block_recovery():
     key = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.BOTH)
-    scope = AccountFactStreamScope.for_position_key(
-        key, stream_id="account-events", stream_epoch="epoch-1"
-    )
-    projection = PositionLedgerProjection(
-        position_key=key,
-        total_active_quantity=Decimal("0"),
-        unallocated_quantity=Decimal("0"),
-        reconciliation_gap=Decimal("0"),
-        high_watermark_trade_at=None,
-        active_batches=(),
-        archived_episodes=(),
-        active_episode=None,
-        event_cut=NOW,
-        stream_scope=scope,
-    )
-    encoded_proj = PositionRecoveryCodec.encode_projection(projection)
-    head = ExecutionBookHeadRow(
-        environment=key.environment,
-        account_label=key.account_label,
-        symbol=key.symbol,
-        position_side=key.position_side.value,
-        stream_id=scope.stream_id,
-        stream_epoch=scope.stream_epoch,
-        revision=2,
-        projection_version="projection-2",
-        state_payload={
-            "projection": encoded_proj,
-            "facts_hash": "a" * 64,
-            "journal_revision": 5,
-            "active_trade_ids": ["trade-1", "trade-2"],
-        },
-        updated_at=NOW,
-    )
+    head = _head(key)
+    head.state_payload["position_state"] = {"schema_version": 999}
+    unit_of_work = _uow(_FakeSession(heads=[head]))
 
-    from crypto_momentum_lab.persistence.postgres.models import AccountFillEventRow
-
-    fill_rows = [
-        AccountFillEventRow(
-            environment=key.environment,
-            account_label=key.account_label,
-            symbol=key.symbol,
-            trade_id=trade_id,
-            order_id=f"order-{trade_id}",
-            side="BUY",
-            price=Decimal("50000"),
-            quantity=Decimal("0.5"),
-            realized_pnl=Decimal("0"),
-            fee=Decimal("0"),
-            fee_asset="USDT",
-            trade_at=NOW,
-            raw_payload={"positionSide": key.position_side.value},
-        )
-        for trade_id in ("trade-1", "trade-2")
-    ]
-
-    async def scalars(statement):
-        text = str(statement)
-        if statement.column_descriptions[0].get("entity") is ExecutionBookHeadRow:
-            return _Rows([head])
-        if "account_fill_events" in text:
-            # The completeness audit is a DISTINCT symbol projection; the load
-            # path selects whole rows.
-            if text.upper().startswith("SELECT DISTINCT"):
-                return _Rows([key.symbol])
-            return _Rows(fill_rows)
-        return _Rows([])
-
-    session = _FakeSession(heads=[head], get_result=head)
-    session.scalars = AsyncMock(side_effect=scalars)
-    journal_store = SimpleNamespace(
-        list_scopes_in_session=AsyncMock(),
-        load_recovery_in_session=AsyncMock(),
-        load_checkpoint_by_id_in_session=AsyncMock(return_value=None),
-    )
-    unit_of_work = AsyncPostgresExecutionUnitOfWork(
-        Mock(return_value=_SessionContext(session)),
-        journal_store=journal_store,
-        command_repository=AsyncMock(),
-        reservation_repository=AsyncMock(),
-    )
-
-    states = await unit_of_work.load_positions(
-        environment=key.environment,
-        account_label=key.account_label,
-        as_of=NOW,
-    )
-
-    assert len(states) == 1
-    assert states[0].scope == scope
-    assert states[0].head is not None
-    assert states[0].head.revision == 2
-    assert states[0].trade_ids == ("trade-1", "trade-2")
-    assert states[0].cut.revision == 5
-    journal_store.load_recovery_in_session.assert_not_awaited()
-    # Coverage is audited against journal scopes; the journal *cut* itself is
-    # still never loaded on the direct-head path.
-    journal_store.list_scopes_in_session.assert_awaited()
-
-
-@pytest.mark.asyncio
-async def test_tampered_quantity_in_head_fails_closed():
-    from crypto_momentum_lab.domain.execution.ports import DecisionCommitConflict
-    from crypto_momentum_lab.domain.execution.position_ledger_models import (
-        PositionLedgerProjection,
-    )
-    from crypto_momentum_lab.domain.execution.recovery_codec import (
-        PositionRecoveryCodec,
-    )
-
-    key = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.BOTH)
-    scope = AccountFactStreamScope.for_position_key(
-        key, stream_id="account-events", stream_epoch="epoch-1"
-    )
-    projection = PositionLedgerProjection(
-        position_key=key,
-        total_active_quantity=Decimal("1.5"),
-        unallocated_quantity=Decimal("1.5"),
-        reconciliation_gap=Decimal("0"),
-        high_watermark_trade_at=None,
-        active_batches=(),
-        archived_episodes=(),
-        active_episode=None,
-        event_cut=NOW,
-        stream_scope=scope,
-    )
-    encoded_proj = PositionRecoveryCodec.encode_projection(projection)
-    correct_digest = PositionRecoveryCodec.compute_projection_digest(projection)
-
-    # Tamper with the quantity in encoded projection without updating projection_digest
-    tampered_proj = dict(encoded_proj)
-    tampered_proj["total_active_quantity"] = "999.0"
-
-    head = ExecutionBookHeadRow(
-        environment=key.environment,
-        account_label=key.account_label,
-        symbol=key.symbol,
-        position_side=key.position_side.value,
-        stream_id=scope.stream_id,
-        stream_epoch=scope.stream_epoch,
-        revision=1,
-        projection_version="projection-1",
-        state_payload={
-            "projection": tampered_proj,
-            "projection_digest": correct_digest,
-            "facts_hash": "a" * 64,
-            "journal_revision": 1,
-            "active_trade_ids": [],
-        },
-        updated_at=NOW,
-    )
-
-    async def scalars(statement):
-        return _Rows([head] if "execution_book_heads" in str(statement) else [])
-
-    session = _FakeSession(heads=[head], get_result=head)
-    unit_of_work = AsyncPostgresExecutionUnitOfWork(
-        Mock(return_value=_SessionContext(session)),
-        journal_store=SimpleNamespace(list_scopes_in_session=AsyncMock()),
-        command_repository=AsyncMock(),
-        reservation_repository=AsyncMock(),
-    )
-
-    with pytest.raises(DecisionCommitConflict, match="projection digest mismatch"):
+    with pytest.raises(DecisionCommitConflict, match="invalid execution head"):
         await unit_of_work.load_positions(
             environment=key.environment,
             account_label=key.account_label,
@@ -438,43 +230,16 @@ async def test_tampered_quantity_in_head_fails_closed():
 
 
 @pytest.mark.asyncio
-async def test_corrupted_payload_format_fails_closed():
-    from crypto_momentum_lab.domain.execution.ports import DecisionCommitConflict
-
+async def test_trade_identity_without_head_blocks_account_recovery():
     key = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.BOTH)
-    scope = AccountFactStreamScope.for_position_key(
-        key, stream_id="account-events", stream_epoch="epoch-1"
+    session = _FakeSession(
+        rows_by_model={
+            ExecutionTradeIdentityRow: [(key.symbol, key.position_side.value)]
+        }
     )
+    unit_of_work = _uow(session)
 
-    head = ExecutionBookHeadRow(
-        environment=key.environment,
-        account_label=key.account_label,
-        symbol=key.symbol,
-        position_side=key.position_side.value,
-        stream_id=scope.stream_id,
-        stream_epoch=scope.stream_epoch,
-        revision=1,
-        projection_version="projection-1",
-        state_payload={
-            "projection": "NOT_A_VALID_PROJECTION_DICT",
-            "facts_hash": "a" * 64,
-            "journal_revision": 1,
-        },
-        updated_at=NOW,
-    )
-
-    async def scalars(statement):
-        return _Rows([head] if "execution_book_heads" in str(statement) else [])
-
-    session = _FakeSession(heads=[head], get_result=head)
-    unit_of_work = AsyncPostgresExecutionUnitOfWork(
-        Mock(return_value=_SessionContext(session)),
-        journal_store=SimpleNamespace(list_scopes_in_session=AsyncMock()),
-        command_repository=AsyncMock(),
-        reservation_repository=AsyncMock(),
-    )
-
-    with pytest.raises(DecisionCommitConflict, match="corrupted execution head payload"):
+    with pytest.raises(DecisionCommitConflict, match="durable trade identity"):
         await unit_of_work.load_positions(
             environment=key.environment,
             account_label=key.account_label,
@@ -483,95 +248,53 @@ async def test_corrupted_payload_format_fails_closed():
 
 
 @pytest.mark.asyncio
-async def test_multi_symbol_missing_head_with_active_responsibility_fails_closed():
-    from crypto_momentum_lab.domain.execution.ports import DecisionCommitConflict
-    from crypto_momentum_lab.domain.execution.position_ledger_models import (
-        PositionLedgerProjection,
-    )
-    from crypto_momentum_lab.domain.execution.recovery_codec import (
-        PositionRecoveryCodec,
-    )
-    from crypto_momentum_lab.persistence.postgres.models import PositionReservationRow
-
-    # Account has BTCUSDT and ETHUSDT.
-    # BTCUSDT has a valid durable head.
-    # ETHUSDT has an active reservation, but its head was deleted / missing.
-    key_btc = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.BOTH)
-    scope_btc = AccountFactStreamScope.for_position_key(
-        key_btc, stream_id="btc-events", stream_epoch="epoch-1"
-    )
-    proj_btc = PositionLedgerProjection(
-        position_key=key_btc,
-        total_active_quantity=Decimal("1.0"),
-        unallocated_quantity=Decimal("1.0"),
-        reconciliation_gap=Decimal("0"),
-        high_watermark_trade_at=None,
-        active_batches=(),
-        archived_episodes=(),
-        active_episode=None,
-        event_cut=NOW,
-        stream_scope=scope_btc,
-    )
-    head_btc = ExecutionBookHeadRow(
-        environment=key_btc.environment,
-        account_label=key_btc.account_label,
-        symbol=key_btc.symbol,
-        position_side=key_btc.position_side.value,
-        stream_id=scope_btc.stream_id,
-        stream_epoch=scope_btc.stream_epoch,
-        revision=1,
-        projection_version="proj-btc",
-        state_payload={
-            "projection": PositionRecoveryCodec.encode_projection(proj_btc),
-            "projection_digest": PositionRecoveryCodec.compute_projection_digest(proj_btc),
-            "facts_hash": "a" * 64,
-            "journal_revision": 1,
-            "active_trade_ids": [],
-        },
-        updated_at=NOW,
-    )
-
-    # Active reservation for ETHUSDT
-    active_res_eth = PositionReservationRow(
+async def test_active_reservation_without_its_position_head_blocks_restore():
+    btc = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.BOTH)
+    missing_eth = PositionKey("live", "primary", "ETHUSDT", FuturesPositionSide.BOTH)
+    head = _head(btc)
+    reservation = PositionReservationRow(
         reservation_id="res-eth-1",
         environment="live",
         account_label="primary",
         strategy_name="trend_v1",
         symbol="ETHUSDT",
         position_side="BOTH",
-        batch_id="b-1",
+        batch_id="batch-1",
         command_id="cmd-1",
-        reserved_quantity=Decimal("5.0"),
+        reserved_quantity=Decimal("5"),
         consumed_quantity=Decimal("0"),
         released_quantity=Decimal("0"),
         status="ACTIVE",
         created_at=NOW,
         updated_at=NOW,
     )
-
-    async def scalars(statement):
-        s_str = str(statement).lower()
-        if "execution_book_heads" in s_str:
-            return _Rows([head_btc])
-        if "position_reservations" in s_str:
-            return _Rows([active_res_eth])
-        return _Rows([])
-
-    session = _FakeSession(heads=[head_btc], get_result=head_btc)
-    session.scalars = AsyncMock(side_effect=scalars)
-    unit_of_work = AsyncPostgresExecutionUnitOfWork(
-        Mock(return_value=_SessionContext(session)),
-        journal_store=SimpleNamespace(list_scopes_in_session=AsyncMock()),
-        command_repository=AsyncMock(),
-        reservation_repository=AsyncMock(),
-    )
+    unit_of_work = _uow(_FakeSession(heads=[head], reservations=[reservation]))
 
     with pytest.raises(
-        DecisionCommitConflict, match="position ETHUSDT:BOTH has active reservation res-eth-1 but no durable head"
+        DecisionCommitConflict,
+        match=f"position {missing_eth.symbol}:BOTH has active reservation res-eth-1",
     ):
         await unit_of_work.load_positions(
-            environment="live",
-            account_label="primary",
+            environment=btc.environment,
+            account_label=btc.account_label,
             as_of=NOW,
         )
 
+
+@pytest.mark.asyncio
+async def test_position_read_does_not_block_on_another_positions_identity():
+    btc = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.BOTH)
+    head = _head(btc)
+    session = _FakeSession(
+        heads=[head],
+        position_key=btc,
+        rows_by_model={
+            ExecutionTradeIdentityRow: []
+        },
+    )
+    unit_of_work = _uow(session)
+
+    state = await unit_of_work.load_position(btc, as_of=NOW)
+
+    assert state is not None
+    assert state.scope.symbol == btc.symbol

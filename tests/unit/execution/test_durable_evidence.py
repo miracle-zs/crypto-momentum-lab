@@ -14,7 +14,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     FactCoverageInterval,
     FactCoverageStatus,
 )
-from tests.unit.execution.test_cumulative_report import NOW, SCOPE, fill, report
+from tests.unit.execution.test_cumulative_report import NOW, SCOPE, report
 
 
 def evidence(**kwargs):
@@ -34,12 +34,6 @@ def test_durable_input_accepts_report_without_manufacturing_trade():
 def test_durable_input_requires_stream_identity():
     with pytest.raises(DurableEvidenceConflict, match="stream identity"):
         prepare_durable_evidence(ExecutionEvidence("evidence", SCOPE, NOW))
-
-
-@pytest.mark.parametrize("raw", [{"is_cumulative": True}, {"cum_qty": "0"}])
-def test_cumulative_fill_transport_cannot_enter_durable_trade_journal(raw):
-    with pytest.raises(DurableEvidenceConflict, match="use cumulative_order"):
-        prepare_durable_evidence(evidence(fill=replace(fill(), raw_payload=raw)))
 
 
 def test_confirmed_live_coverage_requires_typed_provenance():

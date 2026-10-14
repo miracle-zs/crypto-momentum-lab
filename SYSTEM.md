@@ -1,14 +1,14 @@
 # 系统契约与架构重构
 
-状态：业务决策 Q1–Q9 沿用已确认契约；T1 已完成。T2–T4 的早期“闭环”声明已被两轮 review 复核推翻，不能归为“仅待生产验证”。第一轮 6 项见 §8.6；第二轮 6 项见 §8.7；随后又做了一轮**去复杂度收敛**，见 §8.8，其中 §8.6 第 5 项与 §8.7 第 1、2 项的实现方式被替换为更简单的现有机制。当前口径：§8.6/§8.7 中仍成立的部分 + §8.8 的收敛由实现与测试共同证明；生产现场验证项单独保留在文末，未授权项不作本地结论。
+状态：业务决策 Q1–Q9 沿用已确认契约；T1 已完成。T2–T4 的早期“闭环”声明已被 review 复核推翻，不能归为“仅待生产验证”。§8.6–§8.10 记录此前实现与本地收敛；§8.11 更正单一状态模型的目标及剩余优化计划。当前 live 持久路径与进程内都不再使用位置 journal；旧数据库表仅作为既有历史数据保留，不参与当前状态恢复。
 
 第一轮本地已修复的阻塞项（§8.6，含机制删除；第 5 项已被 §8.8 收敛取代）：
 
 0. 早期 8 项（上一轮）：真实账户流装配、无 Hub 风控状态、核验失败不清 gap、缺失当前记录 fail-closed、facts_hash 矛盾阻塞、部署失败状态匹配、派发所有权接入、真实装配端到端验收。这些机制的**结论**保留，其中第 1、3 项在 §8.6 被进一步修正。
 1. **账户同步合并**（原实现只提取标的）：`in_process_producer.py` 现通过 `AccountUserDataState` 合并每一帧并发布 `account_snapshot`/`account_state`；启动 REST 基线、WS 增量、余额、持仓、挂单、账户状态与必要持久化全部接通；唯一当前账户事实生产者明确。
 2. **私有流连续性与持仓变化**：事件源不再“尚未连接即 READY”；连接、断线、重连、流缺口、溢出与事实补齐全部驱动可信度与准入；期望只在真正新增/未知持仓上消费，已有可信持仓与带仓重启不再被反复隔离。
-3. **部分持仓 head 缺失**：`_load_position_states` 在“尚有其他 head”分支补齐完整持久责任集合枚举（journal/checkpoint 作用域、活动成交、订单水位、证据回执、成交身份），缺 head 即明确阻塞，不再静默丢弃或合成空仓。
-4. **checkpoint 分支完整性**：新增与 payload 自证无关的持久成交身份交叉校验（数量/身份/重复），`active_fills` 篡改、缺失、重复身份在有 checkpoint 时同样阻塞；checkpoint 绑定损坏归一为 `DecisionCommitConflict`。
+3. **部分持仓 head 缺失**：历史实现曾检查旧 journal/checkpoint 作用域；2026-10-14 本地收敛后不再查 journal/checkpoint，当前 head 以外只检查仍承担独立责任的命令、预留及身份记录。
+4. **checkpoint 分支完整性**：历史实现曾把 head 成交与独立身份表交叉审计；2026-10-14 本地收敛后移除此重复全量读取。成交身份表只在接纳成交时负责永久去重。
 5. **派发所有权**（实现已在 §8.8 收敛）：单一派发身份与租约令牌接通；首次写入前取得并校验；准备、发送记录与真实 POST/DELETE 前校验同一令牌；无租约/过期/他人持有/续约失败立即停止新开仓、平仓、撤单并保留 UNKNOWN 与在途责任。
 6. **executing 持久操作恢复**：新增跨会话恢复规则，继续核验责任、接续未完成动作并记录结果；不把 `executing` 盲目改回 `requested`。
 
@@ -105,7 +105,13 @@ flowchart LR
 
 系统的必要工作只有：行情产生业务意图；发单前记录身份和风险占用；真实订单与成交更新批次和退出责任；异常后继续未完成责任；展示状态并接受明确操作。稳定身份、成交去重、短事务、未知结果查证、批次归属、退出预留、唯一派发者及独立退出调度由这些工作直接推导，不能为减代码而删除。
 
-当前目标拓扑已较克制，执行内核仍偏复杂。2026-10-13 静态复评发现：`execution_unit_of_work.py` 加载 head 后仍调用 journal 恢复路径；`execution_head.py` 保存摘要与关联信息，并非可独立接续的完整当前责任；`ExecutionActionState`、`EvidenceState`、`ExecutionRecoveryState` 共享多组可变字典，`ExecutionBook` 还承担候选复制、引用刷新及发布协调；Compose 仍存在独立账户同步进程与本账户 Hub 中转。这些是本次精简入口，不以文件数、行数或类型名称判定冗余，也不把共享引用误称为多套独立事实权威。
+当前目标拓扑已较克制，执行内核仍偏复杂。2026-10-14 的本地修改已让 live 恢复和 Dashboard 不再读取或写入旧 `position_fact_journal_events`、`position_recovery_checkpoints`，并移除了无人调用的旧 PostgreSQL journal store；旧表只保留现存数据与必要的维护查询。
+
+剩余问题是 head payload 仍保存有限的 `AccountFacts` 表示，`PositionBook` 再从中计算当前投影。目标是每个持仓 key 只有一份当前 `PositionState`，head 保存该状态，事件直接更新它。命令、预留、成交身份与订单水位按自身生命周期留存，不把历史事实重放成第二份当前状态。内存和 live 持久路径都不再累积位置 journal。
+
+冷启动仍会为选中的标的加载来源、必要时再次读取全量仓位，并按 symbol 顺序查询成交；`ExecutionBook._staged_copy(key)` 仍复制多组账户级容器。Dashboard 已只查 Head，但会逐行解码并投影全部 facts；它不查 Journal，也不以 checkpoint 数量统计当前持仓。`run_live_daemon` 的装配职责仍集中在大函数中，operator exit identity 仍包含 `run_id`。这些是可核实的优化点；固定的启动时延、Dashboard 时延和内存目标须由同负载测量得出。
+
+本地持久路径已收敛到 Head；直接状态表示和旧格式数据转换仍需单独完成与验收。本地测试通过不能替代生产数据转换和验收。
 
 一个账户的执行状态由一个明确所有者裁决。协议解析、纯业务计算、SQL 和有界任务可以拆分；辅助计算显式接收输入、返回结果，不通过多份 State 包装共享可变容器来分摊所有权。保留事务候选和提交后发布的必要语义，简化其表示及装配；不得用单个跨网络/数据库等待的大锁代替现有并发保护。
 
@@ -129,7 +135,7 @@ flowchart LR
 
 采用最少必要事务：准备命令与预留；接纳订单/成交并结算；持久化操作。尽量复用既有表、迁移与唯一约束，不平行建立第二套权威。相同身份相同请求幂等，相同身份不同载荷冲突。数据库提交失败不发布，成功后局部发布；CAS 冲突读新状态或结束失效意图，不覆盖更新版本。事务候选只复制受影响范围，跨 key 约束使用明确数据库原子检查。
 
-活动状态应能直接加载，加真实证据与定向核验接续。新路径的正常启动不依赖 journal/checkpoint/suffix 重建交易投影；仅把重演限定到某个账户或持仓范围，还不满足这一目标。旧读接口保留历史查询及明确的过渡用途；新写入退出重复内部 journal/checkpoint/policy 快照前，先证明活动恢复、引用与去重契约完整。准备与派发可以共享命令记录，但不同持久化义务不能仅因都叫 outbox 就合并。
+每个持仓 key 的当前执行状态只从 `execution_book_heads` 加载；head 必须自包含继续持仓、退出和结算所需的全部当前责任。持久命令、未完成预留和稳定订单/成交身份作为相关责任及唯一约束读取。正常启动、重连和健康判定不读取 journal/checkpoint；交易所核验发现差异时按具体订单/成交查证并更新 head。旧 journal/checkpoint 表仅保留历史行及显式维护工具，不参与 live 当前状态路径。准备与派发可以共享命令记录，但不同持久化义务不能仅因都叫 outbox 就合并。
 
 应用互斥锁不等待网络、数据库、退避、上下文、遥测或文件 I/O；数据库事务锁不跨 HTTP。网络等待不占同 key 的退出派发通道，恢复有预算和公平调度。创建资源的装配者负责失败、取消和关闭释放。
 
@@ -148,12 +154,12 @@ flowchart LR
 
 新执行路径围绕以下四类持久信息组织；这是逻辑分类，不规定表数，不新造通用状态框架：
 
-|信息|最低恢复内容|
+|持久记录|职责|
 |---|---|
-|命令与订单责任|稳定身份、请求内容、发送阶段、累计水位、未知结果、关联批次和未完成结算；退出的原截止及撤单责任。|
-|真实成交与历史身份|真实成交身份、数量、价格、订单及批次归属；持久去重及同身份异载荷冲突依据。|
-|当前批次|真实剩余量、成本、时间锚点、封闭/退出责任，以及正确接纳迟到成交所需关联。|
-|控制、占用与可信度依据|预留、持久操作、派发所有权、必要核验覆盖与缺口；可推导标签不另存可写副本。|
+|每 key 一个 `execution_book_heads`|唯一当前持仓状态；自包含批次、数量/成本、退出边界、当前成交关联、覆盖/连续性及待恢复原因，并以 revision 做 CAS。|
+|命令与预留|独立订单生命周期、未知提交和风险占用；与 head 在同一事务中推进，不能被 head 缺失静默忽略。|
+|订单/成交身份约束|只负责幂等、累计水位和同身份异载荷冲突；不参与重建另一份持仓投影。|
+|历史成交|用于报表、审计和针对具体差异的查证；不与 head 共同裁决当前持仓，也不全量重放来启动。|
 
 主路径为“读取相关当前状态→校验意图或证据→短事务更新事实和当前责任→提交后发布内存视图”。真实成交和对应当前状态必须原子提交，不能先记成交再异步补当前状态。当前记录缺失、格式不兼容或相互矛盾时明确阻塞相应范围，不能静默退回全历史重演以掩盖目标路径未完成。
 
@@ -193,9 +199,9 @@ T1 已完成；本轮 review 确认 T2–T4 尚未完成。下述状态记录当
 |任务|入口及变化范围|退出条件|状态|
 |---|---|---|---|
 |T1：固定行为与可靠性|现有 domain/execution、orders/coordinator、live_rollout 及相关测试|补偿不拒绝已终态命令、原失败不被二次异常覆盖；退避执行前校验；修正当前 coverage 读取与队列年龄；行为夹具冻结，完整链路回归通过。|**闭环**：3542 passed / 9 skipped / 0 failed|
-|T2：事实、当前状态与事务收敛|ExecutionBook/现有持久化适配器|第3.1、3.3、4.1、4.2节闭环；单一执行状态所有者；正常启动直接加载完整当前责任（直接加载 Head，不查 journal events / 旧投影重建）；删除静默 fallback（有流但无有效 head 时严格抛出 DecisionCommitConflict 阻塞恢复）；清理多 State 兼容包装；收敛 ExecutionBook 内部状态，移除 ~20 个返回可变容器属性与 duck-typing 别名；逐点崩溃、去重与迟到事实验收。|**闭环**：505 unit execution + 341 persistence + 93 acceptance 全部通过；`test_normal_restart_succeeds_without_historical_journal_or_checkpoints` 与 `test_corrupted_or_missing_head_with_responsibilities_explicitly_blocks` 验证闭环|
+|T2：事实、当前状态与事务收敛|ExecutionBook/现有持久化适配器|每 key 一个直接表达当前持仓与退出责任的 head；移除内存及持久化 Journal 状态模型和历史事实重放；保留命令、预留、成交身份和订单水位各自所需的持久记录；验证重启、重复成交和迟到成交。|**本地运行路径已收敛**：内存 Journal 与旧 PostgreSQL journal writer 已删除；head 仍序列化 `AccountFacts`，旧数据库表和格式转换尚未处理|
 |T3：账户进程合并|execution_account 接收、live_rollout 装配及 Compose|每账户一个进程；私有事件接收、账户同步与执行真正合并装配；退役本账户旧 Hub 依赖、客户端与 URL 参数；保留 read/trade 凭证角色。|**闭环**：`InProcessAccountEventSource` + `DirectPositionExpectationPublisher` + `AccountPositionExpectationRegistry` 进程内合并装配；移除 Compose/Manifest/Env 中 Hub 依赖；`test_single_account_in_process_lifecycle_private_events_to_exit_and_shutdown` 验证闭环|
-|T4：清理复核与本地运维验收|检查 T2/T3 替代路径、恢复入口与部署材料|不存在遗留双写及无职责中转；更新运维脚本；完整回归；以同负载测量持久化写入、读取范围及事件延迟，记录真实测量依据。|**闭环（本地运维与真实验收测量）**：`update_server.sh` 与 `cml_ops_monitor.py` 彻底移除已退役服务引用；全量测试 100% 通过；提供可复现基准测量数据，如实记录未测量项|
+|T4：按测量做性能与装配收敛|基线读取、候选复制、Dashboard、运行时装配|先记录同负载的冷启动耗时/REST 调用、单 key 事务耗时与复制规模、Dashboard 响应时间；只优化测得的热点；不预设固定时延目标或新增通用分层。|**待做**：先完成 T2 的直接状态模型，再取得可比较的基线|
 
 不删已有迁移，不直接截断历史表，不添加生产自动裁剪；新旧阶段须使用兼容新增结构或明确停止旧写入者的离线切换。下游 Agent 修改接口时更新调用方和测试，不用静默 fallback 保持表面通过。单文档之外不增 glossary、ADR、审计或阶段总结。
 
@@ -253,7 +259,7 @@ T1 已完成；本轮 review 确认 T2–T4 尚未完成。下述状态记录当
 
 T1 本轮修复闭环：
 - 队列最老时间：注入组件时钟（`_StepClock`），coordinator 新增 `_clock` 参数和 `_observation_timestamps` deque，出队更新队首。Event 屏障验证 depth=1 时 age=3（非旧 bug 的 8）。不改全局 asyncio 时钟。
-- 完整补偿链（parametrized projection/sql）：真实 PG `ExecutionBook` + 真实 `OrderExecutionStateMachine`（fake exchange）+ 真实 `PostgresOrderEventRepository` + 真实 `OrderExecutionCoordinator` + 真实 `LiveOrderReconciliation` + 真实 `LiveAccountEventRuntime.run` + 真实 `LiveRuntimeSupervisor`。同套 DI（不替换私有 UoW）。projection case：两次不同 `JournalFactConflict` rollback，structlog capture 断言两条错误消息，`consumed==2`。sql case：`SELECT 1/0` 真实 PG `DBAPIError`，structlog capture 断言 division/DivisionByZero。CAS `head.revision` 递增，cmd2 exact `”acknowledged”`，receipt 入库，reservation 不误释放，cmd1 非 terminal + 公开 recovery gate。真实 shutdown via `LiveRuntimeTasks.shutdown` task。
+- 完整补偿链（parametrized projection/sql）：真实 PG `ExecutionBook` + 真实 `OrderExecutionStateMachine`（fake exchange）+ 真实 `PostgresOrderEventRepository` + 真实 `OrderExecutionCoordinator` + 真实 `LiveOrderReconciliation` + 真实 `LiveAccountEventRuntime.run` + 真实 `LiveRuntimeSupervisor`。同套 DI（不替换私有 UoW）。projection case：两次不同的测试注入写入失败，structlog capture 断言两条错误消息，`consumed==2`。sql case：`SELECT 1/0` 真实 PG `DBAPIError`，structlog capture 断言 division/DivisionByZero。CAS `head.revision` 递增，cmd2 exact `”acknowledged”`，receipt 入库，reservation 不误释放，cmd1 非 terminal + 公开 recovery gate。真实 shutdown via `LiveRuntimeTasks.shutdown` task。
 - 覆盖读取：解码真实 payload（`RecoverySchemaError`/`ValueError` 可判定）、验证 `stream_scope.environment==”live”`、锚点身份（recovery_checkpoint 匹配 checkpoint_id/event_cut，zero_snapshot 严格匹配绑定 checkpoint 的原始 load_provenance kind/id/cut，cp 来源非 zero 或缺失时 fail-closed）、`coverage.covers(bound_cp.event_cut)`、证明限定到 head 的 `journal_revision`、保留最大有效 `end_at`。
 - 新未知订单通知：修复 `_active_reconciliation_order` 只抑制当前查询自身结果（新订单 B 不被抑制），generic callback 在 active 期间也被抑制。
 - Hedge reduce_only：提交前校验拒绝 LONG+BUY / SHORT+SELL 增敞口。
@@ -272,19 +278,19 @@ T2/T3 既有目标失败（不在 T1 范围）：
 
 ### 8.3 T2 验收记录
 
-2026-10-13 本地实现与测试验证完成。
+2026-10-13 曾按“head 可直接 seed view”记录 T2 完成。2026-10-14 的代码改动已将当前执行路径收敛到完整 head：journal/checkpoint 表不再读写或作为 headless fallback。生产仍使用旧格式数据，须先离线转换；本地测试结果不能替代该转换和生产验收。
 
-本轮实现与验证内容：
-- **真正完成直接恢复与批次边界保留**：
+此前实现与验证内容：
+- **部分完成 head 直接恢复与批次边界保留**：
   - `ExecutionBook.restore` → `restore_execution_state` → `_load_position_states` 直接读取 `ExecutionBookHeadRow.state_payload`，内含 `projection`、`active_batches`、`active_fills`、`coverage`、`recovery_checkpoint` 与 `zero_position_snapshot_confirmed`。
   - 彻底修复退出批次边界丢失问题：恢复事实时完整提取 `active_exit_boundaries` 与活动批次的 `exit_order_submitted_at` 事实，放入 `AccountFacts.exit_boundaries`，避免重启后再次开仓因重新投影破坏旧退出封闭批次归属（连续运行与重启后批次 1/批次 2 归属严格一致）。
   - Suffix fills 正确绑定：无 checkpoint 时，Head 中保存的 active fills 直接完整作为 `facts.fills` 恢复；存在真实 checkpoint 时，仅以 `checkpoint.event_cut` 过滤后缀，杜绝无 checkpoint 时合成假检查点导致真实成交在重启后被过滤遗失。
-  - 在 `PositionBook.seed_durable_view` 中直接注入 Head 投影，即使物理数据库中 `position_fact_journal_events` 与 `position_recovery_checkpoints` 历史行被完全清空，带仓重启依然成功，批次成本、预留、原截止与迟到成交完整保留（`test_normal_restart_succeeds_without_historical_journal_or_checkpoints` 验证通过）。
+  - 在 `PositionBook.seed_durable_view` 中直接注入 Head 投影；`test_normal_restart_succeeds_without_historical_journal_or_checkpoints` 验证该特定 fixture 下历史行清空后仍能带仓恢复。该测试不覆盖正常加载与事实接纳仍依赖 journal/checkpoint 的其他路径。
 - **删除静默恢复 fallback（按范围 Fail-Closed 阻塞）**：
   - 彻底删除 `execution_unit_of_work.py` 原第 978 行在 Head 缺失时静默降级为旧历史重演的违规行为。
   - 修复多标的缺失阻塞范围：同账户多个标的若单个标的 Head 缺失或损坏，严格核验活动命令、预留与责任对应关系，绝不忽略或以空账本覆盖既有责任。
   - projection/view 摘要或合法编码但数量/成本被修改、格式不兼容时，严格抛出 `DecisionCommitConflict`，明确拒绝并阻塞恢复，杜绝记日志后继续信任（`test_missing_or_corrupted_head_fail_closed_blocking`、`test_corrupted_or_missing_head_with_responsibilities_explicitly_blocks` 验证通过）。
-- **真正收敛可变状态与清理兼容别名**：
+- **已收敛部分内存状态并清理兼容别名**：
   - 彻底清理 `ExecutionBook` 内部此前暴露可变字典与容器的属性（如 `_positions`、`_outbox`、`_requests_by_id` 别名），杜绝 duck-typing 与 getattr fallback。
   - 彻底移除 `EvidenceState`、`ExecutionActionState`、`CommandLifecycleState`、`ExecutionRecoveryState` 四个包装类及其别名兼容入口。
   - 提取纯计算函数 `evaluate_stream_rollover`，由 `ExecutionBook` 作为唯一状态持有者原子驱动。
@@ -410,6 +416,8 @@ rtk proxy .venv/bin/ruff check src tests
 事实证明的 Mock 不允许 coverage 超出 checkpoint.event_cut；旧成功场景改为合法覆盖内事实与较新发布时间。它只验证发布时间不等于事实切口，不能替代T1“旧checkpoint＋新后缀＋最新合法覆盖”的完整验收；该已知缺口仍待实现并补真实持久化测试，不用非法夹具制造通过。
 
 ### 8.6 本轮 6 项本地阻塞项修复记录（2026-10-13）
+
+以下第 3、4 项记录的是 2026-10-13 的实现，已被 2026-10-14 的单一 head 收敛替换：当前运行时不再查询 journal/checkpoint，也不在恢复时全量比对 head 与成交身份表。
 
 2026-10-13 review 确认 6 项为**本地实现阻塞项**（非“仅待生产验证”）。本轮按“先补暴露缺陷的测试，再修复”的顺序完成，全部测试真实运行，无 skip/xfail、无删除业务断言、无放宽准入。
 
@@ -603,6 +611,14 @@ rtk proxy .venv/bin/ruff check src tests
 - 未测量：`account_facts` 预算在真实交易所私有流首帧延迟分布下是否合适（当前沿用既有 30s，未重新采样）。
 - 生产现场项（真实网络 RTT、长周期存储/内存、在线无遗留责任切换）仍未授权验证。
 
+### 8.10 单一当前状态（2026-10-14，本地实现）
+
+- 每个 position key 由一个 `PositionBook` 持有当前投影；`execution_book_heads` 保存投影和有限的当前核验信息，启动只从 head 恢复。live 路径不读取或写入旧持久 journal/checkpoint，也不从历史成交重放来恢复 head。
+- 内存 `AccountJournal`、旧 PostgreSQL journal writer 和依赖它们的恢复测试/一次性重放脚本已删除。`AccountFacts` 是一次输入或当前 head 的有限核验值，不累积全部历史成交。旧数据库表、迁移和仅针对既有历史行的维护/诊断查询保留；没有新写入，也不参与 live 当前状态路径。
+- 订单回报只推进该订单的累计水位并结算预留；水位用于处理累计回报的重复/增量，不证明账户持仓已入账。账户成交事件直接更新 `PositionBook`。订单进入 FILLED 终态时立即结束订单责任并释放剩余预留，不等待成交历史二次确认。
+- 全量回归与静态检查结果见本地变更记录；本节不把历史测试数当作本轮验证结果。
+- 仅本地改动，尚未提交或部署。
+
 ### 2026-10-14 部署现场补充（进行中）
 
 用户已授权提交、推送、部署和观察，并选择等待原退出规则，不强制平仓。四个原运行账户已持久停入场；2026-10-13 17:04 UTC 后重复交易所读取确认全部零仓、无挂单。旧服务仍负责退出，尚未切换，生产 schema 仍为 0056。
@@ -639,3 +655,19 @@ primary 新进程启动暴露两个接线问题：账户读取硬编码 Multi-As
 部署冷启动时 account-2、account-3、account-4 曾分别记录约 50–55 秒的账户事实启动超时错误，随后接收基线并自行恢复为 ready/non-degraded，未发生进程重启。核验时间处于上海时间 07:45–09:00 的计划停入场窗口，四账户入场 gate 以 `scheduled_risk_window` 关闭；因此当前无订单符合计划，不能据此推断市场未产生信号。未放宽信号或风控条件，未制造测试交易或强制平仓。修复版本完整回归为 **3702 passed、9 skipped**；现场无新增交易，因此真实下单/成交/退出闭环仍待自然触发后验证。
 
 2026-10-14 12:22 CST dashboard 事实完整性告警修复部署：代码 `f30bcb8c3a8f0e6909029e36eb23e1958978519a` 通过 `--dashboard-only` 发布，只替换 dashboard 镜像；策略、行情和研究服务未触碰，数据库 schema 未变。修复移除对每个数值 journal revision 连续存在的错误要求（同一持久化事务可一次写入多个事实，只保留最高 revision），并以当前 execution head 数量判断当前持仓，避免旧 checkpoint projection 让空仓被报成有仓。dashboard 容器使用新镜像、healthy、重启次数为 0，`/api/health` 返回 UP。一次读取详细 `/api/health/operational` 的现场请求超过 12 秒客户端时限，因此本次不记录告警已清除，也不将 dashboard liveness 当作详细事实完整性结果。针对修复的完整回归为 **3707 passed、9 skipped**。
+
+### 8.11 架构评审修订与优化计划
+
+**目标状态**：内存和持久层都不使用 Journal。一个 `PositionState` 是单个 key 的唯一当前状态，包含当前数量、成本、活动批次和退出责任；`execution_book_heads` 持久化它并以 revision 做 CAS。成交和订单事件直接更新此状态。命令、预留、trade identity 和 order watermark 保留为各自生命周期记录；历史成交只服务实际需要历史数据的报表或人工查询，不参与正常启动、当前持仓投影或 Dashboard 完整性判断。不新增 `account_fill_events` 之类的第二套状态/审计链来替代 Journal。
+
+|顺序|优化项|做法|验收|
+|---|---|---|---|
+|1|收敛到内存单一当前状态|已移除 `AccountJournal` 累加器、旧 PostgreSQL journal writer 与旧检查点维护分支；当前 head 保存投影和有限核验值，不带完整成交历史。订单累计水位只处理订单进度与预留结算，账户成交独立更新持仓。|全量回归 3575 passed、9 skipped；`ruff --select F` 和 `git diff --check` 通过。|
+|2|缩短基线恢复|已改为只为非零仓位和有挂单的标的加载恢复锚点；冷标的的真实零仓快照直接作为当前平仓状态，不再查成交或重复读取整份持仓。非零仓位仍需账户成交来恢复批次和成本。|单测覆盖零仓快照无需成交扫描、非零仓位不能由快照伪造成交；基线回调不再对冷标的触发额外持仓读取。完整回归 3575 passed、9 skipped。启动耗时和 REST 请求量的现场测量待做。|
+|3|降低单 key 更新成本|先测 `_staged_copy(key)` 的耗时和复制容器规模；若它是实测热点，再让候选更新只复制受影响 key 和必要索引，不预先引入通用 shard 框架。|同一负载比较更新延迟、CPU 和内存；交易行为测试不变。|
+|4|简化 Dashboard 与装配|Dashboard 从当前 Head 状态读取数量，不查 Journal；先移除历史 facts 解码的热路径，再按实测决定是否需要 revision 缓存。把 `run_live_daemon` 只拆到能形成清晰、可测试接口的少数装配函数，不按图增加层级。|Dashboard 与账户快照的当前持仓数一致；对比响应耗时。装配改动不改变资源生命周期。|
+|5|修正跨 Session 退出身份|从持久化的操作身份派生 operator flatten 的订单身份，不把 `run_id` 放进重试身份。|新 session 对同一操作复用身份；新操作得到新身份；原有退出数量和价格规则不变。|
+
+订单回报的累计成交量只表示该订单的累计进度，用于幂等推进订单水位和结算预留；它不证明对应的账户成交已经进入持仓状态。持仓只由账户成交事件更新。订单和账户流可能先后到达，所以订单状态和持仓状态暂时不同步是允许的，不需要再用累计量反向证明或合成账户成交。回归 `test_order_cumulative_report_does_not_create_an_account_fill` 固定了这个边界。
+
+性能对比只记录真实基线和改后结果，不预设 `<5s`、`50ms` 或固定内存数字。Dashboard 已从当前 head 投影读取当前数量，不查旧 Journal。下一步先测 `_staged_copy(key)` 的实际耗时和复制容器规模；只有确认它是热点后才收敛复制范围。之后再测 Dashboard 与启动装配，不为了假设中的缓存或层级增加状态。第 5 项作为独立的小型正确性修复，可与第 1 项并行完成。

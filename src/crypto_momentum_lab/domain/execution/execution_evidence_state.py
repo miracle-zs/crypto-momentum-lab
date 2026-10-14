@@ -6,7 +6,6 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
 from crypto_momentum_lab.domain.execution.evidence_digest import digest_json_payload
 from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
 from crypto_momentum_lab.domain.execution.evidence_rules import (
@@ -23,6 +22,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
     PositionKey,
 )
+from crypto_momentum_lab.domain.execution.recovery_models import AccountFacts
 from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
 
 if TYPE_CHECKING:
@@ -70,12 +70,21 @@ def apply_flat_snapshot(
             evidence_id=evidence.evidence_id,
             reason=EvidencePendingReason.STREAM_RECOVERY_PROOF_REQUIRED,
         )
-    if canon not in book._journals or current_scope != scope:
-        book._journals[canon] = AccountJournal(key, stream_scope=scope)
-        book._books[canon] = PositionBook(book._journals[canon])
-        book._journal_revisions[canon] = 0
+    if canon not in book._books or current_scope != scope:
+        book._books[canon] = PositionBook(key, stream_scope=scope)
         book._last_sequences.pop(canon, None)
     book._stream_scopes[canon] = scope
+    position_book = book._ensure_book(key)
+    if position_book.stream_scope != scope:
+        position_book.reset_stream(scope)
+    position_book.apply_delta(
+        AccountFacts(
+            position_key=key,
+            snapshots=(evidence.snapshot,),
+            stream_scope=scope,
+            prefix_facts_complete=False,
+        )
+    )
     return Applied(
         evidence_id=evidence.evidence_id,
         updated_view_token=book._books[canon].get_view().projection_version,
@@ -149,24 +158,25 @@ def apply_stream_rollover(
 ) -> None:
     """Apply an already-validated stream transition to execution book state."""
     canon = key.canonical_id
+    position_book = book._books.get(canon)
     if can_rollover:
         book._stream_scopes[canon] = scope
-        journal = book._journals.get(canon)
-        if journal is not None:
-            journal.adopt_stream_scope(scope)
+        if position_book is None:
+            position_book = PositionBook(key, stream_scope=scope)
+            book._books[canon] = position_book
+        else:
+            position_book.adopt_stream_scope(scope)
         book._recovery_adoption_scope = scope
         book._last_sequences.pop(canon, None)
     elif is_unfilled_terminal_order:
-        if canon not in book._journals:
-            book._journals[canon] = AccountJournal(key, stream_scope=scope)
-            book._books[canon] = PositionBook(book._journals[canon])
-            book._journal_revisions[canon] = 0
+        if position_book is None:
+            book._books[canon] = PositionBook(key, stream_scope=scope)
+        else:
+            position_book.adopt_stream_scope(scope)
         book._stream_scopes[canon] = scope
     else:
-        book._journals[canon] = AccountJournal(key, stream_scope=scope)
-        book._books[canon] = PositionBook(book._journals[canon])
+        book._books[canon] = PositionBook(key, stream_scope=scope)
         book._stream_scopes[canon] = scope
-        book._journal_revisions[canon] = 0
         book._last_sequences.pop(canon, None)
         book._recovery_adoption_scope = scope
 

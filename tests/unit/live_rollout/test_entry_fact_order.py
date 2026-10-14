@@ -194,6 +194,15 @@ async def test_recovery_scope_does_not_block_unrelated_exit(gate):
 async def test_book_commit_invalidates_operational_cache_without_next_candle():
     result = await probe_context("cache_fact_update")
     assert result["passed"], result
+    assert result["unmanaged"] == []
+    assert result["managed_count"] == 1
+
+
+async def test_order_cumulative_report_does_not_create_an_account_fill():
+    result = await probe_context("receipt_before_trade")
+    assert result["passed"], result
+    assert result["managed_count"] == 0
+    assert result["unmanaged"] == ["BTCUSDT"]
 
 
 async def test_rolled_back_facts_do_not_publish_context_revision():

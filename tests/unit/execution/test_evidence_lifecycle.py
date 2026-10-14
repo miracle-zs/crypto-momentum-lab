@@ -5,7 +5,6 @@ from decimal import Decimal
 
 import pytest
 
-from crypto_momentum_lab.domain.account import AccountFillEvent
 from crypto_momentum_lab.domain.execution.command_models import (
     DispatchState,
     ExecutionScope,
@@ -61,32 +60,11 @@ def event(state):
     )
 
 
-def fill(quantity, *, order_id="command-1"):
-    return AccountFillEvent(
-        environment="live",
-        account_label="account-3",
-        symbol="TESTUSDT",
-        trade_id="trade",
-        order_id=order_id,
-        side="SELL",
-        quantity=Decimal(quantity),
-        price=Decimal("12"),
-        realized_pnl=Decimal("0"),
-        fee=Decimal("0"),
-        fee_asset="USDT",
-        trade_at=NOW,
-        raw_payload={},
-    )
-
-
-def plan(entry, state, *, durable=True, fills=()):
+def plan(entry, state):
     return plan_order_event(
         entry,
         event(state),
         observed_at=OBSERVED,
-        account_fills=fills,
-        durable=durable,
-        has_active_reservations=True,
     )
 
 
@@ -143,36 +121,15 @@ def test_nonfilled_terminal_releases_capacity_with_original_reason(entry, state)
     assert result.updated.state is expected
     assert result.updated.last_error == f"Order {state.value}"
     assert result.release_reason == f"order_finished_{state.value.lower()}"
-    assert result.dispatch_reconciled and result.recovery_diagnostic is None
-
-
-@pytest.mark.parametrize(
-    "durable,quantity,release,recovery",
-    [
-        (True, "4", None, True),
-        (False, "4", "order_finished_filled", False),
-        (True, "5", "order_filled_with_confirmed_trades", False),
-    ],
-)
-def test_filled_terminal_requires_real_trades_before_durable_release(
-    entry, durable, quantity, release, recovery
-):
-    result = plan(
-        entry, ExchangeOrderState.FILLED, durable=durable, fills=(fill(quantity),)
-    )
-    assert result.updated.state is DispatchState.TERMINAL
-    assert result.updated.last_error == "prior"
-    assert result.release_reason == release
-    assert bool(result.recovery_diagnostic) is recovery
     assert result.dispatch_reconciled
 
 
-def test_other_order_fills_cannot_release_current_command_reservation(entry):
-    result = plan(
-        entry, ExchangeOrderState.FILLED, fills=(fill("100", order_id="other"),)
-    )
-    assert result.release_reason is None
-    assert result.recovery_diagnostic is not None
+def test_filled_terminal_releases_unused_reservation_capacity(entry):
+    result = plan(entry, ExchangeOrderState.FILLED)
+    assert result.updated.state is DispatchState.TERMINAL
+    assert result.updated.last_error == "prior"
+    assert result.release_reason == "order_finished_filled"
+    assert result.dispatch_reconciled
 
 
 @pytest.mark.parametrize("dispatch", [DispatchState.TERMINAL, DispatchState.REJECTED])
@@ -197,7 +154,6 @@ def test_terminal_commands_ignore_late_events_without_second_release(
 def test_missing_outbox_has_no_lifecycle_effect():
     result = plan(None, ExchangeOrderState.FILLED)
     assert result.updated is None and result.release_reason is None
-    assert result.recovery_diagnostic is None
 
 
 def test_partial_fill_event_does_not_manufacture_command_ack_or_terminal(entry):

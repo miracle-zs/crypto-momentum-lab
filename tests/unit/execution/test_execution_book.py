@@ -12,7 +12,10 @@ from crypto_momentum_lab.domain.execution.command_models import (
     DispatchState,
     ExecutionScope,
 )
-from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
+from crypto_momentum_lab.domain.execution.evidence_models import (
+    ExecutionCumulativeOrderReport,
+    ExecutionEvidence,
+)
 from crypto_momentum_lab.domain.execution.execution_book import (
     Accepted,
     AlreadyAccepted,
@@ -31,11 +34,14 @@ from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     FuturesPositionSide,
 )
+from crypto_momentum_lab.domain.execution.position_book import PositionBook
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     FactCoverageInterval,
     FactCoverageStatus,
+    PositionKey,
     PositionHealthStatus,
 )
+from crypto_momentum_lab.domain.execution.recovery_models import AccountFacts
 from crypto_momentum_lab.domain.execution.trade_command import TradeCommandType
 from crypto_momentum_lab.domain.strategy import StrategySide
 
@@ -51,6 +57,41 @@ def _scope() -> ExecutionScope:
         symbol="BTCUSDT",
         position_side=FuturesPositionSide.LONG,
     )
+
+
+def _replace_position(
+    book: ExecutionBook,
+    key: PositionKey,
+    *,
+    fills=(),
+    snapshots=(),
+    coverage=None,
+    exit_boundaries=(),
+    prefix_facts_complete=True,
+):
+    position_book = book._ensure_book(key)
+    position_book.replace_from_facts(
+        AccountFacts(
+            position_key=key,
+            fills=tuple(fills),
+            snapshots=tuple(snapshots),
+            exit_boundaries=tuple(exit_boundaries),
+            coverage=coverage,
+            stream_scope=book._stream_scopes.get(key.canonical_id),
+            prefix_facts_complete=prefix_facts_complete,
+        )
+    )
+    return position_book
+
+
+def _apply_position_delta(book: ExecutionBook, key: PositionKey, **facts: object):
+    values = dict(facts)
+    values.setdefault("stream_scope", book._stream_scopes.get(key.canonical_id))
+    values.setdefault("prefix_facts_complete", False)
+    values.setdefault("position_key", key)
+    position_book = book._ensure_book(key)
+    position_book.apply_delta(AccountFacts(**values))
+    return position_book
 
 
 async def test_staged_recovery_reload_is_isolated_from_published_book():
@@ -87,9 +128,7 @@ async def test_staged_recovery_reload_is_isolated_from_published_book():
     assert candidate._stream_scopes[key.canonical_id] == scope
 
 
-async def test_committed_epoch_rollover_publishes_journal_with_reset_revision():
-    from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
-    from crypto_momentum_lab.domain.execution.position_book import PositionBook
+async def test_committed_epoch_rollover_publishes_the_new_position_and_head():
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
     )
@@ -100,20 +139,16 @@ async def test_committed_epoch_rollover_publishes_journal_with_reset_revision():
         key, stream_id="account_event_hub", stream_epoch="old"
     )
     new_scope = replace(old_scope, stream_epoch="new")
-    book._journal_for_scope(key, old_scope)
+    book._book_for_scope(key, old_scope)
     book._head_revisions[key.canonical_id] = 10
-    book._journal_revisions[key.canonical_id] = 50
     candidate = book._staged_copy(key)
-    journal = AccountJournal(key, stream_scope=new_scope)
-    candidate._journals[key.canonical_id] = journal
-    candidate._books[key.canonical_id] = PositionBook(journal)
+    position = PositionBook(key, stream_scope=new_scope)
+    candidate._books[key.canonical_id] = position
     candidate._stream_scopes[key.canonical_id] = new_scope
     candidate._head_revisions[key.canonical_id] = 11
-    candidate._journal_revisions[key.canonical_id] = 1
     book._publish_candidate(candidate, key)
-    # The next account/order observation must find the committed epoch's journal.
-    assert book._journal_for_scope(key, new_scope) is journal
-    assert book._journal_revisions[key.canonical_id] == 1
+    assert book._book_for_scope(key, new_scope) is position
+    assert book._head_revisions[key.canonical_id] == 11
     assert (
         await book.read(_scope(), stream_id="account_event_hub", stream_epoch="new")
     ).stream_scope == new_scope
@@ -274,15 +309,16 @@ async def test_flat_position_act_when_head_is_none(side) -> None:
 
     # Set up ready coverage so it can trade
     timestamp = _dt(10, 0)
-    journal = book._ensure_journal(key)
-    journal.set_coverage(
-        FactCoverageInterval(
+    _apply_position_delta(
+        book,
+        key,
+        coverage=FactCoverageInterval(
             start_at=timestamp,
             end_at=timestamp,
             status=FactCoverageStatus.CONFIRMED,
             stream_scope=book._stream_scopes[key.canonical_id],
             evidence_observed_at=timestamp,
-        )
+        ),
     )
     view = await book.read(scope)
 
@@ -355,7 +391,7 @@ async def test_flat_position_act_live_without_coverage_succeeds() -> None:
         key, stream_id="account_event_hub", stream_epoch="live-epoch-20260928"
     )
     book._stream_scopes[key.canonical_id] = stream_scope
-    book._ensure_journal(key)
+    book._ensure_book(key)
 
     # In live trading, a clean flat position has stream scope but NO coverage
     # (credibility is PENDING).
@@ -442,23 +478,26 @@ async def test_open_position_act_live_without_coverage_succeeds() -> None:
     )
     book._stream_scopes[key.canonical_id] = stream_scope
     book._head_revisions[key.canonical_id] = 1
-    journal = book._ensure_journal(key)
-    journal.append_fill(
-        AccountFillEvent(
-            environment="live",
-            account_label="primary",
-            symbol="ALGOUSDT",
-            trade_id="fill-1",
-            order_id="order-1",
-            side="BUY",
-            price=Decimal("1.0"),
-            quantity=Decimal("100.0"),
-            realized_pnl=Decimal("0"),
-            fee=Decimal("0.01"),
-            fee_asset="USDT",
-            trade_at=datetime.now(UTC),
-            raw_payload={"row": {"ps": "LONG"}},
-        )
+    _replace_position(
+        book,
+        key,
+        fills=(
+            AccountFillEvent(
+                environment="live",
+                account_label="primary",
+                symbol="ALGOUSDT",
+                trade_id="fill-1",
+                order_id="order-1",
+                side="BUY",
+                price=Decimal("1.0"),
+                quantity=Decimal("100.0"),
+                realized_pnl=Decimal("0"),
+                fee=Decimal("0.01"),
+                fee_asset="USDT",
+                trade_at=datetime.now(UTC),
+                raw_payload={"row": {"ps": "LONG"}},
+            ),
+        ),
     )
 
     view = await book.read(
@@ -544,15 +583,16 @@ async def test_flat_position_act_can_adopt_older_flat_head() -> None:
 
     # Set up ready coverage so it can trade
     timestamp = _dt(10, 0)
-    journal = book._ensure_journal(key)
-    journal.set_coverage(
-        FactCoverageInterval(
+    _apply_position_delta(
+        book,
+        key,
+        coverage=FactCoverageInterval(
             start_at=timestamp,
             end_at=timestamp,
             status=FactCoverageStatus.CONFIRMED,
             stream_scope=book._stream_scopes[key.canonical_id],
             evidence_observed_at=timestamp,
-        )
+        ),
     )
     view = await book.read(scope)
 
@@ -936,11 +976,12 @@ async def test_execution_book_persists_reservation_link_with_first_outbox_write(
         observed_at=t0,
         raw_payload={},
     )
-    journal = book._ensure_journal(scope.to_position_key())
-    journal.set_coverage(
-        FactCoverageInterval(
+    _apply_position_delta(
+        book,
+        scope.to_position_key(),
+        coverage=FactCoverageInterval(
             start_at=t0, end_at=t0, status=FactCoverageStatus.CONFIRMED
-        )
+        ),
     )
     await book.observe(
         ExecutionEvidence(
@@ -1058,25 +1099,11 @@ async def test_linked_settlement_ignores_late_duplicate() -> None:
             evidence_id=evidence_id,
             scope=scope,
             observed_at=_dt(10, 1),
-            fill=AccountFillEvent(
-                environment="live",
-                account_label="primary",
-                symbol="BTCUSDT",
-                trade_id=f"{order_id}-cum-{quantity}",
-                order_id=order_id,
-                side="SELL",
-                price=Decimal("100"),
-                quantity=cumulative,
-                realized_pnl=Decimal("0"),
-                fee=Decimal("0"),
-                fee_asset="USDT",
-                trade_at=_dt(10, 1),
-                raw_payload={
-                    "is_cumulative": True,
-                    "cum_qty": quantity,
-                    "cum_quote": str(cumulative * Decimal("100")),
-                    "reduce_only": True,
-                },
+            cumulative_order=ExecutionCumulativeOrderReport(
+                order_id,
+                cumulative,
+                cumulative * Decimal("100"),
+                _dt(10, 1),
             ),
             order_event=ExchangeOrderEvent(
                 event_id=evidence_id,
@@ -1151,7 +1178,7 @@ async def test_linked_settlement_ignores_late_duplicate() -> None:
 
 
 @pytest.mark.asyncio
-async def test_duplicate_trade_id_does_not_consume_twice() -> None:
+async def test_duplicate_order_report_does_not_consume_twice() -> None:
     from crypto_momentum_lab.domain.execution.trade_command import (
         PositionReservation,
         TradeCommand,
@@ -1188,20 +1215,11 @@ async def test_duplicate_trade_id_does_not_consume_twice() -> None:
             evidence_id=evidence_id,
             scope=scope,
             observed_at=_dt(10, 0),
-            fill=AccountFillEvent(
-                environment="live",
-                account_label="primary",
-                symbol="BTCUSDT",
-                trade_id="exchange-trade-1",
-                order_id="order-duplicate-trade",
-                side="SELL",
-                price=Decimal("100"),
-                quantity=Decimal("2"),
-                realized_pnl=Decimal("0"),
-                fee=Decimal("0"),
-                fee_asset="USDT",
-                trade_at=_dt(10, 0),
-                raw_payload={"reduce_only": True},
+            cumulative_order=ExecutionCumulativeOrderReport(
+                "order-duplicate-trade",
+                Decimal("2"),
+                Decimal("200"),
+                _dt(10, 0),
             ),
         )
 
@@ -1241,13 +1259,14 @@ async def test_execution_book_outbox_lifecycle_and_transitions() -> None:
         trade_at=t0,
         raw_payload={"positionSide": "LONG"},
     )
-    journal = book._ensure_journal(key)
-    journal.set_coverage(
-        FactCoverageInterval(
+    _apply_position_delta(
+        book,
+        key,
+        coverage=FactCoverageInterval(
             start_at=t0,
             end_at=t0,
             status=FactCoverageStatus.CONFIRMED,
-        )
+        ),
     )
     await book.observe(
         ExecutionEvidence(
@@ -1327,13 +1346,14 @@ async def test_execution_book_cumulative_fills_and_reservation_settlement() -> N
         trade_at=t0,
         raw_payload={"positionSide": "LONG"},
     )
-    journal = book._ensure_journal(key)
-    journal.set_coverage(
-        FactCoverageInterval(
+    _apply_position_delta(
+        book,
+        key,
+        coverage=FactCoverageInterval(
             start_at=t0,
             end_at=t0,
             status=FactCoverageStatus.CONFIRMED,
-        )
+        ),
     )
     await book.observe(
         ExecutionEvidence(
@@ -1364,23 +1384,15 @@ async def test_execution_book_cumulative_fills_and_reservation_settlement() -> N
     assert r0.active_quantity == Decimal("5.0")
 
     # Report 1: cumulative filled = 3.0
-    f_cum1 = AccountFillEvent(
-        environment="live",
-        account_label="primary",
-        symbol="BTCUSDT",
-        trade_id="t_fill_1",
-        order_id="req-exit-cum",
-        side="SELL",
-        price=Decimal("61000"),
-        quantity=Decimal("3.0"),
-        realized_pnl=Decimal("100"),
-        fee=Decimal("1"),
-        fee_asset="USDT",
-        trade_at=t0,
-        raw_payload={"positionSide": "LONG", "is_cumulative": True, "cum_qty": "3.0"},
-    )
     app1 = await book.observe(
-        ExecutionEvidence(evidence_id="ev_c1", scope=scope, observed_at=t0, fill=f_cum1)
+        ExecutionEvidence(
+            evidence_id="ev_c1",
+            scope=scope,
+            observed_at=t0,
+            cumulative_order=ExecutionCumulativeOrderReport(
+                "req-exit-cum", Decimal("3.0"), Decimal("183000"), t0
+            ),
+        )
     )
     assert isinstance(app1, Applied)
     assert app1.consumed_quantity == Decimal("3.0")
@@ -1391,23 +1403,15 @@ async def test_execution_book_cumulative_fills_and_reservation_settlement() -> N
     assert r1.active_quantity == Decimal("2.0")
 
     # Report 2: duplicate cumulative filled = 3.0 (must consume 0 delta)
-    f_cum2 = AccountFillEvent(
-        environment="live",
-        account_label="primary",
-        symbol="BTCUSDT",
-        trade_id="t_fill_2",
-        order_id="req-exit-cum",
-        side="SELL",
-        price=Decimal("61000"),
-        quantity=Decimal("3.0"),
-        realized_pnl=Decimal("100"),
-        fee=Decimal("1"),
-        fee_asset="USDT",
-        trade_at=t0,
-        raw_payload={"positionSide": "LONG", "is_cumulative": True, "cum_qty": "3.0"},
-    )
     app2 = await book.observe(
-        ExecutionEvidence(evidence_id="ev_c2", scope=scope, observed_at=t0, fill=f_cum2)
+        ExecutionEvidence(
+            evidence_id="ev_c2",
+            scope=scope,
+            observed_at=t0,
+            cumulative_order=ExecutionCumulativeOrderReport(
+                "req-exit-cum", Decimal("3.0"), Decimal("183000"), t0
+            ),
+        )
     )
     assert isinstance(app2, Applied)
     assert app2.consumed_quantity == Decimal("0")
@@ -1418,23 +1422,15 @@ async def test_execution_book_cumulative_fills_and_reservation_settlement() -> N
     assert r2.active_quantity == Decimal("2.0")
 
     # Report 3: cumulative filled = 5.0 (delta = 2.0, must consume remaining 2.0)
-    f_cum3 = AccountFillEvent(
-        environment="live",
-        account_label="primary",
-        symbol="BTCUSDT",
-        trade_id="t_fill_3",
-        order_id="req-exit-cum",
-        side="SELL",
-        price=Decimal("61000"),
-        quantity=Decimal("5.0"),
-        realized_pnl=Decimal("150"),
-        fee=Decimal("1"),
-        fee_asset="USDT",
-        trade_at=t0,
-        raw_payload={"positionSide": "LONG", "is_cumulative": True, "cum_qty": "5.0"},
-    )
     app3 = await book.observe(
-        ExecutionEvidence(evidence_id="ev_c3", scope=scope, observed_at=t0, fill=f_cum3)
+        ExecutionEvidence(
+            evidence_id="ev_c3",
+            scope=scope,
+            observed_at=t0,
+            cumulative_order=ExecutionCumulativeOrderReport(
+                "req-exit-cum", Decimal("5.0"), Decimal("305000"), t0
+            ),
+        )
     )
     assert isinstance(app3, Applied)
     assert app3.consumed_quantity == Decimal("2.0")
@@ -1473,13 +1469,14 @@ async def test_execution_book_partial_fill_and_order_cancel_event() -> None:
         trade_at=t0,
         raw_payload={"positionSide": "LONG"},
     )
-    journal = book._ensure_journal(key)
-    journal.set_coverage(
-        FactCoverageInterval(
+    _apply_position_delta(
+        book,
+        key,
+        coverage=FactCoverageInterval(
             start_at=t0,
             end_at=t0,
             status=FactCoverageStatus.CONFIRMED,
-        )
+        ),
     )
     await book.observe(
         ExecutionEvidence(
@@ -1522,7 +1519,16 @@ async def test_execution_book_partial_fill_and_order_cancel_event() -> None:
     )
     await book.observe(
         ExecutionEvidence(
-            evidence_id="ev_part", scope=scope, observed_at=t0, fill=f_part
+            evidence_id="ev_part",
+            scope=scope,
+            observed_at=t0,
+            fill=f_part,
+            cumulative_order=ExecutionCumulativeOrderReport(
+                "cmd-exit-partial",
+                Decimal("0.8"),
+                Decimal("48800"),
+                t0,
+            ),
         )
     )
 
@@ -1568,14 +1574,12 @@ async def test_execution_book_partial_fill_and_order_cancel_event() -> None:
 
 
 def test_position_view_changes_only_after_new_position_facts():
-    from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
     from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
-    from crypto_momentum_lab.domain.execution.position_book import PositionBook
     from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
+    from crypto_momentum_lab.domain.execution.recovery_models import AccountFacts
 
     key = PositionKey("live", "acc", "BTCUSDT", FuturesPositionSide.LONG)
-    journal = AccountJournal(key)
-    book = PositionBook(journal)
+    book = PositionBook.from_facts(AccountFacts(position_key=key))
 
     view1 = book.get_view()
 
@@ -1598,11 +1602,12 @@ def test_position_view_changes_only_after_new_position_facts():
         observed_at=now,
         raw_payload={},
     )
-    journal.record_snapshot(snap)
-    assert journal.revision == 1
+    book.apply_delta(
+        AccountFacts(position_key=key, snapshots=(snap,), prefix_facts_complete=False)
+    )
 
     view3 = book.get_view()
-    assert view3.input_revision == 1
+    assert view3.input_revision == 2
     assert view3.projection_version != view1.projection_version
 
 
@@ -1625,14 +1630,12 @@ def test_facts_hash_is_deterministic_and_position_scoped():
 
 
 def test_later_read_without_new_facts_preserves_position_version():
-    from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
     from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
-    from crypto_momentum_lab.domain.execution.position_book import PositionBook
     from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
+    from crypto_momentum_lab.domain.execution.recovery_models import AccountFacts
 
     key = PositionKey("live", "acc", "BTCUSDT", FuturesPositionSide.LONG)
-    journal = AccountJournal(key)
-    book = PositionBook(journal)
+    book = PositionBook.from_facts(AccountFacts(position_key=key))
 
     cut1 = datetime(2026, 9, 28, 12, 0, 0, tzinfo=UTC)
     cut2 = datetime(2026, 9, 28, 12, 0, 15, tzinfo=UTC)
@@ -1647,14 +1650,12 @@ def test_later_read_without_new_facts_preserves_position_version():
     assert view3.projection_version == view1.projection_version
 
 
-def test_account_journal_appends_fill_with_nested_position_side():
+def test_account_fill_reads_nested_position_side():
     from crypto_momentum_lab.domain.account.models import AccountFillEvent
-    from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
     from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
     from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
 
     key = PositionKey("live", "primary", "牛来USDT", FuturesPositionSide.LONG)
-    journal = AccountJournal(key)
     fill = AccountFillEvent(
         environment="live",
         account_label="primary",
@@ -1670,9 +1671,7 @@ def test_account_journal_appends_fill_with_nested_position_side():
         trade_at=datetime(2026, 9, 28, 12, 0, 0, tzinfo=UTC),
         raw_payload={"row": {"ps": "LONG"}},
     )
-    rev = journal.append_fill(fill)
-    assert rev == 1
-    assert len(journal.read_cut().fills) == 1
+    assert fill.raw_position_side == key.position_side.value
 
 
 def test_recover_durable_position_recomputes_stale_projection_digest() -> None:
@@ -1694,12 +1693,10 @@ def test_recover_durable_position_recomputes_stale_projection_digest() -> None:
     scope = AccountFactStreamScope.for_position_key(
         key, stream_id="s1", stream_epoch="epoch-1"
     )
-    facts = AccountFacts(
-        position_key=key,
-        stream_scope=scope,
-        fills=(),
-        prefix_facts_complete=True,
+    position_book = PositionBook.from_facts(
+        AccountFacts(position_key=key, stream_scope=scope)
     )
+    facts = position_book.current_facts
     cut = DurableJournalCut(
         scope=scope,
         as_of=datetime.now(UTC),
@@ -1838,19 +1835,24 @@ def test_reconnect_selects_latest_registered_epoch_for_each_account() -> None:
 
 
 @pytest.mark.parametrize(
-    "state_payload",
+    ("state_payload", "remove_last_sequence"),
     [
-        {"active_reservation_ids": "invalid", "last_sequence": None},
-        {"active_reservation_ids": [1], "last_sequence": None},
-        {"active_reservation_ids": [], "last_sequence": True},
-        {"active_reservation_ids": []},
+        ({"active_reservation_ids": "invalid"}, False),
+        ({"active_reservation_ids": [1]}, False),
+        ({"last_sequence": True}, False),
+        ({}, True),
     ],
 )
 @pytest.mark.asyncio
-async def test_reload_rejects_malformed_durable_head_fields(state_payload) -> None:
+async def test_reload_rejects_malformed_durable_head_fields(
+    state_payload, remove_last_sequence
+) -> None:
     from crypto_momentum_lab.domain.execution.ports import (
         DurableExecutionPositionState,
         ExecutionHeadSnapshot,
+    )
+    from crypto_momentum_lab.domain.execution.execution_head import (
+        build_execution_head_payload,
     )
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
@@ -1866,12 +1868,24 @@ async def test_reload_rejects_malformed_durable_head_fields(state_payload) -> No
         key, stream_id="hub", stream_epoch="epoch"
     )
     now = datetime(2026, 9, 29, 10, tzinfo=UTC)
+    position_book = PositionBook.from_facts(
+        AccountFacts(position_key=key, stream_scope=scope)
+    )
     cut = DurableJournalCut(
         scope=scope,
-        facts=AccountFacts(position_key=key, stream_scope=scope),
+        facts=position_book.current_facts,
         revision=0,
         as_of=now,
     )
+    head_book = ExecutionBook()
+    head_book._stream_scopes[key.canonical_id] = scope
+    head_book._books[key.canonical_id] = position_book
+    payload = build_execution_head_payload(
+        head_book, key, active_reservations=lambda _: ()
+    )
+    payload.update(state_payload)
+    if remove_last_sequence:
+        payload.pop("last_sequence")
     state = DurableExecutionPositionState(
         scope=scope,
         cut=cut,
@@ -1880,7 +1894,7 @@ async def test_reload_rejects_malformed_durable_head_fields(state_payload) -> No
             stream_id=scope.stream_id,
             stream_epoch=scope.stream_epoch,
             projection_version="pv-1",
-            state_payload=state_payload,
+            state_payload=payload,
         ),
         trade_ids=(),
         evidence_ids=(),
@@ -2041,8 +2055,7 @@ async def test_restore_durable_positions_migrates_facts_hash_when_no_reservation
         )
 
 
-async def test_restore_durable_positions_heals_mismatch_even_with_active_reservations(
-) -> None:
+async def test_restore_durable_positions_rejects_legacy_head_with_reservations():
     from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
     from crypto_momentum_lab.domain.execution.ports import (
         DurableExecutionPositionState,
@@ -2220,60 +2233,34 @@ def test_active_reservation_query_preserves_order_and_scope(query) -> None:
     ("policy_version", "schema_version"),
     [("policy-custom", "v1"), ("v1", "schema-custom")],
 )
-def test_historical_view_preserves_configuration_and_current_state(
+def test_current_view_preserves_configuration_and_durable_token(
     policy_version, schema_version
 ) -> None:
-    from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
-    from crypto_momentum_lab.domain.execution.position_book import PositionBook
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
         PositionKey,
     )
-    from crypto_momentum_lab.domain.execution.recovery_models import (
-        AccountFacts,
-        DurableJournalCut,
-    )
+    from crypto_momentum_lab.domain.execution.recovery_models import AccountFacts
 
     key = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
     scope = AccountFactStreamScope.for_position_key(
         key, stream_id="accounts", stream_epoch="epoch-1"
     )
-    cut = DurableJournalCut(
-        scope=scope,
-        as_of=_dt(10, 0),
-        facts=AccountFacts(position_key=key, stream_scope=scope),
-        revision=1,
-    )
-    book = PositionBook(
-        AccountJournal.from_durable_cut(cut),
+    book = PositionBook.from_facts(
+        AccountFacts(position_key=key, stream_scope=scope),
         policy_version=policy_version,
         schema_version=schema_version,
     )
-    book.use_durable_projection_version("live-token", event_cut=cut.as_of)
-    before = book.get_view(now=cut.as_of)
-    historical = book.get_historical_view(cut, event_cut=cut.as_of, now=cut.as_of)
-    expected = PositionBook(
-        AccountJournal.from_durable_cut(cut),
-        policy_version=policy_version,
-        schema_version=schema_version,
-    ).get_view(cut=cut.as_of, now=cut.as_of)
-    default = PositionBook(AccountJournal.from_durable_cut(cut)).get_view(
-        cut=cut.as_of, now=cut.as_of
-    )
-    assert historical == expected
-    assert historical.policy_version == policy_version
-    assert historical.schema_version == schema_version
-    assert (historical.policy_version, historical.schema_version) != (
-        default.policy_version,
-        default.schema_version,
-    )
-    assert historical.projection_version != "live-token"
-    assert book.get_view(now=cut.as_of) == before
+    as_of = _dt(10, 0)
+    book.use_durable_projection_version("live-token", event_cut=as_of)
+    before = book.get_view(now=as_of)
+    assert before.policy_version == policy_version
+    assert before.schema_version == schema_version
+    assert before.projection_version == "live-token"
+    assert book.get_view(now=as_of) == before
 
 
-async def test_nonempty_historical_read_preserves_latest_position() -> None:
-    from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
-    from crypto_momentum_lab.domain.execution.position_book import PositionBook
+async def test_historical_read_is_rejected_when_current_state_has_advanced() -> None:
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
     )
@@ -2305,17 +2292,6 @@ async def test_nonempty_historical_read_preserves_latest_position() -> None:
         )
         for minute in (0, 1)
     )
-    historical_cut = DurableJournalCut(
-        scope=stream,
-        as_of=_dt(10, 0),
-        revision=1,
-        facts=AccountFacts(
-            position_key=key,
-            stream_scope=stream,
-            fills=fills[:1],
-            prefix_facts_complete=True,
-        ),
-    )
     latest_cut = DurableJournalCut(
         scope=stream,
         as_of=_dt(10, 1),
@@ -2329,32 +2305,21 @@ async def test_nonempty_historical_read_preserves_latest_position() -> None:
     )
 
     class Uow:
-        def __init__(self):
-            self.reads = []
-
-        async def load_journal_cut(self, *, scope, as_of):
-            self.reads.append((scope, as_of))
-            return historical_cut
-
         def transaction(self, key):
             raise AssertionError("historical read must not start a write transaction")
 
     uow = Uow()
     book = ExecutionBook(execution_unit_of_work=uow)
     book._persistence_failed = False
-    journal = AccountJournal.from_durable_cut(latest_cut)
-    book._journals[key.canonical_id] = journal
-    book._books[key.canonical_id] = PositionBook(journal)
+    book._books[key.canonical_id] = PositionBook.from_facts(latest_cut.facts)
     book._stream_scopes[key.canonical_id] = stream
     before = await book.read(scope, now=_dt(10, 1))
-    historical = await book.read(scope, event_cut=_dt(10, 0), now=_dt(10, 1))
+    with pytest.raises(ValueError, match="historical position cuts are not held in memory"):
+        await book.read(scope, event_cut=_dt(10, 0), now=_dt(10, 1))
     after = await book.read(scope, now=_dt(10, 1))
 
     assert before.total_quantity == Decimal("2")
-    assert historical.total_quantity == Decimal("1")
-    assert historical.event_cut == _dt(10, 0)
     assert after == before
-    assert uow.reads == [(stream, _dt(10, 0))]
 
 
 @pytest.mark.asyncio
@@ -2532,7 +2497,7 @@ async def test_outbox_scope_controls_cross_stream_read(
                 _scope(), stream_id="account_event_hub", stream_epoch="new-epoch"
             )
         assert book._stream_scopes[key.canonical_id].stream_epoch == "old-epoch"
-        assert key.canonical_id not in book._journals
+        assert key.canonical_id not in book._books
     else:
         view = await book.read(
             _scope(), stream_id="account_event_hub", stream_epoch="new-epoch"
@@ -2610,6 +2575,9 @@ async def test_restore_deduplicates_equal_command_rows_and_rejects_conflicts(
 async def test_restore_preserves_diverged_reservations_and_provides_recovery() -> None:
     from unittest.mock import AsyncMock
 
+    from crypto_momentum_lab.domain.execution.execution_head import (
+        build_execution_head_payload,
+    )
     from crypto_momentum_lab.domain.execution.ports import (
         DurableExecutionPositionState,
         ExecutionHeadSnapshot,
@@ -2628,12 +2596,10 @@ async def test_restore_preserves_diverged_reservations_and_provides_recovery() -
     scope = AccountFactStreamScope.for_position_key(
         key, stream_id="stream", stream_epoch="epoch"
     )
-    facts = AccountFacts(
-        position_key=key,
-        stream_scope=scope,
-        fills=(),
-        prefix_facts_complete=True,
+    position_book = PositionBook.from_facts(
+        AccountFacts(position_key=key, stream_scope=scope)
     )
+    facts = position_book.current_facts
     cut = DurableJournalCut(
         scope=scope,
         as_of=datetime.now(UTC),
@@ -2641,38 +2607,13 @@ async def test_restore_preserves_diverged_reservations_and_provides_recovery() -
         checkpoint=None,
         revision=1,
     )
-    from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
-    from crypto_momentum_lab.domain.execution.evidence_digest import view_projection_digest
-    from crypto_momentum_lab.domain.execution.position_book import PositionBook
-    from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
-    from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
-
-    payload_with_active_res = {
-        "schema_version": 1,
-        "position_key": {
-            "environment": key.environment,
-            "account_label": key.account_label,
-            "symbol": key.symbol,
-            "position_side": key.position_side.value,
-        },
-        "stream_scope": {
-            "stream_id": scope.stream_id,
-            "stream_epoch": scope.stream_epoch,
-        },
-        "facts_hash": facts.compute_facts_hash(),
-        "projection_digest": PositionRecoveryCodec.compute_projection_digest(
-            PositionLedger(key).project(facts)
-        ),
-        "view_digest": view_projection_digest(
-            PositionBook(AccountJournal.from_durable_cut(cut)).get_view()
-        ),
-        "recovery_checkpoint": None,
-        "journal_revision": 1,
-        "active_reservation_ids": ["res-1", "res-2"],
-        "recovery_command_ids": [],
-        "external_recovery_ids": [],
-        "last_sequence": None,
-    }
+    book = ExecutionBook()
+    book._stream_scopes[key.canonical_id] = scope
+    book._books[key.canonical_id] = position_book
+    payload_with_active_res = build_execution_head_payload(
+        book, key, active_reservations=lambda _: ()
+    )
+    payload_with_active_res["active_reservation_ids"] = ["res-1", "res-2"]
     head = ExecutionHeadSnapshot(
         stream_id=scope.stream_id,
         stream_epoch=scope.stream_epoch,

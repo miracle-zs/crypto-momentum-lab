@@ -2,9 +2,7 @@
 
 from dataclasses import dataclass, replace
 from datetime import datetime
-from decimal import Decimal
 
-from crypto_momentum_lab.domain.account.models import AccountFillEvent
 from crypto_momentum_lab.domain.execution.command_models import (
     DispatchState,
     OutboxEntry,
@@ -13,35 +11,14 @@ from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
     ExchangeOrderState,
 )
-from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
 
 
 @dataclass(frozen=True, slots=True)
 class OrderEventPlan:
     updated: OutboxEntry | None = None
     release_reason: str | None = None
-    recovery_diagnostic: str | None = None
-    pending_trade_diagnostic: str | None = None
     requires_dispatch_reconciliation: bool = False
     dispatch_reconciled: bool = False
-
-
-def settlement_trade_facts(
-    journal_fills: tuple[AccountFillEvent, ...],
-    historical_fills: tuple[AccountFillEvent, ...],
-) -> tuple[AccountFillEvent, ...]:
-    """Join real identities for settlement only; never append a position fact."""
-    if not historical_fills:
-        return journal_fills
-    trades = {fill.trade_id: fill for fill in journal_fills}
-    for fill in historical_fills:
-        prior = trades.get(fill.trade_id)
-        if prior is not None and (
-            prior.quantity, prior.price, prior.side, prior.trade_at,
-        ) != (fill.quantity, fill.price, fill.side, fill.trade_at):
-            raise ValueError("historical settlement trade conflicts with journal fact")
-        trades[fill.trade_id] = fill
-    return tuple(trades.values())
 
 
 def plan_order_event(
@@ -49,9 +26,6 @@ def plan_order_event(
     event: ExchangeOrderEvent,
     *,
     observed_at: datetime,
-    account_fills: tuple[AccountFillEvent, ...],
-    durable: bool,
-    has_active_reservations: bool,
 ) -> OrderEventPlan:
     if outbox is None or outbox.state in (
         DispatchState.TERMINAL,
@@ -101,34 +75,9 @@ def plan_order_event(
                 release_reason=f"order_finished_{state.value.lower()}",
                 dispatch_reconciled=True,
             )
-        confirmed = sum(
-            (
-                fill.quantity
-                for fill in account_fills
-                if fill.order_id in (event.client_order_id, outbox.external_order_id)
-            ),
-            Decimal("0"),
-        )
-        if confirmed >= outbox.command.requested_quantity or not durable:
-            return OrderEventPlan(
-                updated=updated,
-                release_reason="order_filled_with_confirmed_trades"
-                if confirmed >= outbox.command.requested_quantity
-                else "order_finished_filled",
-                dispatch_reconciled=True,
-            )
-        if not has_active_reservations:
-            return OrderEventPlan(
-                updated=updated,
-                pending_trade_diagnostic="Order settled; awaiting real account trades",
-                dispatch_reconciled=True,
-            )
         return OrderEventPlan(
             updated=updated,
-            recovery_diagnostic=(
-                "Filled terminal lacks complete account trade facts; "
-                "active reservation is retained for recovery"
-            ),
+            release_reason="order_finished_filled",
             dispatch_reconciled=True,
         )
     if state == ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
@@ -142,42 +91,3 @@ def plan_order_event(
             requires_dispatch_reconciliation=True,
         )
     return OrderEventPlan()
-
-
-def terminal_settlement_is_confirmed(
-    outbox: OutboxEntry,
-    *,
-    account_fills: tuple[AccountFillEvent, ...],
-    cumulative_quantity: Decimal,
-    reservations: tuple[PositionReservation | None, ...],
-    allow_active_reservations: bool = False,
-) -> bool:
-    """Prove a terminal command's trade and reservation quantities agree."""
-    if outbox.state is not DispatchState.TERMINAL:
-        return False
-    confirmed = sum(
-        (fill.quantity for fill in account_fills
-         if fill.order_id in (outbox.command_id, outbox.external_order_id)),
-        Decimal("0"),
-    )
-    if confirmed != cumulative_quantity:
-        return False
-    if not outbox.command.reduce_only:
-        return confirmed == outbox.command.requested_quantity
-    if not Decimal("0") < confirmed <= outbox.command.requested_quantity:
-        return False
-    if not reservations or any(reservation is None for reservation in reservations):
-        return False
-    consumed = Decimal("0")
-    reserved = Decimal("0")
-    for reservation in reservations:
-        assert reservation is not None
-        if (
-            reservation.command_id != outbox.command_id
-            or reservation.position_key != outbox.scope.to_position_key()
-            or (not allow_active_reservations and reservation.active_quantity != 0)
-        ):
-            return False
-        consumed += reservation.consumed_quantity
-        reserved += reservation.reserved_quantity
-    return consumed == confirmed and reserved == outbox.command.requested_quantity

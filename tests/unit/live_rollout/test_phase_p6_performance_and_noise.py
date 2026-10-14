@@ -67,7 +67,6 @@ async def test_inactive_head_migrations_are_consolidated_at_info_level(monkeypat
         watermarks=(),
         head=None,
     )
-    mock_journal = SimpleNamespace()
     mock_book = SimpleNamespace()
     diagnostics = [
         (
@@ -87,7 +86,6 @@ async def test_inactive_head_migrations_are_consolidated_at_info_level(monkeypat
     key = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
     recovered = RecoveredPosition(
         key=key,
-        journal=mock_journal,
         book=mock_book,
         head_revision=1,
         projection_digest="digest",

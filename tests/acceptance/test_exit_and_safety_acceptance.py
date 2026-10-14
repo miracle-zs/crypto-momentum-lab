@@ -57,7 +57,6 @@ from crypto_momentum_lab.domain.account.models import (
     AccountPositionSnapshot,
 )
 from crypto_momentum_lab.domain.account.snapshot_models import AccountSnapshot
-from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
 from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
 from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
 from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
@@ -71,6 +70,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     ExitOrderSubmissionFact,
     PositionKey,
 )
+from crypto_momentum_lab.domain.execution.recovery_models import AccountFacts
 from crypto_momentum_lab.domain.strategy.position_exit import PositionExitMode
 from crypto_momentum_lab.execution_account.binance.client import BinanceUsdMTradeClient
 from crypto_momentum_lab.execution_account.binance.user_data_parser import (
@@ -94,9 +94,6 @@ from crypto_momentum_lab.live_rollout.postgres_runtime import (
 )
 from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
     ExecutionBookHeadRow,
-)
-from crypto_momentum_lab.persistence.postgres.models import (
-    PositionFactJournalEventRow,
 )
 from crypto_momentum_lab.persistence.postgres.session import (
     create_async_database_engine,
@@ -742,19 +739,21 @@ def test_a_single_flat_snapshot_does_not_prove_responsibility_ended() -> None:
     key: PositionKey = _ledger_key()
     scope = _ledger_scope(key)
     boundary_at = _ledger_time(2)
-    journal = AccountJournal(key, stream_scope=scope)
-    journal.append_fill(_ledger_fill(key, "open-1", "BUY", "2", "100", _ledger_time(1)))
-    journal.record_boundary(
-        ExitOrderSubmissionFact(
+    view = PositionBook.from_facts(
+        AccountFacts(
+            position_key=key,
+            stream_scope=scope,
+            fills=(_ledger_fill(key, "open-1", "BUY", "2", "100", _ledger_time(1)),),
+            exit_boundaries=(
+                ExitOrderSubmissionFact(
             order_id="ex-exit-1",
             submitted_at=boundary_at,
             symbol=key.symbol,
             position_side=key.position_side,
             client_order_id="cml-grace-limit-1",
-        )
-    )
-    journal.record_snapshot(
-        AccountPositionSnapshot(
+                ),
+            ),
+            snapshots=(AccountPositionSnapshot(
             environment=key.environment,
             account_label=key.account_label,
             symbol=key.symbol,
@@ -768,10 +767,9 @@ def test_a_single_flat_snapshot_does_not_prove_responsibility_ended() -> None:
             margin_type="cross",
             observed_at=_ledger_time(3),
             raw_payload={"include_flat": True},
+            ),),
         )
-    )
-
-    view = PositionBook(journal).get_view()
+    ).get_view()
 
     assert view.zero_position_snapshot_confirmed is False, (
         "a single flat snapshot was treated as proof that the exit responsibility ended"
@@ -783,14 +781,20 @@ def test_a_single_flat_snapshot_does_not_prove_responsibility_ended() -> None:
     assert view.batches[0].exit_order_submitted_at == boundary_at
 
 
-def test_old_history_and_the_active_view_are_independently_readable() -> None:
-    """Older cuts stay readable while the active ledger moves on."""
+def test_position_book_keeps_only_the_current_view() -> None:
+    """Historical cuts are not retained in the live in-memory position book."""
     key = _ledger_key()
     scope = _ledger_scope(key)
-    journal = AccountJournal(key, stream_scope=scope)
-    journal.append_fill(_ledger_fill(key, "open-1", "BUY", "2", "100", _ledger_time(1)))
-    journal.append_fill(_ledger_fill(key, "open-2", "BUY", "3", "120", _ledger_time(5)))
-    book = PositionBook(journal)
+    book = PositionBook.from_facts(
+        AccountFacts(
+            position_key=key,
+            stream_scope=scope,
+            fills=(
+                _ledger_fill(key, "open-1", "BUY", "2", "100", _ledger_time(1)),
+                _ledger_fill(key, "open-2", "BUY", "3", "120", _ledger_time(5)),
+            ),
+        )
+    )
 
     current = book.get_view()
     assert current.total_quantity == Decimal("5")
@@ -798,13 +802,8 @@ def test_old_history_and_the_active_view_are_independently_readable() -> None:
     assert current.batches[0].entry_price == Decimal("112")
     assert current.batches[0].original_quantity == Decimal("5")
 
-    historical = book.get_view(_ledger_time(2))
-    assert historical.total_quantity == Decimal("2")
-    assert len(historical.batches) == 1
-    assert historical.batches[0].entry_price == Decimal("100")
-    assert historical.batches[0].batch_id == current.batches[0].batch_id
-
-    # Reading old history does not disturb the active responsibility.
+    with pytest.raises(ValueError, match="historical position cuts are not held in memory"):
+        book.get_view(_ledger_time(2))
     assert book.get_view().total_quantity == Decimal("5")
 
 
@@ -941,18 +940,22 @@ async def test_grace_retry_keeps_the_original_boundary_without_a_database() -> N
     key = _ledger_key()
     scope = _ledger_scope(key)
     boundary_at = _ledger_time(2)
-    journal = AccountJournal(key, stream_scope=scope)
-    journal.append_fill(_ledger_fill(key, "open-1", "BUY", "2", "100", _ledger_time(1)))
-    journal.record_boundary(
-        ExitOrderSubmissionFact(
-            order_id="ex-exit-1",
-            submitted_at=boundary_at,
-            symbol=key.symbol,
-            position_side=key.position_side,
-            client_order_id="cml-grace-limit-1",
+    view = PositionBook.from_facts(
+        AccountFacts(
+            position_key=key,
+            stream_scope=scope,
+            fills=(_ledger_fill(key, "open-1", "BUY", "2", "100", _ledger_time(1)),),
+            exit_boundaries=(
+                ExitOrderSubmissionFact(
+                    order_id="ex-exit-1",
+                    submitted_at=boundary_at,
+                    symbol=key.symbol,
+                    position_side=key.position_side,
+                    client_order_id="cml-grace-limit-1",
+                ),
+            ),
         )
-    )
-    view = PositionBook(journal).get_view()
+    ).get_view()
     positions = managed_live_positions_from_views((view,))
     assert len(positions) == 1
     batch_views = positions[0].batch_views()
@@ -1021,7 +1024,7 @@ async def test_incompatible_durable_state_stops_restore_instead_of_wiping_it(
                 .values(state_payload=payload)
             )
 
-        with pytest.raises(RuntimeError, match="malformed"):
+        with pytest.raises(RuntimeError, match="unsupported execution head schema"):
             await _book(factory).restore(account_label=account)
 
         async with factory() as session:
@@ -1034,18 +1037,10 @@ async def test_incompatible_durable_state_stops_restore_instead_of_wiping_it(
             ).scalar_one()
             assert preserved_head.state_payload["schema_version"] == 99
             assert preserved_head.revision >= 1
-            assert preserved_head.state_payload["facts_hash"]
-            facts = (
-                (
-                    await session.execute(
-                        select(PositionFactJournalEventRow).where(
-                            PositionFactJournalEventRow.account_label == account
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            assert facts, "the incompatible restore wiped the durable facts"
+            assert "position_state" in preserved_head.state_payload
+            assert (
+                preserved_head.state_payload["position_key"]["account_label"]
+                == account
+            ), "the incompatible restore wiped the durable facts"
     finally:
         await engine.dispose()

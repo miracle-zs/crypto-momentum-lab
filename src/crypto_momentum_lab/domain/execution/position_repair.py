@@ -1,12 +1,12 @@
 """Compute safe position repairs and validate committed reloads."""
 
 from decimal import Decimal
+from dataclasses import replace
 
-from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
-from crypto_momentum_lab.domain.execution.evidence_codec import (
-    recovery_checkpoint_head_binding,
+from crypto_momentum_lab.domain.execution.execution_head import (
+    EXECUTION_HEAD_SCHEMA_VERSION,
+    decode_execution_head_state,
 )
-from crypto_momentum_lab.domain.execution.evidence_digest import view_projection_digest
 from crypto_momentum_lab.domain.execution.ports import (
     DurableExecutionPositionState,
 )
@@ -22,7 +22,7 @@ from crypto_momentum_lab.domain.execution.position_repair_models import (
     PositionRepairFacts,
     PositionRepairRequest,
 )
-from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
+from crypto_momentum_lab.domain.execution.projection_codec import encode_position_key
 
 
 def build_position_repair(
@@ -49,14 +49,29 @@ def build_position_repair(
         )
     if not loaded.account_fills:
         raise PositionRepairBlocked("complete account fill facts are missing")
-    journal = AccountJournal.from_durable_cut(loaded.cut)
-    inserted = sum(journal.append_fill(fill) for fill in loaded.account_fills)
-    view = PositionBook(journal).get_view()
+    fills_by_id = {fill.trade_id: fill for fill in loaded.cut.facts.fills}
+    inserted = 0
+    for fill in loaded.account_fills:
+        previous = fills_by_id.get(fill.trade_id)
+        if previous is not None:
+            if previous != fill:
+                raise PositionRepairBlocked(
+                    "account fill identity conflicts with loaded position facts"
+                )
+            continue
+        fills_by_id[fill.trade_id] = fill
+        inserted += 1
+    facts = replace(
+        loaded.cut.facts,
+        fills=tuple(
+            sorted(fills_by_id.values(), key=lambda fill: (fill.trade_at, fill.trade_id))
+        ),
+    )
+    view = PositionBook.from_facts(facts).get_view()
     if not view.is_ready_for_trade or view.total_quantity != request.expected_quantity:
         raise PositionRepairBlocked(
             "repair projection does not match actual account exposure"
         )
-    facts = journal.read_cut()
     projection = PositionLedger(request.key).project(facts)
     episode = projection.active_episode
     opening_side = "SELL" if request.key.position_side.value == "SHORT" else "BUY"
@@ -107,27 +122,13 @@ def build_position_repair(
         if sequence is not None and (type(sequence) is not int or sequence < 0):
             raise PositionRepairBlocked("durable sequence is malformed")
     payload = {
-        "schema_version": 1,
-        "position_key": dict(
-            environment=request.key.environment,
-            account_label=request.key.account_label,
-            symbol=request.key.symbol,
-            position_side=request.key.position_side.value,
-        ),
+        "schema_version": EXECUTION_HEAD_SCHEMA_VERSION,
+        "position_key": encode_position_key(request.key),
         "stream_scope": dict(
             stream_id=request.scope.stream_id, stream_epoch=request.scope.stream_epoch
         ),
-        "facts_hash": facts.compute_facts_hash(),
-        "projection_digest": PositionRecoveryCodec.compute_projection_digest(
-            PositionLedger(request.key).project(facts)
-        ),
-        "view_digest": view_projection_digest(view),
-        "recovery_checkpoint": recovery_checkpoint_head_binding(
-            facts.recovery_checkpoint
-        ),
-        "journal_revision": journal.revision,
+        "position_state": PositionBook.from_facts(facts).encode_current_state(),
         "last_sequence": sequence,
-        "seen_trade_count": len(facts.fills),
         "active_reservation_ids": list(reservations),
         "recovery_command_ids": list(recovery_command_ids),
         "external_recovery_ids": list(external_recovery_ids),
@@ -141,8 +142,6 @@ def build_position_repair(
     return PositionRepair(
         request,
         facts,
-        journal.pending_fact_delta(),
-        journal.revision,
         head.revision if head else 0,
         payload,
         view.projection_version,
@@ -175,38 +174,28 @@ def validate_repaired_position(
         or (head.stream_id, head.stream_epoch) != (scope.stream_id, scope.stream_epoch)
     ):
         raise PositionRepairBlocked("reload requires a matching durable head")
-    journal = AccountJournal.from_durable_cut(state.cut)
-    view = PositionBook(journal).get_view()
+    head = state.head
+    book = PositionBook.from_facts(state.cut.facts)
+    if head is not None:
+        book = decode_execution_head_state(head.state_payload, key=key, scope=scope)
+    view = book.get_view()
     if (
         expected_quantity is None
         or view.total_quantity != expected_quantity
         or not view.is_ready_for_trade
     ):
         raise PositionRepairBlocked("reload does not prove current exposure")
-    facts = journal.read_cut()
     payload = head.state_payload
     expected = {
-        "schema_version": 1,
-        "position_key": dict(
-            environment=key.environment,
-            account_label=key.account_label,
-            symbol=key.symbol,
-            position_side=key.position_side.value,
-        ),
+        "schema_version": EXECUTION_HEAD_SCHEMA_VERSION,
+        "position_key": encode_position_key(key),
         "stream_scope": dict(
             stream_id=scope.stream_id, stream_epoch=scope.stream_epoch
         ),
-        "facts_hash": facts.compute_facts_hash(),
-        "projection_digest": PositionRecoveryCodec.compute_projection_digest(
-            PositionLedger(key).project(facts)
-        ),
-        "view_digest": view_projection_digest(view),
-        "recovery_checkpoint": recovery_checkpoint_head_binding(
-            facts.recovery_checkpoint
-        ),
-        "journal_revision": journal.revision,
     }
-    if any(payload.get(k) != v for k, v in expected.items()):
+    if any(payload.get(k) != v for k, v in expected.items()) or (
+        book.current_facts != state.cut.facts
+    ):
         raise PositionRepairBlocked(
             "reloaded durable head failed complete projection validation"
         )

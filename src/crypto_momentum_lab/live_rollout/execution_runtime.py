@@ -37,9 +37,6 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionStateMachine,
     OrderPreSubmissionCallback,
 )
-from crypto_momentum_lab.persistence.postgres.account_journal_store import (
-    PostgresAccountJournalStore,
-)
 from crypto_momentum_lab.persistence.postgres.command_repository import (
     PostgresCommandRepository,
 )
@@ -96,7 +93,6 @@ async def build_live_execution_runtime(
     commands = PostgresCommandRepository(sessions)
     unit_of_work = AsyncPostgresExecutionUnitOfWork(
         sessions,
-        journal_store=PostgresAccountJournalStore(),
         command_repository=commands,
         reservation_repository=reservations,
     )

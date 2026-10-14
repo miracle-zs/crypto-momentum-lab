@@ -8,8 +8,6 @@ from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from functools import cache
-from typing import cast
 from uuid import uuid4
 
 from crypto_momentum_lab.domain.account.models import (
@@ -31,12 +29,6 @@ from crypto_momentum_lab.domain.execution.projection_codec import (
 )
 
 
-@cache
-def _dataclass_field_names(cls: type) -> tuple[str, ...]:
-    """Field names per dataclass type; the reflection is not free per fact."""
-    return tuple(field.name for field in fields(cls))
-
-
 def _canonical_value(value: object) -> object:
     """Canonical, JSON-ready projection of a facts field value."""
     if isinstance(value, StrEnum):
@@ -50,8 +42,8 @@ def _canonical_value(value: object) -> object:
         return value.astimezone(UTC).isoformat()
     if is_dataclass(value):
         return {
-            name: _canonical_value(getattr(value, name))
-            for name in _dataclass_field_names(cast(type, type(value)))
+            item.name: _canonical_value(getattr(value, item.name))
+            for item in fields(value)
         }
     if isinstance(value, dict):
         return {
@@ -65,52 +57,6 @@ def _canonical_value(value: object) -> object:
 
 def _canonical_sort_key(element: object) -> str:
     return json.dumps(element, sort_keys=True, separators=(",", ":"))
-
-
-class CanonicalFactCache:
-    """Canonical encoding per recorded fact, keyed by object identity.
-
-    ``compute_facts_hash`` re-encodes every historical fact on each call, and
-    profiling shows that encoding — not the sort or the digest — dominates the
-    cost: canonicalising 10k facts spends ~0.16s in the walk itself and ~0.05s in
-    JSON, against ~0.01s of sorting and far less for SHA-256.
-
-    Recorded facts are append-only and never mutated, so their canonical element
-    and sort key are computed once and reused. The same element object is handed
-    out on every hit, so callers must treat it as read-only; the only consumer is
-    ``json.dumps`` inside ``compute_facts_hash``.
-
-    Entries key on ``id(fact)`` while holding a strong reference to that fact, so
-    a recycled id can never alias an older entry. A transaction candidate shares
-    the journal's cache; a rolled-back candidate can therefore leave entries for
-    facts that are never published, which is bounded by a few hundred bytes per
-    such fact and never affects correctness (entries are keyed by identity).
-    """
-
-    __slots__ = ("_entries",)
-
-    def __init__(self) -> None:
-        self._entries: dict[int, tuple[object, object, str]] = {}
-
-    def entry(self, fact: object) -> tuple[object, str]:
-        key = id(fact)
-        cached = self._entries.get(key)
-        if cached is not None and cached[0] is fact:
-            return cached[1], cached[2]
-        element = _canonical_value(fact)
-        sort_key = _canonical_sort_key(element)
-        self._entries[key] = (fact, element, sort_key)
-        return element, sort_key
-
-    def element(self, fact: object) -> object:
-        return self.entry(fact)[0]
-
-    def ordered(self, values: tuple[object, ...]) -> list[object]:
-        pairs = [self.entry(item) for item in values]
-        return [element for element, _ in sorted(pairs, key=lambda pair: pair[1])]
-
-    def __len__(self) -> int:
-        return len(self._entries)
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,12 +82,6 @@ class AccountFacts:
     _cached_facts_hash: str | None = field(
         default=None, init=False, repr=False, compare=False, hash=False
     )
-    # Derived encoding cache owned by the journal that produced these facts; it
-    # never participates in equality, hashing or identity.
-    _canonical_fact_cache: CanonicalFactCache | None = field(
-        default=None, repr=False, compare=False, hash=False
-    )
-
     def __post_init__(self) -> None:
         if type(self.prefix_facts_complete) is not bool:
             raise ValueError("prefix_facts_complete must be a boolean")
@@ -170,17 +110,11 @@ class AccountFacts:
         if cached is not None:
             return cached
 
-        encoding_cache = self._canonical_fact_cache
-
         def canonical(value: object) -> object:
-            if encoding_cache is None:
-                return _canonical_value(value)
-            return encoding_cache.element(value)
+            return _canonical_value(value)
 
         def unordered(values: tuple[object, ...]) -> list[object]:
-            if encoding_cache is not None:
-                return encoding_cache.ordered(values)
-            encoded = []
+            encoded: list[tuple[object, str]] = []
             for item in values:
                 element = _canonical_value(item)
                 encoded.append((element, _canonical_sort_key(element)))
