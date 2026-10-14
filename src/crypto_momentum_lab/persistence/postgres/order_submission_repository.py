@@ -306,9 +306,12 @@ class PostgresOrderSubmissionRepository:
                         executed_qty > Decimal("0")
                         and order_row.state in terminal_states
                     ):
-                        is_covered = claim_row.symbol in open_position_symbols and (
+                        is_covered = (
+                            baseline_observed_at is not None
+                            and baseline_observed_at >= order_row.updated_at
+                        ) or (
                             baseline_observed_at is None
-                            or baseline_observed_at >= order_row.updated_at
+                            and claim_row.symbol in open_position_symbols
                         )
                         if is_covered:
                             claim_row.active = False

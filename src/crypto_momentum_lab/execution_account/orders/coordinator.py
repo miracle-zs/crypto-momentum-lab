@@ -557,6 +557,8 @@ class OrderExecutionCoordinator:
         if stream_id and stream_epoch:
             self._active_stream = (stream_id, stream_epoch)
         positions: tuple[AccountPositionSnapshot, ...]
+        account_snapshot_is_flat = False
+        account_snapshot_observed_at: datetime | None = None
         if snapshot is None:
             positions = ()
         elif isinstance(snapshot, AccountPositionSnapshot):
@@ -579,6 +581,11 @@ class OrderExecutionCoordinator:
                         "AccountSnapshot config scope does not match coordinator"
                     )
                 positions = snapshot.positions
+                account_snapshot_observed_at = snapshot.config.observed_at
+                account_snapshot_is_flat = not snapshot.open_orders and all(
+                    position.position_amt == Decimal("0")
+                    for position in snapshot.positions
+                )
                 if hedge_mode is not None and hedge_mode != snapshot.config.hedge_mode:
                     raise ValueError("hedge_mode does not match AccountSnapshot config")
                 hedge_mode = snapshot.config.hedge_mode
@@ -612,6 +619,29 @@ class OrderExecutionCoordinator:
                 position_side=FuturesPositionSide(side_str),
             )
             positions_by_key[scope.to_position_key()] = position
+
+        if account_snapshot_is_flat:
+            assert account_snapshot_observed_at is not None
+            for key in self._execution_book.position_keys_for_account(
+                self._environment, self._account_label
+            ):
+                if key in positions_by_key:
+                    continue
+                positions_by_key[key] = AccountPositionSnapshot(
+                    environment=key.environment,
+                    account_label=key.account_label,
+                    symbol=key.symbol,
+                    position_side=key.position_side.value,
+                    position_amt=Decimal("0"),
+                    entry_price=Decimal("0"),
+                    mark_price=Decimal("0"),
+                    unrealized_pnl=Decimal("0"),
+                    notional=Decimal("0"),
+                    leverage=None,
+                    margin_type=None,
+                    observed_at=account_snapshot_observed_at,
+                    raw_payload={},
+                )
 
         fills_by_key: dict[PositionKey, list[AccountFillEvent]] = {}
         for fill in fills:
@@ -745,6 +775,7 @@ class OrderExecutionCoordinator:
                     source_anchor_snapshot=None
                     if scan is None
                     else scan.source_anchor_snapshot,
+                    account_snapshot_is_flat=account_snapshot_is_flat,
                     stream_id=stream_id,
                     stream_epoch=stream_epoch,
                     sequence=sequence,

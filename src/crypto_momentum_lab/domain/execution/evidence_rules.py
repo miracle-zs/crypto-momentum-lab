@@ -22,6 +22,8 @@ def _canonical_evidence_payload(evidence: ExecutionEvidence) -> dict[str, object
     cumulative_order = payload.get("cumulative_order")
     if isinstance(cumulative_order, dict):
         cumulative_order.pop("observed_at", None)
+    if not payload.get("account_snapshot_is_flat", False):
+        payload.pop("account_snapshot_is_flat", None)
     return payload
 
 

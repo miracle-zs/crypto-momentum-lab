@@ -1044,6 +1044,73 @@ async def test_filled_entry_claim_retired_when_account_baseline_covers_exposure(
         assert first_claim.active is False
 
 
+async def test_filled_entry_claim_retired_when_fresh_baseline_is_flat(
+    order_repository,
+) -> None:
+    _, _, _, events, submissions, factory = order_repository
+    first_intent = _intent()
+    first_evaluation = _evaluation(first_intent, "eval-flat-baseline-1")
+    first_plan = _plan()
+    second_intent = replace(first_intent, candidate_id="candidate-flat-baseline-2")
+    second_evaluation = _evaluation(second_intent, "eval-flat-baseline-2")
+    second_plan = replace(
+        first_plan,
+        intent_id="candidate-flat-baseline-2",
+        client_order_id="cml_ffffffffffffffffffffffffffffffff",
+        symbol="ETHUSDT",
+    )
+    claim_kwargs = {
+        "environment": "live",
+        "account_label": "primary",
+        "strategy_name": "compression_breakout",
+        "max_open_positions": 5,
+        "max_daily_loss": Decimal("1000"),
+        "max_gross_exposure": Decimal("150"),
+        "current_daily_pnl": Decimal("0"),
+        "current_gross_exposure": Decimal("0"),
+        "open_position_symbols": frozenset(),
+        "exposure_notional": Decimal("100"),
+    }
+
+    assert await _prepare_submission(
+        submissions,
+        intent=first_intent,
+        evaluation=first_evaluation,
+        plan=first_plan,
+        prepared_at=NOW + timedelta(seconds=1),
+        **claim_kwargs,
+    )
+    filled_at = NOW + timedelta(seconds=3)
+    await events.append_order_event(
+        ExchangeOrderEvent(
+            event_id="first-flat-baseline-filled",
+            client_order_id=first_plan.client_order_id,
+            state=ExchangeOrderState.FILLED,
+            occurred_at=filled_at,
+            exchange_order_id="first-flat-baseline-order",
+            details={
+                "executed_quantity": str(first_plan.quantity),
+                "average_price": "100",
+            },
+        )
+    )
+
+    second = await _prepare_submission(
+        submissions,
+        intent=second_intent,
+        evaluation=second_evaluation,
+        plan=second_plan,
+        prepared_at=NOW + timedelta(seconds=5),
+        baseline_observed_at=filled_at + timedelta(seconds=1),
+        **claim_kwargs,
+    )
+    assert second is not None
+    async with factory() as session:
+        first_claim = await session.get(LiveExposureClaimRow, first_plan.intent_id)
+    assert first_claim is not None
+    assert first_claim.active is False
+
+
 async def test_partial_fill_canceled_downsizes_claim_and_retains_filled_portion(
     order_repository,
 ) -> None:
@@ -1636,7 +1703,12 @@ from crypto_momentum_lab.persistence.postgres.order_submission_repository import
     PostgresOrderSubmissionRepository,
 )
 from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation
-from tests.integration.persistence.test_order_repository import _intent, _plan, _prepare_submission, NOW
+from tests.integration.persistence.test_order_repository import (
+    NOW,
+    _intent,
+    _plan,
+    _prepare_submission,
+)
 
 async def main():
     engine = create_async_database_engine(os.environ["CML_CRASH_TEST_DATABASE_URL"])

@@ -43,6 +43,7 @@ class ExecutionEvidence:
     sequence: int | None = None
     cumulative_order: ExecutionCumulativeOrderReport | None = None
     source_anchor_snapshot: AccountPositionSnapshot | None = None
+    account_snapshot_is_flat: bool = False
 
     def __post_init__(self) -> None:
         if self.source_anchor_snapshot is not None:

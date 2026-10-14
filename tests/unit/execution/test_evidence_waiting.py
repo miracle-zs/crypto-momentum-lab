@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from crypto_momentum_lab.domain.account.models import AccountConfigSnapshot
+from crypto_momentum_lab.domain.account.snapshot_models import AccountSnapshot
 from crypto_momentum_lab.domain.execution.evidence_grouping import (
     observe_evidence_group,
 )
@@ -90,6 +92,86 @@ async def test_missing_epoch_proof_waits_and_preserves_committed_book(quantity, 
     assert after.total_quantity == before.total_quantity
     assert after.batches == before.batches
     assert book._head_revisions == head_revision
+
+
+async def test_empty_account_snapshot_rebases_stale_position_head():
+    book = await restored_book()
+    observed_at = NOW + timedelta(seconds=2)
+    account_snapshot = AccountSnapshot(
+        config=AccountConfigSnapshot(
+            environment="live",
+            account_label="primary",
+            multi_assets_mode=False,
+            hedge_mode=False,
+            fee_tier=None,
+            observed_at=observed_at,
+            raw_payload={},
+        ),
+        balances=(),
+        positions=(snapshot("0"),),
+        open_orders=(),
+    )
+    coordinator = OrderExecutionCoordinator(
+        backend=SimpleNamespace(),
+        account_label="primary",
+        environment="live",
+        execution_book=book,
+    )
+    try:
+        await coordinator.observe_account_snapshot(
+            account_snapshot,
+            stream_id="hub",
+            stream_epoch="next",
+            sequence=1,
+        )
+
+        view = await book.read(SCOPE, stream_id="hub", stream_epoch="next")
+        assert view.total_quantity == Decimal("0")
+        assert view.stream_scope == AccountFactStreamScope.for_position_key(
+            SCOPE.to_position_key(), stream_id="hub", stream_epoch="next"
+        )
+    finally:
+        await coordinator.aclose()
+
+
+async def test_empty_account_snapshot_without_position_rows_resets_known_head():
+    book = await restored_book()
+    observed_at = NOW + timedelta(seconds=2)
+    account_snapshot = AccountSnapshot(
+        config=AccountConfigSnapshot(
+            environment="live",
+            account_label="primary",
+            multi_assets_mode=False,
+            hedge_mode=False,
+            fee_tier=None,
+            observed_at=observed_at,
+            raw_payload={},
+        ),
+        balances=(),
+        positions=(),
+        open_orders=(),
+    )
+    coordinator = OrderExecutionCoordinator(
+        backend=SimpleNamespace(),
+        account_label="primary",
+        environment="live",
+        execution_book=book,
+    )
+    try:
+        await coordinator.observe_account_snapshot(
+            account_snapshot,
+            stream_id="hub",
+            stream_epoch="next",
+            sequence=1,
+        )
+
+        view = await book.read(SCOPE, stream_id="hub", stream_epoch="next")
+        assert view.total_quantity == Decimal("0")
+        assert view.stream_scope == AccountFactStreamScope.for_position_key(
+            SCOPE.to_position_key(), stream_id="hub", stream_epoch="next"
+        )
+    finally:
+        await coordinator.aclose()
 
 
 async def test_repeated_pending_snapshots_do_not_emit_conflict_errors(monkeypatch):

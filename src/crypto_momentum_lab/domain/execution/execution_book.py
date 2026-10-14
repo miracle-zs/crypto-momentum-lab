@@ -189,6 +189,22 @@ class ExecutionBook:
         """Published facts/commands generation used by operational read caches."""
         return self._context_revision
 
+    def position_keys_for_account(
+        self, environment: str, account_label: str
+    ) -> tuple[PositionKey, ...]:
+        """Return restored position keys for one account."""
+        return tuple(
+            sorted(
+                (
+                    position_book.position_key
+                    for position_book in self._books.values()
+                    if position_book.position_key.environment == environment
+                    and position_book.position_key.account_label == account_label
+                ),
+                key=lambda key: key.canonical_id,
+            )
+        )
+
     @property
     def coordinator(self) -> ReservationRegistry:
         return self._coordinator

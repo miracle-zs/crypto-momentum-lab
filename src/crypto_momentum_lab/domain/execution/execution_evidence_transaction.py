@@ -29,6 +29,8 @@ from crypto_momentum_lab.domain.execution.execution_evidence_processor import (
     is_unfilled_terminal_order,
 )
 from crypto_momentum_lab.domain.execution.execution_evidence_state import (
+    _clear_flat_account_recovery,
+    _has_active_commands,
     apply_flat_snapshot,
     apply_stream_rollover,
     durable_evidence_identity,
@@ -131,6 +133,7 @@ async def observe_evidence_transaction(
                 requires_verified_stream_adoption=book._requires_verified_stream_adoption(
                     key
                 ),
+                has_active_commands=_has_active_commands(book, key),
             )
             if recovery_proof_required:
                 return WaitingForEvidence(
@@ -398,7 +401,19 @@ async def observe_evidence_transaction(
                         scope=scope,
                         can_rollover=can_rollover,
                         is_unfilled_terminal_order=terminal_without_fill,
+                        account_snapshot_is_flat=evidence.account_snapshot_is_flat,
                     )
+                elif can_rollover and evidence.account_snapshot_is_flat:
+                    position_book = candidate._books.get(canon)
+                    if position_book is None:
+                        candidate._books[canon] = PositionBook(key, stream_scope=scope)
+                    else:
+                        position_book.reset_stream(
+                            scope, preserve_episode_sequence=True
+                        )
+                    candidate._stream_scopes[canon] = scope
+                    candidate._last_sequences.pop(canon, None)
+                    _clear_flat_account_recovery(candidate, key)
                 else:
                     candidate._book_for_scope(key, scope)
                 try:
@@ -510,7 +525,9 @@ async def observe_evidence_transaction(
                             raise AbortObservation(
                                 EvidenceConflict(
                                     evidence_id=evidence.evidence_id,
-                                    reason="snapshot identity conflicts with head facts",
+                                    reason=(
+                                        "snapshot identity conflicts with head facts"
+                                    ),
                                 )
                             )
                     observation_evidence = replace(

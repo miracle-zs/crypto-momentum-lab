@@ -15,14 +15,12 @@ from crypto_momentum_lab.domain.account.models import (
     AccountFillReconciliationCursor,
     AccountPositionSnapshot,
 )
-from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    AccountFactConflict,
-    AccountFillLoadProvenance,
-    ExitOrderSubmissionFact,
-)
 from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
+    AccountFactConflict,
     AccountFactStreamScope,
+    AccountFillLoadProvenance,
+    ExitOrderSubmissionFact,
     FactCoverageInterval,
     FactCoverageStatus,
     FreshnessRequirement,
@@ -245,18 +243,29 @@ class PositionBook:
             prefix_facts_complete=False,
         )
 
-    def reset_stream(self, scope: AccountFactStreamScope) -> None:
+    def reset_stream(
+        self,
+        scope: AccountFactStreamScope,
+        *,
+        preserve_episode_sequence: bool = False,
+    ) -> None:
         if not scope.matches(self._position_key):
             raise ValueError("stream scope does not match position key")
+        episode_sequence = (
+            self._state.projection.episode_sequence if preserve_episode_sequence else 0
+        )
         self._stream_scope = scope
-        self._state = _CurrentPositionState(
-            projection=self._ledger.project(
-                AccountFacts(
-                    position_key=self._position_key,
-                    stream_scope=scope,
-                    prefix_facts_complete=True,
-                )
+        projection = self._ledger.project(
+            AccountFacts(
+                position_key=self._position_key,
+                stream_scope=scope,
+                prefix_facts_complete=True,
             )
+        )
+        if preserve_episode_sequence:
+            projection = replace(projection, episode_sequence=episode_sequence)
+        self._state = _CurrentPositionState(
+            projection=projection,
         )
         self._revision += 1
         self._zero_confirmed_override = False
@@ -467,7 +476,8 @@ class PositionBook:
                     health_status = PositionHealthStatus.CATCHING_UP
                     diagnostics.append(
                         f"Projection staleness ({staleness.total_seconds():.1f}s) "
-                        f"exceeds max allowed ({requirement.max_staleness.total_seconds():.1f}s)"
+                        "exceeds max allowed "
+                        f"({requirement.max_staleness.total_seconds():.1f}s)"
                     )
             if requirement.require_comparable and not is_comparable:
                 if health_status == PositionHealthStatus.READY:
@@ -485,7 +495,9 @@ class PositionBook:
             batches=projection.active_batches,
             unallocated_quantity=projection.unallocated_quantity,
             reconciliation_status=(
-                "OK" if health_status == PositionHealthStatus.READY else health_status.value
+                "OK"
+                if health_status == PositionHealthStatus.READY
+                else health_status.value
             ),
             reconciliation_gap=(
                 projection.reconciliation_gap if is_comparable else None
@@ -551,7 +563,9 @@ def _current_projection(
     """Keep only active batches and the counters needed for the next update."""
     active_episode = projection.active_episode
     if active_episode is not None:
-        active_batches = tuple(batch for batch in active_episode.batches if batch.quantity > 0)
+        active_batches = tuple(
+            batch for batch in active_episode.batches if batch.quantity > 0
+        )
         active_episode = replace(
             active_episode,
             batches=active_batches,
@@ -708,7 +722,8 @@ def _coverage_anchor_is_verified(facts: AccountFacts) -> bool:
                 )
                 or (
                     checkpoint.parent_checkpoint_id == provenance.source_anchor_id
-                    and checkpoint.parent_event_cut == provenance.source_anchor_event_cut
+                    and checkpoint.parent_event_cut
+                    == provenance.source_anchor_event_cut
                 )
             )
         )

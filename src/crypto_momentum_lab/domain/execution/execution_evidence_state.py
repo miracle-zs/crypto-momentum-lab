@@ -6,6 +6,7 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from crypto_momentum_lab.domain.execution.command_models import DispatchState
 from crypto_momentum_lab.domain.execution.evidence_digest import digest_json_payload
 from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
 from crypto_momentum_lab.domain.execution.evidence_rules import (
@@ -51,21 +52,39 @@ def apply_flat_snapshot(
         and not (evidence.fills or evidence.fill)
     )
     has_no_reservations = not book._coordinator.get_active_reservations(key)
-    has_no_commands = not any(
+    has_any_commands = any(
         entry.scope.to_position_key() == key
         for entry in book._outbox_by_command_id.values()
     )
-    if not (
-        is_local_flat
+    has_no_active_commands = not _has_active_commands(book, key)
+    account_flat_rebase = (
+        evidence.account_snapshot_is_flat
         and is_evidence_flat
         and has_no_reservations
-        and has_no_commands
+        and has_no_active_commands
+    )
+    if not (
+        (is_local_flat or account_flat_rebase)
+        and is_evidence_flat
+        and has_no_reservations
+        and (not has_any_commands or account_flat_rebase)
         and evidence.coverage_evidence is None
         and evidence.stream_checkpoint_adoption is None
     ):
         return None
     current_scope = book._stream_scopes.get(canon)
-    if requires_verified_stream_adoption(key) and current_scope != scope:
+    if (
+        book._execution_unit_of_work is not None
+        and book._head_revisions.get(canon, 0) > 0
+        and account_flat_rebase
+    ):
+        # A confirmed account-flat baseline must update the durable head too.
+        return None
+    if (
+        requires_verified_stream_adoption(key)
+        and current_scope != scope
+        and not account_flat_rebase
+    ):
         return WaitingForEvidence(
             evidence_id=evidence.evidence_id,
             reason=EvidencePendingReason.STREAM_RECOVERY_PROOF_REQUIRED,
@@ -75,7 +94,10 @@ def apply_flat_snapshot(
         book._last_sequences.pop(canon, None)
     book._stream_scopes[canon] = scope
     position_book = book._ensure_book(key)
-    if position_book.stream_scope != scope:
+    if account_flat_rebase:
+        position_book.reset_stream(scope, preserve_episode_sequence=True)
+        _clear_flat_account_recovery(book, key)
+    elif position_book.stream_scope != scope:
         position_book.reset_stream(scope)
     position_book.apply_delta(
         AccountFacts(
@@ -99,6 +121,7 @@ def evaluate_stream_rollover(
     evidence: ExecutionEvidence,
     is_unfilled_terminal_order: bool,
     requires_verified_stream_adoption: bool,
+    has_active_commands: bool,
 ) -> tuple[bool, bool]:
     """Return ``(can_rollover, requires_recovery_proof)`` for a new stream.
 
@@ -116,20 +139,31 @@ def evaluate_stream_rollover(
     has_blocking_reservations = (
         bool(active_reservations) and not reservations_held_by_event
     )
-    can_rollover = (
-        not requires_verified_stream_adoption
+    has_plain_flat_snapshot = (
+        evidence.snapshot is not None
+        and evidence.snapshot.position_amt == Decimal("0")
+        and not (evidence.fills or evidence.fill)
         and evidence.coverage_evidence is None
         and evidence.stream_checkpoint_adoption is None
         and evidence.source_anchor_snapshot is None
-        and is_flat
+    )
+    can_rollover = (
+        not has_blocking_reservations
+        and evidence.coverage_evidence is None
+        and evidence.stream_checkpoint_adoption is None
+        and evidence.source_anchor_snapshot is None
         and (
             (
-                evidence.snapshot is not None
-                and evidence.snapshot.position_amt == Decimal("0")
+                evidence.account_snapshot_is_flat
+                and has_plain_flat_snapshot
+                and not has_active_commands
             )
-            or is_unfilled_terminal_order
+            or (
+                not requires_verified_stream_adoption
+                and is_flat
+                and (has_plain_flat_snapshot or is_unfilled_terminal_order)
+            )
         )
-        and not has_blocking_reservations
     )
     target_scope = AccountFactStreamScope.for_position_key(
         key, stream_id=evidence.stream_id, stream_epoch=evidence.stream_epoch
@@ -155,6 +189,7 @@ def apply_stream_rollover(
     scope: AccountFactStreamScope,
     can_rollover: bool,
     is_unfilled_terminal_order: bool,
+    account_snapshot_is_flat: bool,
 ) -> None:
     """Apply an already-validated stream transition to execution book state."""
     canon = key.canonical_id
@@ -164,8 +199,12 @@ def apply_stream_rollover(
         if position_book is None:
             position_book = PositionBook(key, stream_scope=scope)
             book._books[canon] = position_book
+        elif account_snapshot_is_flat:
+            position_book.reset_stream(scope, preserve_episode_sequence=True)
         else:
             position_book.adopt_stream_scope(scope)
+        if account_snapshot_is_flat:
+            _clear_flat_account_recovery(book, key)
         book._recovery_adoption_scope = scope
         book._last_sequences.pop(canon, None)
     elif is_unfilled_terminal_order:
@@ -179,6 +218,35 @@ def apply_stream_rollover(
         book._stream_scopes[canon] = scope
         book._last_sequences.pop(canon, None)
         book._recovery_adoption_scope = scope
+
+
+def _has_active_commands(book: ExecutionBook, key: PositionKey) -> bool:
+    return any(
+        entry.scope.to_position_key() == key
+        and entry.state not in (DispatchState.TERMINAL, DispatchState.REJECTED)
+        for entry in book._outbox_by_command_id.values()
+    )
+
+
+def _clear_flat_account_recovery(book: ExecutionBook, key: PositionKey) -> None:
+    canon = key.canonical_id
+    recovery_ids = {
+        identity
+        for identity, position_key in book._external_recovery_positions.items()
+        if position_key == key
+    }
+    recovery_ids.add(f"reservation_divergence:{canon}")
+    for entry in book._outbox_by_command_id.values():
+        if entry.scope.to_position_key() == key and entry.state in (
+            DispatchState.TERMINAL,
+            DispatchState.REJECTED,
+        ):
+            recovery_ids.add(entry.command_id)
+    for identity in recovery_ids:
+        book._recovery_required_commands.discard(identity)
+        book._dispatch_reconciliation_required_commands.discard(identity)
+        book._external_recovery_positions.pop(identity, None)
+    book._head_expected_reservation_ids.pop(canon, None)
 
 
 def durable_evidence_identity(evidence: ExecutionEvidence) -> ExecutionEvidenceIdentity:
