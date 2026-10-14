@@ -887,6 +887,13 @@ service_is_converged "$1"
             1,
             1,
         ),
+        (
+            "alembic/versions/20261014_0061_remove_trading_leases.py",
+            1,
+            1,
+            1,
+            1,
+        ),
     ],
 )
 def test_live_only_change_selects_only_the_affected_live_role(
@@ -932,6 +939,7 @@ def test_destructive_live_schema_migrations_are_blocked_from_registry() -> None:
     assert "destructive_schema_changed" in script
     assert "Refusing Live deployment" in script
     assert "20261005_0047_drop_unused_risk_state_age_limits.py" in registry
+    assert "20261014_0061_remove_trading_leases.py" in registry
 
 
 def test_legacy_writer_protection_and_account_isolation(tmp_path: Path) -> None:

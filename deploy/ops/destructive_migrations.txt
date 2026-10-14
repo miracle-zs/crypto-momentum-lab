@@ -3,3 +3,4 @@
 # then rejects a --live rollout and requires an expand/contract release.
 20261005_0047_drop_unused_risk_state_age_limits.py
 20261007_0053_execution_receipt_retirement.py
+20261014_0061_remove_trading_leases.py
