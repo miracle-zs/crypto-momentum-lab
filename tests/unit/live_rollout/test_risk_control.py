@@ -1,8 +1,8 @@
 import asyncio
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
 from dataclasses import replace
 from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from crypto_momentum_lab.domain.live_rollout import RollbackCommand
 from crypto_momentum_lab.domain.live_rollout.authorization import (
@@ -11,11 +11,11 @@ from crypto_momentum_lab.domain.live_rollout.authorization import (
     EMERGENCY_FLATTEN_COMMAND,
     EMERGENCY_FLATTEN_CONFIRMATION,
 )
-from crypto_momentum_lab.live_rollout.daemon import LiveStrategyDaemon
 from crypto_momentum_lab.execution_account.risk_control_hub import (
     RiskControlAction,
     RiskControlEvent,
 )
+from crypto_momentum_lab.live_rollout.daemon import LiveStrategyDaemon
 from crypto_momentum_lab.live_rollout.risk_control import (
     LiveRiskControlRuntime,
     RiskControlCommandDispatcher,
@@ -29,10 +29,22 @@ async def test_flatten_dispatch_uses_real_daemon_callback_and_stable_identity():
     repository = FakeCommandRepository(command)
     daemon = object.__new__(LiveStrategyDaemon)
     daemon._scheduled_controller = SimpleNamespace(request_flatten=AsyncMock(return_value=None))
-    dispatcher = RiskControlCommandDispatcher(repository=repository, account_label="primary", strategy_name="orderflow_impulse", session_id="live-1", cancel_all_open_entries=daemon.cancel_all_open_entries, request_flatten=daemon.request_flatten, clock=lambda: NOW)
+    dispatcher = RiskControlCommandDispatcher(
+        repository=repository,
+        account_label="primary",
+        strategy_name="orderflow_impulse",
+        session_id="live-1",
+        cancel_all_open_entries=lambda _command_id: daemon.cancel_all_open_entries(),
+        request_flatten=lambda command_id: daemon.request_flatten(
+            operation_id=command_id
+        ),
+        clock=lambda: NOW,
+    )
     event = replace(_event(), action=RiskControlAction.REQUEST_FLATTEN, details={"command_type": EMERGENCY_FLATTEN_COMMAND})
     assert await dispatcher.dispatch(event) is None
-    daemon._scheduled_controller.request_flatten.assert_awaited_once_with(now=None, identity_at=command.requested_at)
+    daemon._scheduled_controller.request_flatten.assert_awaited_once_with(
+        now=None, operation_id=command.command_id
+    )
     assert repository.command.status == "completed"
 
 
@@ -159,8 +171,8 @@ async def test_dispatcher_claims_and_completes_one_shot_action_once() -> None:
         account_label="primary",
         strategy_name="orderflow_impulse",
         session_id="live-1",
-        cancel_all_open_entries=lambda identity_at: _record(calls, "cancel"),
-        request_flatten=lambda identity_at: _record(calls, "flatten"),
+        cancel_all_open_entries=lambda _command_id: _record(calls, "cancel"),
+        request_flatten=lambda _command_id: _record(calls, "flatten"),
         clock=lambda: NOW,
     )
 
@@ -179,8 +191,8 @@ async def test_dispatcher_rejects_event_without_matching_command_type() -> None:
         account_label="primary",
         strategy_name="orderflow_impulse",
         session_id="live-1",
-        cancel_all_open_entries=lambda identity_at: _record(calls, "cancel"),
-        request_flatten=lambda identity_at: _record(calls, "flatten"),
+        cancel_all_open_entries=lambda _command_id: _record(calls, "cancel"),
+        request_flatten=lambda _command_id: _record(calls, "flatten"),
         clock=lambda: NOW,
     )
 

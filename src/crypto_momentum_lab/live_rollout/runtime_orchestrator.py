@@ -1505,8 +1505,12 @@ async def run_live_daemon(
             account_label=account_label,
             strategy_name=strategy_name,
             session_id=session_id,
-            cancel_all_open_entries=daemon.cancel_all_open_entries,
-            request_flatten=daemon.request_flatten,
+            cancel_all_open_entries=lambda _command_id: (
+                daemon.cancel_all_open_entries()
+            ),
+            request_flatten=lambda command_id: daemon.request_flatten(
+                operation_id=command_id
+            ),
             clock=lambda: datetime.now(tz=UTC),
         )
 

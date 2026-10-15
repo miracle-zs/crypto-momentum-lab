@@ -742,11 +742,11 @@ async def test_durable_risk_control_operator_command_consumption(
 
     executed_actions: list[str] = []
 
-    async def fake_cancel_all(identity_at: Any = None) -> str | None:
+    async def fake_cancel_all(_command_id: str) -> str | None:
         executed_actions.append("cancel_all")
         return None
 
-    async def fake_flatten(identity_at: Any = None) -> str | None:
+    async def fake_flatten(_command_id: str) -> str | None:
         executed_actions.append("flatten")
         return None
 
@@ -1789,11 +1789,11 @@ async def test_executing_operator_command_is_recovered_after_restart(
 
         actions: list[str] = []
 
-        async def _cancel_all(identity_at: Any = None) -> str | None:
+        async def _cancel_all(_command_id: str) -> str | None:
             actions.append("cancel_all")
             return None
 
-        async def _flatten(identity_at: Any = None) -> str | None:
+        async def _flatten(_command_id: str) -> str | None:
             actions.append("flatten")
             return None
 
@@ -2004,16 +2004,15 @@ async def test_executing_command_recovery_reuses_command_identity_and_serializes
         )
         assert await repo.save_command(command)
 
-        identities: list[datetime] = []
+        identities: list[str] = []
         actions: list[str] = []
 
-        async def _flatten(identity_at: Any = None) -> str | None:
+        async def _flatten(operation_id: str) -> str | None:
             actions.append("flatten")
-            assert isinstance(identity_at, datetime)
-            identities.append(identity_at)
+            identities.append(operation_id)
             return None
 
-        async def _cancel_all(identity_at: Any = None) -> str | None:
+        async def _cancel_all(_command_id: str) -> str | None:
             actions.append("cancel_all")
             return None
 
@@ -2047,7 +2046,7 @@ async def test_executing_command_recovery_reuses_command_identity_and_serializes
         assert await second.recover_executing_commands() == 0
         assert await first.recover_executing_commands() == 0
         assert actions == ["flatten"]
-        assert identities == [requested_at]
+        assert identities == [command.command_id]
         stored = await repo.load_command(command.command_id)
         assert stored is not None and stored.status == "completed"
 
@@ -2073,9 +2072,8 @@ async def test_executing_command_recovery_reuses_command_identity_and_serializes
         assert await third.recover_executing_commands() == 1
         assert await third.recover_executing_commands() == 0
         assert actions == ["flatten", "flatten"]
-        # The resumed attempt reused the command record's identity: no new
-        # timestamp, so no second flatten was created.
-        assert identities == [requested_at, requested_at]
+        # The resumed attempt reuses the persisted command ID across sessions.
+        assert identities == [command.command_id, stranded.command_id]
         assert (await repo.load_command(stranded.command_id)).status == "completed"
     finally:
         await engine.dispose()

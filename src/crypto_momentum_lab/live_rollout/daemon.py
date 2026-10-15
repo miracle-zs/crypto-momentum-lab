@@ -673,29 +673,25 @@ class LiveStrategyDaemon:
         """Run the scheduled-risk controller for one observation."""
         return await self._scheduled_controller.process(now=now)
 
-    async def cancel_all_open_entries(
-        self,
-        identity_at: datetime | None = None,
-    ) -> str | None:
+    async def cancel_all_open_entries(self) -> str | None:
         """Cancel open entry orders through the live coordinator seam.
 
-        Cancellation is idempotent, so the operator identity is informational;
-        the durable action claim still records that this process owns it.
+        The durable command claim identifies the operator action.
         """
 
         return await self._scheduled_controller.cancel_all_open_entries()
 
     async def request_flatten(
         self,
-        identity_at: datetime | None = None,
         *,
+        operation_id: str | None = None,
         now: datetime | None = None,
     ) -> str | None:
         """Request a reduce-only flatten through the live exit processor."""
 
         return await self._scheduled_controller.request_flatten(
             now=now,
-            identity_at=identity_at,
+            operation_id=operation_id,
         )
 
     def _record_signal_candidate(

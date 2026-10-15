@@ -184,13 +184,12 @@ class ScheduledRiskWindowController:
         self,
         *,
         now: datetime | None = None,
-        identity_at: datetime | None = None,
+        operation_id: str | None = None,
     ) -> str | None:
         """Request a one-shot reduce-only flatten through the exit processor.
 
-        ``identity_at`` is the stable identity timestamp of the operator action.
-        Reusing it on a resumed attempt keeps the same order identity instead of
-        creating a second flatten at a new time.
+        ``operation_id`` is the persisted operator command ID. Reusing it after a
+        restart keeps the same order identity.
         """
 
         observed_at = self._clock() if now is None else now
@@ -198,7 +197,7 @@ class ScheduledRiskWindowController:
             return await self._submit_scheduled_flatten(
                 observed_at,
                 force=True,
-                identity_at=identity_at,
+                operation_id=operation_id,
             )
 
     async def process(
@@ -491,7 +490,7 @@ class ScheduledRiskWindowController:
         now: datetime,
         *,
         force: bool,
-        identity_at: datetime | None = None,
+        operation_id: str | None = None,
     ) -> str | None:
         schedule = self._config.scheduled_risk_window
         exit_manager = self._exit_manager
@@ -589,7 +588,7 @@ class ScheduledRiskWindowController:
                 symbol=state.symbol,
                 reference_prices={state.symbol: _scheduled_reference_price(state)},
                 attempt=attempt,
-                identity_at=identity_at,
+                operation_id=operation_id,
             )
             if not requests:
                 continue

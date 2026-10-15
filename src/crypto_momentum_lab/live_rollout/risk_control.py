@@ -79,7 +79,7 @@ class RiskControlCommandRepository(Protocol):
 class _RiskControlCommandSpec:
     command_type: str
     confirmation_text: str
-    execute: Callable[[datetime], Awaitable[str | None]]
+    execute: Callable[[str], Awaitable[str | None]]
 
 
 class RiskControlCommandDispatcher:
@@ -92,8 +92,8 @@ class RiskControlCommandDispatcher:
         account_label: str,
         strategy_name: str,
         session_id: str,
-        cancel_all_open_entries: Callable[[datetime], Awaitable[str | None]],
-        request_flatten: Callable[[datetime], Awaitable[str | None]],
+        cancel_all_open_entries: Callable[[str], Awaitable[str | None]],
+        request_flatten: Callable[[str], Awaitable[str | None]],
         clock: Callable[[], datetime],
     ) -> None:
         self._repository = repository
@@ -143,17 +143,13 @@ class RiskControlCommandDispatcher:
             return "risk_control_command_already_claimed"
 
         failure: str | None = None
-        # The action identity is stable for the command, so an action that is
-        # resumed after a crash continues the same order identity instead of
-        # creating a second flatten at a new time.
-        identity_at = command.requested_at
         try:
             require_authorized_command(
                 command,
                 command_type=spec.command_type,
                 confirmation_text=spec.confirmation_text,
             )
-            failure = await spec.execute(identity_at)
+            failure = await spec.execute(command.command_id)
         except Exception as error:
             failure = f"risk_control_action_failed:{type(error).__name__}"
             log.exception(
@@ -252,12 +248,10 @@ class RiskControlCommandDispatcher:
                     command_type=spec.command_type,
                     confirmation_text=spec.confirmation_text,
                 )
-                # The command record is the recovery record: the stable
-                # command_id plus the stable action identity continue the same
-                # action instead of creating another flatten.  `complete_command`
-                # only succeeds from `executing`, so exactly one consumer can
-                # conclude it.
-                failure = await spec.execute(claimed.requested_at)
+                # The persisted command ID is the action identity across sessions.
+                # `complete_command` only succeeds from `executing`, so exactly
+                # one consumer can conclude it.
+                failure = await spec.execute(claimed.command_id)
             except Exception as error:
                 failure = f"risk_control_action_failed:{type(error).__name__}"
                 log.exception(

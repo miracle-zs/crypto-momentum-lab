@@ -1200,15 +1200,15 @@ async def test_runtime_full_zero_anchored_scan_repairs_stale_position_atomically
             now=target.observed_at,
         )
         assert integrity[account].gaps == 0
-        assert integrity[account].observed_at == target.observed_at
+        assert integrity[account].observed_at is None
         stale = await load_fact_integrity(
             factory,
             accounts={account: SimpleNamespace(position_count=0)},
             now=target.observed_at + timedelta(minutes=4),
         )
         assert stale[account].gaps == 0
-        assert stale[account].historical_reasons == ("coverage_stale",)
         assert stale[account].observed_at is None
+        assert stale[account].reasons == ()
         from sqlalchemy import delete
 
         async with factory() as session, session.begin():

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.execution.execution_head import (
@@ -22,7 +22,6 @@ from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models impo
 from crypto_momentum_lab.persistence.postgres.models import AccountReconciliationHeadRow
 
 REASON_ACTIVE_POSITION_COUNT_MISMATCH = "active_position_count_mismatch"
-REASON_NO_RELEVANT_HEAD = "no_relevant_head"
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +32,6 @@ class FactIntegritySummary:
     observed_at: datetime | None
     reasons: tuple[str, ...] = ()
     unknown_scopes: tuple[str, ...] = ()
-    historical_reasons: tuple[str, ...] = ()
 
 
 async def load_fact_integrity(
@@ -43,18 +41,31 @@ async def load_fact_integrity(
     now: datetime,
     max_age_seconds: float = 180.0,
 ) -> dict[str, FactIntegritySummary]:
-    """Verify decoded position facts and their current coverage watermark."""
+    """Verify current position and outstanding execution responsibility facts."""
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("fact integrity time must be timezone-aware")
     if not accounts:
         return {}
 
     async with sessions() as session:
+        payload = ExecutionBookHeadRow.state_payload
+        active_position = (
+            payload["position_state"]["projection"]["active_episode"][
+                "is_active"
+            ].astext
+            == "true"
+        )
+        outstanding_responsibility = or_(
+            payload["active_reservation_ids"].astext != "[]",
+            payload["recovery_command_ids"].astext != "[]",
+            payload["external_recovery_ids"].astext != "[]",
+        )
         heads = (
             await session.scalars(
                 select(ExecutionBookHeadRow).where(
                     ExecutionBookHeadRow.environment == "live",
                     ExecutionBookHeadRow.account_label.in_(tuple(accounts)),
+                    or_(active_position, outstanding_responsibility),
                 )
             )
         ).all()
@@ -68,27 +79,15 @@ async def load_fact_integrity(
     summaries: dict[str, FactIntegritySummary] = {}
     for account, account_heads in grouped.items():
         current_count = 0
-        current_cuts: list[datetime] = []
         proven_cuts: list[datetime] = []
-        historical_reasons: list[str] = []
         reasons: list[str] = []
         unknown_scopes: list[str] = []
         invalid = 0
         current_unknown = False
 
-        if not account_heads and accounts[account].position_count:
-            reasons.append(REASON_NO_RELEVANT_HEAD)
-            unknown_scopes.append("*")
-            current_unknown = True
-
         for head in account_heads:
             scope_label = f"{head.symbol}:{head.position_side}"
             payload = head.state_payload or {}
-            is_current = bool(
-                payload.get("active_reservation_ids")
-                or payload.get("recovery_command_ids")
-                or payload.get("external_recovery_ids")
-            )
             if not is_supported_execution_head_schema(payload.get("schema_version")):
                 # Unknown head formats cannot prove current exposure. Any live
                 # exchange position still appears in the account-level count.
@@ -118,7 +117,6 @@ async def load_fact_integrity(
                 continue
 
             quantity = projection.total_active_quantity
-            is_current = is_current or quantity != 0
             if quantity != 0:
                 current_count += 1
             if (
@@ -127,39 +125,27 @@ async def load_fact_integrity(
                 or facts.has_synthetic_fills
                 or facts.has_late_events
             ):
-                if is_current:
-                    invalid += 1
-                    reasons.append("facts_conflict")
-                    unknown_scopes.append(scope_label)
-                    continue
-                historical_reasons.append("facts_conflict")
+                invalid += 1
+                reasons.append("facts_conflict")
+                unknown_scopes.append(scope_label)
                 continue
             coverage = facts.coverage
             if coverage is None or not coverage.is_authoritative:
-                if is_current:
-                    current_unknown = True
-                    reasons.append("coverage_missing")
-                    unknown_scopes.append(scope_label)
-                else:
-                    historical_reasons.append("coverage_missing")
+                current_unknown = True
+                reasons.append("coverage_missing")
+                unknown_scopes.append(scope_label)
                 continue
             if projection.health_status.value != "READY":
-                if is_current:
-                    current_unknown = True
-                    reasons.append("position_not_ready")
-                    unknown_scopes.append(scope_label)
-                else:
-                    historical_reasons.append("position_not_ready")
+                current_unknown = True
+                reasons.append("position_not_ready")
+                unknown_scopes.append(scope_label)
                 continue
             if projection.reconciliation_gap != Decimal(
                 "0"
             ) or projection.unallocated_quantity != Decimal("0"):
-                if is_current:
-                    invalid += 1
-                    reasons.append("position_not_ready")
-                    unknown_scopes.append(scope_label)
-                else:
-                    historical_reasons.append("position_not_ready")
+                invalid += 1
+                reasons.append("position_not_ready")
+                unknown_scopes.append(scope_label)
                 continue
 
             age_seconds = (now - coverage.end_at).total_seconds()
@@ -176,16 +162,11 @@ async def load_fact_integrity(
                 or age_seconds > max_age_seconds
                 or coverage.end_at < latest_fact_at
             ):
-                if is_current:
-                    current_unknown = True
-                    reasons.append("coverage_stale")
-                    unknown_scopes.append(scope_label)
-                else:
-                    historical_reasons.append("coverage_stale")
+                current_unknown = True
+                reasons.append("coverage_stale")
+                unknown_scopes.append(scope_label)
                 continue
             proven_cuts.append(coverage.end_at)
-            if is_current:
-                current_cuts.append(coverage.end_at)
 
         if current_count != accounts[account].position_count:
             reasons.append(REASON_ACTIVE_POSITION_COUNT_MISMATCH)
@@ -203,7 +184,6 @@ async def load_fact_integrity(
             observed_at=min(proven_cuts) if proven_cuts else None,
             reasons=tuple(dict.fromkeys(reasons)),
             unknown_scopes=tuple(dict.fromkeys(unknown_scopes)),
-            historical_reasons=tuple(dict.fromkeys(historical_reasons)),
         )
     return summaries
 

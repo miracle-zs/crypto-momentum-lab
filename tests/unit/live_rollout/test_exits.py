@@ -816,29 +816,29 @@ def test_exit_quantity_and_identity_use_current_position_capacity(target_batch):
 
 
 async def test_scheduled_flatten_identity_is_stable_across_recovery_attempts() -> None:
-    """A resumed operator flatten reuses its identity instead of a new time."""
+    """A resumed operator flatten reuses its persisted command identity."""
 
     manager = LiveExitManager(config=_config(PositionExitMode.CANDLE_15M))
-    command_requested_at = datetime(2026, 7, 3, 23, 40, tzinfo=UTC)
+    operation_id = "operator-command-42"
 
     first = await manager.requests_for_scheduled_flatten(
         (_long_position(),),
         now=datetime(2026, 7, 3, 23, 45, tzinfo=UTC),
         reference_prices={"BTCUSDT": Decimal("99")},
-        identity_at=command_requested_at,
+        operation_id=operation_id,
     )
     # The retry happens later on the wall clock but for the same command.
     second = await manager.requests_for_scheduled_flatten(
         (_long_position(),),
         now=datetime(2026, 7, 3, 23, 52, tzinfo=UTC),
         reference_prices={"BTCUSDT": Decimal("99")},
-        identity_at=command_requested_at,
+        attempt=3,
+        operation_id=operation_id,
     )
 
     assert len(first) == 1 and len(second) == 1
-    # The candidate identity (which becomes the client order id) is derived from
-    # the stable identity instant, not from the retry's wall clock, so a resumed
-    # recovery continues the same order instead of creating another flatten.
+    # The candidate identity (which becomes the client order id) comes from the
+    # persisted command ID, not the session, attempt count or retry wall clock.
     assert first[0].candidate.candidate_id == second[0].candidate.candidate_id
     assert first[0].candidate.signal_id == second[0].candidate.signal_id
     # Without the stable identity the same retry mints a different order.
@@ -859,7 +859,6 @@ async def test_scheduled_flatten_skips_a_position_whose_close_is_already_filled(
     requests = await manager.requests_for_scheduled_flatten(
         (closed,),
         now=datetime(2026, 7, 3, 23, 45, tzinfo=UTC),
-        identity_at=datetime(2026, 7, 3, 23, 40, tzinfo=UTC),
     )
 
     assert requests == ()
@@ -909,7 +908,7 @@ async def test_post_cancellation_flatten_keeps_identity_across_managers() -> Non
     operator command.
     """
 
-    identity_at = datetime(2026, 7, 3, 23, 40, tzinfo=UTC)
+    operation_id = "operator-command-cross-session"
     recovery_plan = _partial_recovery_plan(
         order_id="recovery-client",
         created_at=datetime(2026, 7, 3, 23, 30, tzinfo=UTC),
@@ -922,16 +921,18 @@ async def test_post_cancellation_flatten_keeps_identity_across_managers() -> Non
         (position,),
         now=datetime(2026, 7, 3, 23, 45, tzinfo=UTC),
         reference_prices={"BTCUSDT": Decimal("99")},
-        identity_at=identity_at,
+        operation_id=operation_id,
     )
 
     # Restart: a brand new manager and session resume the same command later.
-    second_manager = LiveExitManager(config=_config(PositionExitMode.CANDLE_15M))
+    second_manager = LiveExitManager(
+        config=replace(_config(PositionExitMode.CANDLE_15M), run_id="run-after-restart")
+    )
     second = await second_manager.requests_for_scheduled_flatten(
         (position,),
         now=datetime(2026, 7, 3, 23, 58, tzinfo=UTC),
         reference_prices={"BTCUSDT": Decimal("99")},
-        identity_at=identity_at,
+        operation_id=operation_id,
     )
 
     assert len(first) == 1 and len(second) == 1
@@ -951,7 +952,7 @@ async def test_post_cancellation_flatten_keeps_identity_across_managers() -> Non
 
 
 async def test_post_cancellation_flatten_without_identity_is_not_stable() -> None:
-    """The stable identity is what prevents a rebuilt second order."""
+    """An operator command ID is what prevents a rebuilt second order."""
 
     recovery_plan = _partial_recovery_plan(
         order_id="recovery-client",
@@ -964,7 +965,7 @@ async def test_post_cancellation_flatten_without_identity_is_not_stable() -> Non
         (position,),
         now=datetime(2026, 7, 3, 23, 45, tzinfo=UTC),
         reference_prices={"BTCUSDT": Decimal("99")},
-        identity_at=datetime(2026, 7, 3, 23, 40, tzinfo=UTC),
+        operation_id="operator-command-42",
     )
     rebuilt = await manager.requests_for_scheduled_flatten(
         (position,),

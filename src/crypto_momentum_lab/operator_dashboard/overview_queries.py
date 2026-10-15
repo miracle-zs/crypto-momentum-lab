@@ -208,12 +208,6 @@ def _fact_integrity_details(
         # Keep the default "unconfirmed" wording: no proof was produced at all.
         return None
     if summary.gaps is not None and summary.gaps == 0:
-        if summary.historical_reasons:
-            # Current risk is proven, but closed objects are missing evidence:
-            # name it instead of hiding it behind a healthy current status.
-            return "fact_integrity_historical_" + ",".join(
-                summary.historical_reasons
-            )
         return None
     parts = list(summary.reasons) or ["fact_integrity_unconfirmed"]
     if summary.unknown_scopes:

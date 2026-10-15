@@ -118,8 +118,16 @@ def test_current_exposure_without_fresh_coverage_is_unknown() -> None:
 
     assert result["primary"].gaps is None
     assert result["primary"].reasons == ("coverage_missing",)
-    sql = str(session.statement.compile(dialect=postgresql.dialect()))
+    compiled = session.statement.compile(dialect=postgresql.dialect())
+    sql = str(compiled)
     assert "execution_book_heads" in sql
+    compiled_values = tuple(str(value) for value in compiled.params.values())
+    assert "active_episode" in compiled_values
+    assert {
+        "active_reservation_ids",
+        "recovery_command_ids",
+        "external_recovery_ids",
+    } <= set(compiled_values)
     assert "position_fact_journal_events" not in sql
     assert "position_recovery_checkpoints" not in sql
 
@@ -153,7 +161,7 @@ def test_missing_head_is_unknown_only_when_exchange_reports_a_position() -> None
 
     assert result["flat"].gaps == 0
     assert result["open"].gaps is None
-    assert "no_relevant_head" in result["open"].reasons
+    assert "active_position_count_mismatch" in result["open"].reasons
 
 
 @pytest.mark.asyncio

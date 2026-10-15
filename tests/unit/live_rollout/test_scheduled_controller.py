@@ -303,7 +303,7 @@ async def test_a5_scheduled_controller_separates_entry_stop_and_flatten() -> Non
             symbol=None,
             reference_prices=None,
             attempt=1,
-            identity_at=None,
+            operation_id=None,
         ):
             flatten_calls.append(now)
             return ()

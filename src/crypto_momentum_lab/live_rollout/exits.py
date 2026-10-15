@@ -559,13 +559,12 @@ class LiveExitManager:
         symbol: str | None = None,
         reference_prices: Mapping[str, Decimal] | None = None,
         attempt: int = 1,
-        identity_at: datetime | None = None,
+        operation_id: str | None = None,
     ) -> tuple[LiveExitRequest, ...]:
         """Build market reduce-only requests for the scheduled risk window.
 
-        ``identity_at`` pins the client order identity to a caller-supplied
-        instant (an operator action), so a resumed attempt reuses the identity
-        instead of producing a new one from the current wall clock.
+        ``operation_id`` pins an operator flatten to its persisted command ID,
+        so a resumed attempt in a new process reuses the same order identity.
 
         Scheduled flattening is deliberately independent of the configured
         strategy exit policy.  Every live position is targeted, including a
@@ -580,7 +579,11 @@ class LiveExitManager:
             raise ValueError("attempt must be positive")
         references = reference_prices or {}
         requests: list[LiveExitRequest] = []
-        reason = f"scheduled_risk_window_flatten_attempt_{attempt}"
+        reason = (
+            "operator_flatten"
+            if operation_id is not None
+            else f"scheduled_risk_window_flatten_attempt_{attempt}"
+        )
         for position in positions:
             if (
                 (symbol is not None and position.symbol != symbol)
@@ -596,10 +599,11 @@ class LiveExitManager:
                 position=position,
                 reason=reason,
                 trigger_at=now,
-                identity_trigger_at=identity_at or now,
+                identity_trigger_at=now,
                 created_at=now,
                 reference_price=reference_price,
                 quantity=position.quantity,
+                operator_operation_id=operation_id,
             )
             recovery_plan = position.recovery_order_plan
             if recovery_plan is not None and _recovery_order_blocks_current_episode(
@@ -615,13 +619,13 @@ class LiveExitManager:
                     reason=reason,
                     trigger_at=now,
                     identity_trigger_at=(
-                        identity_at
-                        or _recovery_exit_started_at(position)
+                        _recovery_exit_started_at(position)
                         or recovery_plan.created_at
                     ),
                     created_at=now,
                     reference_price=reference_price,
                     quantity=position.quantity,
+                    operator_operation_id=operation_id,
                 )
                 requests.append(
                     LiveExitCancellationRequest(
@@ -796,6 +800,7 @@ class LiveExitManager:
         entry_type: EntryType = EntryType.MARKET,
         limit_price: Decimal | None = None,
         quantity: Decimal | None = None,
+        operator_operation_id: str | None = None,
     ) -> LiveExitOrderRequest:
         identity_trigger_at = identity_trigger_at or trigger_at
         order_quantity = (
@@ -825,14 +830,24 @@ class LiveExitManager:
         # exits of different sizes used to derive the same candidate/client order
         # ID.  The second one then failed the durable order-identity check and the
         # position could never be closed.
-        identity = (
-            f"{self._config.run_id}:{position.symbol}:"
-            f"{position.position_side.value}:{position.opened_at.isoformat()}"
-            f"{batch_component}:"
-            f"{reason}:{identity_trigger_at.isoformat()}"
-            f":quantity:{order_quantity}"
-            f":projection:{position.projection_version}"
-        )
+        if operator_operation_id is None:
+            identity = (
+                f"{self._config.run_id}:{position.symbol}:"
+                f"{position.position_side.value}:{position.opened_at.isoformat()}"
+                f"{batch_component}:"
+                f"{reason}:{identity_trigger_at.isoformat()}"
+                f":quantity:{order_quantity}"
+                f":projection:{position.projection_version}"
+            )
+        else:
+            identity = (
+                f"operator:{self._config.account_label}:"
+                f"{self._config.strategy_name}:{operator_operation_id}:"
+                f"{position.symbol}:{position.position_side.value}:"
+                f"{position.opened_at.isoformat()}{batch_component}:"
+                f"quantity:{order_quantity}"
+                f":projection:{position.projection_version}"
+            )
         epoch = self._grace_identity_epoch_for(position.symbol)
         if epoch:
             identity = f"{identity}:epoch:{epoch}"
