@@ -21,6 +21,7 @@ from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
 )
 from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
     ExecutionBookHeadRow,
+    ExecutionOrderWatermarkRow,
     ExecutionTradeIdentityRow,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
@@ -187,6 +188,43 @@ async def test_current_recovery_reads_only_the_head_facts():
 
 
 @pytest.mark.asyncio
+async def test_watermarks_load_once_for_all_position_heads():
+    btc = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.BOTH)
+    eth = PositionKey("live", "primary", "ETHUSDT", FuturesPositionSide.BOTH)
+    rows = [
+        SimpleNamespace(
+            symbol=key.symbol,
+            position_side=key.position_side.value,
+            order_id=f"order-{key.symbol}",
+            cumulative_quantity=Decimal("1"),
+            cumulative_quote=Decimal("100"),
+            updated_at=NOW,
+        )
+        for key in (btc, eth)
+    ]
+    session = _FakeSession(
+        heads=[_head(btc), _head(eth)],
+        rows_by_model={ExecutionOrderWatermarkRow: rows},
+    )
+
+    states = await _uow(session).load_positions(
+        environment="live", account_label="primary", as_of=NOW
+    )
+
+    assert {state.scope.symbol: len(state.watermarks) for state in states} == {
+        "BTCUSDT": 1,
+        "ETHUSDT": 1,
+    }
+    watermark_queries = [
+        call.args[0]
+        for call in session.scalars.await_args_list
+        if call.args[0].column_descriptions[0].get("entity")
+        is ExecutionOrderWatermarkRow
+    ]
+    assert len(watermark_queries) == 1
+
+
+@pytest.mark.asyncio
 async def test_new_account_without_heads_or_obligations_restores_empty():
     session = _FakeSession()
     unit_of_work = _uow(session)
@@ -196,6 +234,11 @@ async def test_new_account_without_heads_or_obligations_restores_empty():
     )
 
     assert states == ()
+    assert not any(
+        call.args[0].column_descriptions[0].get("entity")
+        is ExecutionOrderWatermarkRow
+        for call in session.scalars.await_args_list
+    )
 
 
 @pytest.mark.asyncio
@@ -230,21 +273,17 @@ async def test_corrupt_head_facts_block_recovery():
 
 
 @pytest.mark.asyncio
-async def test_trade_identity_without_head_blocks_account_recovery():
+async def test_historical_trade_identity_without_head_does_not_block_restore():
     key = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.BOTH)
-    session = _FakeSession(
-        rows_by_model={
-            ExecutionTradeIdentityRow: [(key.symbol, key.position_side.value)]
-        }
-    )
-    unit_of_work = _uow(session)
+    unit_of_work = _uow(_FakeSession())
 
-    with pytest.raises(DecisionCommitConflict, match="durable trade identity"):
-        await unit_of_work.load_positions(
-            environment=key.environment,
-            account_label=key.account_label,
-            as_of=NOW,
-        )
+    states = await unit_of_work.load_positions(
+        environment=key.environment,
+        account_label=key.account_label,
+        as_of=NOW,
+    )
+
+    assert states == ()
 
 
 @pytest.mark.asyncio

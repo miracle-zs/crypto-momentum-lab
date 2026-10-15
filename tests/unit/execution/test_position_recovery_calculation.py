@@ -55,8 +55,6 @@ def state():
         cut,
         ExecutionHeadSnapshot(3, "hub", "epoch", "durable-token", payload),
         (),
-        (),
-        (),
     )
 
 

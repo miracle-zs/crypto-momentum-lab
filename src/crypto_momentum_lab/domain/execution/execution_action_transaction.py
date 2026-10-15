@@ -114,15 +114,6 @@ async def accept_action_transaction(
                             current_token=head.projection_version,
                             reason="Position projection is stale; reload durable facts",
                         )
-                    if current_view.projection_version != head.projection_version:
-                        return StaleView(
-                            expected_token=request.expected_view_token,
-                            current_token=head.projection_version,
-                            reason=(
-                                "Position projection differs from its "
-                                "durable head; reload before trading"
-                            ),
-                        )
             candidate._active_transaction = tx
             result = await candidate._act_mutating(request)
             if not isinstance(result, Accepted):

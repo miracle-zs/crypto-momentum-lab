@@ -19,9 +19,6 @@ from crypto_momentum_lab.domain.execution.command_codec import (
     decode_active_commands,
 )
 from crypto_momentum_lab.domain.execution.command_models import OutboxEntry
-from crypto_momentum_lab.domain.execution.evidence_rules import (
-    _scoped_evidence_identity,
-)
 from crypto_momentum_lab.domain.execution.execution_head import (
     decode_execution_head_state,
 )
@@ -281,22 +278,11 @@ async def restore_durable_positions(
                 book._external_recovery_positions[identity] = key
                 book._recovery_required_commands.add(identity)
             book._head_expected_reservation_ids[canon] = set(recovered.reservation_ids)
-            eff_seq = max(
-                filter(
-                    lambda s: s is not None,
-                    (recovered.last_sequence, durable_state.latest_evidence_sequence),
-                ),
-                default=None,
-            )
+            eff_seq = recovered.last_sequence
             if eff_seq is not None:
                 book._last_sequences[canon] = eff_seq
         book._books[canon] = recovered.book
         book._stream_scopes[canon] = scope
-        book._seen_trade_ids.update(durable_state.trade_ids)
-        book._seen_evidence_ids.update(
-            _scoped_evidence_identity(scope, evidence_id)
-            for evidence_id in durable_state.evidence_ids
-        )
         for watermark in durable_state.watermarks:
             key_for_order = watermark_key(key, watermark.order_id)
             book._order_cumulative_fills[key_for_order] = watermark.cumulative_quantity
@@ -391,13 +377,7 @@ def apply_loaded_execution_position(
             execution_book._recovery_required_commands.discard(divergence_identity)
             execution_book._external_recovery_positions.pop(divergence_identity, None)
             execution_book._head_expected_reservation_ids.pop(canon, None)
-        eff_seq = max(
-            filter(
-                lambda s: s is not None,
-                (last_sequence, target_state.latest_evidence_sequence),
-            ),
-            default=None,
-        )
+        eff_seq = last_sequence
         if eff_seq is not None:
             execution_book._last_sequences[canon] = eff_seq
         else:
@@ -408,11 +388,6 @@ def apply_loaded_execution_position(
     execution_book._books[canon] = book
     dependencies.advance_context_revision()
     execution_book._stream_scopes[canon] = scope
-    execution_book._seen_trade_ids.update(target_state.trade_ids)
-    execution_book._seen_evidence_ids.update(
-        _scoped_evidence_identity(scope, identity)
-        for identity in target_state.evidence_ids
-    )
     for watermark in target_state.watermarks:
         watermark_key = dependencies.order_watermark_key(key, watermark.order_id)
         execution_book._order_cumulative_fills[watermark_key] = (

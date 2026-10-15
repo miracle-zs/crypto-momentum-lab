@@ -524,8 +524,6 @@ async def test_strict_reload_validates_before_publishing_book(corruption):
             as_of=NOW,
         ),
         head=ExecutionHeadSnapshot(1, "hub", epoch, plan.projection_version, payload),
-        trade_ids=("fill-1",),
-        evidence_ids=("durable-evidence",),
         watermarks=(),
     )
     execution_uow = AsyncMock()

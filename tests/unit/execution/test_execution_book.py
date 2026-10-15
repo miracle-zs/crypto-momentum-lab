@@ -38,8 +38,8 @@ from crypto_momentum_lab.domain.execution.position_book import PositionBook
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     FactCoverageInterval,
     FactCoverageStatus,
-    PositionKey,
     PositionHealthStatus,
+    PositionKey,
 )
 from crypto_momentum_lab.domain.execution.recovery_models import AccountFacts
 from crypto_momentum_lab.domain.execution.trade_command import TradeCommandType
@@ -117,7 +117,7 @@ async def test_staged_recovery_reload_is_isolated_from_published_book():
         revision=1,
         as_of=_dt(10, 0),
     )
-    durable = DurableExecutionPositionState(scope, cut, None, (), (), ())
+    durable = DurableExecutionPositionState(scope, cut, None, ())
     uow = SimpleNamespace(load_position=AsyncMock(return_value=durable))
     book = ExecutionBook(execution_unit_of_work=uow)
     candidate = book._staged_copy(key)
@@ -1736,8 +1736,6 @@ def test_recover_durable_position_recomputes_stale_projection_digest() -> None:
         scope=scope,
         cut=cut,
         head=head,
-        trade_ids=(),
-        evidence_ids=(),
         watermarks=(),
     )
 
@@ -1792,8 +1790,6 @@ async def test_repaired_position_reload_uses_the_real_uow_contract(
         scope=scope,
         cut=cut,
         head=None,
-        trade_ids=(),
-        evidence_ids=(),
         watermarks=(),
     )
     uow.load_position.return_value = state if has_position else None
@@ -1847,12 +1843,12 @@ def test_reconnect_selects_latest_registered_epoch_for_each_account() -> None:
 async def test_reload_rejects_malformed_durable_head_fields(
     state_payload, remove_last_sequence
 ) -> None:
+    from crypto_momentum_lab.domain.execution.execution_head import (
+        build_execution_head_payload,
+    )
     from crypto_momentum_lab.domain.execution.ports import (
         DurableExecutionPositionState,
         ExecutionHeadSnapshot,
-    )
-    from crypto_momentum_lab.domain.execution.execution_head import (
-        build_execution_head_payload,
     )
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
@@ -1896,8 +1892,6 @@ async def test_reload_rejects_malformed_durable_head_fields(
             projection_version="pv-1",
             state_payload=payload,
         ),
-        trade_ids=(),
-        evidence_ids=(),
         watermarks=(),
     )
 
@@ -1941,8 +1935,6 @@ async def test_reservation_divergence_requires_a_reloaded_expected_set() -> None
         scope=scope,
         cut=cut,
         head=None,
-        trade_ids=(),
-        evidence_ids=(),
         watermarks=(),
     )
 
@@ -2031,8 +2023,6 @@ async def test_restore_durable_positions_migrates_facts_hash_when_no_reservation
         scope=scope,
         cut=cut,
         head=head,
-        trade_ids=(),
-        evidence_ids=(),
         watermarks=(),
     )
 
@@ -2129,8 +2119,6 @@ async def test_restore_durable_positions_rejects_legacy_head_with_reservations()
         scope=scope,
         cut=cut,
         head=head,
-        trade_ids=(),
-        evidence_ids=(),
         watermarks=(),
     )
 
@@ -2625,8 +2613,6 @@ async def test_restore_preserves_diverged_reservations_and_provides_recovery() -
         scope=scope,
         cut=cut,
         head=head,
-        trade_ids=(),
-        evidence_ids=(),
         watermarks=(),
     )
 

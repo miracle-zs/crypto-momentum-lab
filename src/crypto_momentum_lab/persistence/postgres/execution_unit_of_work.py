@@ -8,9 +8,15 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from crypto_momentum_lab.domain.execution.execution_head import (
+    EXECUTION_HEAD_SCHEMA_VERSION,
+    decode_current_facts,
+    decode_execution_head_state,
+    is_supported_execution_head_schema,
+)
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.order_submission import (
     OrderRejectionOutcome,
@@ -32,12 +38,6 @@ from crypto_momentum_lab.domain.execution.ports import (
 )
 from crypto_momentum_lab.domain.execution.ports import (
     ExecutionWatermark as _ExecutionWatermark,
-)
-from crypto_momentum_lab.domain.execution.execution_head import (
-    EXECUTION_HEAD_SCHEMA_VERSION,
-    decode_current_facts,
-    decode_execution_head_state,
-    is_supported_execution_head_schema,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
@@ -653,13 +653,49 @@ class AsyncPostgresExecutionUnitOfWork:
                 )
                 rows = () if row is None else (row,)
             heads = {(row.symbol, row.position_side): row for row in rows}
-            await self._require_complete_head_coverage(
+            await self._require_live_obligations_have_heads(
                 session,
                 environment=environment,
                 account_label=account_label,
                 heads_by_position=heads,
                 key=key,
             )
+
+            watermarks_by_position: dict[
+                tuple[str, str], list[_ExecutionWatermark]
+            ] = {}
+            if rows:
+                watermark_conditions = [
+                    ExecutionOrderWatermarkRow.environment == environment,
+                    ExecutionOrderWatermarkRow.account_label == account_label,
+                ]
+                if key is not None:
+                    watermark_conditions.extend(
+                        (
+                            ExecutionOrderWatermarkRow.symbol == key.symbol,
+                            ExecutionOrderWatermarkRow.position_side
+                            == key.position_side.value,
+                        )
+                    )
+                watermark_rows = (
+                    await session.scalars(
+                        select(ExecutionOrderWatermarkRow).where(
+                            *watermark_conditions
+                        )
+                    )
+                ).all()
+                for watermark in watermark_rows:
+                    position_watermarks = watermarks_by_position.setdefault(
+                        (watermark.symbol, watermark.position_side), []
+                    )
+                    position_watermarks.append(
+                        _ExecutionWatermark(
+                            order_id=watermark.order_id,
+                            cumulative_quantity=watermark.cumulative_quantity,
+                            cumulative_quote=watermark.cumulative_quote,
+                            updated_at=watermark.updated_at,
+                        )
+                    )
 
             states: list[_DurableExecutionPositionState] = []
             for row in rows:
@@ -733,57 +769,21 @@ class AsyncPostgresExecutionUnitOfWork:
                     as_of=max((as_of, *event_times)),
                     checkpoint=facts.recovery_checkpoint,
                 )
-                trade_rows = (
-                    await session.scalars(
-                        select(ExecutionTradeIdentityRow.trade_id).where(
-                            ExecutionTradeIdentityRow.environment
-                            == position_key.environment,
-                            ExecutionTradeIdentityRow.account_label
-                            == position_key.account_label,
-                            ExecutionTradeIdentityRow.symbol == position_key.symbol,
-                            ExecutionTradeIdentityRow.position_side
-                            == position_key.position_side.value,
-                        )
-                    )
-                ).all()
-                latest_evidence_sequence = await session.scalar(
-                    select(func.max(ExecutionEvidenceReceiptRow.sequence)).where(
-                        *_execution_scope_conditions(position_key, scope)
-                    )
-                )
-                watermark_rows = (
-                    await session.scalars(
-                        select(ExecutionOrderWatermarkRow).where(
-                            ExecutionOrderWatermarkRow.environment == environment,
-                            ExecutionOrderWatermarkRow.account_label == account_label,
-                            ExecutionOrderWatermarkRow.symbol == row.symbol,
-                            ExecutionOrderWatermarkRow.position_side
-                            == row.position_side,
-                        )
-                    )
-                ).all()
                 states.append(
                     _DurableExecutionPositionState(
                         scope=scope,
                         cut=cut,
                         head=head,
-                        trade_ids=tuple(trade_rows),
-                        evidence_ids=(),
                         watermarks=tuple(
-                            _ExecutionWatermark(
-                                order_id=watermark.order_id,
-                                cumulative_quantity=watermark.cumulative_quantity,
-                                cumulative_quote=watermark.cumulative_quote,
-                                updated_at=watermark.updated_at,
+                            watermarks_by_position.get(
+                                (row.symbol, row.position_side), ()
                             )
-                            for watermark in watermark_rows
                         ),
-                        latest_evidence_sequence=latest_evidence_sequence,
                     )
                 )
             return tuple(states)
 
-    async def _require_complete_head_coverage(
+    async def _require_live_obligations_have_heads(
         self,
         session: AsyncSession,
         *,
@@ -792,38 +792,8 @@ class AsyncPostgresExecutionUnitOfWork:
         heads_by_position: Mapping[tuple[str, str], ExecutionBookHeadRow],
         key: PositionKey | None = None,
     ) -> None:
-        """Load current state from heads and the independent live obligations."""
+        """Keep active commands and reservations attached to a current head."""
         head_keys = set(heads_by_position)
-
-        for model, label in (
-            (ExecutionOrderWatermarkRow, "order watermark"),
-            (ExecutionEvidenceReceiptRow, "evidence receipt"),
-            (ExecutionTradeIdentityRow, "trade identity"),
-        ):
-            conditions = [
-                model.environment == environment,
-                model.account_label == account_label,
-            ]
-            if key is not None:
-                conditions.extend(
-                    (
-                        model.symbol == key.symbol,
-                        model.position_side == key.position_side.value,
-                    )
-                )
-            rows = (
-                await session.execute(
-                    select(model.symbol, model.position_side)
-                    .where(*conditions)
-                    .distinct()
-                )
-            ).all()
-            for symbol, position_side in rows:
-                if (symbol, position_side) not in head_keys:
-                    raise _DecisionCommitConflict(
-                        f"position {symbol}:{position_side} has durable {label} "
-                        "but no durable head; recovery blocked"
-                    )
 
         reservation_conditions = [
             PositionReservationRow.environment == environment,

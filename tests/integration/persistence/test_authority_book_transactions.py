@@ -266,7 +266,6 @@ async def test_legacy_dispatch_without_head_restores_unknown_atomically(
             scope.to_position_key(), as_of=datetime.now(UTC)
         )
         assert state.head.revision >= 1
-        assert "1" in state.trade_ids
         assert not state.cut.facts.fills
         assert (await restored.read(scope)).total_quantity == Decimal("1")
 
@@ -280,7 +279,7 @@ async def test_legacy_dispatch_without_head_restores_unknown_atomically(
                 )
             )
         blocked = _book(factory)
-        with pytest.raises(DecisionCommitConflict, match="recovery blocked"):
+        with pytest.raises(DecisionCommitConflict, match="has active command"):
             await blocked.restore(account_label=account)
     finally:
         await engine.dispose()
@@ -330,6 +329,7 @@ async def test_terminal_order_needs_no_recovery_after_process_restart(
         restored = _book(factory)
         await restored.restore(account_label=account)
         assert command.command_id not in restored._recovery_required_commands
+        assert not restored._seen_trade_ids
         trade = replace(
             first,
             evidence_id="true-trade",
@@ -339,7 +339,9 @@ async def test_terminal_order_needs_no_recovery_after_process_restart(
         assert isinstance(await restored.observe(trade), Applied)
         assert not restored._recovery_required_commands
         assert (await restored.read(scope)).total_quantity == Decimal("1")
-        assert isinstance(await restored.observe(trade), Duplicate)
+        replay = replace(trade, evidence_id="true-trade-replay", sequence=4)
+        assert isinstance(await restored.observe(replay), Duplicate)
+        assert (await restored.read(scope)).total_quantity == Decimal("1")
         reads = []
 
         def record_read(conn, cursor, statement, parameters, context, many):
@@ -350,6 +352,8 @@ async def test_terminal_order_needs_no_recovery_after_process_restart(
                     "position_recovery_checkpoints",
                     "account_fill_events",
                     "account_position_snapshots",
+                    "execution_trade_identities",
+                    "execution_evidence_receipts",
                 )
             ):
                 reads.append(statement)
@@ -362,7 +366,6 @@ async def test_terminal_order_needs_no_recovery_after_process_restart(
         assert not reads, "direct recovery must not query journal or checkpoint tables"
         assert state.scope.matches(scope.to_position_key())
         assert state.cut.facts.fills == ()
-        assert "1" in state.trade_ids
     finally:
         await engine.dispose()
 

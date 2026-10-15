@@ -682,6 +682,7 @@ async def test_a3b_all_io_entrypoints_assert_no_application_locks_held() -> None
             self.tx_count = 0
             self.load_position_called = False
             self.persisted_heads: dict[str, Any] = {}
+            self.trade_ids: set[str] = set()
 
         @asynccontextmanager
         async def transaction(self, key: PositionKey, account_scope: str | None = None):
@@ -715,7 +716,14 @@ async def test_a3b_all_io_entrypoints_assert_no_application_locks_held() -> None
             tx.record_evidence = AsyncMock(
                 return_value=MagicMock(is_replay=False, is_conflict=False)
             )
-            tx.record_trade = AsyncMock(return_value=True)
+            async def _record_trade(**kwargs: Any) -> bool:
+                trade_id = kwargs["trade"].trade_id
+                if trade_id in self.trade_ids:
+                    return False
+                self.trade_ids.add(trade_id)
+                return True
+
+            tx.record_trade = AsyncMock(side_effect=_record_trade)
             yield tx
 
         async def load_position(self, key: PositionKey, as_of: Any = None):
@@ -811,6 +819,25 @@ async def test_a3b_all_io_entrypoints_assert_no_application_locks_held() -> None
             assert not self._book._mutation_lock(request.key).locked()
             self.load_facts_called = True
             scope = request.scope
+            from crypto_momentum_lab.domain.execution.execution_head import (
+                build_execution_head_payload,
+            )
+
+            position_book = self._book._ensure_book(request.key)
+            head_revision = self._book._head_revisions.get(
+                request.key.canonical_id, 0
+            )
+            current_head = ExecutionHeadSnapshot(
+                head_revision,
+                scope.stream_id,
+                scope.stream_epoch,
+                position_book.get_view().projection_version,
+                build_execution_head_payload(
+                    self._book,
+                    request.key,
+                    active_reservations=lambda _key: (),
+                ),
+            )
             fill = AccountFillEvent(
                 environment=request.key.environment,
                 account_label=request.key.account_label,
@@ -892,11 +919,13 @@ async def test_a3b_all_io_entrypoints_assert_no_application_locks_held() -> None
                     snapshots=(zero_snap, current_snap),
                     fill_load_provenance=prov,
                 ),
-                revision=0,
+                revision=self._book._head_revisions.get(
+                    request.key.canonical_id, 0
+                ),
                 as_of=NOW,
             )
             return PositionRepairFacts(
-                cut, None, (fill,), frozenset({"order-repair-lock"})
+                cut, current_head, (fill,), frozenset({"order-repair-lock"})
             )
 
         async def persist_repair(self, repair: Any) -> PositionRepairReceipt:
@@ -933,8 +962,6 @@ async def test_a3b_all_io_entrypoints_assert_no_application_locks_held() -> None
                     as_of=NOW,
                 ),
                 head,
-                ("fill-repair-lock",),
-                (),
                 (),
             )
             return receipt

@@ -1,7 +1,7 @@
 """Compute safe position repairs and validate committed reloads."""
 
-from decimal import Decimal
 from dataclasses import replace
+from decimal import Decimal
 
 from crypto_momentum_lab.domain.execution.execution_head import (
     EXECUTION_HEAD_SCHEMA_VERSION,
@@ -168,16 +168,12 @@ def validate_repaired_position(
     ):
         raise PositionRepairBlocked("reload position/stream identity mismatch")
     head = state.head
-    if (
-        head is None
-        or head.revision < 1
-        or (head.stream_id, head.stream_epoch) != (scope.stream_id, scope.stream_epoch)
-    ):
+    if head is None or head.revision < 1 or (
+        head.stream_id,
+        head.stream_epoch,
+    ) != (scope.stream_id, scope.stream_epoch):
         raise PositionRepairBlocked("reload requires a matching durable head")
-    head = state.head
-    book = PositionBook.from_facts(state.cut.facts)
-    if head is not None:
-        book = decode_execution_head_state(head.state_payload, key=key, scope=scope)
+    book = decode_execution_head_state(head.state_payload, key=key, scope=scope)
     view = book.get_view()
     if (
         expected_quantity is None
@@ -186,16 +182,7 @@ def validate_repaired_position(
     ):
         raise PositionRepairBlocked("reload does not prove current exposure")
     payload = head.state_payload
-    expected = {
-        "schema_version": EXECUTION_HEAD_SCHEMA_VERSION,
-        "position_key": encode_position_key(key),
-        "stream_scope": dict(
-            stream_id=scope.stream_id, stream_epoch=scope.stream_epoch
-        ),
-    }
-    if any(payload.get(k) != v for k, v in expected.items()) or (
-        book.current_facts != state.cut.facts
-    ):
+    if book.current_facts != state.cut.facts:
         raise PositionRepairBlocked(
             "reloaded durable head failed complete projection validation"
         )

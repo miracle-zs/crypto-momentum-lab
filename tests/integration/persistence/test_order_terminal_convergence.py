@@ -523,10 +523,10 @@ async def test_duplicate_terminal_event_when_outbox_unresolved_converges(
 
 
 @pytest.mark.asyncio
-async def test_transient_projection_version_mismatch_reloads_and_does_not_fail_book(
+async def test_stale_head_revision_reloads_before_observing_evidence(
     async_database_url: str,
 ):
-    """S03: When local view projection_version lags durable head, book reloads without setting persistence_failed."""
+    """A newer durable revision refreshes the local position before applying evidence."""
     engine = create_async_database_engine(async_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     account = "s03-" + uuid4().hex[:10]
@@ -594,7 +594,7 @@ async def test_transient_projection_version_mismatch_reloads_and_does_not_fail_b
     # Verify book is healthy
     assert not book._persistence_failed
 
-    # Simulate another worker or transaction bumping the durable projection_version on head
+    # Advance the durable revision after this process loaded its local position.
     async with factory() as session:
         async with session.begin():
             head_row = await session.get(
@@ -602,7 +602,7 @@ async def test_transient_projection_version_mismatch_reloads_and_does_not_fail_b
                 ("live", account, "SOLUSDT", "LONG"),
             )
             assert head_row is not None
-            head_row.projection_version = "pv_bumped_123"
+            head_row.revision += 1
 
     # Now an observation arrives in this process
     ev = ExecutionEvidence(
@@ -629,7 +629,7 @@ async def test_transient_projection_version_mismatch_reloads_and_does_not_fail_b
     )
 
     await book.observe(ev)
-    # The observation must not throw bare RuntimeError or set _persistence_failed = True!
+    # The revision guard reloads the durable state before committing the event.
     assert not book._persistence_failed
 
     await engine.dispose()

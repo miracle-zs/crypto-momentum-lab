@@ -70,10 +70,7 @@ class DurableExecutionPositionState:
     scope: AccountFactStreamScope
     cut: DurableJournalCut
     head: ExecutionHeadSnapshot | None
-    trade_ids: tuple[str, ...]
-    evidence_ids: tuple[str, ...]
     watermarks: tuple[ExecutionWatermark, ...]
-    latest_evidence_sequence: int | None = None
 
 
 class ExecutionTransactionPort(Protocol):

@@ -10,12 +10,12 @@ from crypto_momentum_lab.domain.execution.command_models import (
 )
 from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
 from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+from crypto_momentum_lab.domain.execution.execution_head import (
+    decode_execution_head_state,
+)
 from crypto_momentum_lab.domain.execution.ports import (
     DurableExecutionPositionState,
     ExecutionHeadSnapshot,
-)
-from crypto_momentum_lab.domain.execution.execution_head import (
-    decode_execution_head_state,
 )
 from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
 from crypto_momentum_lab.live_rollout.position_self_healing import (
@@ -36,6 +36,7 @@ async def test_repair_commit_and_reload_exclude_account_observation():
     persisted = asyncio.Event()
     observing = asyncio.Event()
     state = []
+    durable_trade_ids = set()
 
     class RepairUow(MemoryRepairUow):
         @asynccontextmanager
@@ -46,6 +47,7 @@ async def test_repair_commit_and_reload_exclude_account_observation():
 
         async def persist_repair(self, repair):
             receipt = await super().persist_repair(repair)
+            durable_trade_ids.update(fill.trade_id for fill in repair.facts.fills)
             head = ExecutionHeadSnapshot(
                 receipt.head_revision,
                 "hub",
@@ -69,8 +71,6 @@ async def test_repair_commit_and_reload_exclude_account_observation():
                         as_of=NOW,
                     ),
                     head,
-                    tuple(fill.trade_id for fill in repair.facts.fills),
-                    (),
                     (),
                 )
             )
@@ -83,6 +83,15 @@ async def test_repair_commit_and_reload_exclude_account_observation():
         async def transaction(self, key):
             async with db_lock:
                 tx = ObservationTransaction(state[-1].head)
+
+                async def record_trade(**kwargs):
+                    trade_id = kwargs["trade"].trade_id
+                    if trade_id in durable_trade_ids:
+                        return False
+                    durable_trade_ids.add(trade_id)
+                    return True
+
+                tx.record_trade = record_trade
                 yield tx
 
         async def load_head(self, key):

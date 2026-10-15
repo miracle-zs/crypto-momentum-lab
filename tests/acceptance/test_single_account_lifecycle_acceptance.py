@@ -3,7 +3,7 @@
 Proves:
 1. Normal restart succeeds without historical journal or checkpoint tables (O(1) direct Head restore).
 2. Late fills and fill deduplication are preserved across restarts.
-3. Missing/corrupted Head with responsibilities explicitly blocks (DecisionCommitConflict, fail-closed).
+3. A missing Head is not rebuilt from historical fills; active commands and reservations still require one.
 4. Single-account in-process lifecycle: private event -> fill booking -> expectation verification -> exit execution -> clean shutdown (without WebSocket Hub).
 """
 
@@ -52,9 +52,6 @@ from crypto_momentum_lab.domain.execution.order_state import (
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
     OrderSubmissionPreparation,
-)
-from crypto_momentum_lab.domain.execution.ports import (
-    DecisionCommitConflict,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionKey,
@@ -370,16 +367,10 @@ async def test_normal_restart_succeeds_without_historical_journal_or_checkpoints
 
 
 @pytest.mark.asyncio
-async def test_partial_missing_head_with_position_only_blocks_account_recovery(
+async def test_partial_missing_head_is_not_reconstructed_from_historical_fills(
     async_database_url: str,
 ) -> None:
-    """Two held positions, one deleted head: recovery must not silently drop it.
-
-    Reproduced: BTC and ETH each held 1; deleting the ETH head let restore
-    succeed with only BTC, stranding the ETH position. The deleted position has
-    no active command or reservation (the entry order already completed), so
-    only the durable fill/identity responsibility can betray it.
-    """
+    """A missing position head is not recreated by reading historical fills."""
 
     engine = create_async_database_engine(async_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -428,19 +419,22 @@ async def test_partial_missing_head_with_position_only_blocks_account_recovery(
             assert deleted.rowcount == 1
             await session.commit()
 
-        # Restart must block explicitly instead of dropping the ETH position.
+        # Historical fills do not reconstruct current position heads at startup.
         book2, _ = _book(factory)
-        with pytest.raises(DecisionCommitConflict, match="no durable head"):
-            await book2.restore(account_label=account)
+        await book2.restore(account_label=account)
+        restored_symbols = sorted(
+            key.symbol for key in book2.position_keys_for_account("live", account)
+        )
+        assert restored_symbols == ["BTCUSDT"]
     finally:
         await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_multi_symbol_partial_corruption_and_new_account_are_distinguished(
+async def test_historical_evidence_does_not_recreate_a_missing_position_head(
     async_database_url: str,
 ) -> None:
-    """A genuinely new account restores empty; a partially corrupted one blocks."""
+    """New accounts and positions with only historical evidence restore from heads only."""
 
     engine = create_async_database_engine(async_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -472,8 +466,8 @@ async def test_multi_symbol_partial_corruption_and_new_account_are_distinguished
                 ),
                 Applied,
             )
-        # The current position head and its trade identity survive a damaged
-        # key independently of the account's other symbols.
+        # Historical evidence remains available, but it is not a second
+        # source for reconstructing the current position.
         async with factory() as session:
             receipts = (
                 await session.scalars(
@@ -506,17 +500,20 @@ async def test_multi_symbol_partial_corruption_and_new_account_are_distinguished
             await session.commit()
 
         book2, _ = _book(factory)
-        with pytest.raises(DecisionCommitConflict, match="ETHUSDT"):
-            await book2.restore(account_label=account)
+        await book2.restore(account_label=account)
+        restored_symbols = sorted(
+            key.symbol for key in book2.position_keys_for_account("live", account)
+        )
+        assert restored_symbols == ["BTCUSDT"]
     finally:
         await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_corrupted_or_missing_head_with_responsibilities_explicitly_blocks(
+async def test_missing_head_with_only_history_restores_without_reconstruction(
     async_database_url: str,
 ) -> None:
-    """Missing or corrupted Head when responsibilities exist raises DecisionCommitConflict (fail-closed)."""
+    """Historical fills and receipts do not reconstruct a deleted current head."""
     engine = create_async_database_engine(async_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     account = f"corrupt-head-{uuid4().hex}"
@@ -537,7 +534,7 @@ async def test_corrupted_or_missing_head_with_responsibilities_explicitly_blocks
         )
         assert isinstance(applied, Applied)
 
-        # Step 2: Delete Head row while responsibility/stream sequence exists
+        # Step 2: Delete the current head while historical evidence remains.
         async with factory() as session:
             await session.execute(
                 delete(ExecutionBookHeadRow).where(
@@ -547,13 +544,10 @@ async def test_corrupted_or_missing_head_with_responsibilities_explicitly_blocks
             )
             await session.commit()
 
-        # Step 3: Book 2 restore MUST fail-closed with DecisionCommitConflict
+        # Step 3: Restore does not scan history to rebuild current state.
         book2, _ = _book(factory)
-        with pytest.raises(
-            DecisionCommitConflict,
-            match="no durable head; recovery blocked",
-        ):
-            await book2.restore(account_label=account)
+        await book2.restore(account_label=account)
+        assert book2.position_keys_for_account("live", account) == ()
     finally:
         await engine.dispose()
 

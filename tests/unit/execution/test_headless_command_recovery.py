@@ -58,7 +58,7 @@ class LegacyUow(ObservationUnitOfWork):
         # Production restores the historical journal even if it has no head.
         return (DurableExecutionPositionState(
             scope, DurableJournalCut(scope=scope, facts=facts, revision=0,
-                                     as_of=NOW), None, (), (), (),
+                                     as_of=NOW), None, (),
         ),)
 
 

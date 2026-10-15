@@ -30,6 +30,7 @@ from crypto_momentum_lab.domain.execution.recovery_models import (
     StreamCheckpointAdoption,
 )
 
+
 def create_current_state_checkpoint(
     *,
     book: PositionBook,
@@ -187,22 +188,8 @@ def recover_durable_position(state: DurableExecutionPositionState) -> RecoveredP
         stored_reservations = payload.get("active_reservation_ids")
         recovery_command_ids = payload.get("recovery_command_ids")
         external_recovery_ids = payload.get("external_recovery_ids")
-        expected_key = {
-            "environment": key.environment,
-            "account_label": key.account_label,
-            "symbol": key.symbol,
-            "position_side": key.position_side.value,
-        }
-        expected_scope = {
-            "stream_id": scope.stream_id,
-            "stream_epoch": scope.stream_epoch,
-        }
         if (
-            payload.get("position_key") != expected_key
-            or (payload.get("stream_scope") != expected_scope)
-            or book.current_facts != state.cut.facts
-            or book.stream_scope != scope
-            or "last_sequence" not in payload
+            "last_sequence" not in payload
             or (
                 payload["last_sequence"] is not None
                 and (
@@ -226,25 +213,6 @@ def recover_durable_position(state: DurableExecutionPositionState) -> RecoveredP
             )
         ):
             raise RuntimeError("durable execution head is malformed")
-        if not all(
-            isinstance(value, list)
-            for value in (
-                stored_reservations,
-                recovery_command_ids,
-                external_recovery_ids,
-            )
-        ):
-            raise RuntimeError("durable execution head recovery links are malformed")
-        if any(
-            not isinstance(value, str) or not value
-            for values in (
-                stored_reservations,
-                recovery_command_ids,
-                external_recovery_ids,
-            )
-            for value in values
-        ):
-            raise RuntimeError("durable execution head recovery links are malformed")
         last_sequence = payload["last_sequence"]
         head_revision = head.revision
         reservation_ids = set(stored_reservations)

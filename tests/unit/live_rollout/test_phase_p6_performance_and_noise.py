@@ -62,8 +62,6 @@ async def test_inactive_head_migrations_are_consolidated_at_info_level(monkeypat
     state = SimpleNamespace(
         scope=scope,
         cut=SimpleNamespace(revision=1),
-        trade_ids=(),
-        evidence_ids=(),
         watermarks=(),
         head=None,
     )

@@ -57,7 +57,7 @@ else
   runner=("${ssh_command[@]}" "${ssh_options[@]}" "${server_user}@${server_host}" bash -s --)
 fi
 
-started_at="$(date +%s)"
+client_started_at="$(date +%s)"
 if "${runner[@]}" "$remote_dir" "$target_ref" <<'REMOTE_SCRIPT'; then
 set -Eeuo pipefail
 
@@ -96,6 +96,55 @@ if [[ "$target_commit" != "$previous_commit" ]] && \
   echo "Refusing deployment: target must fast-forward main" >&2
   exit 1
 fi
+
+# Build the target image in the background while checking whether all accounts
+# are flat. The outage then covers only service stop, migration, and restart.
+build_parent="$(mktemp -d "${TMPDIR:-/tmp}/cml-deploy-build.XXXXXX")"
+build_dir="$build_parent/source"
+build_pid=""
+cleanup_build_worktree() {
+  if [[ -n "$build_pid" ]]; then
+    kill "$build_pid" >/dev/null 2>&1 || true
+    wait "$build_pid" >/dev/null 2>&1 || true
+  fi
+  if [[ -f "$build_dir/.git" ]]; then
+    git worktree remove "$build_dir" >/dev/null 2>&1 || true
+  fi
+  rmdir "$build_parent" >/dev/null 2>&1 || true
+}
+trap cleanup_build_worktree EXIT
+git worktree add --detach "$build_dir" "$target_commit"
+build_compose=(docker compose --project-directory "$build_dir" \
+  --env-file "$remote_dir/.env.server" \
+  -f "$build_dir/compose.server.yaml" \
+  -f "$build_dir/compose.live.accounts.yaml" --profile live)
+target_image="crypto-momentum-lab-app:${target_commit}"
+if ! docker image inspect "$target_image" >/dev/null 2>&1; then
+  CML_CODE_COMMIT="$target_commit" CML_DASHBOARD_IMAGE="$target_image" \
+    "${build_compose[@]}" build migrate &
+  build_pid=$!
+fi
+
+finish_target_build() {
+  if [[ -z "$build_pid" ]]; then
+    return 0
+  fi
+  local pid="$build_pid" status=0
+  build_pid=""
+  if wait "$pid"; then
+    return 0
+  else
+    status=$?
+  fi
+  echo "Target image build failed: commit=$target_commit status=$status" >&2
+  return "$status"
+}
+
+check_target_build() {
+  if [[ -n "$build_pid" ]] && ! kill -0 "$build_pid" 2>/dev/null; then
+    finish_target_build
+  fi
+}
 
 accounts=(
   "primary:live-strategy"
@@ -137,6 +186,7 @@ PY
 )
 
 while :; do
+  check_target_build
   all_flat=1
   for item in "${accounts[@]}"; do
     account="${item%%:*}"
@@ -160,6 +210,7 @@ while :; do
       fi
       all_flat=0
     fi
+    check_target_build
   done
   if (( all_flat == 1 )); then
     break
@@ -167,6 +218,7 @@ while :; do
   echo "Waiting for every account to have no positions or open orders; retrying in 30 seconds."
   sleep 30
 done
+finish_target_build
 
 services=()
 for service in dashboard market-data research-collector \
@@ -177,16 +229,42 @@ for service in dashboard market-data research-collector \
   fi
 done
 
+execution_account_containers=()
 for service in execution-account-live execution-account-live-account-2 \
   execution-account-live-account-3 execution-account-live-account-4; do
   container="$(docker ps -q --filter label=com.docker.compose.project=crypto-momentum-lab \
     --filter "label=com.docker.compose.service=$service" | head -n 1)"
   if [[ -n "$container" ]]; then
-    docker stop --time 90 "$container" >/dev/null
+    execution_account_containers+=("$container")
   fi
 done
+execution_stop_pids=()
+application_stop_pid=""
+for container in "${execution_account_containers[@]}"; do
+  docker stop --time 90 "$container" >/dev/null &
+  execution_stop_pids+=("$!")
+done
 if (( ${#services[@]} > 0 )); then
-  "${compose[@]}" stop --timeout 90 "${services[@]}"
+  "${compose[@]}" stop --timeout 90 "${services[@]}" &
+  application_stop_pid=$!
+fi
+stop_status=0
+for stop_pid in "${execution_stop_pids[@]}" "$application_stop_pid"; do
+  if [[ -z "$stop_pid" ]]; then
+    continue
+  fi
+  if wait "$stop_pid"; then
+    continue
+  else
+    status=$?
+  fi
+  if (( stop_status == 0 )); then
+    stop_status=$status
+  fi
+done
+if (( stop_status != 0 )); then
+  echo "Deployment failed while stopping services: status=$stop_status" >&2
+  exit "$stop_status"
 fi
 
 if [[ "$target_commit" != "$previous_commit" ]]; then
@@ -203,7 +281,6 @@ set_env_value() {
 set_env_value CML_CODE_COMMIT "$target_commit"
 set_env_value CML_DASHBOARD_IMAGE "crypto-momentum-lab-app:${target_commit}"
 chmod 600 .env.server
-"${compose[@]}" build
 "${compose[@]}" up -d postgres
 if (( ${#services[@]} > 0 )); then
   # Compose runs migration and volume initialization before the app services.
