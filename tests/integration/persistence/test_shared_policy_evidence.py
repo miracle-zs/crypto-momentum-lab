@@ -22,10 +22,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
     DecisionTraceRow,
     MarketRevisionRefRow,
 )
-from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
-    PositionFactJournalEventRow,
-    PositionRecoveryCheckpointRow,
-)
 from crypto_momentum_lab.tools.share_decision_policy_evidence import (
     backfill_batch,
     collect_batch,
@@ -47,12 +43,16 @@ async def evidence_sessions(async_database_url):
     )
     try:
         async with engine.connect() as connection:
+            await connection.exec_driver_sql(
+                "CREATE TABLE position_fact_journal_events (id integer PRIMARY KEY)"
+            )
+            await connection.exec_driver_sql(
+                "CREATE TABLE position_recovery_checkpoints (id integer PRIMARY KEY)"
+            )
             for table in (
                 DecisionPolicyEvidenceRow.__table__,
                 DecisionTraceRow.__table__,
                 MarketRevisionRefRow.__table__,
-                PositionFactJournalEventRow.__table__,
-                PositionRecoveryCheckpointRow.__table__,
             ):
                 await connection.run_sync(table.create)
             await connection.commit()

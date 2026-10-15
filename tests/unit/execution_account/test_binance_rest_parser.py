@@ -3,6 +3,7 @@ from decimal import Decimal, InvalidOperation
 
 import pytest
 
+from crypto_momentum_lab.domain.account.models import compact_fill_metadata
 from crypto_momentum_lab.execution_account.binance.rest_parser import (
     account_fill_from_trade_item,
     account_open_order_from_item,
@@ -54,6 +55,9 @@ def open_order_row():
         "origQty": "0.010",
         "executedQty": "0.002",
         "reduceOnly": True,
+        "positionSide": "LONG",
+        "timeInForce": "GTC",
+        "unusedTransportField": "discard",
     }
 
 
@@ -77,7 +81,14 @@ def test_open_order_parser_preserves_exchange_facts():
     assert result.price == Decimal("50000.00")
     assert result.original_quantity == Decimal("0.010")
     assert result.executed_quantity == Decimal("0.002")
-    assert result.raw_payload == row
+    assert result.raw_payload == {"positionSide": "LONG", "timeInForce": "GTC"}
+
+
+def test_open_order_parser_does_not_invent_a_missing_position_side():
+    row = open_order_row()
+    del row["positionSide"]
+
+    assert parse_open_order(row).raw_payload == {"timeInForce": "GTC"}
 
 
 @pytest.mark.parametrize(
@@ -109,8 +120,17 @@ def test_open_order_parser_rejects_a_symbol_other_than_requested():
         parse_open_order(row)
 
 
-def test_bounded_trade_parser_preserves_fields_precision_and_raw_payload():
+def test_bounded_trade_parser_preserves_fill_facts_and_compacts_metadata():
     row = trade_row()
+    row.update(
+        {
+            "positionSide": "LONG",
+            "clientOrderId": "cml-entry-1",
+            "reduceOnly": True,
+            "is_system": True,
+            "transport_event_id": "discard-this",
+        }
+    )
     result = parse(row)
     assert result.symbol == "BTCUSDT"
     assert result.trade_id == "1" and result.order_id == "10"
@@ -119,9 +139,36 @@ def test_bounded_trade_parser_preserves_fields_precision_and_raw_payload():
     assert result.realized_pnl == Decimal("-0.2") and result.fee == Decimal("0.1")
     assert result.trade_at == datetime(2026, 10, 1, 0, 0, 0, 123000, tzinfo=UTC)
     assert result.environment == "live" and result.account_label == "primary"
-    assert result.raw_payload == row
+    assert result.raw_payload == {
+        "positionSide": "LONG",
+        "client_order_id": "cml-entry-1",
+        "reduce_only": True,
+        "is_system": True,
+    }
     assert result.raw_payload is not row
-    assert row == trade_row()
+    assert row["transport_event_id"] == "discard-this"
+
+
+def test_compact_fill_metadata_extracts_websocket_attribution_fields():
+    row = {
+        "cum_qty": "0.5",
+        "ignored": "large transport data",
+    }
+    result = compact_fill_metadata(
+        {
+            "source": "user_data_stream",
+            "event_id": "transport-event",
+            "event": {"o": {"ps": "SHORT", "c": "cml-exit-1", "R": True}},
+            "row": row,
+        }
+    )
+
+    assert result == {
+        "positionSide": "SHORT",
+        "client_order_id": "cml-exit-1",
+        "reduce_only": True,
+        "is_cumulative": True,
+    }
 
 
 @pytest.mark.parametrize(
@@ -495,13 +542,15 @@ def account_scope():
     }
 
 
-def test_balance_response_keeps_order_values_and_raw_payload():
+def test_balance_response_keeps_exchange_time_and_dashboard_valuation_marker():
     rows = [
         {
             "asset": "USDT",
             "balance": "100.00",
             "availableBalance": "80",
             "crossUnPnl": "-2",
+            "updateTime": 1790812800123,
+            "unusedTransportField": "discard",
         },
         {
             "asset": "BTC",
@@ -516,12 +565,15 @@ def test_balance_response_keeps_order_values_and_raw_payload():
     assert result[0].available_balance == 80 and result[0].unrealized_pnl == -2
     assert result[1].wallet_balance == result[1].available_balance == 0
     assert result[1].unrealized_pnl == 0
-    assert result[0].raw_payload == rows[0] and result[0].raw_payload is not rows[0]
+    assert result[0].raw_payload == {
+        "updateTime": 1790812800123,
+        "crossUnPnl": "-2",
+    }
     assert result[0].observed_at == account_scope()["observed_at"]
     assert result[0].environment == "live" and result[0].account_label == "primary"
 
 
-def test_position_response_keeps_flat_rows_order_and_optional_fields():
+def test_position_response_keeps_flat_rows_order_and_exchange_time():
     rows = [
         {
             "symbol": "ETHUSDT",
@@ -533,6 +585,8 @@ def test_position_response_keeps_flat_rows_order_and_optional_fields():
             "notional": "-22",
             "leverage": "5",
             "marginType": "cross",
+            "updateTime": 1790812800123,
+            "unusedTransportField": "discard",
         },
         {
             "symbol": "BTCUSDT",
@@ -554,8 +608,9 @@ def test_position_response_keeps_flat_rows_order_and_optional_fields():
         and result[0].notional == -22
     )
     assert result[0].leverage == 5 and result[0].margin_type == "cross"
-    assert result[0].raw_payload == rows[0]
+    assert result[0].raw_payload == {"updateTime": 1790812800123}
     assert result[1].position_side == "BOTH" and result[1].position_amt == 0
+    assert result[1].raw_payload == {}
     assert result[1].entry_price == result[1].mark_price == 0
     assert result[1].leverage is None and result[1].margin_type is None
     assert result[1].observed_at == account_scope()["observed_at"]

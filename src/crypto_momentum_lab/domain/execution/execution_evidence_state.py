@@ -41,10 +41,11 @@ def apply_flat_snapshot(
     key = evidence.scope.to_position_key()
     canon = key.canonical_id
     current_book = book._books.get(canon)
-    is_local_flat = current_book is None or (
-        current_book.get_view().total_quantity == Decimal("0")
-        and not current_book.get_view().batches
-        and not current_book.get_view().unallocated_quantity
+    current_view = current_book.get_view() if current_book is not None else None
+    is_local_flat = current_view is None or (
+        current_view.total_quantity == Decimal("0")
+        and not current_view.batches
+        and not current_view.unallocated_quantity
     )
     is_evidence_flat = (
         evidence.snapshot is not None

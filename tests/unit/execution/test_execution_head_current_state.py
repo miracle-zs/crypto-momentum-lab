@@ -47,6 +47,7 @@ class _FakeTx:
     def __init__(self) -> None:
         self.head: ExecutionHeadSnapshot | None = None
         self.persist_count = 0
+        self.trade_ids: set[str] = set()
 
     async def load_head(self, _key: Any) -> ExecutionHeadSnapshot | None:
         return self.head
@@ -57,7 +58,11 @@ class _FakeTx:
     async def record_evidence(self, **_kwargs: Any) -> bool:
         return True
 
-    async def record_trade(self, **_kwargs: Any) -> bool:
+    async def record_trade(self, **kwargs: Any) -> bool:
+        trade_id = kwargs["trade"].trade_id
+        if trade_id in self.trade_ids:
+            return False
+        self.trade_ids.add(trade_id)
         return True
 
     async def persist_watermark(self, **_kwargs: Any) -> None:

@@ -856,13 +856,12 @@ async def test_committed_facts_restore_quantity_cost_and_deduplication(
                     )
                 )
             ).all()
-        assert {
-            (row.trade_id, row.order_id, row.quantity, row.price) for row in rows
-        } == {
-            ("facts-trade-1", "ord-facts", Decimal("1.5"), Decimal("100")),
-            ("facts-trade-2", "ord-facts", Decimal("0.5"), Decimal("120")),
+        assert {row.trade_id for row in rows} == {
+            "facts-trade-1",
+            "facts-trade-2",
         }
-        # The head stores current exposure; stable trade identities live apart.
+        assert all(len(row.payload_digest) == 64 for row in rows)
+        # The head stores current exposure; compact trade identities live apart.
         async with factory() as session:
             head = await session.get(
                 ExecutionBookHeadRow,

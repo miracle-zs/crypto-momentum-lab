@@ -836,13 +836,7 @@ async def run_live_daemon(
                 snapshot: AccountSnapshot,
                 event: AccountEvent,
             ) -> None:
-                """Persist the merged account observation, not just the execution book.
-
-                Kept deliberately narrow: the execution book owns trade/fill
-                persistence, while this callback keeps the account projection
-                (balances, positions, open orders, process state) that the
-                dashboard and restart readers consume.
-                """
+                """Persist the account observation and its exchange fills."""
 
                 observed_at = snapshot.config.observed_at
                 sync_config = ExecutionAccountSyncConfig(
@@ -863,7 +857,7 @@ async def run_live_daemon(
                     balances=persisted_balances,
                     positions=persisted_positions,
                     open_orders=snapshot.open_orders,
-                    fills=(),
+                    fills=event.fills,
                     run=reconciliation_run(
                         sync_config,
                         reconciliation_id=user_data_reconciliation_id(
@@ -885,7 +879,7 @@ async def run_live_daemon(
                             if position.position_amt != Decimal("0")
                         ),
                         open_order_count=len(snapshot.open_orders),
-                        fill_count=0,
+                        fill_count=len(event.fills),
                     ),
                 )
                 for balance in snapshot.balances:

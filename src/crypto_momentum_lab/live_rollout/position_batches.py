@@ -82,8 +82,7 @@ def _build_position_batches(
         def _fill_matches_position(fill: AccountFillEvent) -> bool:
             if fill.symbol != position.symbol:
                 return False
-            payload = fill.raw_payload
-            fill_ps = payload.get("positionSide") or payload.get("ps")
+            fill_ps = fill.raw_position_side
             if fill_ps:
                 fill_ps_str = str(fill_ps).upper()
                 pos_ps_str = position_side.value.upper()

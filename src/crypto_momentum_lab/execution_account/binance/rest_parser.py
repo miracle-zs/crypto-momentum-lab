@@ -10,6 +10,7 @@ from crypto_momentum_lab.domain.account.models import (
     AccountFillEvent,
     AccountOpenOrderSnapshot,
     AccountPositionSnapshot,
+    compact_fill_metadata,
 )
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderSnapshot,
@@ -50,7 +51,7 @@ def account_fill_from_trade_item(
             rest_require_int(item, "time") / 1000,
             tz=UTC,
         ),
-        raw_payload=json_mapping(item),
+        raw_payload=compact_fill_metadata(item),
     )
 
 
@@ -79,7 +80,13 @@ def account_open_order_from_item(
         executed_quantity=Decimal(rest_require_string(item, "executedQty")),
         reduce_only=rest_require_bool(item, "reduceOnly"),
         observed_at=observed_at,
-        raw_payload=json_mapping(item),
+        raw_payload=json_mapping(
+            {
+                key: item[key]
+                for key in ("positionSide", "timeInForce")
+                if key in item
+            }
+        ),
     )
 
 
@@ -212,7 +219,13 @@ def balances_from_response(
             ),
             unrealized_pnl=decimal_value(rest_require_string(item, "crossUnPnl")),
             observed_at=observed_at,
-            raw_payload=json_mapping(item),
+            raw_payload=json_mapping(
+                {
+                    key: item[key]
+                    for key in ("updateTime", "crossUnPnl")
+                    if key in item
+                }
+            ),
         )
         for item in rest_require_sequence_of_mappings(payload)
     )
@@ -239,7 +252,11 @@ def positions_from_response(
             leverage=rest_optional_int(item.get("leverage")),
             margin_type=rest_optional_str(item.get("marginType")),
             observed_at=observed_at,
-            raw_payload=json_mapping(item),
+            raw_payload=json_mapping(
+                {"updateTime": item["updateTime"]}
+                if "updateTime" in item
+                else {}
+            ),
         )
         for item in rest_require_sequence_of_mappings(payload)
     )

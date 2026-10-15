@@ -77,7 +77,16 @@ def test_target_image_build_overlaps_account_flat_checks() -> None:
     assert 'docker image inspect "$target_image"' in script
     assert '"${build_compose[@]}" build migrate &' in script
     assert 'check_target_build' in script
-    assert 'finish_target_build\n\nservices=()' in script
+    assert 'finish_target_build\n\n# This timer' in script
+    assert (
+        script.index("finish_target_build")
+        < script.index("systemctl disable --now cml-position-recovery-retention.timer")
+        < script.index("services=()")
+    )
+    timer_shutdown = script[
+        script.index("# This timer") : script.index("\nservices=()")
+    ]
+    assert "|| true" not in timer_shutdown
     assert 'trap cleanup_build_worktree EXIT' in script
 
 

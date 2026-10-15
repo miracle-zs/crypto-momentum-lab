@@ -58,7 +58,8 @@ async def accept_action_transaction(
     key = request.scope.to_position_key()
     canon = key.canonical_id
 
-    # Phase 1: In-memory snapshot & decision under short lock
+    # The caller serializes this position's durable writer until publication.
+    # Phase 1 takes a short in-memory snapshot for the decision.
     async with book._mutation_lock(key):
         stream_scope = book._stream_scopes.get(canon)
         if stream_scope is None:
@@ -75,7 +76,8 @@ async def accept_action_transaction(
             current_view.total_quantity == Decimal("0") and not current_view.batches
         )
 
-    # Phase 2: Lock-free durable I/O and CAS commit (I2: never hold locks across I/O)
+    # Phase 2 is a short database transaction. No exchange request runs here;
+    # order dispatch starts only after this transaction returns.
     try:
         account_scope = f"{key.environment}:{key.account_label}:{request.strategy_name}"
         async with book._execution_unit_of_work.transaction(
@@ -115,6 +117,8 @@ async def accept_action_transaction(
                             reason="Position projection is stale; reload durable facts",
                         )
             candidate._active_transaction = tx
+            candidate._requests_by_id = dict(candidate._requests_by_id)
+            candidate._receipts_by_id = dict(candidate._receipts_by_id)
             result = await candidate._act_mutating(request)
             if not isinstance(result, Accepted):
                 return result
@@ -138,14 +142,16 @@ async def accept_action_transaction(
                             AccountFacts(
                                 position_key=key,
                                 stream_scope=stream_scope,
-                                exit_boundaries=(ExitOrderSubmissionFact(
-                                order_id=f"{request.request_id}:{batch_id}",
-                                submitted_at=prepared.plan.created_at,
-                                symbol=key.symbol,
-                                position_side=key.position_side,
-                                client_order_id=request.request_id,
-                                target_batch_id=batch_id,
-                                ),),
+                                exit_boundaries=(
+                                    ExitOrderSubmissionFact(
+                                        order_id=f"{request.request_id}:{batch_id}",
+                                        submitted_at=prepared.plan.created_at,
+                                        symbol=key.symbol,
+                                        position_side=key.position_side,
+                                        client_order_id=request.request_id,
+                                        target_batch_id=batch_id,
+                                    ),
+                                ),
                                 prefix_facts_complete=False,
                             )
                         )

@@ -220,6 +220,17 @@ while :; do
 done
 finish_target_build
 
+# This timer only prunes the retired position journal tables. Stop it before
+# the schema migration drops those tables.
+if command -v systemctl >/dev/null 2>&1; then
+  if systemctl cat cml-position-recovery-retention.timer >/dev/null 2>&1; then
+    systemctl disable --now cml-position-recovery-retention.timer
+  fi
+  if systemctl cat cml-position-recovery-retention.service >/dev/null 2>&1; then
+    systemctl stop cml-position-recovery-retention.service
+  fi
+fi
+
 services=()
 for service in dashboard market-data research-collector \
   live-strategy live-strategy-account-2 live-strategy-account-3 live-strategy-account-4; do
@@ -324,6 +335,10 @@ done
 if [[ " ${services[*]} " == *" dashboard "* ]]; then
   curl --fail --silent --show-error --max-time 10 \
     http://127.0.0.1:8765/api/health >/dev/null
+fi
+if command -v systemctl >/dev/null 2>&1 && \
+  systemctl cat cml-ops-monitor.service >/dev/null 2>&1; then
+  systemctl restart cml-ops-monitor.service
 fi
 echo "deployed_commit=$target_commit"
 "${compose[@]}" ps

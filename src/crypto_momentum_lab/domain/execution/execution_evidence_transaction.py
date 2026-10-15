@@ -119,10 +119,11 @@ async def observe_evidence_transaction(
             # of historical symbols on every refresh.
             terminal_without_fill = is_unfilled_terminal_order(evidence)
             pos_book = book._books.get(canon)
-            is_flat = pos_book is not None and (
-                pos_book.get_view().total_quantity == Decimal("0")
-                and not pos_book.get_view().batches
-                and not pos_book.get_view().unallocated_quantity
+            current_view = pos_book.get_view() if pos_book is not None else None
+            is_flat = current_view is not None and (
+                current_view.total_quantity == Decimal("0")
+                and not current_view.batches
+                and not current_view.unallocated_quantity
             )
             can_rollover, recovery_proof_required = evaluate_stream_rollover(
                 current_scope=book._stream_scopes.get(canon),
@@ -143,7 +144,9 @@ async def observe_evidence_transaction(
             snapshot_head_revision = book._head_revisions.get(canon, 0)
             candidate = book._staged_copy(key=key)
 
-        # Phase 2: Lock-free durable I/O and CAS commit (I2: no lock across I/O)
+        # ExecutionBook holds the per-position write lock from staging through
+        # publication, so another local writer cannot stage against this head.
+        # This transaction performs database work only, never exchange I/O.
         try:
             async with book._execution_unit_of_work.transaction(key) as tx:
                 head = await tx.load_head(key)
@@ -447,12 +450,9 @@ async def observe_evidence_transaction(
                             stream_epoch=scope.stream_epoch,
                             trade=ExecutionTradeIdentity(
                                 trade_id=fill.trade_id,
-                                order_id=fill.order_id,
                                 quantity=fill.quantity,
                                 price=fill.price,
-                                side=fill.side,
                                 payload_digest=trade_payload_digest(fill),
-                                first_seen_at=fill.trade_at,
                             ),
                         )
                     except DecisionCommitConflict as err:

@@ -221,22 +221,16 @@ class PositionBook:
             coverage=state.coverage,
             has_synthetic_fills=state.has_synthetic_fills,
             conflicting_fills=(
-                (state.conflicting_fill,)
-                if state.conflicting_fill is not None
-                else ()
+                (state.conflicting_fill,) if state.conflicting_fill is not None else ()
             ),
             has_late_events=state.has_late_events,
             stream_scope=self._stream_scope,
             recovery_checkpoint=state.recovery_checkpoint,
             fact_conflicts=(
-                (state.fact_conflict,)
-                if state.fact_conflict is not None
-                else ()
+                (state.fact_conflict,) if state.fact_conflict is not None else ()
             ),
             integrity_issues=(
-                (state.integrity_issue,)
-                if state.integrity_issue is not None
-                else ()
+                (state.integrity_issue,) if state.integrity_issue is not None else ()
             ),
             fill_load_provenance=state.fill_load_provenance,
             fill_cursor_provenance=state.fill_cursor_provenance,
@@ -439,6 +433,7 @@ class PositionBook:
             facts,
         )
         version = self._execution_version(
+            facts=facts,
             health_status=health_status,
             is_comparable=is_comparable,
             coverage=view_coverage,
@@ -521,24 +516,21 @@ class PositionBook:
     def _execution_version(
         self,
         *,
+        facts: AccountFacts | None = None,
         health_status: PositionHealthStatus | None = None,
         is_comparable: bool | None = None,
         coverage: FactCoverageInterval | None = None,
         zero_confirmed: bool | None = None,
     ) -> str:
-        facts = self.current_facts
+        facts = facts or self.current_facts
         view_coverage = facts.coverage if coverage is None else coverage
         projection = self._state.projection
         status = health_status or projection.health_status
         comparable = (
-            projection.is_comparable
-            if is_comparable is None
-            else is_comparable
+            projection.is_comparable if is_comparable is None else is_comparable
         )
         confirmed_zero = (
-            self._zero_confirmed_override
-            if zero_confirmed is None
-            else zero_confirmed
+            self._zero_confirmed_override if zero_confirmed is None else zero_confirmed
         )
         return _execution_state_version(
             facts=facts,
@@ -622,9 +614,7 @@ def _merge_current_state(
             else current.conflicting_fill
         ),
         fact_conflict=(
-            facts.fact_conflicts[-1]
-            if facts.fact_conflicts
-            else current.fact_conflict
+            facts.fact_conflicts[-1] if facts.fact_conflicts else current.fact_conflict
         ),
         has_synthetic_fills=current.has_synthetic_fills or facts.has_synthetic_fills,
         has_late_events=current.has_late_events or facts.has_late_events,

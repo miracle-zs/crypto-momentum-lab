@@ -448,7 +448,11 @@ class BinanceUsdMPrivateReadClient:
         data = rest_require_mapping(payload)
         hedge_mode = rest_require_bool(data, "dualSidePosition")
         multi_assets_mode = rest_require_bool(data, "multiAssetsMargin")
-        raw_payload = json_mapping(data)
+        raw_payload = json_mapping(
+            {"totalInitialMargin": data["totalInitialMargin"]}
+            if "totalInitialMargin" in data
+            else {}
+        )
         observed_at = self._now()
         return AccountConfigSnapshot(
             environment=self._environment,

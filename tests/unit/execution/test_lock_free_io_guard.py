@@ -1,9 +1,8 @@
-"""I2 guard: no I/O is awaited while a domain mutation lock is held.
+"""Keep slow operations outside the short in-memory publication locks.
 
-The book's per-key lock exists for in-memory work only: staging a candidate
-(consistent read) and publishing an already-committed candidate. Holding it
-across an ``await`` would serialize network/database I/O behind it, so this
-guard asserts the invariant structurally instead of trusting review.
+The separate per-position durable-writer lock intentionally spans database
+transactions so concurrent coroutines cannot stage the same stale head. These
+locks do not wrap exchange or other network requests.
 """
 
 import ast
@@ -40,7 +39,7 @@ def _lock_sections(path: pathlib.Path) -> list[tuple[int, str, list[str]]]:
     return sections
 
 
-def test_no_io_is_awaited_under_a_domain_lock() -> None:
+def test_no_io_is_awaited_under_a_memory_publication_lock() -> None:
     sections: list[tuple[str, int, str, list[str]]] = []
     for path in sorted(DOMAIN_EXECUTION.rglob("*.py")):
         sections.extend(

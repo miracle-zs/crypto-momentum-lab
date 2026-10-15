@@ -140,10 +140,7 @@ class SimulationExecutionAdapter:
             fee=fee,
             fee_asset="USDT",
             trade_at=fill_time,
-            raw_payload={
-                "fill_model": model.model_version,
-                "positionSide": position.position_key.position_side.value,
-            },
+            raw_payload={"positionSide": position.position_key.position_side.value},
         )
 
         snapshot = AccountPositionSnapshot(
@@ -273,10 +270,7 @@ class SimulationExecutionAdapter:
             fee=fee,
             fee_asset="USDT",
             trade_at=fill_time,
-            raw_payload={
-                "fill_model": model.model_version,
-                "positionSide": position.position_key.position_side.value,
-            },
+            raw_payload={"positionSide": position.position_key.position_side.value},
         )
 
         snapshot = AccountPositionSnapshot(

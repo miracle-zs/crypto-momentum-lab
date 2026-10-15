@@ -187,6 +187,15 @@ async def test_runtime_failure_is_not_classified_as_startup_retryable_error(
         "crypto_momentum_lab.live_rollout.runtime_orchestrator.assemble_live_persistence",
         lambda **kwargs: mock_persistence,
     )
+    persist_reconciliation_snapshot = AsyncMock()
+    monkeypatch.setattr(
+        "crypto_momentum_lab.live_rollout.runtime_orchestrator.PostgresAccountRepository.save_reconciliation_snapshot",
+        persist_reconciliation_snapshot,
+    )
+    monkeypatch.setattr(
+        "crypto_momentum_lab.live_rollout.runtime_orchestrator.PostgresAccountRepository.save_process_state",
+        AsyncMock(),
+    )
     monkeypatch.setattr(
         "crypto_momentum_lab.live_rollout.runtime_orchestrator.LiveRuntimeTelemetry.start",
         AsyncMock(),
@@ -256,6 +265,7 @@ async def test_runtime_failure_is_not_classified_as_startup_retryable_error(
     mock_exec_runtime.coordinator.aclose = AsyncMock()
     accepted_baseline = []
     baseline_callback = []
+    snapshot_persister = []
     if in_process_mode:
         from types import SimpleNamespace
         from crypto_momentum_lab.domain.account import ExecutionAccountStatus
@@ -280,6 +290,7 @@ async def test_runtime_failure_is_not_classified_as_startup_retryable_error(
 
         def make_producer(**kwargs):
             baseline_callback.append(kwargs["publish_baseline"])
+            snapshot_persister.append(kwargs["persist_snapshot"])
             return SimpleNamespace(
                 start=lambda: None,
                 stop=AsyncMock(),
@@ -375,6 +386,58 @@ async def test_runtime_failure_is_not_classified_as_startup_retryable_error(
                 )
                 await baseline_callback[0](event.account_snapshot, event)
                 assert accepted_baseline == ["book", "bind", "context"]
+
+                from types import SimpleNamespace
+
+                from crypto_momentum_lab.domain.account import (
+                    AccountFillEvent,
+                    ExecutionAccountStatus,
+                )
+                from crypto_momentum_lab.execution_account.hub import AccountEvent
+
+                observed_at = datetime.now(UTC)
+                fill = AccountFillEvent(
+                    environment="live",
+                    account_label="account-1",
+                    symbol="WALUSDT",
+                    trade_id="trade-1",
+                    order_id="order-1",
+                    side="SELL",
+                    price=Decimal("12"),
+                    quantity=Decimal("1"),
+                    realized_pnl=Decimal("0.5"),
+                    fee=Decimal("0.01"),
+                    fee_asset="USDT",
+                    trade_at=observed_at,
+                    raw_payload={"positionSide": "LONG"},
+                )
+                snapshot = SimpleNamespace(
+                    config=SimpleNamespace(observed_at=observed_at),
+                    balances=(),
+                    positions=(),
+                    open_orders=(),
+                )
+                trade_event = AccountEvent(
+                    environment="live",
+                    account_label="account-1",
+                    event_type="ORDER_TRADE_UPDATE",
+                    event_id="trade-event-1",
+                    event_at=observed_at,
+                    received_at=observed_at,
+                    has_fill=True,
+                    trade_id="trade-1",
+                    fills=(fill,),
+                    account_state=ExecutionAccountStatus.RUNNING,
+                )
+                await snapshot_persister[0](snapshot, trade_event)
+                persist_reconciliation_snapshot.assert_awaited_once()
+                assert persist_reconciliation_snapshot.await_args.kwargs["fills"] == (
+                    fill,
+                )
+                assert (
+                    persist_reconciliation_snapshot.await_args.kwargs["run"].fill_count
+                    == 1
+                )
             raise InjectedRetryableRuntimeFailure("network dropped during runtime")
 
         mock_session.run.side_effect = run_session

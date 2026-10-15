@@ -1,11 +1,11 @@
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict
-from datetime import UTC, datetime
-from typing import Any, cast
+from datetime import datetime
+from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import structlog
-from sqlalchemy import case, delete, func, select, text, tuple_
+from sqlalchemy import case, delete, func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -17,11 +17,9 @@ from crypto_momentum_lab.domain.account.models import (
     AccountOpenOrderSnapshot,
     AccountPositionSnapshot,
     AccountPositionStateSnapshot,
-    AccountReconciliationHead,
     AccountReconciliationRun,
     ExecutionAccountProcessState,
 )
-from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.persistence.postgres.models import (
     AccountBalanceSnapshotRow,
     AccountConfigSnapshotRow,
@@ -29,7 +27,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
     AccountFillReconciliationCursorRow,
     AccountOpenOrderRow,
     AccountPositionSnapshotRow,
-    AccountReconciliationHeadRow,
     AccountReconciliationRunRow,
     ExecutionAccountProcessStateRow,
 )
@@ -97,7 +94,6 @@ class PostgresAccountRepository:
                     AccountReconciliationRunRow,
                     reconciliation_run_row(run),
                 )
-                await self._upsert_reconciliation_head_in_session(session, run)
 
     async def save_reconciliation_snapshot(
         self,
@@ -179,7 +175,6 @@ class PostgresAccountRepository:
                     AccountReconciliationRunRow,
                     reconciliation_run_row(run),
                 )
-                await self._upsert_reconciliation_head_in_session(session, run)
 
     async def save_reconciliation_fills_and_cursors(
         self,
@@ -369,7 +364,8 @@ class PostgresAccountRepository:
     ) -> datetime | None:
         """Protect the recorded history of current, not historical, position legs.
 
-        Heads enumerate current legs without scanning the snapshot journal.
+        The latest ready reconciliation runs enumerate current legs without
+        scanning the snapshot history.
         Two bounded index seeks per leg find its latest flat marker and first
         subsequent non-zero snapshot. Without a flat marker we conservatively
         retain its entire known history. Missing or unready evidence fails
@@ -379,32 +375,41 @@ class PostgresAccountRepository:
             raise ValueError("environment must not be empty")
         watermarks: list[datetime] = []
         async with self._session_factory() as session:
-            heads = (
+            latest_runs = (
                 await session.scalars(
-                    select(AccountReconciliationHeadRow).where(
-                        AccountReconciliationHeadRow.environment == environment
+                    select(AccountReconciliationRunRow)
+                    .distinct(
+                        AccountReconciliationRunRow.environment,
+                        AccountReconciliationRunRow.account_label,
+                    )
+                    .where(
+                        AccountReconciliationRunRow.environment == environment,
+                        AccountReconciliationRunRow.status == "ready",
+                    )
+                    .order_by(
+                        AccountReconciliationRunRow.environment,
+                        AccountReconciliationRunRow.account_label,
+                        AccountReconciliationRunRow.observed_at.desc(),
+                        AccountReconciliationRunRow.reconciliation_id.desc(),
                     )
                 )
             ).all()
-            missing = expected_account_labels - {head.account_label for head in heads}
+            missing = expected_account_labels - {
+                run.account_label for run in latest_runs
+            }
             if missing:
                 raise ValueError(
-                    f"Missing position reconciliation heads: {sorted(missing)}"
+                    f"Missing ready position reconciliation runs: {sorted(missing)}"
                 )
-            for head in heads:
-                if head.status != "ready":
-                    raise ValueError(
-                        "Position reconciliation head is not ready: "
-                        f"{head.account_label}"
-                    )
-                state = _position_state_from_run(head)
+            for run in latest_runs:
+                state = _position_state_from_run(run)
                 for symbol, side in state.position_keys:
                     scope = (
                         AccountPositionSnapshotRow.environment == environment,
-                        AccountPositionSnapshotRow.account_label == head.account_label,
+                        AccountPositionSnapshotRow.account_label == run.account_label,
                         AccountPositionSnapshotRow.symbol == symbol,
                         AccountPositionSnapshotRow.position_side == side,
-                        AccountPositionSnapshotRow.observed_at <= head.observed_at,
+                        AccountPositionSnapshotRow.observed_at <= run.observed_at,
                     )
                     flat_at = await session.scalar(
                         select(AccountPositionSnapshotRow.observed_at)
@@ -427,7 +432,7 @@ class PostgresAccountRepository:
                     if opened_at is None:
                         raise ValueError(
                             f"Missing snapshot for active position: "
-                            f"{head.account_label}/{symbol}/{side}"
+                            f"{run.account_label}/{symbol}/{side}"
                         )
                     watermarks.append(opened_at)
         return min(watermarks) if watermarks else None
@@ -438,32 +443,13 @@ class PostgresAccountRepository:
         environment: str,
         account_labels: Iterable[str] | None = None,
     ) -> frozenset[str]:
-        """Return live account labels whose latest ready run has positions.
-
-        Reads active labels from the latest reconciliation head or run.
-        """
+        """Return labels whose latest usable reconciliation run has positions."""
         if not environment.strip():
             raise ValueError("environment must not be empty")
         expected_labels = set(account_labels) if account_labels is not None else None
         if expected_labels == set():
             return frozenset()
         async with self._session_factory() as session:
-            head_stmt = select(AccountReconciliationHeadRow).where(
-                AccountReconciliationHeadRow.environment == environment,
-                AccountReconciliationHeadRow.status == "ready",
-            )
-            if expected_labels is not None:
-                head_stmt = head_stmt.where(
-                    AccountReconciliationHeadRow.account_label.in_(expected_labels)
-                )
-            heads = (await session.scalars(head_stmt)).all()
-            active_by_label = {
-                row.account_label: row.position_count > 0 for row in heads
-            }
-
-            # Reconciliation runs also carry complete position state while
-            # fill coverage is catching up. Read the newest usable run per
-            # account so those observations supersede older ready heads.
             latest_runs = (
                 select(AccountReconciliationRunRow)
                 .distinct(AccountReconciliationRunRow.account_label)
@@ -482,100 +468,9 @@ class PostgresAccountRepository:
                 AccountReconciliationRunRow.reconciliation_id.desc(),
             )
             current_runs = (await session.scalars(latest_runs)).all()
-            for row in current_runs:
-                active_by_label[row.account_label] = row.position_count > 0
-
             return frozenset(
-                label for label, active in active_by_label.items() if active
+                row.account_label for row in current_runs if row.position_count > 0
             )
-
-    async def load_reconciliation_heads(
-        self,
-        *,
-        environment: str,
-    ) -> dict[str, AccountReconciliationHead]:
-        """Return a mapping of account_label to its latest ready reconciliation head."""
-        if not environment.strip():
-            raise ValueError("environment must not be empty")
-        async with self._session_factory() as session:
-            rows = (
-                await session.scalars(
-                    select(AccountReconciliationHeadRow).where(
-                        AccountReconciliationHeadRow.environment == environment,
-                    )
-                )
-            ).all()
-            return {
-                row.account_label: AccountReconciliationHead(
-                    environment=row.environment,
-                    account_label=row.account_label,
-                    reconciliation_id=row.reconciliation_id,
-                    status=row.status,
-                    observed_at=row.observed_at,
-                    balance_count=row.balance_count,
-                    position_count=row.position_count,
-                    open_order_count=row.open_order_count,
-                    fill_count=row.fill_count,
-                    mismatch_count=row.mismatch_count,
-                    details=cast(dict[str, JsonValue], dict(row.details)),
-                    projection_schema_version=row.projection_schema_version,
-                    projected_at=row.projected_at,
-                )
-                for row in rows
-            }
-
-    @staticmethod
-    async def _upsert_reconciliation_head_in_session(
-        session: AsyncSession,
-        run: AccountReconciliationRun,
-        *,
-        projected_at: datetime | None = None,
-    ) -> None:
-        if run.status != "ready":
-            return
-        now = projected_at or datetime.now(UTC)
-        values = {
-            "environment": run.environment,
-            "account_label": run.account_label,
-            "reconciliation_id": run.reconciliation_id,
-            "status": run.status,
-            "observed_at": run.observed_at,
-            "balance_count": run.balance_count,
-            "position_count": run.position_count,
-            "open_order_count": run.open_order_count,
-            "fill_count": run.fill_count,
-            "mismatch_count": run.mismatch_count,
-            "details": jsonable(run.details),
-            "projection_schema_version": 1,
-            "projected_at": now,
-        }
-        stmt = insert(AccountReconciliationHeadRow).values(values)
-        update_dict = {
-            "reconciliation_id": stmt.excluded.reconciliation_id,
-            "status": stmt.excluded.status,
-            "observed_at": stmt.excluded.observed_at,
-            "balance_count": stmt.excluded.balance_count,
-            "position_count": stmt.excluded.position_count,
-            "open_order_count": stmt.excluded.open_order_count,
-            "fill_count": stmt.excluded.fill_count,
-            "mismatch_count": stmt.excluded.mismatch_count,
-            "details": stmt.excluded.details,
-            "projection_schema_version": stmt.excluded.projection_schema_version,
-            "projected_at": stmt.excluded.projected_at,
-        }
-        where_cond = tuple_(
-            stmt.excluded.observed_at,
-            stmt.excluded.reconciliation_id,
-        ) >= tuple_(
-            AccountReconciliationHeadRow.observed_at,
-            AccountReconciliationHeadRow.reconciliation_id,
-        )
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["environment", "account_label"],
-            set_=update_dict,
-            where=where_cond,
-        )
-        await session.execute(stmt)
 
     async def _insert(self, model: Any, values: dict[str, object]) -> None:
         async with self._session_factory() as session:
@@ -714,7 +609,7 @@ def _row_id(namespace: str, *parts: str) -> UUID:
 
 
 def _position_state_from_run(
-    run: AccountReconciliationRunRow | AccountReconciliationHeadRow,
+    run: AccountReconciliationRunRow,
 ) -> AccountPositionStateSnapshot:
     details = run.details
     if not isinstance(details, Mapping):

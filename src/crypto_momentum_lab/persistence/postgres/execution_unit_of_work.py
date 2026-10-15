@@ -285,7 +285,6 @@ class ExecutionTransaction:
             or trade.quantity <= 0
             or trade.price <= 0
             or not trade.trade_id.strip()
-            or not trade.order_id.strip()
         ):
             raise ValueError("durable execution trade identity is invalid")
         _execution_identity_values(key, stream_id, stream_epoch)
@@ -295,13 +294,7 @@ class ExecutionTransaction:
             ExecutionTradeIdentityRow, primary_key, with_for_update=True
         )
         if existing is not None:
-            if (
-                existing.order_id != trade.order_id
-                or existing.quantity != trade.quantity
-                or existing.price != trade.price
-                or existing.side != trade.side
-                or existing.payload_digest != trade.payload_digest
-            ):
+            if existing.payload_digest != trade.payload_digest:
                 raise _DecisionCommitConflict(
                     f"trade {trade.trade_id} conflicts with its durable identity"
                 )
@@ -310,12 +303,7 @@ class ExecutionTransaction:
             ExecutionTradeIdentityRow(
                 **dict(zip(_EXECUTION_POSITION_FIELDS, position_identity, strict=True)),
                 trade_id=trade.trade_id,
-                order_id=trade.order_id,
-                quantity=trade.quantity,
-                price=trade.price,
-                side=trade.side,
                 payload_digest=trade.payload_digest,
-                first_seen_at=trade.first_seen_at,
             )
         )
         return True

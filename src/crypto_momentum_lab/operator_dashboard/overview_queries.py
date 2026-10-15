@@ -48,7 +48,7 @@ from crypto_momentum_lab.operator_dashboard.status import (
     freshness_status,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
-    AccountReconciliationHeadRow,
+    AccountReconciliationRunRow,
     ExecutionAccountProcessStateRow,
     LiveSessionTransitionRow,
     MonitoringMembershipRow,
@@ -190,9 +190,7 @@ def live_account_summaries(
                 readiness=(state if state is not None else "missing"),
                 observed_at=occurred_at,
                 strategy_name=(
-                    strategy.strategy_name
-                    if strategy is not None
-                    else None
+                    strategy.strategy_name if strategy is not None else None
                 ),
                 strategy_state=(strategy.state if strategy is not None else None),
             )
@@ -279,24 +277,37 @@ class OverviewQueries:
                 "details": view.details,
             }
 
-        heads_by_account: dict[str, AccountReconciliationHeadRow] = {}
+        ready_runs_by_account: dict[str, AccountReconciliationRunRow] = {}
         try:
             async with self._session_factory() as session:
-                heads = (
+                runs = (
                     await session.scalars(
-                        select(AccountReconciliationHeadRow).where(
-                            AccountReconciliationHeadRow.environment == "live"
+                        select(AccountReconciliationRunRow)
+                        .distinct(AccountReconciliationRunRow.account_label)
+                        .where(
+                            AccountReconciliationRunRow.environment == "live",
+                            AccountReconciliationRunRow.status == "ready",
+                        )
+                        .order_by(
+                            AccountReconciliationRunRow.account_label,
+                            AccountReconciliationRunRow.observed_at.desc(),
+                            AccountReconciliationRunRow.reconciliation_id.desc(),
                         )
                     )
                 ).all()
-                heads_by_account = {h.account_label: h for h in heads}
+                ready_runs_by_account = {run.account_label: run for run in runs}
         except Exception:
             pass
 
         fact_integrity = {}
         try:
             fact_integrity = await load_fact_integrity(
-                self._session_factory, accounts=heads_by_account, now=now
+                self._session_factory,
+                account_position_counts={
+                    label: run.position_count
+                    for label, run in ready_runs_by_account.items()
+                },
+                now=now,
             )
         except Exception:
             # An unavailable or malformed proof cannot be reported as complete.
@@ -307,19 +318,19 @@ class OverviewQueries:
             observed = acc.observed_at or now
             lag = max(0.0, (now - observed).total_seconds())
 
-            head = heads_by_account.get(acc.account_label)
-            if head is not None:
+            run = ready_runs_by_account.get(acc.account_label)
+            if run is not None:
                 recon_matched = (
-                    head.status in ("OK", "reconciled", "matched", "ready")
-                    and head.mismatch_count == 0
+                    run.status in ("OK", "reconciled", "matched", "ready")
+                    and run.mismatch_count == 0
                 )
-                head_st = head.status.lower()
+                run_status = run.status.lower()
                 recon_details = (
-                    f"reconciliation_{head_st}_mismatches_{head.mismatch_count}"
+                    f"reconciliation_{run_status}_mismatches_{run.mismatch_count}"
                 )
             else:
                 recon_matched = False
-                recon_details = "unconfirmed_reconciliation_head_absent"
+                recon_details = "unconfirmed_reconciliation_run_absent"
 
             # Entry and exit are independent: a blocked entry (new risk) must
             # not hide an open exit (risk reduction), and missing runtime
@@ -494,9 +505,7 @@ class OverviewQueries:
             )
             # The database overview owns current halt state. Keep honoring a
             # halt explicitly reported by older runtime snapshots during rollout.
-            has_halt = observed_halt or any(
-                item.halt_active is True for item in gates
-            )
+            has_halt = observed_halt or any(item.halt_active is True for item in gates)
             if runtime_running:
                 mode = "RUNNING"
             elif has_halt:

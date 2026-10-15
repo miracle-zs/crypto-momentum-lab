@@ -348,8 +348,6 @@ async def test_terminal_order_needs_no_recovery_after_process_restart(
             if statement.startswith("SELECT") and any(
                 table in statement
                 for table in (
-                    "position_fact_journal_events",
-                    "position_recovery_checkpoints",
                     "account_fill_events",
                     "account_position_snapshots",
                     "execution_trade_identities",

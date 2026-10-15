@@ -44,12 +44,6 @@ from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models impo
 from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
     ExecutionTradeIdentityRow as ExecutionTradeIdentityRow,
 )
-from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
-    PositionFactJournalEventRow as PositionFactJournalEventRow,
-)
-from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
-    PositionRecoveryCheckpointRow as PositionRecoveryCheckpointRow,
-)
 
 
 class ContractMetadataRow(Base):
@@ -863,35 +857,6 @@ class AccountReconciliationRunRow(Base):
             desc("reconciliation_id"),
             postgresql_include=["position_count"],
             postgresql_where=text("status = 'ready'"),
-        ),
-    )
-
-
-class AccountReconciliationHeadRow(Base):
-    __tablename__ = "account_reconciliation_heads"
-
-    environment: Mapped[str] = mapped_column(String(32), primary_key=True)
-    account_label: Mapped[str] = mapped_column(String(64), primary_key=True)
-    reconciliation_id: Mapped[str] = mapped_column(String(128))
-    status: Mapped[str] = mapped_column(String(32))
-    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    balance_count: Mapped[int] = mapped_column(Integer)
-    position_count: Mapped[int] = mapped_column(Integer)
-    open_order_count: Mapped[int] = mapped_column(Integer)
-    fill_count: Mapped[int] = mapped_column(Integer)
-    mismatch_count: Mapped[int] = mapped_column(Integer)
-    details: Mapped[dict[str, object]] = mapped_column(JSONB)
-    projection_schema_version: Mapped[int] = mapped_column(
-        Integer, server_default=text("1")
-    )
-    projected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-
-    __table_args__ = (
-        Index(
-            "ix_account_reconciliation_heads_lookup",
-            "environment",
-            "status",
-            "position_count",
         ),
     )
 

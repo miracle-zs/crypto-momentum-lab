@@ -40,12 +40,9 @@ class ExecutionEvidenceIdentity:
 @dataclass(frozen=True, slots=True)
 class ExecutionTradeIdentity:
     trade_id: str
-    order_id: str
     quantity: Decimal
     price: Decimal
-    side: str
     payload_digest: str
-    first_seen_at: datetime
 
 
 @dataclass(frozen=True, slots=True)

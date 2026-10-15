@@ -1180,8 +1180,6 @@ async def test_runtime_full_zero_anchored_scan_repairs_stale_position_atomically
             )
         )
         assert checkpoint is not None and checkpoint.coverage.is_authoritative
-        from types import SimpleNamespace
-
         from crypto_momentum_lab.operator_dashboard.fact_integrity_queries import (
             load_fact_integrity,
         )
@@ -1196,14 +1194,14 @@ async def test_runtime_full_zero_anchored_scan_repairs_stale_position_atomically
         assert sources[("BTCUSDT", "LONG")].stream_epoch == "new"
         integrity = await load_fact_integrity(
             factory,
-            accounts={account: SimpleNamespace(position_count=0)},
+            account_position_counts={account: 0},
             now=target.observed_at,
         )
         assert integrity[account].gaps == 0
         assert integrity[account].observed_at is None
         stale = await load_fact_integrity(
             factory,
-            accounts={account: SimpleNamespace(position_count=0)},
+            account_position_counts={account: 0},
             now=target.observed_at + timedelta(minutes=4),
         )
         assert stale[account].gaps == 0

@@ -28,7 +28,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
     AccountConfigSnapshotRow,
     AccountOpenOrderRow,
     AccountPositionSnapshotRow,
-    AccountReconciliationHeadRow,
     AccountReconciliationRunRow,
     ExecutionAccountProcessStateRow,
 )
@@ -145,7 +144,6 @@ async def test_reconciliation_snapshot_rolls_back_as_one_transaction(
         async with factory() as session:
             async with session.begin():
                 for model in (
-                    AccountReconciliationHeadRow,
                     AccountReconciliationRunRow,
                     AccountBalanceSnapshotRow,
                     AccountPositionSnapshotRow,

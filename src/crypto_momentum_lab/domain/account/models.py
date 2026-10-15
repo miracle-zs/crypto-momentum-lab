@@ -115,6 +115,71 @@ def extract_fill_position_side(raw_payload: Mapping[str, Any] | None) -> str | N
     return str(value).strip().upper() if value is not None else None
 
 
+def compact_fill_metadata(
+    raw_payload: Mapping[str, Any] | None,
+) -> dict[str, JsonValue]:
+    """Keep only fill metadata used to assign and attribute the position fact."""
+    if not isinstance(raw_payload, Mapping):
+        return {}
+
+    sources: list[Mapping[str, Any]] = [raw_payload]
+    row = raw_payload.get("row")
+    if isinstance(row, Mapping):
+        sources.append(row)
+    event = raw_payload.get("event")
+    if isinstance(event, Mapping):
+        sources.append(event)
+        order = event.get("o")
+        if isinstance(order, Mapping):
+            sources.append(order)
+
+    def value_for(*keys: str) -> Any:
+        for source in sources:
+            for key in keys:
+                value = source.get(key)
+                if value is not None:
+                    return value
+        return None
+
+    def bool_for(*keys: str) -> bool | None:
+        value = value_for(*keys)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int) and value in (0, 1):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1"}:
+                return True
+            if normalized in {"false", "0"}:
+                return False
+        return None
+
+    result: dict[str, JsonValue] = {}
+    position_side = extract_fill_position_side(raw_payload)
+    if position_side is not None:
+        result["positionSide"] = position_side
+
+    client_order_id = value_for("client_order_id", "clientOrderId", "c")
+    if isinstance(client_order_id, str) and client_order_id.strip():
+        result["client_order_id"] = client_order_id.strip()
+
+    for target, aliases in (
+        ("is_system", ("is_system",)),
+        ("reduce_only", ("reduce_only", "reduceOnly", "R")),
+        ("synthetic_from_order", ("synthetic_from_order",)),
+    ):
+        if bool_for(*aliases) is True:
+            result[target] = True
+
+    is_cumulative = bool_for("is_cumulative") is True or any(
+        "cum_qty" in source for source in sources
+    )
+    if is_cumulative:
+        result["is_cumulative"] = True
+    return result
+
+
 @dataclass(frozen=True, slots=True)
 class AccountFillEvent:
     environment: str
@@ -305,25 +370,6 @@ class AccountFillLoadScan:
 
 
 @dataclass(frozen=True, slots=True)
-class AccountFundingEvent:
-    environment: str
-    account_label: str
-    symbol: str
-    income_id: str
-    amount: Decimal
-    asset: str
-    funding_at: datetime
-    raw_payload: dict[str, JsonValue]
-
-    def __post_init__(self) -> None:
-        _require_common(self.environment, self.account_label)
-        _require_non_empty(self.symbol, "symbol")
-        _require_non_empty(self.income_id, "income_id")
-        _require_non_empty(self.asset, "asset")
-        _require_aware(self.funding_at, "funding_at")
-
-
-@dataclass(frozen=True, slots=True)
 class AccountConfigSnapshot:
     environment: str
     account_label: str
@@ -399,42 +445,6 @@ class AccountReconciliationRun:
             "open_order_count",
             "fill_count",
             "mismatch_count",
-        ):
-            value = getattr(self, field_name)
-            if value < 0:
-                raise ValueError(f"{field_name} must be non-negative")
-
-
-@dataclass(frozen=True, slots=True)
-class AccountReconciliationHead:
-    environment: str
-    account_label: str
-    reconciliation_id: str
-    status: str
-    observed_at: datetime
-    balance_count: int
-    position_count: int
-    open_order_count: int
-    fill_count: int
-    mismatch_count: int
-    details: dict[str, JsonValue]
-    projection_schema_version: int = 1
-    projected_at: datetime | None = None
-
-    def __post_init__(self) -> None:
-        _require_common(self.environment, self.account_label)
-        _require_non_empty(self.reconciliation_id, "reconciliation_id")
-        _require_non_empty(self.status, "status")
-        _require_aware(self.observed_at, "observed_at")
-        if self.projected_at is not None:
-            _require_aware(self.projected_at, "projected_at")
-        for field_name in (
-            "balance_count",
-            "position_count",
-            "open_order_count",
-            "fill_count",
-            "mismatch_count",
-            "projection_schema_version",
         ):
             value = getattr(self, field_name)
             if value < 0:

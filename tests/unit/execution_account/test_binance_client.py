@@ -227,6 +227,8 @@ async def test_client_fetches_account_and_position_modes() -> None:
                 "multiAssetsMargin": False,
                 "dualSidePosition": True,
                 "feeTier": 0,
+                "totalInitialMargin": "42.5",
+                "unusedTransportField": "discard",
             },
         )
 
@@ -252,11 +254,7 @@ async def test_client_fetches_account_and_position_modes() -> None:
     assert config.hedge_mode is True
     assert config.multi_assets_mode is False
     assert config.fee_tier == 0
-    assert config.raw_payload == {
-        "multiAssetsMargin": False,
-        "dualSidePosition": True,
-        "feeTier": 0,
-    }
+    assert config.raw_payload == {"totalInitialMargin": "42.5"}
 
 
 @pytest.mark.parametrize(

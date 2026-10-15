@@ -20,6 +20,7 @@ from crypto_momentum_lab.domain.account.models import (
     AccountFillEvent,
     AccountPositionSnapshot,
 )
+from crypto_momentum_lab.domain.execution.evidence_digest import trade_payload_digest
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
@@ -1444,21 +1445,7 @@ def _checkpoint_identity(
 
 
 def _same_fill(first: AccountFillEvent, second: AccountFillEvent) -> bool:
-    return (
-        first.environment == second.environment
-        and first.account_label == second.account_label
-        and first.symbol == second.symbol
-        and first.trade_id == second.trade_id
-        and first.order_id == second.order_id
-        and first.side.upper() == second.side.upper()
-        and first.price == second.price
-        and first.quantity == second.quantity
-        and first.realized_pnl == second.realized_pnl
-        and first.fee == second.fee
-        and first.fee_asset == second.fee_asset
-        and first.trade_at == second.trade_at
-        and first.raw_payload == second.raw_payload
-    )
+    return trade_payload_digest(first) == trade_payload_digest(second)
 
 
 def _is_synthetic_fill(fill: AccountFillEvent) -> bool:

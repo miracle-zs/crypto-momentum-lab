@@ -121,10 +121,6 @@ from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
 from crypto_momentum_lab.persistence.postgres.order_submission_repository import (
     PostgresOrderSubmissionRepository,
 )
-from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
-    PositionFactJournalEventRow,
-    PositionRecoveryCheckpointRow,
-)
 from crypto_momentum_lab.persistence.postgres.position_reservation_repository import (
     AsyncPostgresPositionReservationRepository,
 )
@@ -296,23 +292,7 @@ async def test_normal_restart_succeeds_without_historical_journal_or_checkpoints
         )
         assert isinstance(accepted, Accepted)
 
-        # Step 2: Wipe historical fact journals and checkpoints completely!
-        async with factory() as session:
-            await session.execute(
-                delete(PositionRecoveryCheckpointRow).where(
-                    PositionRecoveryCheckpointRow.environment == "live",
-                    PositionRecoveryCheckpointRow.account_label == account,
-                )
-            )
-            await session.execute(
-                delete(PositionFactJournalEventRow).where(
-                    PositionFactJournalEventRow.environment == "live",
-                    PositionFactJournalEventRow.account_label == account,
-                )
-            )
-            await session.commit()
-
-        # Step 3: Restart into brand new Book 2
+        # Restart into a new Book; recovery comes from the execution head.
         book2, reservations2 = _book(factory)
         await book2.restore(account_label=account)
         after = await book2.read(scope)
@@ -1681,8 +1661,6 @@ async def test_reconciliation_failure_retains_fact_gap_symbol_isolated() -> None
     assert gate.is_symbol_entry_allowed("BTCUSDT")[0] is True
 
 
-
-
 async def _seed_single_fill_head(
     factory: async_sessionmaker,
     *,
@@ -1723,9 +1701,7 @@ async def test_position_head_keeps_trade_facts_out_of_the_position_projection(
 
     try:
         duplicate_account = f"cp-dupe-{uuid4().hex}"
-        key, payload = await _seed_single_fill_head(
-            factory, account=duplicate_account
-        )
+        key, payload = await _seed_single_fill_head(factory, account=duplicate_account)
         assert "fills" not in payload
         assert "position_state" in payload
         async with factory() as session:
@@ -1744,8 +1720,6 @@ async def test_position_head_keeps_trade_facts_out_of_the_position_projection(
 
     finally:
         await engine.dispose()
-
-
 
 
 @pytest.mark.asyncio
@@ -1958,12 +1932,6 @@ async def test_late_fill_across_restart_preserves_quantity_cost_and_batches(
         await engine.dispose()
 
 
-
-
-
-
-
-
 @pytest.mark.asyncio
 async def test_executing_command_recovery_reuses_command_identity_and_serializes(
     async_database_url: str,
@@ -2077,12 +2045,6 @@ async def test_executing_command_recovery_reuses_command_identity_and_serializes
         assert (await repo.load_command(stranded.command_id)).status == "completed"
     finally:
         await engine.dispose()
-
-
-
-
-
-
 
 
 def _plan_for_key(account: str, symbol: str) -> OrderExecutionPlan:

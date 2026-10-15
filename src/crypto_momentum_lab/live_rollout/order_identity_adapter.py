@@ -47,8 +47,7 @@ def build_position_account_facts(
     def _fill_matches_side(fill: AccountFillEvent) -> bool:
         if fill.symbol != position_key.symbol:
             return False
-        payload = fill.raw_payload
-        ps = payload.get("positionSide") or payload.get("ps")
+        ps = fill.raw_position_side
         if ps:
             ps_str = str(ps).upper()
             if (

@@ -506,6 +506,61 @@ async def test_sync_always_includes_active_symbols_with_historical_batching() ->
     assert client.calls[1][0] == ("ETHUSDT", "SOLUSDT")
 
 
+async def test_position_anchors_do_not_expand_historical_fill_batch() -> None:
+    observed_at = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
+    fresh_checked_at = observed_at - timedelta(minutes=5)
+    old_checked_at = observed_at - timedelta(hours=2)
+    cursors = {
+        "BTCUSDT": AccountFillReconciliationCursor(
+            environment="live",
+            account_label="primary",
+            symbol="BTCUSDT",
+            from_id=1,
+            start_time_ms=None,
+            last_checked_at=fresh_checked_at,
+        ),
+        **{
+            symbol: AccountFillReconciliationCursor(
+                environment="live",
+                account_label="primary",
+                symbol=symbol,
+                from_id=index,
+                start_time_ms=None,
+                last_checked_at=old_checked_at,
+            )
+            for index, symbol in enumerate(("ETHUSDT", "SOLUSDT"), start=2)
+        },
+    }
+    flat_btc = replace(_position(), symbol="BTCUSDT", position_amt=Decimal("0"))
+    client = NewPositionClient(responses=[()], positions=[(flat_btc,)])
+    loaded_position_keys = []
+
+    async def load_anchors(position_keys):
+        loaded_position_keys.append(position_keys)
+        return {("BTCUSDT", "BOTH"): None}
+
+    service = ExecutionAccountSyncService(
+        client=client,
+        repository=FakeRepository(),
+        fill_source_anchor_loader=load_anchors,
+        config=ExecutionAccountSyncConfig(
+            environment="live",
+            account_label="primary",
+            expected_multi_assets_mode=False,
+            expected_hedge_mode=False,
+            observed_at=observed_at,
+            recent_fill_cursors=cursors,
+            historical_fill_reconciliation_interval_seconds=3600,
+            historical_fill_reconciliation_batch_size=1,
+        ),
+    )
+
+    await service.sync_once()
+
+    assert loaded_position_keys == [(("BTCUSDT", "BOTH"),)]
+    assert client.calls[0][0] == ("ETHUSDT",)
+
+
 async def test_sync_skips_zero_snapshot_fill_scan_with_empty_time_range() -> None:
     observed_at = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
     flat_position = replace(_position(), position_amt=Decimal("0"))
@@ -1143,7 +1198,10 @@ async def test_tracked_flat_symbol_uses_prior_explicit_rest_zero_for_proof():
 
     client = ProvenanceClient()
 
-    async def load_current_heads():
+    anchor_loader_calls = []
+
+    async def load_current_heads(position_keys):
+        anchor_loader_calls.append(position_keys)
         return {("BTCUSDT", "LONG"): None}
 
     service = ExecutionAccountSyncService(
@@ -1164,6 +1222,7 @@ async def test_tracked_flat_symbol_uses_prior_explicit_rest_zero_for_proof():
     result = await service.sync_once_for_realtime(observed_at=client.cut)
     assert len(result.fill_load_scans) == 1
     scan = result.fill_load_scans[0]
+    assert anchor_loader_calls == [(("BTCUSDT", "LONG"), ("ETHUSDT", "LONG"))]
     assert scan.source_anchor_event_cut == start
     assert scan.source_anchor_snapshot == initial.snapshot.positions[0]
     assert scan.source_anchor_id == stable_snapshot_anchor_id(

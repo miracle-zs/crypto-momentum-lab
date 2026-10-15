@@ -24,10 +24,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
     PositionReservationRow,
     RiskHaltRow,
 )
-from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
-    PositionFactJournalEventRow,
-    PositionRecoveryCheckpointRow,
-)
 from crypto_momentum_lab.persistence.postgres.session import (
     create_async_database_engine,
 )
@@ -42,9 +38,7 @@ __all__ = ["fake_binance_server", "order_repository"]
 @pytest.fixture
 async def order_repository(
     async_database_url: str,
-) -> AsyncIterator[
-    tuple[OrderRows, async_sessionmaker[AsyncSession]]
-]:
+) -> AsyncIterator[tuple[OrderRows, async_sessionmaker[AsyncSession]]]:
     engine = create_async_database_engine(async_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session:
@@ -55,8 +49,6 @@ async def order_repository(
                 ExecutionEvidenceReceiptRow,
                 ExecutionTradeIdentityRow,
                 ExecutionOrderWatermarkRow,
-                PositionFactJournalEventRow,
-                PositionRecoveryCheckpointRow,
                 ExchangeFillRow,
                 ExchangeOrderEventRow,
                 ExchangeOrderRow,

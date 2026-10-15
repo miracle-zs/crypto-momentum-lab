@@ -27,13 +27,14 @@ import structlog
 from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
     ExecutionAccountStatus,
+    compact_fill_metadata,
 )
 from crypto_momentum_lab.domain.account.snapshot_models import (
     AccountSnapshot,
 )
 from crypto_momentum_lab.execution_account.binance.user_data import (
-    BinanceUserDataListenKeyClient,
     BinanceUsdMUserDataStream,
+    BinanceUserDataListenKeyClient,
 )
 from crypto_momentum_lab.execution_account.binance.user_data_models import (
     BinanceUserDataEvent,
@@ -126,8 +127,10 @@ def convert_user_data_event_to_account_event(
                         realized_pnl=realized_pnl,
                         fee=fee,
                         fee_asset=fee_asset,
-                        trade_at=event.event_at,
-                        raw_payload={"positionSide": pos_side, **order},
+                        trade_at=event.exchange_event_at or event.event_at,
+                        raw_payload=compact_fill_metadata(
+                            {"positionSide": pos_side, **order}
+                        ),
                     )
                     fills.append(fill_event)
                 except Exception as fill_err:
@@ -208,7 +211,7 @@ def build_snapshot_account_event(
 
 
 class InProcessAccountStreamProducer:
-    """Consumes private user data events, verifies position expectations, and publishes to InProcessAccountEventSource."""
+    """Consume private events and publish verified account projections."""
 
     def __init__(
         self,
@@ -229,9 +232,7 @@ class InProcessAccountStreamProducer:
         persist_snapshot: SnapshotPersister | None = None,
     ) -> None:
         if require_live_stream and (websocket_url is None or not websocket_url.strip()):
-            raise ValueError(
-                "websocket_url must be provided for live in-process account stream producer"
-            )
+            raise ValueError("websocket_url is required for a live account producer")
         self._client = client
         self._registry = registry
         self._source = source
@@ -240,6 +241,7 @@ class InProcessAccountStreamProducer:
         self._stream_epoch = stream_epoch or f"epoch-{uuid4().hex[:8]}"
         self._sequence = 0
         self._stopping = False
+        self._stopped_event = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._events_processed_count = 0
         self._stream: BinanceUsdMUserDataStream | None = None
@@ -507,7 +509,7 @@ class InProcessAccountStreamProducer:
             await self._schedule_persistence(update.snapshot, account_event)
 
     def _is_new_observation(self, observed_at: datetime) -> bool:
-        """Only a newer merged observation may be written; older frames cannot roll back."""
+        """Reject older merged observations so they cannot roll state back."""
 
         return (
             self._last_persisted_observed_at is None
@@ -545,9 +547,8 @@ class InProcessAccountStreamProducer:
 
     async def run(self) -> None:
         if self._stream is None:
-            # Idle wait until stopped when using manual/fake event dispatch
-            while not self._stopping:
-                await asyncio.sleep(1.0)
+            # Manual/fake dispatch has no socket to keep this task alive.
+            await self._stopped_event.wait()
             return
         self._baseline_task = asyncio.create_task(
             self._run_baseline_on_connect(),
@@ -607,6 +608,7 @@ class InProcessAccountStreamProducer:
 
     async def aclose(self) -> None:
         self._stopping = True
+        self._stopped_event.set()
         if self._connected_event is None:
             self._connected_event = asyncio.Event()
         self._connected_event.set()
@@ -626,6 +628,7 @@ class InProcessAccountStreamProducer:
 
     def stop(self) -> None:
         self._stopping = True
+        self._stopped_event.set()
         if self._connected_event is None:
             self._connected_event = asyncio.Event()
         self._connected_event.set()

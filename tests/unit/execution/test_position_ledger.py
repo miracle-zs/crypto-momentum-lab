@@ -13,6 +13,7 @@ from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
     ExitOrderSubmissionFact,
+    PositionHealthStatus,
     PositionKey,
 )
 from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
@@ -387,6 +388,47 @@ def test_position_ledger_idempotency_and_out_of_order_resilience() -> None:
         b.quantity for b in baseline.active_batches
     ]
     assert proj.high_watermark_trade_at == baseline.high_watermark_trade_at
+
+
+def test_duplicate_trade_ignores_transport_only_fill_payload_fields() -> None:
+    key = _key()
+    ledger = PositionLedger(key)
+    trade_at = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+    rest_fill = replace(
+        _fill("same-trade", "BUY", "10", "60000", trade_at),
+        raw_payload={"positionSide": "BOTH", "is_system": True, "source": "rest"},
+    )
+    stream_fill = replace(
+        rest_fill,
+        raw_payload={
+            "positionSide": "BOTH",
+            "is_system": True,
+            "source": "user_data_stream",
+            "event_id": "transport-event-123",
+        },
+    )
+
+    projection = ledger.project(
+        AccountFacts(position_key=key, fills=(rest_fill, stream_fill))
+    )
+
+    assert projection.total_active_quantity == Decimal("10")
+    assert projection.health_status is PositionHealthStatus.READY
+
+
+def test_duplicate_trade_with_different_business_facts_remains_a_conflict() -> None:
+    key = _key()
+    ledger = PositionLedger(key)
+    trade_at = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+    original = _fill("same-trade", "BUY", "10", "60000", trade_at)
+    changed = replace(original, fee=Decimal("0.02"))
+
+    projection = ledger.project(
+        AccountFacts(position_key=key, fills=(original, changed))
+    )
+
+    assert projection.total_active_quantity == Decimal("10")
+    assert projection.health_status is PositionHealthStatus.CONFLICT
 
 
 def test_position_ledger_interleaved_exit_fill_does_not_split_new_batch() -> None:

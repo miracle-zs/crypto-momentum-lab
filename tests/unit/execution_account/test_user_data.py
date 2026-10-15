@@ -14,6 +14,7 @@ from crypto_momentum_lab.domain.account import (
 from crypto_momentum_lab.domain.account.snapshot_models import (
     AccountSnapshot,
 )
+from crypto_momentum_lab.domain.execution.evidence_digest import trade_payload_digest
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     FuturesPositionSide,
@@ -27,6 +28,9 @@ from crypto_momentum_lab.execution_account.binance.user_data_parser import (
 from crypto_momentum_lab.execution_account.expectations import (
     AccountPositionExpectation,
     AccountPositionExpectationRegistry,
+)
+from crypto_momentum_lab.execution_account.in_process_producer import (
+    convert_user_data_event_to_account_event,
 )
 from crypto_momentum_lab.execution_account.snapshot_changes import (
     apply_account_snapshot_delta,
@@ -172,7 +176,9 @@ def test_account_user_data_state_merges_partial_account_update() -> None:
     position = update.snapshot.positions[0]
     assert balance.wallet_balance == Decimal("120")
     assert balance.available_balance == Decimal("80")
+    assert balance.raw_payload == {}
     assert position.position_amt == Decimal("0.002")
+    assert position.raw_payload == {}
     assert position.unrealized_pnl == Decimal("1.25")
     assert position.mark_price == Decimal("51000")
     assert position.notional == Decimal("102")
@@ -210,6 +216,8 @@ def test_account_user_data_state_deduplicates_trade_event_and_closes_order() -> 
             "N": "USDT",
             "T": 1783123201000,
             "R": False,
+            "ps": "BOTH",
+            "f": "LIMIT",
         },
     }
 
@@ -229,7 +237,15 @@ def test_account_user_data_state_deduplicates_trade_event_and_closes_order() -> 
     assert len(first.fills) == 1
     assert first.fills[0].trade_id == "5001"
     assert first.fills[0].quantity == Decimal("0.001")
+    assert first.fills[0].raw_payload == {
+        "positionSide": "BOTH",
+        "client_order_id": "entry-1",
+    }
     assert first.snapshot.open_orders[0].status == "PARTIALLY_FILLED"
+    assert first.snapshot.open_orders[0].raw_payload == {
+        "positionSide": "BOTH",
+        "timeInForce": "LIMIT",
+    }
     assert duplicate.changed is False
     assert duplicate.fills == ()
 
@@ -304,6 +320,49 @@ def test_account_user_data_state_uses_exchange_time_for_order_ordering() -> None
     assert stale.needs_reconciliation is True
     assert stale.reason == "stale_exchange_event"
     assert stale.snapshot.open_orders[0].status == "PARTIALLY_FILLED"
+
+
+def test_websocket_and_rest_user_trade_use_the_same_exchange_trade_time() -> None:
+    event = parse_user_data_event(
+        {
+            "e": "ORDER_TRADE_UPDATE",
+            "E": 1783123203000,
+            "T": 1783123200000,
+            "o": {
+                "s": "BTCUSDT",
+                "c": "entry-1",
+                "S": "BUY",
+                "o": "LIMIT",
+                "q": "0.002",
+                "p": "50000",
+                "x": "TRADE",
+                "X": "PARTIALLY_FILLED",
+                "i": 1001,
+                "t": 5003,
+                "z": "0.001",
+                "l": "0.001",
+                "L": "50100",
+                "rp": "0.1",
+                "n": "0.01",
+                "N": "USDT",
+                "T": 1783123200000,
+                "R": False,
+                "ps": "LONG",
+            },
+        },
+        received_at=datetime(2026, 7, 4, 0, 0, 4, tzinfo=UTC),
+    )
+    websocket_fill = convert_user_data_event_to_account_event(
+        event,
+        environment="live",
+        account_label="primary",
+        sequence=1,
+        stream_epoch="epoch-1",
+    ).fills[0]
+    rest_fill = AccountUserDataState(_initial_snapshot()).apply(event).fills[0]
+
+    assert websocket_fill.trade_at == rest_fill.trade_at
+    assert trade_payload_digest(websocket_fill) == trade_payload_digest(rest_fill)
 
 
 def test_account_user_data_state_rejects_exchange_update_gap() -> None:

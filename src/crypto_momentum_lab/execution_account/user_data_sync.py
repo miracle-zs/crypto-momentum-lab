@@ -7,6 +7,7 @@ from crypto_momentum_lab.domain.account.models import (
     AccountFillEvent,
     AccountOpenOrderSnapshot,
     AccountPositionSnapshot,
+    compact_fill_metadata,
 )
 from crypto_momentum_lab.domain.account.snapshot_models import (
     AccountSnapshot,
@@ -28,6 +29,7 @@ from crypto_momentum_lab.execution_account.snapshot_changes import (
 from crypto_momentum_lab.execution_account.user_data_fields import (
     event_raw_payload,
     initial_mark_price,
+    json_value,
     parse_bool,
     parse_decimal,
     parse_timestamp,
@@ -202,7 +204,7 @@ class AccountUserDataState:
                         else Decimal("0")
                     ),
                     observed_at=event.received_at,
-                    raw_payload=event_raw_payload(event, "balance", row),
+                    raw_payload={},
                 )
             )
 
@@ -267,7 +269,7 @@ class AccountUserDataState:
                         )
                     ),
                     observed_at=event.received_at,
-                    raw_payload=event_raw_payload(event, "position", row),
+                    raw_payload={},
                 )
             )
 
@@ -386,7 +388,14 @@ class AccountUserDataState:
             ),
             reduce_only=parse_bool(row.get("R"), "ORDER_TRADE_UPDATE reduce-only flag"),
             observed_at=event.received_at,
-            raw_payload=event_raw_payload(event, "order", row),
+            raw_payload={
+                target: json_value(row[source])
+                for source, target in (
+                    ("ps", "positionSide"),
+                    ("f", "timeInForce"),
+                )
+                if source in row
+            },
         )
         execution_type = required_text(
             row.get("x"), "ORDER_TRADE_UPDATE execution type"
@@ -431,7 +440,9 @@ class AccountUserDataState:
                     row.get("T"),
                     field_name="ORDER_TRADE_UPDATE trade time",
                 ),
-                raw_payload=event_raw_payload(event, "fill", row),
+                raw_payload=compact_fill_metadata(
+                    event_raw_payload(event, "fill", row)
+                ),
             )
 
         if event.exchange_event_at is not None:

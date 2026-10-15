@@ -78,7 +78,6 @@ _DEFAULT_RETENTION_TIMER_UNIT = "cml-archive-trim.timer"
 _DEFAULT_RETENTION_TIMER_MAX_AGE_SECONDS = 26.0 * 60.0 * 60.0
 _DEFAULT_MARKET_REVISION_PURGE_TIMER_MAX_AGE_SECONDS = 26.0 * 60.0 * 60.0
 _DEFAULT_MARKET_REVISION_ARCHIVE_TIMER_MAX_AGE_SECONDS = 3.0 * 60.0 * 60.0
-_DEFAULT_POSITION_RECOVERY_RETENTION_TIMER_MAX_AGE_SECONDS = 3.0 * 60.0 * 60.0
 _DEFAULT_STORAGE_SAMPLE_INTERVAL_SECONDS = 300.0
 _DEFAULT_STORAGE_SAMPLE_WINDOW_SECONDS = 24.0 * 60.0 * 60.0
 _DEFAULT_DISK_WARNING_FRACTION = 0.75
@@ -114,9 +113,6 @@ _ALERT_LABELS = {
     "retention_timer_inactive": "冷数据归档定时器未激活",
     "retention_timer_failed": "冷数据归档上次运行失败",
     "retention_timer_stale": "冷数据归档长时间未运行",
-    "position_recovery_retention_timer_inactive": "持仓恢复历史清理定时器未激活",
-    "position_recovery_retention_timer_failed": "持仓恢复历史清理上次运行失败",
-    "position_recovery_retention_timer_stale": "持仓恢复历史清理长时间未运行",
     "market_revision_archive_timer_inactive": "市场版本压缩归档定时器未激活",
     "market_revision_archive_timer_failed": "市场版本压缩归档上次运行失败",
     "market_revision_archive_timer_stale": "市场版本压缩归档长时间未运行",
@@ -170,15 +166,6 @@ _ALERT_IMPACTS = {
     ),
     "retention_timer_stale": (
         "归档任务已超过预期周期未启动，通常意味着定时器被停用或主机计划未生效。"
-    ),
-    "position_recovery_retention_timer_inactive": (
-        "持仓恢复历史清理已停用，已被检查点覆盖的旧状态副本会持续占用数据库空间。"
-    ),
-    "position_recovery_retention_timer_failed": (
-        "持仓恢复历史清理上次运行失败，恢复事件与检查点可能继续增长。"
-    ),
-    "position_recovery_retention_timer_stale": (
-        "持仓恢复历史清理超过预期周期没有运行，数据库空间增长可能无人处理。"
     ),
     "market_revision_archive_timer_inactive": (
         "市场版本压缩归档已停用，market_revision_refs 会继续在 PostgreSQL 内增长。"
@@ -265,15 +252,6 @@ _ALERT_ACTIONS = {
     ),
     "retention_timer_stale": (
         "确认 timer 处于 active 且主机时钟正常；若刚恢复，先手动跑一次再观察下一周期。"
-    ),
-    "position_recovery_retention_timer_inactive": (
-        "执行 systemctl enable --now cml-position-recovery-retention.timer，并检查 timer 的下次触发时间。"
-    ),
-    "position_recovery_retention_timer_failed": (
-        "查看 cml-position-recovery-retention.service 日志；确认失败原因后手动 dry-run 并重试。"
-    ),
-    "position_recovery_retention_timer_stale": (
-        "检查 cml-position-recovery-retention.timer 是否激活及主机时钟；确认上次服务退出码为 0。"
     ),
     "market_revision_archive_timer_inactive": (
         "执行 systemctl enable --now cml-market-revision-archive.timer，并确认下次触发时间。"
@@ -1022,9 +1000,7 @@ def evaluate_database_state(
             )
         )
     if observation_queue_capacity is not None and observation_queue_capacity > 0:
-        depth_fraction = (
-            observation_queue_depth or 0
-        ) / observation_queue_capacity
+        depth_fraction = (observation_queue_depth or 0) / observation_queue_capacity
         oldest_age = observation_queue_oldest_age_seconds
         saturated = depth_fraction >= 1.0 or (oldest_age or 0.0) >= 120.0
         pressured = depth_fraction >= 0.8 or (oldest_age or 0.0) >= 30.0
@@ -1928,9 +1904,7 @@ class MonitorConfig:
     compose_profiles: tuple[str, ...] = ()
     compose_env_file: Path | None = Path("/opt/crypto-momentum-lab/.env.server")
     services: tuple[str, ...] = _DEFAULT_SERVICES
-    live_accounts: tuple[tuple[str, str], ...] = (
-        ("primary", "live-primary-v1"),
-    )
+    live_accounts: tuple[tuple[str, str], ...] = (("primary", "live-primary-v1"),)
     live_run_id: str = "live-primary-v1"
     live_account_label: str = "primary"
     interval_seconds: float = _DEFAULT_INTERVAL_SECONDS
@@ -1966,10 +1940,6 @@ class MonitorConfig:
     market_revision_archive_timer_max_age_seconds: float = (
         _DEFAULT_MARKET_REVISION_ARCHIVE_TIMER_MAX_AGE_SECONDS
     )
-    position_recovery_retention_timer_unit: str = ""
-    position_recovery_retention_timer_max_age_seconds: float = (
-        _DEFAULT_POSITION_RECOVERY_RETENTION_TIMER_MAX_AGE_SECONDS
-    )
     storage_path: str = ""
     disk_warning_fraction: float = _DEFAULT_DISK_WARNING_FRACTION
     disk_critical_fraction: float = _DEFAULT_DISK_CRITICAL_FRACTION
@@ -1982,12 +1952,8 @@ class MonitorConfig:
     storage_growth_warning_bytes_per_day: int = (
         _DEFAULT_STORAGE_GROWTH_WARNING_BYTES_PER_DAY
     )
-    storage_growth_recovery_fraction: float = (
-        _DEFAULT_STORAGE_GROWTH_RECOVERY_FRACTION
-    )
-    storage_growth_recovery_seconds: float = (
-        _DEFAULT_STORAGE_GROWTH_RECOVERY_SECONDS
-    )
+    storage_growth_recovery_fraction: float = _DEFAULT_STORAGE_GROWTH_RECOVERY_FRACTION
+    storage_growth_recovery_seconds: float = _DEFAULT_STORAGE_GROWTH_RECOVERY_SECONDS
     storage_growth_critical_bytes_per_day: int = (
         _DEFAULT_STORAGE_GROWTH_CRITICAL_BYTES_PER_DAY
     )
@@ -2079,10 +2045,6 @@ class OpsMonitor:
         if config.market_revision_archive_timer_max_age_seconds <= 0:
             raise ValueError(
                 "market_revision_archive_timer_max_age_seconds must be positive"
-            )
-        if config.position_recovery_retention_timer_max_age_seconds <= 0:
-            raise ValueError(
-                "position_recovery_retention_timer_max_age_seconds must be positive"
             )
         if (
             config.storage_path
@@ -2190,14 +2152,6 @@ class OpsMonitor:
     def _market_revision_archive_schedule_state(self) -> RetentionScheduleState | None:
         return self._schedule_state(
             self._config.market_revision_archive_timer_unit,
-            "",
-        )
-
-    def _position_recovery_retention_schedule_state(
-        self,
-    ) -> RetentionScheduleState | None:
-        return self._schedule_state(
-            self._config.position_recovery_retention_timer_unit,
             "",
         )
 
@@ -2459,8 +2413,7 @@ SELECT json_build_object(
             if growth >= self._config.relation_growth_warning_bytes_per_day
         }
         exceeds_warning_budget = (
-            database_growth_per_day
-            >= self._config.storage_growth_warning_bytes_per_day
+            database_growth_per_day >= self._config.storage_growth_warning_bytes_per_day
             or bool(fast_relations)
         )
         if not exceeds_warning_budget:
@@ -2489,14 +2442,10 @@ SELECT json_build_object(
                 self._state["database_storage_growth_resolution_hold"] = True
                 return ()
 
-            recovery_since = self._state.get(
-                "database_storage_growth_recovery_since"
-            )
+            recovery_since = self._state.get("database_storage_growth_recovery_since")
             if not isinstance(recovery_since, (int, float)) or recovery_since > now:
                 recovery_since = now
-                self._state[
-                    "database_storage_growth_recovery_since"
-                ] = recovery_since
+                self._state["database_storage_growth_recovery_since"] = recovery_since
             if now - recovery_since < self._config.storage_growth_recovery_seconds:
                 self._state["database_storage_growth_resolution_hold"] = True
                 return ()
@@ -2578,15 +2527,15 @@ SELECT json_build_object(
                         name: rate
                         for name, rate in sorted(
                             relation_growth_per_day.items(),
-                            key=lambda item: item[1], reverse=True,
-                        )[:5] if rate > 0
+                            key=lambda item: item[1],
+                            reverse=True,
+                        )[:5]
+                        if rate > 0
                     },
                     "unattributed_growth_bytes_per_day": recent[
                         "unattributed_bytes_per_day"
                     ],
-                    "unbaselined_relation_count": recent[
-                        "unbaselined_relation_count"
-                    ],
+                    "unbaselined_relation_count": recent["unbaselined_relation_count"],
                     "warning_bytes_per_day": (
                         self._config.storage_growth_warning_bytes_per_day
                     ),
@@ -2696,16 +2645,6 @@ SELECT json_build_object(
                     self._config.market_revision_archive_timer_max_age_seconds
                 ),
                 alert_prefix="market_revision_archive",
-            )
-        )
-        alerts.extend(
-            evaluate_retention_timer(
-                self._position_recovery_retention_schedule_state(),
-                now=now,
-                max_age_seconds=(
-                    self._config.position_recovery_retention_timer_max_age_seconds
-                ),
-                alert_prefix="position_recovery_retention",
             )
         )
         alerts.extend(self._disk_usage_alerts(now=now))
@@ -3902,8 +3841,7 @@ COMMIT;
             ),
             observation_queue_capacity=(
                 None
-                if observation_queue_capacity is None
-                or observation_queue_capacity <= 0
+                if observation_queue_capacity is None or observation_queue_capacity <= 0
                 else observation_queue_capacity
             ),
             observation_queue_oldest_age_seconds=(
@@ -4631,8 +4569,7 @@ LEFT JOIN (
 
             if (
                 name == "database_storage_growth"
-                and self._state.get("database_storage_growth_resolution_hold")
-                is True
+                and self._state.get("database_storage_growth_resolution_hold") is True
             ):
                 if isinstance(pending_resolutions, dict):
                     pending_resolutions.pop(name, None)
@@ -5853,9 +5790,7 @@ def _format_alert_human_details(
             lines.append(
                 f"- **近期折算日增长**：约 **{total_rate / (1024**3):.2f} GiB/天**"
             )
-        recovery_rate = details.get(
-            "database_growth_recovery_threshold_bytes_per_day"
-        )
+        recovery_rate = details.get("database_growth_recovery_threshold_bytes_per_day")
         recovery_seconds = details.get("growth_recovery_seconds")
         if isinstance(recovery_rate, int) and isinstance(recovery_seconds, int):
             lines.append(
@@ -6209,8 +6144,7 @@ def _parse_live_accounts(raw_value: str | None) -> tuple[tuple[str, str], ...]:
         parts = tuple(part.strip() for part in item.split("|"))
         if len(parts) != 2 or any(not part for part in parts):
             raise ValueError(
-                "CML_MONITOR_LIVE_ACCOUNTS must use "
-                "label|session-id entries"
+                "CML_MONITOR_LIVE_ACCOUNTS must use label|session-id entries"
             )
         accounts.append((parts[0], parts[1]))
     return tuple(accounts)
@@ -6400,15 +6334,6 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
             os.environ.get(
                 "CML_MARKET_REVISION_ARCHIVE_TIMER_MAX_AGE_SECONDS",
                 _DEFAULT_MARKET_REVISION_ARCHIVE_TIMER_MAX_AGE_SECONDS,
-            )
-        ),
-        position_recovery_retention_timer_unit=os.environ.get(
-            "CML_POSITION_RECOVERY_RETENTION_TIMER_UNIT", ""
-        ),
-        position_recovery_retention_timer_max_age_seconds=float(
-            os.environ.get(
-                "CML_POSITION_RECOVERY_RETENTION_TIMER_MAX_AGE_SECONDS",
-                _DEFAULT_POSITION_RECOVERY_RETENTION_TIMER_MAX_AGE_SECONDS,
             )
         ),
         storage_path=os.environ.get("CML_STORAGE_PATH", ""),

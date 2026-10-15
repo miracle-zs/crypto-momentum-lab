@@ -117,6 +117,7 @@ async def mutate_evidence(
                 evidence, active_res
             )
             has_blocking_reservations = bool(active_res) and not res_held_by_order
+            current_view = current_book.get_view() if current_book is not None else None
             can_rollover = (
                 evidence.coverage_evidence is None
                 and current_book is not None
@@ -127,12 +128,14 @@ async def mutate_evidence(
                     )
                     or (
                         terminal_without_fill
-                        and current_book.get_view().total_quantity == Decimal("0")
+                        and current_view is not None
+                        and current_view.total_quantity == Decimal("0")
                     )
                 )
-                and current_book.get_view().total_quantity == Decimal("0")
-                and not current_book.get_view().batches
-                and not current_book.get_view().unallocated_quantity
+                and current_view is not None
+                and current_view.total_quantity == Decimal("0")
+                and not current_view.batches
+                and not current_view.unallocated_quantity
                 and not has_blocking_reservations
             )
             if can_rollover:
@@ -269,10 +272,7 @@ async def mutate_evidence(
                 )
             if event_plan.dispatch_reconciled:
                 dispatch_reconciled_command_id = cmd_id
-        if (
-            evidence.order_event.state.terminal
-            and not settlement_recovery_required
-        ):
+        if evidence.order_event.state.terminal and not settlement_recovery_required:
             execution_book._recovery_required_commands.discard(cmd_id)
 
     if pending_watermark is not None:
@@ -304,21 +304,21 @@ async def mutate_evidence(
         try:
             book.apply_delta(
                 AccountFacts(
-                position_key=key,
-                fills=tuple(applied_fills),
-                snapshots=delta_snapshots,
-                exit_boundaries=(
-                    (evidence.boundary,) if evidence.boundary is not None else ()
-                ),
-                coverage=evidence.coverage,
-                has_synthetic_fills=any(
-                    bool(fill.raw_payload.get("synthetic_from_order", False))
-                    for fill in applied_fills
-                    if isinstance(fill.raw_payload, dict)
-                ),
-                stream_scope=book.stream_scope,
-                fill_load_provenance=evidence.fill_load_provenance,
-                prefix_facts_complete=False,
+                    position_key=key,
+                    fills=tuple(applied_fills),
+                    snapshots=delta_snapshots,
+                    exit_boundaries=(
+                        (evidence.boundary,) if evidence.boundary is not None else ()
+                    ),
+                    coverage=evidence.coverage,
+                    has_synthetic_fills=any(
+                        bool(fill.raw_payload.get("synthetic_from_order", False))
+                        for fill in applied_fills
+                        if isinstance(fill.raw_payload, dict)
+                    ),
+                    stream_scope=book.stream_scope,
+                    fill_load_provenance=evidence.fill_load_provenance,
+                    prefix_facts_complete=False,
                 )
             )
         except ValueError as error:

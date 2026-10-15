@@ -79,7 +79,8 @@ class ExecutionAccountSyncService:
         repository: AccountSyncRepository,
         config: ExecutionAccountSyncConfig,
         fill_source_anchor_loader: Callable[
-            [], Awaitable[Mapping[tuple[str, str], AccountFillSourceAnchor | None]]
+            [tuple[tuple[str, str], ...]],
+            Awaitable[Mapping[tuple[str, str], AccountFillSourceAnchor | None]],
         ]
         | None = None,
     ) -> None:
@@ -89,7 +90,9 @@ class ExecutionAccountSyncService:
         self._repository = repository
         self._config = config
         self._fill_source_anchor_loader = fill_source_anchor_loader
-        self._fill_source_anchors = dict(config.fill_source_anchors)
+        self._fill_source_anchors: dict[
+            tuple[str, str], AccountFillSourceAnchor | None
+        ] = {}
         self._zero_position_snapshots: dict[
             tuple[str, str], AccountPositionSnapshot
         ] = {}
@@ -220,16 +223,29 @@ class ExecutionAccountSyncService:
                     mismatch_count=len(mismatches),
                 )
 
-            if include_fills and self._fill_source_anchor_loader is not None:
-                self._fill_source_anchors.update(
-                    await self._fill_source_anchor_loader()
-                )
             balances = await self._client.fetch_balances()
             previous_active_position_keys = set(self._active_position_keys)
             positions = tuple(
                 _position_cut_for_trade_scan(item)
                 for item in await self._client.fetch_positions(include_flat=True)
             )
+            if include_fills and self._fill_source_anchor_loader is not None:
+                position_keys = tuple(
+                    sorted(
+                        {
+                            (
+                                position.symbol.strip().upper(),
+                                position.position_side.strip().upper(),
+                            )
+                            for position in positions
+                        }
+                    )
+                )
+                self._fill_source_anchors = (
+                    dict(await self._fill_source_anchor_loader(position_keys))
+                    if position_keys
+                    else {}
+                )
             active_positions = tuple(
                 position for position in positions if position.position_amt != 0
             )
@@ -269,7 +285,8 @@ class ExecutionAccountSyncService:
                 order.symbol.strip().upper() for order in open_orders
             )
             active_fill_symbols.update(
-                symbol for symbol, _side in self._fill_source_anchors
+                symbol.strip().upper()
+                for symbol, _side in previous_active_position_keys
             )
             self._tracked_fill_symbols.update(active_fill_symbols)
             tracked_fill_symbols = select_fill_reconciliation_symbols(

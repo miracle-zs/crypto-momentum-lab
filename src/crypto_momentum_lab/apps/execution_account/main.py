@@ -437,7 +437,8 @@ def _resolve_account_label(account_label: str | None) -> str:
     if env_label:
         return env_label
     raise ValueError(
-        "Missing required account_label (must pass --account-label or set CML_ACCOUNT_LABEL)"
+        "Missing required account_label "
+        "(must pass --account-label or set CML_ACCOUNT_LABEL)"
     )
 
 
@@ -484,8 +485,13 @@ async def sync_once(
             service = ExecutionAccountSyncService(
                 client=sync_client,
                 repository=sync_repository,
-                fill_source_anchor_loader=lambda: load_fill_recovery_sources(
-                    factory, environment=environment, account_label=account_label
+                fill_source_anchor_loader=lambda position_keys: (
+                    load_fill_recovery_sources(
+                        factory,
+                        environment=environment,
+                        account_label=account_label,
+                        position_keys=position_keys,
+                    )
                 ),
                 config=ExecutionAccountSyncConfig(
                     environment=environment,
@@ -497,9 +503,6 @@ async def sync_once(
                         sorted(set(fill_symbols) | historical_fill_symbols)
                     ),
                     recent_fill_cursors=historical_fill_cursors,
-                    fill_source_anchors=await load_fill_recovery_sources(
-                        factory, environment=environment, account_label=account_label
-                    ),
                 ),
             )
             return await service.sync_once()
@@ -601,8 +604,13 @@ async def sync_continuously(
             service = ExecutionAccountSyncService(
                 client=sync_client,
                 repository=sync_repository,
-                fill_source_anchor_loader=lambda: load_fill_recovery_sources(
-                    factory, environment=environment, account_label=account_label
+                fill_source_anchor_loader=lambda position_keys: (
+                    load_fill_recovery_sources(
+                        factory,
+                        environment=environment,
+                        account_label=account_label,
+                        position_keys=position_keys,
+                    )
                 ),
                 config=ExecutionAccountSyncConfig(
                     environment=environment,
@@ -614,9 +622,6 @@ async def sync_continuously(
                         sorted(set(fill_symbols) | historical_fill_symbols)
                     ),
                     recent_fill_cursors=historical_fill_cursors,
-                    fill_source_anchors=await load_fill_recovery_sources(
-                        factory, environment=environment, account_label=account_label
-                    ),
                     historical_fill_reconciliation_interval_seconds=(
                         historical_fill_reconciliation_interval_seconds
                     ),
@@ -921,7 +926,8 @@ def _account_event_from_reconciled_fill(
         raise ValueError("reconciled fill event requires an account snapshot")
     received_at = max(fill.trade_at, result.snapshot.config.observed_at)
     client_order_id = _event_text(
-        fill.raw_payload.get("clientOrderId")
+        fill.raw_payload.get("client_order_id")
+        or fill.raw_payload.get("clientOrderId")
         if isinstance(fill.raw_payload, dict)
         else None
     )

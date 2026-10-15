@@ -1,5 +1,6 @@
 """Order progress and account position facts advance independently."""
 
+import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -42,9 +43,10 @@ SCOPE = ExecutionScope("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
 class ObservationTransaction:
     """Persistence seam only; all observation and settlement use the real Book."""
 
-    def __init__(self, head, checkpoints=None):
+    def __init__(self, head, checkpoints=None, trade_ids=None):
         self.head = head
         self.checkpoints = checkpoints or {}
+        self.trade_ids = set(trade_ids or ())
 
     async def load_head(self, key):
         return self.head
@@ -56,6 +58,10 @@ class ObservationTransaction:
         return True
 
     async def record_trade(self, **kwargs):
+        trade_id = kwargs["trade"].trade_id
+        if trade_id in self.trade_ids:
+            return False
+        self.trade_ids.add(trade_id)
         return True
 
     async def persist_watermark(self, **kwargs):
@@ -83,14 +89,51 @@ class ObservationUnitOfWork:
         self.head = None
         self.fail_commit = False
         self.checkpoints = dict(checkpoints or {})
+        self.trade_ids: set[str] = set()
 
     @asynccontextmanager
     async def transaction(self, key, account_scope=None):
-        transaction = ObservationTransaction(self.head, checkpoints=self.checkpoints)
+        transaction = ObservationTransaction(
+            self.head,
+            checkpoints=self.checkpoints,
+            trade_ids=self.trade_ids,
+        )
         yield transaction
         if self.fail_commit:
             raise RuntimeError("injected commit failure")
         self.head = transaction.head
+        self.trade_ids = transaction.trade_ids
+
+
+class BlockingObservationUnitOfWork(ObservationUnitOfWork):
+    """Hold the first durable write while another observation is staged."""
+
+    def __init__(self, *, head, trade_ids):
+        super().__init__()
+        self.head = head
+        self.trade_ids = set(trade_ids)
+        self.database_lock = asyncio.Lock()
+        self.first_transaction_started = asyncio.Event()
+        self.release_first_transaction = asyncio.Event()
+        self.block_first_transaction = True
+
+    @asynccontextmanager
+    async def transaction(self, key, account_scope=None):
+        async with self.database_lock:
+            transaction = ObservationTransaction(
+                self.head,
+                checkpoints=self.checkpoints,
+                trade_ids=self.trade_ids,
+            )
+            if self.block_first_transaction:
+                self.block_first_transaction = False
+                self.first_transaction_started.set()
+                await self.release_first_transaction.wait()
+            yield transaction
+            if self.fail_commit:
+                raise RuntimeError("injected commit failure")
+            self.head = transaction.head
+            self.trade_ids = transaction.trade_ids
 
 
 def evidence(identity, **kwargs):
@@ -309,9 +352,7 @@ async def test_verified_partial_receipt_resolves_unknown_dispatch_without_releas
 @pytest.mark.asyncio
 async def test_external_exit_fill_updates_current_position_directly():
     book = await reserved_book()
-    result = await book.observe(
-        evidence("manual-exit", fill=fill("manual-close", "2"))
-    )
+    result = await book.observe(evidence("manual-exit", fill=fill("manual-close", "2")))
     assert isinstance(result, Applied)
     assert not result.recovery_required
     assert (await book.read(SCOPE)).total_quantity == Decimal("3")
@@ -490,3 +531,49 @@ async def test_filled_reduce_only_smaller_than_requested_releases_unused_capacit
     assert not book.command_requires_recovery("exit")
     assert (await book.read(SCOPE)).total_quantity == Decimal("4")
     assert book.get_outbox("exit").state == DispatchState.TERMINAL
+
+
+@pytest.mark.asyncio
+async def test_same_position_durable_observations_stage_one_at_a_time():
+    original_uow = ObservationUnitOfWork()
+    book = ExecutionBook(execution_unit_of_work=original_uow)
+    book._persistence_failed = False
+    assert isinstance(
+        await book.observe(evidence("opening", fill=fill("opening", "5", entry=True))),
+        Applied,
+    )
+
+    uow = BlockingObservationUnitOfWork(
+        head=original_uow.head,
+        trade_ids=original_uow.trade_ids,
+    )
+    book._execution_unit_of_work = uow
+    original_stage = book._staged_copy
+    staged = 0
+    second_stage_started = asyncio.Event()
+
+    def count_staging(key=None):
+        nonlocal staged
+        staged += 1
+        if staged == 2:
+            second_stage_started.set()
+        return original_stage(key=key)
+
+    book._staged_copy = count_staging
+    first = asyncio.create_task(
+        book.observe(evidence("trade-a", fill=fill("trade-a", "1", entry=True)))
+    )
+    await asyncio.wait_for(uow.first_transaction_started.wait(), timeout=1)
+    second = asyncio.create_task(
+        book.observe(evidence("trade-b", fill=fill("trade-b", "1", entry=True)))
+    )
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(second_stage_started.wait(), timeout=0.02)
+    finally:
+        uow.release_first_transaction.set()
+
+    results = await asyncio.gather(first, second)
+    assert all(isinstance(result, Applied) for result in results)
+    assert staged == 2
+    assert (await book.read(SCOPE)).total_quantity == Decimal("7")

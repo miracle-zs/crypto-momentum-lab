@@ -164,6 +164,7 @@ class ExecutionBook:
         self._recovery_adoption_scope: AccountFactStreamScope | None = None
         self._process_mutation_lock = asyncio.Lock()
         self._mutation_locks: dict[str, asyncio.Lock] = {}
+        self._position_write_locks: dict[str, asyncio.Lock] = {}
         self._requests_by_id: dict[str, ExecutionRequest] = {}
         self._receipts_by_id: dict[str, ExecutionReceipt] = {}
         self._seen_evidence_ids: set[str] = set()
@@ -293,10 +294,24 @@ class ExecutionBook:
         uow: PositionRepairUnitOfWork,
         is_current: Callable[[], bool] | None = None,
     ) -> PublishedPositionRepair:
+        async with self._position_write_lock(request.key):
+            return await self._repair_position_locked(
+                request,
+                uow=uow,
+                is_current=is_current,
+            )
+
+    async def _repair_position_locked(
+        self,
+        request: PositionRepairRequest,
+        *,
+        uow: PositionRepairUnitOfWork,
+        is_current: Callable[[], bool] | None = None,
+    ) -> PublishedPositionRepair:
         """Serialize fact load, durable repair commit and publication with observe.
 
-        Every writer takes the Book lock before the database lock. No observer
-        can see a committed repair head against the old in-memory projection.
+        The caller holds this position's write lock until the durable head has
+        been committed and reloaded into the in-memory projection.
         """
         for attempt in range(3):
             try:
@@ -501,10 +516,10 @@ class ExecutionBook:
         return self._execution_unit_of_work is not None
 
     def _mutation_lock(self, key: PositionKey | None = None) -> asyncio.Lock:
-        """Process-local mutation lock for this ExecutionBook instance.
+        """Short lock for publishing process-local state in this Book.
 
-        Each position key is isolated with its own asyncio.Lock to avoid
-        cross-symbol lock contention during lock-free I/O.
+        Durable writers use ``_position_write_lock`` to prevent stale staging;
+        this lock still protects brief in-memory reads and publications.
         If key is None, falls back to the instance-level process lock.
         """
         if key is None:
@@ -514,27 +529,68 @@ class ExecutionBook:
             self._mutation_locks[canon] = asyncio.Lock()
         return self._mutation_locks[canon]
 
+    def _position_write_lock(self, key: PositionKey) -> asyncio.Lock:
+        """Serialize one position's durable write from staging through publish."""
+        canon = key.canonical_id
+        if canon not in self._position_write_locks:
+            self._position_write_locks[canon] = asyncio.Lock()
+        return self._position_write_locks[canon]
+
     def _staged_copy(self, key: PositionKey | None = None) -> ExecutionBook:
-        """Copy published domain state before entering a durable transaction."""
+        """Stage the state a durable transaction is allowed to change."""
         candidate = copy.copy(self)
-        candidate._books = dict(self._books)
         if key is not None:
             canon = key.canonical_id
+            candidate._books = {}
             position_book = self._books.get(canon)
             if position_book is not None:
                 candidate._books[canon] = position_book.copy_for_transaction()
+            candidate._stream_scopes = (
+                {canon: self._stream_scopes[canon]}
+                if canon in self._stream_scopes
+                else {}
+            )
+            candidate._head_revisions = (
+                {canon: self._head_revisions[canon]}
+                if canon in self._head_revisions
+                else {}
+            )
+            candidate._head_expected_reservation_ids = (
+                {canon: set(self._head_expected_reservation_ids[canon])}
+                if canon in self._head_expected_reservation_ids
+                else {}
+            )
+            candidate._last_sequences = (
+                {canon: self._last_sequences[canon]}
+                if canon in self._last_sequences
+                else {}
+            )
         else:
             candidate._books = {
                 canon: book.copy_for_transaction()
                 for canon, book in self._books.items()
             }
+            candidate._stream_scopes = dict(self._stream_scopes)
+            candidate._head_revisions = dict(self._head_revisions)
+            candidate._head_expected_reservation_ids = dict(
+                self._head_expected_reservation_ids
+            )
+            candidate._last_sequences = dict(self._last_sequences)
         candidate._transaction_position_keys = (
             (key.canonical_id,) if key is not None else tuple(candidate._books)
         )
-        candidate._requests_by_id = dict(self._requests_by_id)
-        candidate._receipts_by_id = dict(self._receipts_by_id)
-        candidate._seen_evidence_ids = set(self._seen_evidence_ids)
-        candidate._seen_trade_ids = set(self._seen_trade_ids)
+        candidate._requests_by_id = (
+            dict(self._requests_by_id) if key is None else self._requests_by_id
+        )
+        candidate._receipts_by_id = (
+            dict(self._receipts_by_id) if key is None else self._receipts_by_id
+        )
+        candidate._seen_evidence_ids = (
+            set() if key is not None else set(self._seen_evidence_ids)
+        )
+        candidate._seen_trade_ids = (
+            set() if key is not None else set(self._seen_trade_ids)
+        )
         candidate._outbox_by_command_id = dict(self._outbox_by_command_id)
         candidate._command_reservations = dict(self._command_reservations)
         candidate._order_cumulative_fills = dict(self._order_cumulative_fills)
@@ -544,16 +600,18 @@ class ExecutionBook:
         candidate._dispatch_reconciliation_required_commands = set(
             self._dispatch_reconciliation_required_commands
         )
-        candidate._stream_scopes = dict(self._stream_scopes)
-        candidate._active_streams = set(self._active_streams)
-        candidate._latest_active_streams = dict(self._latest_active_streams)
-        candidate._head_revisions = dict(self._head_revisions)
-        candidate._head_expected_reservation_ids = dict(
-            self._head_expected_reservation_ids
+        candidate._active_streams = (
+            set(self._active_streams) if key is None else self._active_streams
         )
-        candidate._last_sequences = dict(self._last_sequences)
+        candidate._latest_active_streams = (
+            dict(self._latest_active_streams)
+            if key is None
+            else self._latest_active_streams
+        )
         candidate._recovery_adoption_scope = self._recovery_adoption_scope
-        candidate._initial_latest_active_streams = dict(self._latest_active_streams)
+        candidate._initial_latest_active_streams = dict(
+            candidate._latest_active_streams
+        )
         candidate._initial_recovery_adoption_scope = self._recovery_adoption_scope
         candidate._staged_recovery_required_commands = set(
             self._recovery_required_commands
@@ -570,6 +628,7 @@ class ExecutionBook:
         candidate._active_transaction = None
         candidate._process_mutation_lock = self._process_mutation_lock
         candidate._mutation_locks = self._mutation_locks
+        candidate._position_write_locks = self._position_write_locks
         return candidate
 
     async def _publish_committed_candidate(
@@ -625,11 +684,15 @@ class ExecutionBook:
             else:
                 self._head_expected_reservation_ids.pop(canon, None)
 
-        self._requests_by_id.update(candidate._requests_by_id)
-        self._receipts_by_id.update(candidate._receipts_by_id)
-        self._seen_evidence_ids.update(candidate._seen_evidence_ids)
-        self._seen_trade_ids.update(candidate._seen_trade_ids)
-        self._active_streams.update(candidate._active_streams)
+        if candidate._requests_by_id is not self._requests_by_id:
+            self._requests_by_id.update(candidate._requests_by_id)
+        if candidate._receipts_by_id is not self._receipts_by_id:
+            self._receipts_by_id.update(candidate._receipts_by_id)
+        if key is None or self._execution_unit_of_work is None:
+            self._seen_evidence_ids.update(candidate._seen_evidence_ids)
+            self._seen_trade_ids.update(candidate._seen_trade_ids)
+        if candidate._active_streams is not self._active_streams:
+            self._active_streams.update(candidate._active_streams)
         initial_streams = getattr(candidate, "_initial_latest_active_streams", {})
         for acc_k, stream_val in candidate._latest_active_streams.items():
             if stream_val != initial_streams.get(acc_k):
@@ -1008,10 +1071,11 @@ class ExecutionBook:
             )
         ):
             current_book = self._books.get(canon)
-            is_flat = current_book is None or (
-                current_book.get_view().total_quantity == Decimal("0")
-                and not current_book.get_view().batches
-                and not current_book.get_view().unallocated_quantity
+            current_view = current_book.get_view() if current_book is not None else None
+            is_flat = current_view is None or (
+                current_view.total_quantity == Decimal("0")
+                and not current_view.batches
+                and not current_view.unallocated_quantity
             )
             has_no_reservations = not bool(self.get_active_reservations(key))
             has_no_commands = not any(
@@ -1136,9 +1200,15 @@ class ExecutionBook:
         ]
         | None = None,
     ) -> ExecutionActResult:
-        return await accept_action_transaction(
-            self, request, prepare_submission=prepare_submission
-        )
+        key = request.scope.to_position_key()
+        if self._execution_unit_of_work is None:
+            return await accept_action_transaction(
+                self, request, prepare_submission=prepare_submission
+            )
+        async with self._position_write_lock(key):
+            return await accept_action_transaction(
+                self, request, prepare_submission=prepare_submission
+            )
 
     async def _act_mutating(
         self,
@@ -1237,6 +1307,31 @@ class ExecutionBook:
         entry = self._outbox_by_command_id.get(command_id)
         if entry is None:
             raise KeyError(f"Outbox entry {command_id} not found")
+        async with self._position_write_lock(entry.scope.to_position_key()):
+            return await self._commit_durable_command_mutation(
+                command_id,
+                target,
+                unit_of_work=unit_of_work,
+                at=at,
+                external_order_id=external_order_id,
+                reason=reason,
+                intent_id=intent_id,
+            )
+
+    async def _commit_durable_command_mutation(
+        self,
+        command_id: str,
+        target: DispatchState,
+        *,
+        unit_of_work: ExecutionUnitOfWorkPort,
+        at: datetime | None = None,
+        external_order_id: str | None = None,
+        reason: str = "",
+        intent_id: str | None = None,
+    ) -> OutboxEntry:
+        entry = self._outbox_by_command_id.get(command_id)
+        if entry is None:
+            raise KeyError(f"Outbox entry {command_id} not found")
         key = entry.scope.to_position_key()
         canon = key.canonical_id
         result: OutboxEntry = entry
@@ -1247,7 +1342,8 @@ class ExecutionBook:
             candidate = self._staged_copy(key=key)
             base_head_revision = self._head_revisions.get(canon, 0)
 
-        # Phase 2: Lock-free durable I/O and CAS commit (I2)
+        # The caller holds this position's write lock through the database
+        # transaction and publication; no exchange request runs in this path.
         try:
             async with unit_of_work.transaction(key) as tx:
                 head = await tx.load_head(key)
@@ -1665,7 +1761,12 @@ class ExecutionBook:
 
     async def observe(self, evidence: ExecutionEvidence) -> ExecutionObserveResult:
         try:
-            result = await observe_evidence_transaction(self, evidence)
+            if self._execution_unit_of_work is None:
+                result = await observe_evidence_transaction(self, evidence)
+            else:
+                key = evidence.scope.to_position_key()
+                async with self._position_write_lock(key):
+                    result = await observe_evidence_transaction(self, evidence)
         except Exception as err:
             if (
                 evidence.order_event is not None

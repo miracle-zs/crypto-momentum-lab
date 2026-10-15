@@ -89,7 +89,10 @@ def _head(
     payload = {
         "schema_version": schema_version,
         "position_key": encode_position_key(key),
-        "stream_scope": {"stream_id": scope.stream_id, "stream_epoch": scope.stream_epoch},
+        "stream_scope": {
+            "stream_id": scope.stream_id,
+            "stream_epoch": scope.stream_epoch,
+        },
         "position_state": PositionBook.from_facts(facts).encode_current_state(),
         "active_reservation_ids": [],
         "recovery_command_ids": [],
@@ -111,7 +114,7 @@ def test_current_exposure_without_fresh_coverage_is_unknown() -> None:
     result = __import__("asyncio").run(
         load_fact_integrity(
             _Sessions(session),
-            accounts={"primary": SimpleNamespace(position_count=1)},
+            account_position_counts={"primary": 1},
             now=NOW,
         )
     )
@@ -128,8 +131,6 @@ def test_current_exposure_without_fresh_coverage_is_unknown() -> None:
         "recovery_command_ids",
         "external_recovery_ids",
     } <= set(compiled_values)
-    assert "position_fact_journal_events" not in sql
-    assert "position_recovery_checkpoints" not in sql
 
 
 def test_legacy_head_fails_closed_when_account_has_exposure() -> None:
@@ -137,7 +138,7 @@ def test_legacy_head_fails_closed_when_account_has_exposure() -> None:
     result = __import__("asyncio").run(
         load_fact_integrity(
             _Sessions(session),
-            accounts={"primary": SimpleNamespace(position_count=1)},
+            account_position_counts={"primary": 1},
             now=NOW,
         )
     )
@@ -151,10 +152,7 @@ def test_missing_head_is_unknown_only_when_exchange_reports_a_position() -> None
     result = __import__("asyncio").run(
         load_fact_integrity(
             _Sessions(session),
-            accounts={
-                "flat": SimpleNamespace(position_count=0),
-                "open": SimpleNamespace(position_count=1),
-            },
+            account_position_counts={"flat": 0, "open": 1},
             now=NOW,
         )
     )
@@ -165,9 +163,12 @@ def test_missing_head_is_unknown_only_when_exchange_reports_a_position() -> None
 
 
 @pytest.mark.asyncio
-async def test_empty_account_map_does_not_open_a_session() -> None:
+async def test_empty_position_counts_do_not_open_a_session() -> None:
     class _NeverOpen:
         def __call__(self):
-            raise AssertionError("empty account map should return immediately")
+            raise AssertionError("empty position counts should return immediately")
 
-    assert await load_fact_integrity(_NeverOpen(), accounts={}, now=NOW) == {}
+    assert (
+        await load_fact_integrity(_NeverOpen(), account_position_counts={}, now=NOW)
+        == {}
+    )

@@ -2,7 +2,6 @@
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -25,10 +24,6 @@ from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
 )
 from crypto_momentum_lab.persistence.postgres.models import (
     AccountPositionSnapshotRow,
-)
-from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
-    PositionFactJournalEventRow,
-    PositionRecoveryCheckpointRow,
 )
 from crypto_momentum_lab.persistence.postgres.position_reservation_repository import (
     AsyncPostgresPositionReservationRepository,
@@ -117,30 +112,18 @@ async def test_account_fact_health_and_restart_use_the_same_head(async_database_
 
         integrity = await load_fact_integrity(
             factory,
-            accounts={account: SimpleNamespace(position_count=1)},
+            account_position_counts={account: 1},
             now=at,
         )
         assert integrity[account].gaps is None
         assert integrity[account].reasons == ("coverage_missing",)
 
         async with factory() as session:
-            event_count = await session.scalar(
-                select(func.count())
-                .select_from(PositionFactJournalEventRow)
-                .where(PositionFactJournalEventRow.account_label == account)
-            )
-            checkpoint_count = await session.scalar(
-                select(func.count())
-                .select_from(PositionRecoveryCheckpointRow)
-                .where(PositionRecoveryCheckpointRow.account_label == account)
-            )
             snapshot_count = await session.scalar(
                 select(func.count())
                 .select_from(AccountPositionSnapshotRow)
                 .where(AccountPositionSnapshotRow.account_label == account)
             )
-        assert event_count == 0
-        assert checkpoint_count == 0
         assert snapshot_count == 0
     finally:
         await engine.dispose()

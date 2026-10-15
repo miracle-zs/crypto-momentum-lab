@@ -8,7 +8,6 @@ from crypto_momentum_lab.domain.account.models import (
     AccountFillEvent,
     AccountFillLoadScan,
     AccountFillReconciliationCursor,
-    AccountFillSourceAnchor,
     ExecutionAccountStatus,
 )
 from crypto_momentum_lab.domain.account.snapshot_models import (
@@ -31,9 +30,6 @@ class ExecutionAccountSyncConfig:
     recent_fill_symbols: tuple[str, ...] = ()
     recent_fill_cursors: Mapping[str, AccountFillReconciliationCursor] = field(
         default_factory=dict
-    )
-    fill_source_anchors: Mapping[tuple[str, str], AccountFillSourceAnchor | None] = (
-        field(default_factory=dict)
     )
     historical_fill_reconciliation_interval_seconds: float = 6 * 60 * 60
     # A historical sweep is deliberately incremental.  Active symbols are
@@ -73,19 +69,6 @@ class ExecutionAccountSyncConfig:
                 raise ValueError(
                     "recent_fill_cursors must match the sync account scope"
                 )
-        for identity, anchor in self.fill_source_anchors.items():
-            if len(identity) != 2:
-                raise ValueError("fill_source_anchors keys must be (symbol, side)")
-            symbol, side = (part.strip().upper() for part in identity)
-            if not symbol or not side:
-                raise ValueError("fill_source_anchors keys must not be empty")
-            if anchor is None:
-                continue
-            if (symbol, side) != (
-                anchor.symbol.strip().upper(),
-                anchor.position_side.strip().upper(),
-            ):
-                raise ValueError("fill_source_anchors keys must match anchor identity")
 
 
 @dataclass(frozen=True, slots=True)

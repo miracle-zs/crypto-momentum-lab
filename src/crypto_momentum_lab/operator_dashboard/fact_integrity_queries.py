@@ -1,5 +1,6 @@
 """Check live position facts from the single durable execution head."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -19,7 +20,6 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
 from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
     ExecutionBookHeadRow,
 )
-from crypto_momentum_lab.persistence.postgres.models import AccountReconciliationHeadRow
 
 REASON_ACTIVE_POSITION_COUNT_MISMATCH = "active_position_count_mismatch"
 
@@ -37,14 +37,14 @@ class FactIntegritySummary:
 async def load_fact_integrity(
     sessions: async_sessionmaker[AsyncSession],
     *,
-    accounts: dict[str, AccountReconciliationHeadRow],
+    account_position_counts: Mapping[str, int],
     now: datetime,
     max_age_seconds: float = 180.0,
 ) -> dict[str, FactIntegritySummary]:
     """Verify current position and outstanding execution responsibility facts."""
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("fact integrity time must be timezone-aware")
-    if not accounts:
+    if not account_position_counts:
         return {}
 
     async with sessions() as session:
@@ -64,14 +64,16 @@ async def load_fact_integrity(
             await session.scalars(
                 select(ExecutionBookHeadRow).where(
                     ExecutionBookHeadRow.environment == "live",
-                    ExecutionBookHeadRow.account_label.in_(tuple(accounts)),
+                    ExecutionBookHeadRow.account_label.in_(
+                        tuple(account_position_counts)
+                    ),
                     or_(active_position, outstanding_responsibility),
                 )
             )
         ).all()
 
     grouped: dict[str, list[ExecutionBookHeadRow]] = {
-        account: [] for account in accounts
+        account: [] for account in account_position_counts
     }
     for head in heads:
         grouped[head.account_label].append(head)
@@ -168,7 +170,7 @@ async def load_fact_integrity(
                 continue
             proven_cuts.append(coverage.end_at)
 
-        if current_count != accounts[account].position_count:
+        if current_count != account_position_counts[account]:
             reasons.append(REASON_ACTIVE_POSITION_COUNT_MISMATCH)
             unknown_scopes.append("*")
             current_unknown = True

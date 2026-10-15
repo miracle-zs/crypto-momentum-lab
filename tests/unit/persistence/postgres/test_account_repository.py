@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from crypto_momentum_lab.domain.account import (
     AccountBalanceSnapshot,
@@ -15,7 +16,6 @@ from crypto_momentum_lab.persistence.postgres.account_repository import (
     process_state_row,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
-    AccountReconciliationHeadRow,
     AccountReconciliationRunRow,
 )
 
@@ -31,7 +31,7 @@ async def test_retention_watermark_uses_only_current_position_episode(
     head_at = datetime(2026, 10, 7, tzinfo=UTC)
     flat_at = datetime(2026, 10, 5, tzinfo=UTC)
     opened_at = datetime(2026, 10, 6, tzinfo=UTC)
-    head = AccountReconciliationHeadRow(
+    run = AccountReconciliationRunRow(
         environment="live",
         account_label="primary",
         status="ready",
@@ -58,7 +58,7 @@ async def test_retention_watermark_uses_only_current_position_episode(
             pass
 
         async def scalars(self, statement):
-            return SimpleNamespace(all=lambda: [head])
+            return SimpleNamespace(all=lambda: [run])
 
         async def scalar(self, statement):
             statements.append(statement)
@@ -81,7 +81,7 @@ async def test_retention_watermark_uses_only_current_position_episode(
 async def test_position_retention_missing_open_snapshot_fails_closed() -> None:
     from types import SimpleNamespace
 
-    head = AccountReconciliationHeadRow(
+    run = AccountReconciliationRunRow(
         environment="live",
         account_label="primary",
         status="ready",
@@ -102,7 +102,7 @@ async def test_position_retention_missing_open_snapshot_fails_closed() -> None:
             pass
 
         async def scalars(self, _statement):
-            return SimpleNamespace(all=lambda: [head])
+            return SimpleNamespace(all=lambda: [run])
 
         async def scalar(self, _statement):
             return None
@@ -113,11 +113,10 @@ async def test_position_retention_missing_open_snapshot_fails_closed() -> None:
         ).load_active_position_retention_watermark()
 
 
-@pytest.mark.parametrize("status", ["catching_up", "failed"])
-async def test_position_retention_unready_head_fails_closed(status: str) -> None:
+async def test_position_retention_selects_latest_ready_runs() -> None:
     from types import SimpleNamespace
 
-    head = AccountReconciliationHeadRow(account_label="primary", status=status)
+    statements = []
 
     class Session:
         async def __aenter__(self):
@@ -126,13 +125,21 @@ async def test_position_retention_unready_head_fails_closed(status: str) -> None
         async def __aexit__(self, *_args):
             pass
 
-        async def scalars(self, _statement):
-            return SimpleNamespace(all=lambda: [head])
+        async def scalars(self, statement):
+            statements.append(statement)
+            return SimpleNamespace(all=lambda: [])
 
-    with pytest.raises(ValueError, match="not ready"):
-        await PostgresAccountRepository(
-            Session
-        ).load_active_position_retention_watermark()
+    actual = await PostgresAccountRepository(
+        Session
+    ).load_active_position_retention_watermark()
+    assert actual is None
+    sql = str(
+        statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "account_reconciliation_runs.status = 'ready'" in sql
 
 
 async def test_position_retention_missing_configured_account_fails_closed() -> None:
@@ -148,7 +155,7 @@ async def test_position_retention_missing_configured_account_fails_closed() -> N
         async def scalars(self, _statement):
             return SimpleNamespace(all=lambda: [])
 
-    with pytest.raises(ValueError, match="Missing position reconciliation heads"):
+    with pytest.raises(ValueError, match="Missing ready position reconciliation runs"):
         repository = PostgresAccountRepository(Session)
         await repository.load_active_position_retention_watermark(
             expected_account_labels=frozenset({"primary"})
@@ -190,27 +197,6 @@ def test_process_state_row_uses_state_value() -> None:
 
     assert row["state"] == "ready_readonly"
     assert row["reason"] is None
-
-
-def test_account_reconciliation_head_validates_fields() -> None:
-    from crypto_momentum_lab.domain.account import AccountReconciliationHead
-
-    head = AccountReconciliationHead(
-        environment="live",
-        account_label="primary",
-        reconciliation_id="test:1",
-        status="ready",
-        observed_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
-        balance_count=1,
-        position_count=2,
-        open_order_count=0,
-        fill_count=5,
-        mismatch_count=0,
-        details={"ok": True},
-    )
-    assert head.environment == "live"
-    assert head.position_count == 2
-    assert head.projection_schema_version == 1
 
 
 def test_position_state_run_details_preserve_complete_empty_snapshot() -> None:
@@ -303,6 +289,7 @@ async def test_unversioned_position_state_is_rejected() -> None:
         position_count=1,
         details={},
     )
+
     class Session:
         async def __aenter__(self):
             return self
@@ -322,38 +309,29 @@ async def test_unversioned_position_state_is_rejected() -> None:
         )
 
 
-async def test_active_position_label_discovery_fills_partial_head_projection() -> None:
-    head = AccountReconciliationHeadRow(
+async def test_active_position_labels_use_one_latest_run_query() -> None:
+    flat_run = AccountReconciliationRunRow(
+        reconciliation_id="flat-run",
         environment="live",
-        account_label="head-present",
-        reconciliation_id="head-run",
+        account_label="flat",
         status="ready",
         observed_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
-        balance_count=0,
         position_count=0,
-        open_order_count=0,
-        fill_count=0,
-        mismatch_count=0,
         details={},
-        projection_schema_version=1,
-        projected_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
     )
-    missing_run = AccountReconciliationRunRow(
-        reconciliation_id="missing-run",
+    open_run = AccountReconciliationRunRow(
+        reconciliation_id="open-run",
         environment="live",
-        account_label="head-missing",
-        status="ready",
+        account_label="open",
+        status="catching_up",
         observed_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
         position_count=1,
         details={},
     )
 
     class Scalars:
-        def __init__(self, rows):
-            self._rows = rows
-
         def all(self):
-            return self._rows
+            return [flat_run, open_run]
 
     class Session:
         calls = 0
@@ -366,13 +344,15 @@ async def test_active_position_label_discovery_fills_partial_head_projection() -
 
         async def scalars(self, _statement):
             self.calls += 1
-            return Scalars([head] if self.calls == 1 else [missing_run])
+            return Scalars()
 
-    repository = PostgresAccountRepository(lambda: Session())
+    session = Session()
+    repository = PostgresAccountRepository(lambda: session)
 
     labels = await repository.load_active_position_account_labels(
         environment="live",
-        account_labels=("head-present", "head-missing"),
+        account_labels=("flat", "open"),
     )
 
-    assert labels == frozenset({"head-missing"})
+    assert labels == frozenset({"open"})
+    assert session.calls == 1

@@ -81,9 +81,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
     ExecutionCommandRow,
     PositionReservationRow,
 )
-from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
-    PositionFactJournalEventRow,
-)
 from crypto_momentum_lab.persistence.postgres.position_reservation_repository import (
     AsyncPostgresPositionReservationRepository,
 )
@@ -103,6 +100,7 @@ LIVE_ACCOUNTS = frozenset({"primary", "account-2", "account-3", "account-4"})
 CREDENTIAL_ROLES = ("READ", "TRADE")
 
 BURST = 50
+
 
 # --------------------------------------------------------------------------- #
 # (A) One live process per account
@@ -181,6 +179,7 @@ def test_each_account_is_assembled_as_one_process_holding_both_roles() -> None:
         "account facts and executes trades; observed assembly: "
         f"{violations}"
     )
+
 
 # --------------------------------------------------------------------------- #
 # (B) Lean persistence: recoverable evidence, bounded meaningless observation
@@ -385,7 +384,6 @@ async def _durable_row_counts(
         for table, model in (
             ("execution_book_heads", ExecutionBookHeadRow),
             ("execution_evidence_receipts", ExecutionEvidenceReceiptRow),
-            ("position_fact_journal_events", PositionFactJournalEventRow),
             ("position_reservations", PositionReservationRow),
         ):
             counts[table] = int(
@@ -600,7 +598,6 @@ async def test_duplicate_evidence_identity_is_an_idempotent_no_op(
         before = await _durable_row_counts(factory, account)
         assert before["execution_book_heads"] == 1
         assert before["execution_evidence_receipts"] == 2
-        assert before["position_fact_journal_events"] == 0
 
         for _ in range(BURST):
             assert isinstance(await book.observe(opened), Duplicate)
@@ -655,20 +652,8 @@ async def test_redelivered_known_datum_appends_no_durable_state_row(
         # The evidence accepted before the burst is still recoverable after it.
         await _assert_position_is_recoverable(factory, account=account, key=key)
 
-        # No durable position-state row may be appended for a known datum.
-        appended = (
-            after["position_fact_journal_events"]
-            - before["position_fact_journal_events"]
-        )
-        assert (
-            after["position_fact_journal_events"]
-            == before["position_fact_journal_events"]
-        ), (
-            f"re-observing the same snapshot/coverage/fill datum {BURST} times "
-            f"appended {appended} durable journal state rows; the datum carries "
-            "no new business fact and SYSTEM.md 4 requires the writer to stop "
-            "duplicating internal journal/checkpoint/policy snapshots"
-        )
+        # The current position remains in the one execution head; repeated
+        # evidence does not create another position-state store.
     finally:
         await engine.dispose()
 
@@ -999,12 +984,10 @@ async def test_full_replay_after_restart_advances_cursor_without_recounting_fill
         await engine.dispose()
 
 
-async def test_checkpoint_known_prefix_with_fresh_coverage_advances_head(
+async def test_checkpoint_suffix_with_fresh_coverage_advances_head(
     async_database_url: str,
 ) -> None:
-    """Restored checkpoint given known prefix fill & snapshot plus fresh coverage
-    scan advances head revision and checked_through while keeping business state.
-    """
+    """Persist a post-checkpoint fill and coverage as one recoverable suffix."""
     engine = create_async_database_engine(async_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     account = f"persist-fresh-cov-{uuid4().hex}"
@@ -1024,6 +1007,7 @@ async def test_checkpoint_known_prefix_with_fresh_coverage_advances_head(
         facts = position_book.current_facts
         assert facts.recovery_checkpoint is not None
         ckpt = facts.recovery_checkpoint
+        assert opened.fill is not None and opened.snapshot is not None
 
         async with factory() as session:
             head_before = await session.scalar(
@@ -1037,24 +1021,51 @@ async def test_checkpoint_known_prefix_with_fresh_coverage_advances_head(
         initial_rev = head_before.revision
 
         stream_scope = ckpt.stream_scope
+        suffix_trade_at = ckpt.event_cut + timedelta(minutes=5)
         adv_checked_through = ckpt.event_cut + timedelta(minutes=10)
-        fresh_coverage_evidence = _scoped_evidence(
-            key,
-            evidence_id="fresh-coverage-after-checkpoint",
-            scope=stream_scope,
-            at=adv_checked_through,
+        suffix_fill = AccountFillEvent(
+            environment=key.environment,
+            account_label=key.account_label,
+            symbol=key.symbol,
+            trade_id=f"trade-suffix-{uuid4().hex[:8]}",
+            order_id=f"order-suffix-{uuid4().hex[:8]}",
+            side="BUY",
+            price=Decimal("110"),
+            quantity=Decimal("1"),
+            realized_pnl=Decimal("0"),
+            fee=Decimal("0"),
+            fee_asset="USDT",
+            trade_at=suffix_trade_at,
+            raw_payload={"positionSide": key.position_side.value},
+        )
+        latest_snapshot = replace(
+            opened.snapshot,
+            position_amt=Decimal("4"),
+            entry_price=Decimal("102.5"),
+            mark_price=Decimal("102.5"),
+            notional=Decimal("410"),
+            observed_at=adv_checked_through,
+        )
+        proof = _coverage(
+            stream_scope,
+            load_id="scan-adv-1",
+            scan_origin=ckpt.event_cut,
+            anchor_id=ckpt.checkpoint_id,
+            anchor_cut=ckpt.event_cut,
+            anchor_kind="recovery_checkpoint",
+            checked_through=adv_checked_through,
+        )
+        fresh_coverage_evidence = ExecutionEvidence(
+            evidence_id="suffix-and-coverage-after-checkpoint",
+            scope=_scope(key),
+            observed_at=adv_checked_through,
+            snapshot=latest_snapshot,
+            fills=(opened.fill, suffix_fill),
+            coverage_evidence=proof,
+            fill_load_provenance=proof.load_provenance,
+            stream_id=stream_scope.stream_id,
+            stream_epoch=stream_scope.stream_epoch,
             sequence=100,
-            fill=opened.fill,
-            snapshot=opened.snapshot,
-            proof=_coverage(
-                stream_scope,
-                load_id="scan-adv-1",
-                scan_origin=ckpt.event_cut,
-                anchor_id=ckpt.checkpoint_id,
-                anchor_cut=ckpt.event_cut,
-                anchor_kind="recovery_checkpoint",
-                checked_through=adv_checked_through,
-            ),
         )
 
         observe_result = await restarted.observe(fresh_coverage_evidence)
@@ -1072,21 +1083,29 @@ async def test_checkpoint_known_prefix_with_fresh_coverage_advances_head(
         assert head_after.revision == initial_rev + 1
 
         view_after = await restarted.read(scope)
-        assert view_after.total_quantity == Decimal("3")
-        assert view_after.batches == view_before.batches
+        assert view_after.total_quantity == Decimal("4")
+        assert len(view_after.batches) == 1
+        assert view_after.batches[0].quantity == Decimal("4")
+        assert view_after.batches[0].entry_price == Decimal("102.5")
 
         restarted_again, _ = _book(factory)
         await restarted_again.restore(account_label=account)
         position_book_again = restarted_again._books.get(key.canonical_id)
         assert position_book_again is not None
         facts_again = position_book_again.current_facts
+        assert facts_again.recovery_checkpoint is not None
+        assert facts_again.recovery_checkpoint.event_cut == adv_checked_through
+        assert (
+            facts_again.recovery_checkpoint.projection.total_active_quantity
+            == Decimal("4")
+        )
         assert facts_again.coverage is not None
         assert facts_again.coverage.end_at == adv_checked_through
         assert facts_again.fill_load_provenance is not None
         assert facts_again.fill_load_provenance.checked_through == adv_checked_through
         assert restarted_again._last_sequences[key.canonical_id] == 100
         view_again = await restarted_again.read(scope)
-        assert view_again.total_quantity == Decimal("3")
-        assert view_again.batches == view_before.batches
+        assert view_again.total_quantity == Decimal("4")
+        assert view_again.batches == view_after.batches
     finally:
         await engine.dispose()

@@ -5,7 +5,6 @@ from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger,
-    CheckConstraint,
     DateTime,
     Integer,
     Numeric,
@@ -76,7 +75,7 @@ class ExecutionRetiredStreamRow(Base):
 
 
 class ExecutionTradeIdentityRow(Base):
-    """Stable account-position identity of a trade across stream epochs."""
+    """Stable trade key and full canonical fill digest across stream epochs."""
 
     __tablename__ = "execution_trade_identities"
 
@@ -85,19 +84,7 @@ class ExecutionTradeIdentityRow(Base):
     symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
     position_side: Mapped[str] = mapped_column(String(8), primary_key=True)
     trade_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    order_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
-    price: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
-    side: Mapped[str] = mapped_column(String(8), nullable=False)
     payload_digest: Mapped[str] = mapped_column(String(64), nullable=False)
-    first_seen_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-
-    __table_args__ = (
-        CheckConstraint("quantity > 0", name="ck_execution_trade_quantity"),
-        CheckConstraint("price > 0", name="ck_execution_trade_price"),
-    )
 
 
 class ExecutionOrderWatermarkRow(Base):

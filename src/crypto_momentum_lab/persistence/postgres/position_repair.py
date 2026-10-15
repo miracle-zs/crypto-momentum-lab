@@ -127,12 +127,9 @@ class PostgresPositionRepairTransaction:
                 stream_epoch=request.scope.stream_epoch,
                 trade=ExecutionTradeIdentity(
                     trade_id=fill.trade_id,
-                    order_id=fill.order_id,
                     quantity=fill.quantity,
                     price=fill.price,
-                    side=fill.side,
                     payload_digest=trade_payload_digest(fill),
-                    first_seen_at=fill.trade_at,
                 ),
             )
         revision = await tx.persist_head(
