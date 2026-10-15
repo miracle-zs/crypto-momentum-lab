@@ -615,12 +615,13 @@ class UserDataAccountSyncDaemon:
         self._accept_events = False
         recovery_generation = self._pipeline_recovery_generation
         reason = self._pipeline_recovery_reason or "unspecified"
-        try:
-            await self._stream.request_reconnect(
-                f"account_event_pipeline_recovery:{reason}"
-            )
-        except Exception as error:
-            self._report_error(error)
+        if reason != "account_config_update":
+            try:
+                await self._stream.request_reconnect(
+                    f"account_event_pipeline_recovery:{reason}"
+                )
+            except Exception as error:
+                self._report_error(error)
         if self._event_queue is not None and not await self._wait_for_queue_drain(
             self._event_queue,
             "event recovery",
@@ -631,8 +632,18 @@ class UserDataAccountSyncDaemon:
             "persistence recovery",
         ):
             raise TimeoutError("account persistence queue did not drain for recovery")
+        if reason == "account_config_update":
+            reason = self._pipeline_recovery_reason or reason
+            if reason != "account_config_update":
+                recovery_generation = self._pipeline_recovery_generation
+                try:
+                    await self._stream.request_reconnect(
+                        f"account_event_pipeline_recovery:{reason}"
+                    )
+                except Exception as error:
+                    self._report_error(error)
         result = await self._reconcile(
-            include_fills=True,
+            include_fills=reason != "account_config_update",
             wait_for_pipeline=False,
         )
         if _is_usable_result(result):
@@ -775,7 +786,10 @@ class UserDataAccountSyncDaemon:
     ) -> None:
         self._accept_events = False
         self._pipeline_recovery_generation += 1
-        if self._pipeline_recovery_reason is None:
+        if self._pipeline_recovery_reason is None or (
+            self._pipeline_recovery_reason == "account_config_update"
+            and reason != "account_config_update"
+        ):
             self._pipeline_recovery_reason = reason
         if origin_event is not None and self._pipeline_recovery_origin_event is None:
             self._pipeline_recovery_origin_event = origin_event

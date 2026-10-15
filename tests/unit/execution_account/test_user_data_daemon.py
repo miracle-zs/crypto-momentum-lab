@@ -2,6 +2,7 @@ import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -822,6 +823,43 @@ async def test_event_queue_overflow_requests_reconciliation():
         assert daemon._event_queue.empty()
     finally:
         await daemon._stop_pipeline()
+
+
+async def test_account_config_recovery_skips_fill_scan_and_stream_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stream = SimpleNamespace(request_reconnect=AsyncMock())
+    daemon = UserDataAccountSyncDaemon(
+        service=SimpleNamespace(),
+        stream=stream,
+        config=UserDataAccountSyncConfig(),
+    )
+    daemon._pipeline_recovery_reason = "account_config_update"
+    daemon._reconcile = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        "crypto_momentum_lab.execution_account.daemon._is_usable_result",
+        lambda result: False,
+    )
+
+    await daemon._recover_pipeline()
+
+    stream.request_reconnect.assert_not_awaited()
+    daemon._reconcile.assert_awaited_once_with(
+        include_fills=False,
+        wait_for_pipeline=False,
+    )
+
+
+def test_account_config_recovery_is_upgraded_by_a_pipeline_failure() -> None:
+    daemon = UserDataAccountSyncDaemon(
+        service=SimpleNamespace(),
+        stream=SimpleNamespace(),
+        config=UserDataAccountSyncConfig(),
+    )
+    daemon._request_pipeline_recovery("account_config_update")
+    daemon._request_pipeline_recovery("event_queue_overflow")
+
+    assert daemon._pipeline_recovery_reason == "event_queue_overflow"
 
 
 async def test_heartbeat_publishes_keepalive_snapshot_when_stream_idle() -> None:

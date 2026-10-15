@@ -1,4 +1,4 @@
-"""Domain models for authoritative position ledger and immutable facts.
+"""Domain models for immutable exchange facts and their derived position view.
 
 Provides strict identity types:
 - ``PositionKey``: Fully qualified identity across environment,
@@ -662,7 +662,7 @@ class PositionEpisode:
 
 @dataclass(frozen=True, slots=True)
 class PositionLedgerProjection:
-    """Immutable point-in-time projection of a position ledger."""
+    """Derived lot allocation at one point in time, built from exchange facts."""
 
     position_key: PositionKey
     active_episode: PositionEpisode | None
@@ -693,7 +693,7 @@ class PositionLedgerProjection:
 
 @dataclass(frozen=True, slots=True)
 class FreshnessRequirement:
-    """Freshness constraints for reading an authoritative PositionView."""
+    """Freshness constraints for reading the derived position view."""
 
     max_staleness: timedelta = timedelta(seconds=15)
     min_event_cut: datetime | None = None
@@ -702,9 +702,11 @@ class FreshnessRequirement:
 
 @dataclass(frozen=True, slots=True)
 class PositionView:
-    """
-    Authoritative, immutable point-in-time view consumed by strategy and execution
-    coordinators.
+    """Derived lot-level read model consumed by strategy and execution.
+
+    Exchange snapshots and fills are the source facts. This view groups those
+    facts into the batches needed for targeted exits; it is not a second source
+    of account position truth.
     """
 
     key: PositionKey

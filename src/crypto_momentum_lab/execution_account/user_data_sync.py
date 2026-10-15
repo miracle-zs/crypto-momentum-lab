@@ -121,8 +121,38 @@ class AccountUserDataState:
             changed, fills, reason = self._apply_order_trade_update(event)
             needs_reconciliation = reason is not None
         elif event.event_type == "ACCOUNT_CONFIG_UPDATE":
-            needs_reconciliation = True
-            reason = "account_config_update"
+            changed_account_mode = event.payload.get("ai") is not None
+            if changed_account_mode:
+                account_mode = require_mapping(
+                    event.payload.get("ai"), "ACCOUNT_CONFIG_UPDATE.ai"
+                )
+                parse_bool(
+                    account_mode.get("j"),
+                    "ACCOUNT_CONFIG_UPDATE multi-assets mode",
+                )
+            pair_config = event.payload.get("ac")
+            if pair_config is None and not changed_account_mode:
+                raise UserDataStateError(
+                    "ACCOUNT_CONFIG_UPDATE requires ac or ai configuration"
+                )
+            if pair_config is not None:
+                config = require_mapping(pair_config, "ACCOUNT_CONFIG_UPDATE.ac")
+                symbol = required_text(
+                    config.get("s"), "ACCOUNT_CONFIG_UPDATE symbol"
+                )
+                changed_open_symbol_leverage = any(
+                    position.symbol == symbol and position.position_amt != 0
+                    for position in self._positions.values()
+                )
+                needs_reconciliation = (
+                    changed_account_mode or changed_open_symbol_leverage
+                )
+            else:
+                needs_reconciliation = changed_account_mode
+            if needs_reconciliation:
+                # Refresh account facts/config only. Replaying fill history or
+                # reconnecting the stream cannot apply this configuration event.
+                reason = "account_config_update"
         elif event.event_type == "listenKeyExpired":
             needs_reconciliation = True
             reason = "listen_key_expired"

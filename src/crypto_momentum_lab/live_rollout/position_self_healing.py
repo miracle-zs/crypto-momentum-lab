@@ -69,8 +69,19 @@ async def auto_heal_unmanaged_position(
         published = await book.repair_position(request, uow=uow, is_current=is_current)
     except PositionRepairBlocked as error:
         reason = str(error)
-        log.warning("position_repair_blocked", symbol=request.key.symbol,
-                    account_label=request.key.account_label, reason=reason)
+        if reason == "repair context advanced during fact load":
+            log.info(
+                "position_repair_superseded_by_new_account_facts",
+                symbol=request.key.symbol,
+                account_label=request.key.account_label,
+            )
+            return False
+        log.warning(
+            "position_repair_blocked",
+            symbol=request.key.symbol,
+            account_label=request.key.account_label,
+            reason=reason,
+        )
         return False
     receipt, reloaded = published.receipt, published.view
     log.info(

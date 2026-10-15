@@ -50,6 +50,17 @@ def _dt(hour: int, minute: int, second: int = 0) -> datetime:
     return datetime(2026, 9, 25, hour, minute, second, tzinfo=UTC)
 
 
+def test_recent_evidence_identity_cache_has_a_fixed_limit() -> None:
+    book = ExecutionBook()
+
+    for index in range(5_000):
+        book.remember_evidence_id(f"evidence-{index}")
+
+    assert len(book._seen_evidence_ids) == 4_096
+    assert "evidence-0" not in book._seen_evidence_ids
+    assert "evidence-4999" in book._seen_evidence_ids
+
+
 def _scope() -> ExecutionScope:
     return ExecutionScope(
         environment="live",
@@ -2302,7 +2313,9 @@ async def test_historical_read_is_rejected_when_current_state_has_advanced() -> 
     book._books[key.canonical_id] = PositionBook.from_facts(latest_cut.facts)
     book._stream_scopes[key.canonical_id] = stream
     before = await book.read(scope, now=_dt(10, 1))
-    with pytest.raises(ValueError, match="historical position cuts are not held in memory"):
+    with pytest.raises(
+        ValueError, match="historical position cuts are not held in memory"
+    ):
         await book.read(scope, event_cut=_dt(10, 0), now=_dt(10, 1))
     after = await book.read(scope, now=_dt(10, 1))
 

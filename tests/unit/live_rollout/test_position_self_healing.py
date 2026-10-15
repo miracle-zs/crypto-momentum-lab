@@ -207,10 +207,11 @@ async def test_repair_worker_coalesces_latest_context_and_rejects_stale_requests
     assert len(calls) == (0 if stale else 1)
 
 
-async def test_repair_context_advanced_during_fact_read_cannot_persist():
+async def test_repair_context_advanced_during_fact_read_cannot_persist(monkeypatch):
     from contextlib import asynccontextmanager
     from types import SimpleNamespace
 
+    import crypto_momentum_lab.live_rollout.position_self_healing as self_healing
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
         PositionKey,
@@ -244,15 +245,29 @@ async def test_repair_context_advanced_during_fact_read_cannot_persist():
         expected_quantity=Decimal("1"),
         observed_at=NOW,
     )
-    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
-
     book = ExecutionBook()
     book._reload_position = AsyncMock()
+    logs = []
+    monkeypatch.setattr(
+        self_healing,
+        "log",
+        SimpleNamespace(
+            info=lambda event, **kwargs: logs.append(("info", event, kwargs)),
+            warning=lambda event, **kwargs: logs.append(("warning", event, kwargs)),
+        ),
+    )
     assert not await auto_heal_unmanaged_position(
         request=request, uow=Uow(), book=book, is_current=lambda: current[0]
     )
     persisted.assert_not_awaited()
     book._reload_position.assert_not_awaited()
+    assert logs == [
+        (
+            "info",
+            "position_repair_superseded_by_new_account_facts",
+            {"symbol": "BTCUSDT", "account_label": "primary"},
+        )
+    ]
 
 
 async def test_context_reads_continue_while_existing_worker_repairs(monkeypatch):

@@ -469,6 +469,30 @@ class LiveExitProcessor:
                 self._exit_recovery_attempts.pop(root, None)
                 self._exit_recovery_next_attempt_at.pop(root, None)
                 return observed_result
+        elif (
+            plan.client_order_id not in observation.active_exit_order_client_ids
+            and observation.position_quantity <= 0
+            and known_executed_quantity > 0
+        ):
+            # A flat exchange position plus a previously reported fill means
+            # the exit already did its job. Keep the command unresolved until
+            # its terminal fill facts arrive; marking it absent here releases
+            # its reservation and turns the late receipt into a false
+            # reservation-recovery warning.
+            log.info(
+                "live_exit_recovery_waiting_for_reported_fill_facts",
+                run_id=self._config.run_id,
+                symbol=plan.symbol,
+                client_order_id=plan.client_order_id,
+                known_executed_quantity=str(known_executed_quantity),
+            )
+            return OrderExecutionResult(
+                plan.client_order_id,
+                ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+                None,
+                executed_quantity=known_executed_quantity,
+                plan=plan,
+            )
         elif plan.client_order_id not in observation.active_exit_order_client_ids:
             observed_result = await self._state_machine.mark_absent_reconciled(
                 plan,

@@ -745,6 +745,65 @@ def test_rest_entity_times_prevent_delayed_ws_rollback(
     assert not state.apply(event).changed
 
 
+def test_account_config_update_for_unheld_symbol_does_not_reconcile() -> None:
+    state = AccountUserDataState(_initial_snapshot())
+
+    update = state.apply(
+        parse_user_data_event(
+            {
+                "e": "ACCOUNT_CONFIG_UPDATE",
+                "E": 1783123201000,
+                "T": 1783123201000,
+                "ac": {"s": "ETHUSDT", "l": 5},
+            },
+            received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
+        )
+    )
+
+    assert update.needs_reconciliation is False
+    assert update.reason is None
+    assert update.changed is False
+
+
+def test_account_config_update_for_open_symbol_requests_snapshot_refresh() -> None:
+    state = AccountUserDataState(_initial_snapshot())
+
+    update = state.apply(
+        parse_user_data_event(
+            {
+                "e": "ACCOUNT_CONFIG_UPDATE",
+                "E": 1783123201000,
+                "T": 1783123201000,
+                "ac": {"s": "BTCUSDT", "l": 10},
+            },
+            received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
+        )
+    )
+
+    assert update.needs_reconciliation is True
+    assert update.reason == "account_config_update"
+    assert update.changed is False
+
+
+def test_account_config_update_for_multi_asset_mode_requests_snapshot_refresh() -> None:
+    state = AccountUserDataState(_initial_snapshot())
+
+    update = state.apply(
+        parse_user_data_event(
+            {
+                "e": "ACCOUNT_CONFIG_UPDATE",
+                "E": 1783123201000,
+                "T": 1783123201000,
+                "ai": {"j": True},
+            },
+            received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
+        )
+    )
+
+    assert update.needs_reconciliation is True
+    assert update.reason == "account_config_update"
+
+
 @pytest.mark.parametrize("baseline_time", [None, 0, True, "1783123202000", -1])
 def test_invalid_rest_time_does_not_suppress_account_event(baseline_time) -> None:
     original = _initial_snapshot()

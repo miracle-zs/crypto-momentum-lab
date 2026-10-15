@@ -122,6 +122,7 @@ class LiveMarketLoop:
         self._decision_fact_binder = decision_fact_binder
         self._market_gap_generation = 0
         self._strategy_gap_reset_generation_by_symbol: dict[str, int] = {}
+        self._previous_unmanaged_position_symbols: frozenset[str] = frozenset()
 
     def notify_market_state_gap(self, *, reason: str) -> None:
         if not reason.strip():
@@ -220,7 +221,7 @@ class LiveMarketLoop:
                     # unnecessarily interrupts exits for unrelated symbols.
                     self._strategy.reset_symbol(state.symbol)
                     self._checkpoint_coordinator.forget_symbol(state.symbol)
-                    log.warning(
+                    log.info(
                         "live_strategy_symbol_reset_after_market_state_gap",
                         run_id=self._run_id,
                         symbol=state.symbol,
@@ -330,12 +331,7 @@ class LiveMarketLoop:
             if admission.context is None:
                 raise RuntimeError("market state admission is incomplete")
             context = admission.context
-            if context.unmanaged_position_symbols:
-                log.warning(
-                    "live_unmanaged_positions_observed",
-                    run_id=self._run_id,
-                    symbols=sorted(context.unmanaged_position_symbols),
-                )
+            self._report_unmanaged_position_changes(context.unmanaged_position_symbols)
             # An unavailable account projection is not proof of a flat
             # account. Never turn that uncertainty into a reduce-only cancel;
             # queue-overflow recovery will publish a fresh full snapshot first.
@@ -407,6 +403,27 @@ class LiveMarketLoop:
             state,
             saved_at=saved_at,
         )
+
+    def _report_unmanaged_position_changes(self, symbols: frozenset[str]) -> None:
+        """Log exposure ownership changes once instead of on every quote."""
+        current = frozenset(symbols)
+        previous = self._previous_unmanaged_position_symbols
+        newly_unmanaged = current - previous
+        resolved = previous - current
+        if newly_unmanaged:
+            log.warning(
+                "live_unmanaged_positions_observed",
+                run_id=self._run_id,
+                symbols=sorted(newly_unmanaged),
+                current_symbols=sorted(current),
+            )
+        if resolved:
+            log.info(
+                "live_unmanaged_positions_resolved",
+                run_id=self._run_id,
+                symbols=sorted(resolved),
+            )
+        self._previous_unmanaged_position_symbols = current
 
     async def _recover_gap(
         self,

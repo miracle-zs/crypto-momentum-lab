@@ -24,10 +24,7 @@ WARMUP_STATE_LIMIT = 100_000
 WARMUP_BATCH_SIZE = 5_000
 _DURABLE_CUTOVER_WAIT_SECONDS = 5.0
 _DURABLE_CUTOVER_POLL_SECONDS = 0.1
-# A state Hub can publish a recovered batch slightly before the database writer
-# commits its intermediate buckets.  Keep this bounded: a long per-symbol wait
-# would serially stall the market loop when a real gap cannot be repaired.
-_MARKET_GAP_RECOVERY_WAIT_SECONDS = 5.0
+
 
 class _WarmupPageArguments(TypedDict):
     environment: str
@@ -125,8 +122,6 @@ async def load_live_market_state_gap(
     previous_at: datetime,
     current_at: datetime,
     interval_seconds: int = 15,
-    timeout_seconds: float = _MARKET_GAP_RECOVERY_WAIT_SECONDS,
-    poll_interval_seconds: float = _DURABLE_CUTOVER_POLL_SECONDS,
 ) -> tuple[MarketState15s, ...]:
     """Load durable intermediate buckets for one live continuity gap.
 
@@ -146,11 +141,6 @@ async def load_live_market_state_gap(
         raise ValueError("interval_seconds must be positive")
     if current_at <= previous_at:
         return ()
-    if timeout_seconds < 0:
-        raise ValueError("timeout_seconds must not be negative")
-    if poll_interval_seconds <= 0:
-        raise ValueError("poll_interval_seconds must be positive")
-
     delta_seconds = (current_at - previous_at).total_seconds()
     bucket_count = int(delta_seconds // interval_seconds)
     missing_count = bucket_count - 1
@@ -159,57 +149,37 @@ async def load_live_market_state_gap(
 
     cursor = RuntimeStateCursor(bucket_start=previous_at, symbol="")
     upper_bound = current_at - timedelta(microseconds=1)
-    started_at = monotonic()
-    deadline = started_at + timeout_seconds
-    while True:
-        states = await repository.load_after(
-            environment=environment,
-            cursor=cursor,
-            limit=missing_count,
-            upper_bound=upper_bound,
-            symbols=(symbol,),
+    states = await repository.load_after(
+        environment=environment,
+        cursor=cursor,
+        limit=missing_count,
+        upper_bound=upper_bound,
+        symbols=(symbol,),
+    )
+    canonical = tuple(
+        sorted(
+            (
+                state
+                for state in states
+                if state.symbol == symbol
+                and previous_at < state.bucket_start < current_at
+            ),
+            key=lambda state: state.bucket_start,
         )
-        canonical = tuple(
-            sorted(
-                (
-                    state
-                    for state in states
-                    if state.symbol == symbol
-                    and previous_at < state.bucket_start < current_at
-                ),
-                key=lambda state: state.bucket_start,
-            )
-        )
-        expected = tuple(
-            previous_at + timedelta(seconds=interval_seconds * index)
-            for index in range(1, bucket_count)
-        )
-        if tuple(state.bucket_start for state in canonical) == expected:
-            log.info(
-                "live_market_state_gap_recovery_outcome",
-                symbol=symbol,
-                outcome="complete",
-                waited_seconds=round(monotonic() - started_at, 3),
-                bucket_count=bucket_count,
-                timeout_seconds=timeout_seconds,
-            )
-            return canonical
-        if monotonic() >= deadline:
-            # Record the real wait so the 500ms budget can be judged from data
-            # instead of guessed at.
-            log.warning(
-                "live_market_state_gap_recovery_outcome",
-                symbol=symbol,
-                outcome="timeout",
-                waited_seconds=round(monotonic() - started_at, 3),
-                expected_buckets=missing_count,
-                observed_buckets=len(canonical),
-                timeout_seconds=timeout_seconds,
-            )
-            return ()
-        await _sleep_for_durable_cutover(
-            min(poll_interval_seconds, max(0.0, deadline - monotonic()))
-        )
+    )
+    expected = tuple(
+        previous_at + timedelta(seconds=interval_seconds * index)
+        for index in range(1, bucket_count)
+    )
+    complete = tuple(state.bucket_start for state in canonical) == expected
+    log.info(
+        "live_market_state_gap_recovery_outcome",
+        symbol=symbol,
+        outcome="complete" if complete else "incomplete",
+        expected_buckets=missing_count,
+        observed_buckets=len(canonical),
+    )
+    return canonical if complete else ()
 
 
 async def _sleep_for_durable_cutover(seconds: float) -> None:

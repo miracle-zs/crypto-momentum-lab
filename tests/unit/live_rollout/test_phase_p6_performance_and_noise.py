@@ -132,7 +132,7 @@ async def test_inactive_head_migrations_are_consolidated_at_info_level(monkeypat
     assert warning_logs[0][1]["symbol"] == "ETHUSDT"
 
 
-def test_account_config_update_recovery_logs_as_info(monkeypatch):
+def test_config_refresh_logs_as_info_and_pipeline_failures_as_errors(monkeypatch):
     daemon = UserDataAccountSyncDaemon(
         service=SimpleNamespace(),
         stream=SimpleNamespace(),

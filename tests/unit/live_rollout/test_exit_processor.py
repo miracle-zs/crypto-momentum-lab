@@ -1261,6 +1261,53 @@ async def test_committed_flat_receipt_invalidates_context_without_replacement():
     assert not processor._submission.calls
 
 
+async def test_flat_position_with_reported_fill_waits_for_fill_facts_before_absence():
+    from unittest.mock import AsyncMock
+
+    from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
+
+    submission = RecordingSubmission(None)
+    processor = _processor(submission)
+    plan = OrderExecutionPlan(
+        "exit",
+        "run-1",
+        "reported-exit",
+        "BTCUSDT",
+        "SELL",
+        "MARKET",
+        Decimal("2"),
+        None,
+        True,
+        NOW,
+        position_side=FuturesPositionSide.LONG,
+    )
+    mark_absent = AsyncMock()
+    processor._state_machine = SimpleNamespace(mark_absent_reconciled=mark_absent)
+    processor._exit_recovery_client = SimpleNamespace(
+        inspect_exit_order=AsyncMock(
+            return_value=SimpleNamespace(
+                order=None,
+                position_quantity=Decimal("0"),
+                active_exit_order_client_ids=(),
+                observed_at=NOW,
+            )
+        )
+    )
+
+    result = await processor._recover_unknown_exit(
+        plan=plan,
+        known_executed_quantity=Decimal("2"),
+        state=_state(),
+    )
+
+    assert result is not None
+    assert result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+    assert result.executed_quantity == Decimal("2")
+    assert result.plan == plan
+    mark_absent.assert_not_awaited()
+    assert submission.calls == []
+
+
 async def test_incomplete_terminal_fill_retains_recovery_without_replacement_post():
     from unittest.mock import AsyncMock
 
