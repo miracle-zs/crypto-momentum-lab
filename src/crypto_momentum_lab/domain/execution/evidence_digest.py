@@ -2,8 +2,8 @@
 
 import hashlib
 import json
-from dataclasses import asdict
-from datetime import UTC, datetime
+from dataclasses import asdict, replace
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 
@@ -47,6 +47,16 @@ def trade_payload_digest(fill: AccountFillEvent) -> str:
             else rendered
         )
     return digest_json_payload(payload)
+
+
+def trade_payload_digest_aliases(fill: AccountFillEvent) -> tuple[str, ...]:
+    """Return hashes for the exchange's millisecond timestamp rounding edge."""
+    return tuple(
+        trade_payload_digest(
+            replace(fill, trade_at=fill.trade_at + timedelta(milliseconds=offset))
+        )
+        for offset in (-1, 1)
+    )
 
 
 def view_projection_digest(view: PositionView) -> str:

@@ -17,7 +17,10 @@ from crypto_momentum_lab.domain.execution.durable_evidence import (
     changed_order_watermarks,
     prepare_durable_evidence,
 )
-from crypto_momentum_lab.domain.execution.evidence_digest import trade_payload_digest
+from crypto_momentum_lab.domain.execution.evidence_digest import (
+    trade_payload_digest,
+    trade_payload_digest_aliases,
+)
 from crypto_momentum_lab.domain.execution.evidence_grouping import (
     observe_evidence_group,
 )
@@ -35,6 +38,7 @@ from crypto_momentum_lab.domain.execution.execution_evidence_state import (
     apply_stream_rollover,
     durable_evidence_identity,
     evaluate_stream_rollover,
+    matching_nonflat_position_snapshot_matches,
     matching_nonflat_snapshot_can_rollover,
 )
 from crypto_momentum_lab.domain.execution.execution_head import (
@@ -131,6 +135,15 @@ async def observe_evidence_transaction(
                 current_view=current_view,
                 current_scope=current_scope,
                 evidence=evidence,
+                known_trade_ids=book._seen_trade_ids,
+            )
+            matching_snapshot_with_fills = (
+                bool(evidence.fills or evidence.fill is not None)
+                and matching_nonflat_position_snapshot_matches(
+                    current_view=current_view,
+                    current_scope=current_scope,
+                    evidence=evidence,
+                )
             )
             can_rollover, recovery_proof_required = evaluate_stream_rollover(
                 current_scope=current_scope,
@@ -142,7 +155,9 @@ async def observe_evidence_transaction(
                     key
                 ),
                 has_active_commands=_has_active_commands(book, key),
-                matching_nonflat_snapshot=matching_nonflat_snapshot,
+                matching_nonflat_snapshot=(
+                    matching_nonflat_snapshot or matching_snapshot_with_fills
+                ),
             )
             if recovery_proof_required:
                 return WaitingForEvidence(
@@ -189,45 +204,9 @@ async def observe_evidence_transaction(
                         or head.stream_epoch != scope.stream_epoch
                     ):
                         adopting_epoch = True
-                        if (
-                            not can_rollover
-                            and not terminal_without_fill
-                            and (
-                                evidence.coverage_evidence is None
-                                or evidence.fill_load_provenance is None
-                                or not evidence.fill_load_provenance.is_complete
-                            )
-                        ):
-                            raise AbortObservation(
-                                WaitingForEvidence(
-                                    evidence_id=evidence.evidence_id,
-                                    reason=(
-                                        EvidencePendingReason.STREAM_RECOVERY_PROOF_REQUIRED
-                                    ),
-                                )
-                            )
                 current_scope = candidate._stream_scopes.get(canon)
                 if current_scope is not None and current_scope != scope:
                     adopting_epoch = True
-                    if (
-                        not can_rollover
-                        and not terminal_without_fill
-                        and (
-                            evidence.coverage_evidence is None
-                            or evidence.fill_load_provenance is None
-                            or not evidence.fill_load_provenance.is_complete
-                        )
-                    ):
-                        raise AbortObservation(
-                            WaitingForEvidence(
-                                evidence_id=evidence.evidence_id,
-                                reason=(
-                                    EvidencePendingReason.STREAM_RECOVERY_PROOF_REQUIRED
-                                ),
-                            )
-                        )
-                    if not adopting_epoch:
-                        raise RuntimeError("stream adoption state is inconsistent")
 
                 adoption = evidence.stream_checkpoint_adoption
                 if adoption is None and adopting_epoch and head is not None:
@@ -366,28 +345,6 @@ async def observe_evidence_transaction(
                             )
                         )
 
-                if adopting_epoch:
-                    apply_stream_rollover(
-                        candidate,
-                        key=key,
-                        scope=scope,
-                        can_rollover=can_rollover,
-                        is_unfilled_terminal_order=terminal_without_fill,
-                        account_snapshot_is_flat=evidence.account_snapshot_is_flat,
-                    )
-                elif can_rollover and evidence.account_snapshot_is_flat:
-                    position_book = candidate._books.get(canon)
-                    if position_book is None:
-                        candidate._books[canon] = PositionBook(key, stream_scope=scope)
-                    else:
-                        position_book.reset_stream(
-                            scope, preserve_episode_sequence=True
-                        )
-                    candidate._stream_scopes[canon] = scope
-                    candidate._last_sequences.pop(canon, None)
-                    _clear_flat_account_recovery(candidate, key)
-                else:
-                    candidate._book_for_scope(key, scope)
                 try:
                     accepted = await tx.record_evidence(
                         key=key,
@@ -433,6 +390,88 @@ async def observe_evidence_transaction(
                         )
                     )
 
+                fills_to_record = evidence.fills or (
+                    (evidence.fill,) if evidence.fill is not None else ()
+                )
+                inserted_trade_ids: set[str] = set()
+                for fill in fills_to_record:
+                    try:
+                        identity_inserted = await tx.record_trade(
+                            key=key,
+                            stream_id=scope.stream_id,
+                            stream_epoch=scope.stream_epoch,
+                            trade=ExecutionTradeIdentity(
+                                trade_id=fill.trade_id,
+                                quantity=fill.quantity,
+                                price=fill.price,
+                                payload_digest=trade_payload_digest(fill),
+                                payload_digest_aliases=trade_payload_digest_aliases(fill),
+                            ),
+                        )
+                    except DecisionCommitConflict as err:
+                        raise AbortObservation(
+                            EvidenceConflict(
+                                evidence_id=evidence.evidence_id,
+                                reason=str(err),
+                            )
+                        ) from err
+                    if identity_inserted:
+                        inserted_trade_ids.add(fill.trade_id)
+                    else:
+                        candidate._seen_trade_ids.add(fill.trade_id)
+
+                if adopting_epoch and matching_snapshot_with_fills:
+                    can_rollover = not inserted_trade_ids
+
+                if (
+                    adopting_epoch
+                    and not can_rollover
+                    and not terminal_without_fill
+                    and (
+                        evidence.coverage_evidence is None
+                        or evidence.fill_load_provenance is None
+                        or not evidence.fill_load_provenance.is_complete
+                    )
+                ):
+                    raise AbortObservation(
+                        WaitingForEvidence(
+                            evidence_id=evidence.evidence_id,
+                            reason=EvidencePendingReason.STREAM_RECOVERY_PROOF_REQUIRED,
+                        )
+                    )
+
+                if adopting_epoch:
+                    matched_nonflat_position = (
+                        can_rollover
+                        and matching_nonflat_position_snapshot_matches(
+                            current_view=current_view,
+                            current_scope=current_scope,
+                            evidence=evidence,
+                        )
+                    )
+                    apply_stream_rollover(
+                        candidate,
+                        key=key,
+                        scope=scope,
+                        can_rollover=can_rollover,
+                        is_unfilled_terminal_order=terminal_without_fill,
+                        account_snapshot_is_flat=evidence.account_snapshot_is_flat,
+                        allow_recovery_prefix=not matched_nonflat_position,
+                    )
+                elif can_rollover and evidence.account_snapshot_is_flat:
+                    position_book = candidate._books.get(canon)
+                    if position_book is None:
+                        candidate._books[canon] = PositionBook(key, stream_scope=scope)
+                    else:
+                        position_book.reset_stream(
+                            scope, preserve_episode_sequence=True
+                        )
+                    candidate._stream_scopes[canon] = scope
+                    candidate._last_sequences.pop(canon, None)
+                    _clear_flat_account_recovery(candidate, key)
+                else:
+                    candidate._book_for_scope(key, scope)
+
                 if evidence.source_anchor_snapshot is not None:
                     # Only an explicit flat source row may seed a new baseline.
                     candidate._ensure_book(key).apply_delta(
@@ -446,32 +485,7 @@ async def observe_evidence_transaction(
                 book_before = candidate._ensure_book(key)
                 facts_before = book_before.current_facts
                 position_state_before = book_before.encode_current_state()
-                fills_to_record = evidence.fills or (
-                    (evidence.fill,) if evidence.fill is not None else ()
-                )
                 checkpoint = facts_before.recovery_checkpoint
-                for fill in fills_to_record:
-                    try:
-                        identity_inserted = await tx.record_trade(
-                            key=key,
-                            stream_id=scope.stream_id,
-                            stream_epoch=scope.stream_epoch,
-                            trade=ExecutionTradeIdentity(
-                                trade_id=fill.trade_id,
-                                quantity=fill.quantity,
-                                price=fill.price,
-                                payload_digest=trade_payload_digest(fill),
-                            ),
-                        )
-                    except DecisionCommitConflict as err:
-                        raise AbortObservation(
-                            EvidenceConflict(
-                                evidence_id=evidence.evidence_id,
-                                reason=str(err),
-                            )
-                        ) from err
-                    if not identity_inserted:
-                        candidate._seen_trade_ids.add(fill.trade_id)
                 observation_evidence = evidence
 
                 if (

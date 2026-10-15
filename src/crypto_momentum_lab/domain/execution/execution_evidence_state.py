@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -197,8 +197,24 @@ def matching_nonflat_snapshot_can_rollover(
     current_view: PositionView | None,
     current_scope: AccountFactStreamScope | None,
     evidence: ExecutionEvidence,
+    known_trade_ids: Collection[str] = (),
 ) -> bool:
-    """Whether a plain current snapshot matches an allocated existing position."""
+    """Whether a snapshot and its fills continue the allocated current position."""
+    fills = evidence.fills or ((evidence.fill,) if evidence.fill is not None else ())
+    return matching_nonflat_position_snapshot_matches(
+        current_view=current_view,
+        current_scope=current_scope,
+        evidence=evidence,
+    ) and all(fill.trade_id in known_trade_ids for fill in fills)
+
+
+def matching_nonflat_position_snapshot_matches(
+    *,
+    current_view: PositionView | None,
+    current_scope: AccountFactStreamScope | None,
+    evidence: ExecutionEvidence,
+) -> bool:
+    """Whether the snapshot matches a healthy, allocated position head."""
     snapshot = evidence.snapshot
     if current_view is None or current_scope is None or snapshot is None:
         return False
@@ -220,8 +236,6 @@ def matching_nonflat_snapshot_can_rollover(
             current_view.event_cut is None
             or snapshot.observed_at >= current_view.event_cut
         )
-        and not evidence.fills
-        and evidence.fill is None
         and evidence.boundary is None
         and evidence.order_event is None
         and evidence.coverage is None
@@ -241,6 +255,7 @@ def apply_stream_rollover(
     can_rollover: bool,
     is_unfilled_terminal_order: bool,
     account_snapshot_is_flat: bool,
+    allow_recovery_prefix: bool = True,
 ) -> None:
     """Apply an already-validated stream transition to execution book state."""
     canon = key.canonical_id
@@ -256,8 +271,8 @@ def apply_stream_rollover(
             position_book.adopt_stream_scope(scope)
         if account_snapshot_is_flat:
             _clear_flat_account_recovery(book, key)
-        book._recovery_adoption_scope = scope
         book._last_sequences.pop(canon, None)
+        book._recovery_adoption_scope = scope if allow_recovery_prefix else None
     elif is_unfilled_terminal_order:
         if position_book is None:
             book._books[canon] = PositionBook(key, stream_scope=scope)
@@ -268,7 +283,7 @@ def apply_stream_rollover(
         book._books[canon] = PositionBook(key, stream_scope=scope)
         book._stream_scopes[canon] = scope
         book._last_sequences.pop(canon, None)
-        book._recovery_adoption_scope = scope
+        book._recovery_adoption_scope = scope if allow_recovery_prefix else None
 
 
 def _has_active_commands(book: ExecutionBook, key: PositionKey) -> bool:

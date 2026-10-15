@@ -294,7 +294,10 @@ class ExecutionTransaction:
             ExecutionTradeIdentityRow, primary_key, with_for_update=True
         )
         if existing is not None:
-            if existing.payload_digest != trade.payload_digest:
+            if (
+                existing.payload_digest != trade.payload_digest
+                and existing.payload_digest not in trade.payload_digest_aliases
+            ):
                 raise _DecisionCommitConflict(
                     f"trade {trade.trade_id} conflicts with its durable identity"
                 )

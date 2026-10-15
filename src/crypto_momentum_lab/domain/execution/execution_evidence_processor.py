@@ -131,6 +131,7 @@ async def mutate_evidence(
                 current_view=current_view,
                 current_scope=current_scope,
                 evidence=evidence,
+                known_trade_ids=execution_book._seen_trade_ids,
             )
             can_rollover = (
                 evidence.coverage_evidence is None

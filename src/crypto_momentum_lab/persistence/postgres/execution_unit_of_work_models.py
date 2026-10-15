@@ -75,7 +75,7 @@ class ExecutionRetiredStreamRow(Base):
 
 
 class ExecutionTradeIdentityRow(Base):
-    """Stable trade key and full canonical fill digest across stream epochs."""
+    """Exchange trade idempotency key with its first-seen payload digest."""
 
     __tablename__ = "execution_trade_identities"
 

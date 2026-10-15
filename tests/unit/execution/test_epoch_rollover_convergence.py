@@ -32,6 +32,7 @@ from crypto_momentum_lab.live_rollout.exits import managed_live_positions_from_v
 class _DurableTx:
     def __init__(self) -> None:
         self.head: ExecutionHeadSnapshot | None = None
+        self.trade_ids: set[str] = set()
 
     async def load_head(self, key: Any) -> ExecutionHeadSnapshot | None:
         del key
@@ -46,7 +47,10 @@ class _DurableTx:
         return True
 
     async def record_trade(self, **kwargs: Any) -> bool:
-        del kwargs
+        trade = kwargs["trade"]
+        if trade.trade_id in self.trade_ids:
+            return False
+        self.trade_ids.add(trade.trade_id)
         return True
 
     async def persist_watermark(self, **kwargs: Any) -> None:
@@ -79,9 +83,8 @@ async def test_matching_nonflat_snapshot_adopts_epoch_and_keeps_exit_batch(
     durable: bool,
 ) -> None:
     """A matching snapshot continues a healthy existing lot without a history scan."""
-    book = ExecutionBook(
-        execution_unit_of_work=_DurableUow() if durable else None
-    )
+    uow = _DurableUow() if durable else None
+    book = ExecutionBook(execution_unit_of_work=uow)
     book._persistence_failed = False
     scope = ExecutionScope(
         environment="live",
@@ -119,6 +122,8 @@ async def test_matching_nonflat_snapshot_adopts_epoch_and_keeps_exit_batch(
         )
     )
     assert not isinstance(obs_1, EvidenceConflict)
+    if durable:
+        assert uow is not None and "trade-1" in uow.tx.trade_ids
 
     # 2. Confirm that the original stream reconciled the current quantity.
     snapshot = AccountPositionSnapshot(
@@ -169,12 +174,17 @@ async def test_matching_nonflat_snapshot_adopts_epoch_and_keeps_exit_batch(
         stream_id="account_event_hub",
         stream_epoch="epoch-2",
     )
+    if durable:
+        # Simulate restart: the durable trade identity remains, while the
+        # in-memory seen-id set has not yet been rebuilt.
+        book._seen_trade_ids.clear()
 
     evidence_new_epoch = ExecutionEvidence(
         evidence_id="evidence-snapshot-epoch-2",
         scope=scope,
         observed_at=snapshot.observed_at,
         snapshot=snapshot,
+        fills=(fill,) if durable else (),
         stream_id="account_event_hub",
         stream_epoch="epoch-2",
         sequence=1,

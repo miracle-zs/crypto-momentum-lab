@@ -43,6 +43,7 @@ class ExecutionTradeIdentity:
     quantity: Decimal
     price: Decimal
     payload_digest: str
+    payload_digest_aliases: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
