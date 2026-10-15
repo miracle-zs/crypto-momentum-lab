@@ -1364,6 +1364,7 @@ async def run_live_daemon(
         context_provider.set_execution_book(execution_book)
         if startup_warmup_symbols:
             await context_provider.warm_symbol_rules(startup_warmup_symbols, now)
+        entry_runtime.set_trading_rules_warmer(context_provider.warm_symbol_rules)
         latest_market_states = LatestMarketStateCache()
         latest_market_quotes = LatestMarketQuoteCache()
 

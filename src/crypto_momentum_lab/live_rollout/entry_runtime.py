@@ -39,6 +39,7 @@ UniverseSnapshotProvider = Callable[
     UniverseRankingSnapshot | None,
 ]
 ReadyCallback = Callable[[bool], None]
+TradingRulesWarmer = Callable[[Iterable[str], datetime], Awaitable[None]]
 
 
 class EntryExchangeWarmup(Protocol):
@@ -84,6 +85,7 @@ class LiveEntryRuntime:
         )
         self._entry_filter_cache: LiveEntryFilterCache | None = None
         self._entry_symbol_cache: LiveEntrySymbolCache | None = None
+        self._trading_rules_warmer: TradingRulesWarmer | None = None
         self._last_entry_universe_symbols: frozenset[str] = frozenset()
         self._warming_symbols: set[str] = set()
         if self._universe_repository is not None:
@@ -192,6 +194,12 @@ class LiveEntryRuntime:
         if self._entry_symbol_cache is not None:
             self._entry_symbol_cache.set_ready_callback(callback)
 
+    def set_trading_rules_warmer(
+        self,
+        warmer: TradingRulesWarmer | None,
+    ) -> None:
+        self._trading_rules_warmer = warmer
+
     def start(self) -> tuple[asyncio.Task[None] | None, asyncio.Task[None] | None]:
         filter_task = (
             None
@@ -276,8 +284,50 @@ class LiveEntryRuntime:
             for entry in snapshot.ranking.gainers[:top_count]
             if entry.utc_day_return > 0
         )
+        await self._warm_entry_universe(symbols, observed_at)
         self._last_entry_universe_symbols = symbols
         return LiveEntryUniverseData(symbols=symbols, snapshot=snapshot)
+
+    async def _warm_entry_universe(
+        self,
+        symbols: frozenset[str],
+        observed_at: datetime,
+    ) -> None:
+        if self._trading_rules_warmer is None:
+            return
+
+        margin_symbols = (
+            [
+                symbol
+                for symbol in symbols
+                if not self._client.is_entry_margin_type_configured(symbol)
+            ]
+            if self._margin_type is not None
+            else []
+        )
+        leverage_symbols = (
+            [
+                symbol
+                for symbol in symbols
+                if not self._client.is_entry_leverage_configured(symbol)
+            ]
+            if self._entry_leverage is not None
+            else []
+        )
+
+        try:
+            if margin_symbols:
+                await self._client.warm_entry_margin_type(margin_symbols)
+            if leverage_symbols:
+                await self._client.warm_entry_leverage(leverage_symbols)
+        except Exception as error:
+            log.warning(
+                "live_entry_pool_symbol_warmup_failed",
+                error_type=type(error).__name__,
+            )
+            raise
+
+        await self._trading_rules_warmer(symbols, observed_at)
 
     async def _load_entry_symbols_from_database(
         self,

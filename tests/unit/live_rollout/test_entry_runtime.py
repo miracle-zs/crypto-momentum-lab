@@ -35,6 +35,27 @@ class FakeUniverseRepository:
         )
 
 
+class MutableUniverseRepository:
+    def __init__(self, symbols: tuple[str, ...]) -> None:
+        self.symbols = symbols
+
+    async def load_snapshot_at(self, observed_at: datetime):
+        return SimpleNamespace(
+            observed_at=observed_at,
+            snapshot_id="universe-snapshot",
+            config_hash="universe-config",
+            ranking=SimpleNamespace(
+                gainers=tuple(
+                    SimpleNamespace(
+                        symbol=symbol,
+                        utc_day_return=Decimal("0.02"),
+                    )
+                    for symbol in self.symbols
+                )
+            ),
+        )
+
+
 class FakeEmaProvider:
     def prune(self, **kwargs) -> int:
         return 0
@@ -67,6 +88,70 @@ async def test_entry_runtime_warms_exchange_from_positive_gainer_pool() -> None:
     assert client.leverage_symbols == frozenset({"BTCUSDT", "SOLUSDT"})
     assert runtime.entry_symbol_cache_required
     assert not runtime.entry_filter_cache_required
+
+
+@pytest.mark.asyncio
+async def test_entry_runtime_warms_new_pool_symbols_before_publishing_them() -> None:
+    class WarmableClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.warmed_margin: set[str] = set()
+            self.warmed_leverage: set[str] = set()
+            self.margin_calls: list[frozenset[str]] = []
+            self.leverage_calls: list[frozenset[str]] = []
+            self.events: list[tuple[str, frozenset[str]]] = []
+
+        def is_entry_leverage_configured(self, symbol: str) -> bool:
+            return symbol in self.warmed_leverage
+
+        def is_entry_margin_type_configured(self, symbol: str) -> bool:
+            return symbol in self.warmed_margin
+
+        async def warm_entry_margin_type(self, symbols) -> None:
+            requested = frozenset(symbols)
+            self.margin_calls.append(requested)
+            self.events.append(("margin", requested))
+            self.warmed_margin.update(requested)
+
+        async def warm_entry_leverage(self, symbols) -> None:
+            requested = frozenset(symbols)
+            self.leverage_calls.append(requested)
+            self.events.append(("leverage", requested))
+            self.warmed_leverage.update(requested)
+
+    observed_at = datetime(2026, 9, 12, tzinfo=UTC)
+    next_refresh_at = datetime(2026, 9, 12, 0, 0, 15, tzinfo=UTC)
+    repository = MutableUniverseRepository(("BTCUSDT",))
+    client = WarmableClient()
+    runtime = LiveEntryRuntime(
+        universe_reader=repository,
+        client=client,
+        ema_provider=None,
+        positive_gainer_top_count=3,
+        entry_leverage=7,
+        margin_type="ISOLATED",
+    )
+    await runtime.warm_exchange(observed_at)
+
+    async def warm_trading_rules(symbols, _observed_at) -> None:
+        requested = frozenset(symbols)
+        client.events.append(("trading_rules", requested))
+
+    runtime.set_trading_rules_warmer(warm_trading_rules)
+    repository.symbols = ("BTCUSDT", "NEWCOINUSDT")
+
+    refreshed = await runtime._load_entry_universe_data(next_refresh_at)
+
+    assert refreshed.symbols == frozenset({"BTCUSDT", "NEWCOINUSDT"})
+    assert client.margin_calls == [frozenset({"BTCUSDT"}), frozenset({"NEWCOINUSDT"})]
+    assert client.leverage_calls == [
+        frozenset({"BTCUSDT"}),
+        frozenset({"NEWCOINUSDT"}),
+    ]
+    assert client.events[-1] == (
+        "trading_rules",
+        frozenset({"BTCUSDT", "NEWCOINUSDT"}),
+    )
 
 
 @pytest.mark.asyncio
@@ -146,7 +231,7 @@ async def test_entry_runtime_is_symbol_warmed_and_trigger_warmup() -> None:
     runtime.trigger_symbol_warmup("BTCUSDT")
     # Allow background task to execute
     import asyncio
+
     await asyncio.sleep(0.01)
 
     assert runtime.is_symbol_warmed("BTCUSDT") is True
-
