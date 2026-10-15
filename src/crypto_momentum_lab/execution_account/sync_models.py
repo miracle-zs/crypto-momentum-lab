@@ -4,9 +4,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from crypto_momentum_lab.domain.account.baseline_checkpoint import (
-    AccountBaselineCheckpoint,
-)
 from crypto_momentum_lab.domain.account.models import (
     AccountFillEvent,
     AccountFillLoadScan,
@@ -106,4 +103,3 @@ class ExecutionAccountSyncResult:
     fill_cursor_updates: tuple[AccountFillReconciliationCursor, ...] = ()
     fill_load_scans: tuple[AccountFillLoadScan, ...] = ()
     fills_catching_up: bool = False
-    baseline_checkpoint: AccountBaselineCheckpoint | None = None

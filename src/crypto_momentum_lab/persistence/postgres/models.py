@@ -740,45 +740,6 @@ class AccountOpenOrderRow(Base):
     raw_payload: Mapped[dict[str, object]] = mapped_column(JSONB)
 
 
-class AccountUserDataJournalRow(Base):
-    __tablename__ = "account_user_data_journal"
-
-    sequence: Mapped[int] = mapped_column(
-        BigInteger, primary_key=True, autoincrement=True
-    )
-    environment: Mapped[str] = mapped_column(String(32))
-    account_label: Mapped[str] = mapped_column(String(64))
-    receiver_session_id: Mapped[str] = mapped_column(String(64))
-    stream_token: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    event_id: Mapped[str] = mapped_column(String(64))
-    event_type: Mapped[str] = mapped_column(String(64))
-    event_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    exchange_event_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    exchange_update_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    exchange_previous_update_id: Mapped[int | None] = mapped_column(
-        BigInteger, nullable=True
-    )
-    payload: Mapped[dict[str, object]] = mapped_column(JSONB)
-
-    __table_args__ = (
-        UniqueConstraint(
-            "environment",
-            "account_label",
-            "event_id",
-            name="uq_account_user_data_journal_event",
-        ),
-        Index(
-            "ix_account_user_data_journal_cursor",
-            "environment",
-            "account_label",
-            "sequence",
-        ),
-    )
-
-
 class AccountFillEventRow(Base):
     __tablename__ = "account_fill_events"
 
@@ -1517,7 +1478,8 @@ class MarketRevisionRefRow(Base):
             "bucket_start",
             "revision_id",
             postgresql_where=text(
-                "payload IS NULL AND payload_archive_path IS NOT NULL AND payload_archive_sha256 IS NOT NULL"
+                "payload IS NULL AND payload_archive_path IS NOT NULL "
+                "AND payload_archive_sha256 IS NOT NULL"
             ),
         ),
     )

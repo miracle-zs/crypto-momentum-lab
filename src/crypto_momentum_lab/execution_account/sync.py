@@ -5,9 +5,6 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from crypto_momentum_lab.domain.account.baseline_checkpoint import (
-    encode_baseline_checkpoint,
-)
 from crypto_momentum_lab.domain.account.models import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
@@ -125,28 +122,6 @@ class ExecutionAccountSyncService:
         self._last_persisted_process_state: ExecutionAccountStatus | None = None
         self._last_persisted_process_state_reason: str | None = None
         self._last_persisted_process_state_at: datetime | None = None
-
-    async def record_user_data_event(
-        self,
-        *,
-        event: BinanceUserDataEvent,
-        receiver_session_id: str,
-        stream_token: int | None,
-    ) -> int:
-        """Commit an unmerged WS receipt without REST or projection locks."""
-        return await self._repository.append_user_data_event(
-            environment=self._config.environment,
-            account_label=self._config.account_label,
-            receiver_session_id=receiver_session_id,
-            stream_token=stream_token,
-            event=event.to_receipt(),
-        )
-
-    async def user_data_journal_cursor(self) -> int:
-        return await self._repository.user_data_journal_cursor(
-            environment=self._config.environment,
-            account_label=self._config.account_label,
-        )
 
     async def sync_once(
         self,
@@ -529,7 +504,8 @@ class ExecutionAccountSyncService:
             ):
                 # Stale snapshot: skip snapshot, balances, positions, open orders,
                 # and status update.  HOWEVER, fills and cursor updates are immutable
-                # or monotonic progress: persist them atomically without the stale state.
+                # or monotonic progress: persist them atomically without the stale
+                # state.
                 if result.fills or result.fill_cursor_updates:
                     await self._repository.save_reconciliation_fills_and_cursors(
                         fills=result.fills,
@@ -547,22 +523,6 @@ class ExecutionAccountSyncService:
             details: dict[str, JsonValue] = {}
             if source is not None:
                 details["source"] = source
-            checkpoint = result.baseline_checkpoint
-            if checkpoint is not None:
-                if (
-                    result.status
-                    not in (
-                        ExecutionAccountStatus.RUNNING,
-                        ExecutionAccountStatus.READY_READONLY,
-                    )
-                    or result.fills_catching_up
-                    or checkpoint.snapshot != snapshot
-                    or (snapshot.config.environment, snapshot.config.account_label)
-                    != (self._config.environment, self._config.account_label)
-                    or checkpoint.baseline_id != result.reconciliation_id
-                ):
-                    raise ValueError("checkpoint does not match a verified baseline")
-                details["baseline_checkpoint"] = encode_baseline_checkpoint(checkpoint)
             if result.fills_catching_up:
                 details["fills_catching_up"] = True
                 details["incomplete_symbols"] = [

@@ -3,7 +3,6 @@
 from dataclasses import dataclass
 from datetime import datetime
 
-from crypto_momentum_lab.domain.account.event_journal import AccountEventReceipt
 from crypto_momentum_lab.domain.market.models import JsonValue
 
 
@@ -43,16 +42,3 @@ class BinanceUserDataEvent:
                 isinstance(value, bool) or not isinstance(value, int) or value < 0
             ):
                 raise ValueError(f"{field_name} must be a non-negative integer")
-
-    def to_receipt(self) -> AccountEventReceipt:
-        """Preserve raw exchange evidence at the persistence boundary."""
-        return AccountEventReceipt(
-            event_type=self.event_type,
-            event_at=self.event_at,
-            received_at=self.received_at,
-            payload=self.payload,
-            event_id=self.event_id,
-            exchange_event_at=self.exchange_event_at,
-            exchange_update_id=self.exchange_update_id,
-            exchange_previous_update_id=self.exchange_previous_update_id,
-        )

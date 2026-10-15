@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import Protocol, TypeVar
-from uuid import uuid4
 
 import httpx
 import structlog
@@ -67,14 +66,6 @@ class UserDataAccountSyncCycle(AccountSyncCycle, Protocol):
     async def persist_reconciliation_result(
         self, result: ExecutionAccountSyncResult
     ) -> None: ...
-
-    async def record_user_data_event(
-        self,
-        *,
-        event: BinanceUserDataEvent,
-        receiver_session_id: str,
-        stream_token: int | None,
-    ) -> int: ...
 
     async def publish_user_data_heartbeat(
         self,
@@ -163,12 +154,6 @@ class UserDataAccountSyncConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class _ReceivedUserDataEvent:
-    event: BinanceUserDataEvent
-    stream_token: int | None
-
-
-@dataclass(frozen=True, slots=True)
 class _PendingUserDataPersistence:
     snapshot: AccountSnapshot
     event: BinanceUserDataEvent
@@ -211,10 +196,9 @@ class UserDataAccountSyncDaemon:
         self._accept_events = False
         self._state_lock = asyncio.Lock()
         self._rest_sync_lock = asyncio.Lock()
-        self._event_queue: asyncio.Queue[_ReceivedUserDataEvent] | None = None
+        self._event_queue: asyncio.Queue[BinanceUserDataEvent] | None = None
         self._deferred_events: deque[BinanceUserDataEvent] = deque()
         self._reconciliation_active = False
-        self._receiver_session_id = uuid4().hex
         self._persistence_queue: (
             asyncio.Queue[_PendingUserDataPersistence | None] | None
         ) = None
@@ -427,33 +411,14 @@ class UserDataAccountSyncDaemon:
                     pass
 
     async def _on_event(self, event: BinanceUserDataEvent) -> None:
-        receipt = _ReceivedUserDataEvent(
-            event,
-            self._stream.continuity_token,
-        )
         queue = self._event_queue
         if queue is None:
-            await self._record_received_event(receipt)
             await self._process_event(event)
             return
         try:
-            queue.put_nowait(receipt)
+            queue.put_nowait(event)
         except asyncio.QueueFull:
             self._request_pipeline_recovery("event_queue_overflow", origin_event=event)
-
-    async def _record_received_event(self, receipt: _ReceivedUserDataEvent) -> None:
-        try:
-            await self._service.record_user_data_event(
-                event=receipt.event,
-                receiver_session_id=self._receiver_session_id,
-                stream_token=receipt.stream_token,
-            )
-        except Exception as error:
-            self._report_error(error)
-            self._request_pipeline_recovery(
-                "user_data_journal_failed", origin_event=receipt.event
-            )
-            raise
 
     async def _process_event(
         self,
@@ -545,13 +510,11 @@ class UserDataAccountSyncDaemon:
 
     async def _event_worker(
         self,
-        queue: asyncio.Queue[_ReceivedUserDataEvent],
+        queue: asyncio.Queue[BinanceUserDataEvent],
     ) -> None:
         while True:
-            receipt = await queue.get()
-            event = receipt.event
+            event = await queue.get()
             try:
-                await self._record_received_event(receipt)
                 if (
                     self._reconciliation_active
                     or self._pipeline_recovery_event.is_set()

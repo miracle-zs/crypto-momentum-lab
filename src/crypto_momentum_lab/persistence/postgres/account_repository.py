@@ -9,14 +9,6 @@ from sqlalchemy import case, delete, func, select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from crypto_momentum_lab.domain.account.baseline_checkpoint import (
-    AccountBaselineCheckpoint,
-    decode_baseline_checkpoint,
-)
-from crypto_momentum_lab.domain.account.event_journal import (
-    AccountEventJournalEntry,
-    AccountEventReceipt,
-)
 from crypto_momentum_lab.domain.account.models import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
@@ -39,7 +31,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
     AccountPositionSnapshotRow,
     AccountReconciliationHeadRow,
     AccountReconciliationRunRow,
-    AccountUserDataJournalRow,
     ExecutionAccountProcessStateRow,
 )
 from crypto_momentum_lab.persistence.postgres.serialization import jsonable
@@ -92,141 +83,6 @@ class PostgresAccountRepository:
     ) -> None:
         self._session_factory = session_factory
 
-    async def append_user_data_event(
-        self,
-        *,
-        environment: str,
-        account_label: str,
-        receiver_session_id: str,
-        stream_token: int | None,
-        event: AccountEventReceipt,
-    ) -> int:
-        if (
-            not environment.strip()
-            or not account_label.strip()
-            or not receiver_session_id.strip()
-        ):
-            raise ValueError("journal account and receiver identity must not be empty")
-        async with self._session_factory() as session:
-            async with session.begin():
-                # Allocate order only after previous same-account receipt commits.
-                # A sequence is scoped by account and can contain gaps/duplicates.
-                await session.execute(
-                    text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
-                    {
-                        "lock_key": f"account-user-data-journal:{environment}:{account_label}"
-                    },
-                )
-                sequence = await session.scalar(
-                    insert(AccountUserDataJournalRow)
-                    .values(
-                        environment=environment,
-                        account_label=account_label,
-                        receiver_session_id=receiver_session_id,
-                        stream_token=stream_token,
-                        event_id=event.event_id,
-                        event_type=event.event_type,
-                        event_at=event.event_at,
-                        received_at=event.received_at,
-                        exchange_event_at=event.exchange_event_at,
-                        exchange_update_id=event.exchange_update_id,
-                        exchange_previous_update_id=event.exchange_previous_update_id,
-                        payload=jsonable(event.payload),
-                    )
-                    .on_conflict_do_nothing(
-                        constraint="uq_account_user_data_journal_event"
-                    )
-                    .returning(AccountUserDataJournalRow.sequence)
-                )
-                if sequence is None:
-                    sequence = await session.scalar(
-                        select(AccountUserDataJournalRow.sequence).where(
-                            AccountUserDataJournalRow.environment == environment,
-                            AccountUserDataJournalRow.account_label == account_label,
-                            AccountUserDataJournalRow.event_id == event.event_id,
-                        )
-                    )
-                if sequence is None:
-                    raise RuntimeError("account event receipt was not persisted")
-            return int(sequence)
-
-    async def user_data_journal_cursor(self, *, environment: str, account_label: str) -> int:
-        if not environment.strip() or not account_label.strip():
-            raise ValueError("journal account identity must not be empty")
-        async with self._session_factory() as session:
-            sequence = await session.scalar(select(func.max(AccountUserDataJournalRow.sequence)).where(
-                AccountUserDataJournalRow.environment == environment,
-                AccountUserDataJournalRow.account_label == account_label,
-            ))
-            return int(sequence or 0)
-
-    async def load_baseline_checkpoint(self, *, environment: str, account_label: str) -> AccountBaselineCheckpoint | None:
-        if not environment.strip() or not account_label.strip():
-            raise ValueError("checkpoint account identity must not be empty")
-        async with self._session_factory() as session:
-            row = await session.scalar(select(AccountReconciliationRunRow).where(
-                AccountReconciliationRunRow.environment == environment,
-                AccountReconciliationRunRow.account_label == account_label,
-                AccountReconciliationRunRow.status == "ready",
-                AccountReconciliationRunRow.details.has_key("baseline_checkpoint"),
-            ).order_by(AccountReconciliationRunRow.observed_at.desc(), AccountReconciliationRunRow.reconciliation_id.desc()).limit(1))
-            if row is None:
-                return None
-            checkpoint = decode_baseline_checkpoint(row.details["baseline_checkpoint"])
-            if (
-                (checkpoint.snapshot.config.environment, checkpoint.snapshot.config.account_label) != (environment, account_label)
-                or checkpoint.baseline_id != row.reconciliation_id
-                or checkpoint.snapshot.config.observed_at != row.observed_at
-            ):
-                raise ValueError("checkpoint does not match its persisted baseline")
-            return checkpoint
-
-    async def load_user_data_events(
-        self,
-        *,
-        environment: str,
-        account_label: str,
-        after_sequence: int = 0,
-        limit: int = 256,
-    ) -> tuple[AccountEventJournalEntry, ...]:
-        if not environment.strip() or not account_label.strip():
-            raise ValueError("journal account identity must not be empty")
-        if after_sequence < 0 or not 1 <= limit <= 4096:
-            raise ValueError("invalid journal cursor or page size")
-        async with self._session_factory() as session:
-            rows = (
-                await session.scalars(
-                    select(AccountUserDataJournalRow)
-                    .where(
-                        AccountUserDataJournalRow.environment == environment,
-                        AccountUserDataJournalRow.account_label == account_label,
-                        AccountUserDataJournalRow.sequence > after_sequence,
-                    )
-                    .order_by(AccountUserDataJournalRow.sequence)
-                    .limit(limit)
-                )
-            ).all()
-            return tuple(
-                AccountEventJournalEntry(
-                    sequence=row.sequence,
-                    environment=row.environment,
-                    account_label=row.account_label,
-                    receiver_session_id=row.receiver_session_id,
-                    stream_token=row.stream_token,
-                    event=AccountEventReceipt(
-                        event_type=row.event_type,
-                        event_at=row.event_at,
-                        received_at=row.received_at,
-                        payload=cast(dict[str, JsonValue], row.payload),
-                        event_id=row.event_id,
-                        exchange_event_at=row.exchange_event_at,
-                        exchange_update_id=row.exchange_update_id,
-                        exchange_previous_update_id=row.exchange_previous_update_id,
-                    ),
-                )
-                for row in rows
-            )
-
     async def save_position_snapshot(self, snapshot: AccountPositionSnapshot) -> None:
         await self._insert(
             AccountPositionSnapshotRow,
@@ -270,24 +126,6 @@ class PostgresAccountRepository:
                         )
                     },
                 )
-                checkpoint_payload = run.details.get("baseline_checkpoint")
-                if checkpoint_payload is not None:
-                    checkpoint = decode_baseline_checkpoint(checkpoint_payload)
-                    if (
-                        checkpoint.baseline_id != run.reconciliation_id
-                        or checkpoint.snapshot.config != config
-                        or (run.environment, run.account_label) != (config.environment, config.account_label)
-                        or checkpoint.snapshot.config.observed_at != run.observed_at
-                    ):
-                        raise ValueError("checkpoint does not match the snapshot transaction")
-                    if checkpoint.journal_sequence > 0:
-                        anchor = await session.scalar(select(AccountUserDataJournalRow.sequence).where(
-                            AccountUserDataJournalRow.environment == config.environment,
-                            AccountUserDataJournalRow.account_label == config.account_label,
-                            AccountUserDataJournalRow.sequence == checkpoint.journal_sequence,
-                        ))
-                        if anchor is None:
-                            raise ValueError("checkpoint journal cursor does not belong to this account")
                 await self._insert_in_session(
                     session,
                     AccountConfigSnapshotRow,
@@ -620,8 +458,7 @@ class PostgresAccountRepository:
                 )
             heads = (await session.scalars(head_stmt)).all()
             active_by_label = {
-                row.account_label: row.position_count > 0
-                for row in heads
+                row.account_label: row.position_count > 0 for row in heads
             }
 
             # Reconciliation runs also carry complete position state while
@@ -632,9 +469,7 @@ class PostgresAccountRepository:
                 .distinct(AccountReconciliationRunRow.account_label)
                 .where(
                     AccountReconciliationRunRow.environment == environment,
-                    AccountReconciliationRunRow.status.in_(
-                        ("ready", "catching_up")
-                    ),
+                    AccountReconciliationRunRow.status.in_(("ready", "catching_up")),
                 )
             )
             if expected_labels is not None:

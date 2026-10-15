@@ -1,6 +1,6 @@
 # 系统契约与架构重构
 
-状态：业务决策 Q1–Q9 沿用已确认契约；T1 已完成。T2–T4 的早期“闭环”声明已被 review 复核推翻，不能归为“仅待生产验证”。§8.6–§8.10 记录此前实现与本地收敛；§8.11 更正单一状态模型的目标及剩余优化计划。当前 live 持久路径与进程内都不再使用位置 journal；旧数据库表仅作为既有历史数据保留，不参与当前状态恢复。
+状态：业务决策 Q1–Q9 沿用已确认契约；T1 已完成。T2–T4 的早期“闭环”声明已被 review 复核推翻，不能归为“仅待生产验证”。§8.6–§8.10 记录此前实现与本地收敛；§8.11 更正单一状态模型的目标及剩余优化计划。当前运行路径不使用位置 journal，也不写入或读取原始账户 WebSocket journal；相关旧表和迁移仅保留历史，尚未删除。
 
 第一轮本地已修复的阻塞项（§8.6，含机制删除；第 5 项已被 §8.8 收敛取代）：
 
@@ -107,7 +107,7 @@ flowchart LR
 
 当前目标拓扑已较克制，执行内核仍偏复杂。2026-10-14 的本地修改已让 live 恢复和 Dashboard 不再读取或写入旧 `position_fact_journal_events`、`position_recovery_checkpoints`，并移除了无人调用的旧 PostgreSQL journal store；旧表只保留现存数据与必要的维护查询。
 
-剩余问题是 head payload 仍保存有限的 `AccountFacts` 表示，`PositionBook` 再从中计算当前投影。目标是每个持仓 key 只有一份当前 `PositionState`，head 保存该状态，事件直接更新它。命令、预留、成交身份与订单水位按自身生命周期留存，不把历史事实重放成第二份当前状态。内存和 live 持久路径都不再累积位置 journal。
+剩余问题是 head payload 仍保存有限的 `AccountFacts` 表示，`PositionBook` 再从中计算当前投影。目标是每个持仓 key 只有一份当前 `PositionState`，head 保存该状态，事件直接更新它。命令、预留、成交身份与订单水位按自身生命周期留存，不把历史事实重放成第二份当前状态。内存和 live 持久路径都不再累积位置 journal。2026-10-15 又移除了 `account_user_data_journal` 的逐 WebSocket 事件写入、游标读取和基线 checkpoint 关联；已应用的账户状态、订单和成交仍走原有持久化路径，未处理事件留在进程内队列。
 
 冷启动仍会为选中的标的加载来源、必要时再次读取全量仓位，并按 symbol 顺序查询成交；`ExecutionBook._staged_copy(key)` 仍复制多组账户级容器。Dashboard 已只查 Head，但会逐行解码并投影全部 facts；它不查 Journal，也不以 checkpoint 数量统计当前持仓。`run_live_daemon` 的装配职责仍集中在大函数中，operator exit identity 仍包含 `run_id`。这些是可核实的优化点；固定的启动时延、Dashboard 时延和内存目标须由同负载测量得出。
 
@@ -199,7 +199,7 @@ T1 已完成；本轮 review 确认 T2–T4 尚未完成。下述状态记录当
 |任务|入口及变化范围|退出条件|状态|
 |---|---|---|---|
 |T1：固定行为与可靠性|现有 domain/execution、orders/coordinator、live_rollout 及相关测试|补偿不拒绝已终态命令、原失败不被二次异常覆盖；退避执行前校验；修正当前 coverage 读取与队列年龄；行为夹具冻结，完整链路回归通过。|**闭环**：3542 passed / 9 skipped / 0 failed|
-|T2：事实、当前状态与事务收敛|ExecutionBook/现有持久化适配器|每 key 一个直接表达当前持仓与退出责任的 head；移除内存及持久化 Journal 状态模型和历史事实重放；保留命令、预留、成交身份和订单水位各自所需的持久记录；验证重启、重复成交和迟到成交。|**本地运行路径已收敛**：内存 Journal 与旧 PostgreSQL journal writer 已删除；head 仍序列化 `AccountFacts`，旧数据库表和格式转换尚未处理|
+|T2：事实、当前状态与事务收敛|ExecutionBook/现有持久化适配器|每 key 一个直接表达当前持仓与退出责任的 head；移除内存及持久化 Journal 状态模型和历史事实重放；保留命令、预留、成交身份和订单水位各自所需的持久记录；验证重启、重复成交和迟到成交。|**本地运行路径已收敛**：位置 Journal 与逐事件账户 WebSocket journal 写入已删除；head 仍序列化 `AccountFacts`，旧数据库历史表与 head 格式转换尚未处理|
 |T3：账户进程合并|execution_account 接收、live_rollout 装配及 Compose|每账户一个进程；私有事件接收、账户同步与执行真正合并装配；退役本账户旧 Hub 依赖、客户端与 URL 参数；保留 read/trade 凭证角色。|**闭环**：`InProcessAccountEventSource` + `DirectPositionExpectationPublisher` + `AccountPositionExpectationRegistry` 进程内合并装配；移除 Compose/Manifest/Env 中 Hub 依赖；`test_single_account_in_process_lifecycle_private_events_to_exit_and_shutdown` 验证闭环|
 |T4：按测量做性能与装配收敛|基线读取、候选复制、Dashboard、运行时装配|先记录同负载的冷启动耗时/REST 调用、单 key 事务耗时与复制规模、Dashboard 响应时间；只优化测得的热点；不预设固定时延目标或新增通用分层。|**待做**：先完成 T2 的直接状态模型，再取得可比较的基线|
 
@@ -727,3 +727,11 @@ primary 新进程启动暴露两个接线问题：账户读取硬编码 Multi-As
 ### 8.15 交易所空仓条件下的全服务部署（2026-10-15）
 
 2026-10-15 06:50 CST：部署前直接查询四账户交易所仓位和挂单，均为空；按 §9 停止全部七个应用服务，保留 PostgreSQL，执行迁移并启动应用。运行版本为 `74f9804021cda0774eecfe8822f21481dc685ed8`，数据库 head 为 `20261015_0062`。重启后七个应用服务均为该版本且 healthy，四个策略进程重启次数为 0，Dashboard health 与数据库 health 均为 UP；再次直接读取交易所，四账户仍为零仓、无挂单。本次没有扫描历史成交或回放旧逐标的快照来决定能否部署，也没有验证自然开仓、成交和退出闭环。
+
+### 8.16 移除账户 WebSocket 原始事件 journal（2026-10-15，未部署）
+
+源码确认 `account_user_data_journal` 过去每收到一条私有 WebSocket 事件就开数据库事务、取得账户级 advisory lock 并写入原始 payload；没有运行时读取或重放调用方。基线 checkpoint 只保存该 journal 游标并在写快照时验证游标，没有生产代码创建或消费它。该写入增加账户数据库热路径；写入失败还会阻止事件应用并触发整条账户管线恢复。
+
+已删除逐事件写入、游标和读取接口、checkpoint 模型及快照事务中的 journal 校验。事件队列直接承载解析后的 `BinanceUserDataEvent`；应用后的账户快照及真实成交仍通过原有持久化队列保存，队列溢出或实际状态/持久化处理失败仍触发 REST 对账。`account_user_data_journal` 的数据库表和历史迁移暂留，未删除历史数据，也未新增数据库迁移。
+
+验证：相关单元测试 **62 passed**，账户快照和账户仓库集成测试 **10 passed**；完整 Python 回归 **3505 passed, 9 skipped**。Ruff 与 `git diff --check` 通过。本次改动尚未部署。

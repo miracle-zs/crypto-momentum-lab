@@ -68,9 +68,6 @@ class FakeService:
     async def persist_reconciliation_result(self, result) -> None:
         return None
 
-    async def record_user_data_event(self, **receipt) -> int:
-        return 1
-
     async def sync_once(
         self,
         *,
@@ -798,265 +795,8 @@ def _snapshot() -> AccountSnapshot:
     )
 
 
-@pytest.mark.parametrize("frozen", [False, True])
-async def test_raw_event_is_durable_before_application_even_during_repair(frozen):
-    class JournalService(FakeService):
-        def __init__(self):
-            super().__init__(_snapshot())
-            self.started = asyncio.Event()
-            self.release = asyncio.Event()
-            self.receipts = []
-
-        async def record_user_data_event(self, **receipt):
-            self.started.set()
-            await self.release.wait()
-            self.receipts.append(receipt)
-            return 1
-
-    service = JournalService()
-    applied = []
-    daemon = UserDataAccountSyncDaemon(
-        service=service,
-        stream=BlockingStream(),
-        config=UserDataAccountSyncConfig(),
-        on_event_applied=lambda *args: applied.append(args),
-    )
-    await daemon._reconcile(include_fills=True)
-    daemon._start_pipeline()
-    daemon._reconciliation_active = frozen
-    event = parse_user_data_event(
-        {
-            "e": "ACCOUNT_UPDATE",
-            "E": 1783123201000,
-            "T": 1783123201000,
-            "a": {"B": [{"a": "USDT", "wb": "101", "cw": "81"}], "P": []},
-        },
-        received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
-    )
-    task = asyncio.create_task(daemon._on_event(event))
-    try:
-        await asyncio.wait_for(service.started.wait(), timeout=1)
-        assert applied == []
-        assert not daemon._deferred_events
-        service.release.set()
-        await asyncio.wait_for(task, timeout=1)
-        await asyncio.wait_for(daemon._event_queue.join(), timeout=1)
-        assert service.receipts[0]["event"] == event
-        assert len(service.receipts[0]["receiver_session_id"]) == 32
-        if frozen:
-            assert list(daemon._deferred_events) == [event]
-            assert applied == []
-        else:
-            await asyncio.wait_for(daemon._event_queue.join(), timeout=1)
-            assert len(applied) == 1
-    finally:
-        service.release.set()
-        await asyncio.gather(task, return_exceptions=True)
-        await daemon._stop_pipeline()
-
-
-async def test_journal_failure_requests_recovery_without_applying_unrecorded_event():
-    class FailingJournalService(FakeService):
-        async def record_user_data_event(self, **receipt):
-            raise RuntimeError("journal unavailable")
-
-    service = FailingJournalService(_snapshot())
-    applied = []
-    daemon = UserDataAccountSyncDaemon(
-        service=service,
-        stream=BlockingStream(),
-        config=UserDataAccountSyncConfig(),
-        on_event_applied=lambda *args: applied.append(args),
-    )
-    await daemon._reconcile(include_fills=True)
-    event = parse_user_data_event(
-        {"e": "ACCOUNT_CONFIG_UPDATE", "E": 1783123201000},
-        received_at=datetime(2026, 7, 4, tzinfo=UTC),
-    )
-    with pytest.raises(RuntimeError, match="journal unavailable"):
-        await daemon._on_event(event)
-    assert daemon._pipeline_recovery_event.is_set()
-    assert daemon._pipeline_recovery_origin_event == event
-    assert not daemon._accept_events
-    assert applied == []
-
-
-async def test_pending_raw_receipt_cannot_be_included_in_a_background_cut():
-    class PendingReceiptService(RealtimeFakeService):
-        def __init__(self):
-            super().__init__(_snapshot())
-            self.journal_started = asyncio.Event()
-            self.release_journal = asyncio.Event()
-            self.fetch_started = asyncio.Event()
-            self.release_fetch = asyncio.Event()
-            self.cursor_reads = 0
-
-        async def record_user_data_event(self, **receipt):
-            self.journal_started.set()
-            await self.release_journal.wait()
-            return 17
-
-        async def user_data_journal_cursor(self):
-            self.cursor_reads += 1
-            return 17
-
-        async def sync_once_for_realtime(self, **kwargs):
-            result = await super().sync_once_for_realtime(**kwargs)
-            self.fetch_started.set()
-            await self.release_fetch.wait()
-            return result
-
-    service = PendingReceiptService()
-    daemon = UserDataAccountSyncDaemon(
-        service=service,
-        stream=BlockingStream(),
-        config=UserDataAccountSyncConfig(),
-        clock=lambda: datetime(2026, 7, 4, 0, 0, 2, tzinfo=UTC),
-    )
-    await daemon._reconcile(include_fills=True)
-    daemon._start_pipeline()
-    # Make the stream explicitly eligible so the in-flight receipt is the
-    # only reason this scan must use the protected repair path.
-    daemon._stream.continuity_token = 1
-    event = parse_user_data_event(
-        {
-            "e": "ACCOUNT_UPDATE",
-            "E": 1783123201000,
-            "T": 1783123201000,
-            "a": {"B": [{"a": "USDT", "wb": "101", "cw": "81"}], "P": []},
-        },
-        received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
-    )
-    receipt = asyncio.create_task(daemon._on_event(event))
-    repair = None
-    try:
-        await asyncio.wait_for(service.journal_started.wait(), timeout=1)
-        repair = asyncio.create_task(daemon._reconcile(include_fills=True))
-        await asyncio.sleep(0)
-        assert not service.fetch_started.is_set()
-        await daemon._publish_heartbeat()
-        assert service.heartbeat_states[-1] is ExecutionAccountStatus.RUNNING
-        assert service.cursor_reads == 0
-        service.release_journal.set()
-        await asyncio.wait_for(receipt, timeout=1)
-        await asyncio.wait_for(daemon._event_queue.join(), timeout=1)
-        assert daemon._event_queue.empty()
-        await asyncio.wait_for(service.fetch_started.wait(), timeout=1)
-        service.release_fetch.set()
-        result = await asyncio.wait_for(repair, timeout=1)
-        assert result.baseline_checkpoint is None
-        assert daemon._state.snapshot(event.received_at).balances[
-            0
-        ].wallet_balance == Decimal("101")
-    finally:
-        service.release_journal.set()
-        service.release_fetch.set()
-        await asyncio.gather(
-            receipt, *([repair] if repair is not None else []), return_exceptions=True
-        )
-        await daemon._stop_pipeline()
-
-
-async def test_slow_journal_does_not_block_receive_and_captures_each_stream_token():
-    class SlowJournal(FakeService):
-        def __init__(self):
-            super().__init__(_snapshot())
-            self.started = asyncio.Event()
-            self.release = asyncio.Event()
-            self.receipts = []
-
-        async def record_user_data_event(self, **receipt):
-            self.started.set()
-            await self.release.wait()
-            self.receipts.append(receipt)
-            return len(self.receipts)
-
-    service = SlowJournal()
-    stream = BlockingStream()
-    stream.continuity_token = 1
-    daemon = UserDataAccountSyncDaemon(
-        service=service, stream=stream, config=UserDataAccountSyncConfig()
-    )
-    await daemon._reconcile(include_fills=True)
-    daemon._start_pipeline()
-    events = [
-        parse_user_data_event(
-            {
-                "e": "ACCOUNT_UPDATE",
-                "E": 1783123201000 + i,
-                "T": 1783123201000 + i,
-                "a": {"B": [{"a": "USDT", "wb": str(101 + i), "cw": "81"}], "P": []},
-            },
-            received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
-        )
-        for i in range(2)
-    ]
-    try:
-        await asyncio.wait_for(daemon._on_event(events[0]), 1)
-        await asyncio.wait_for(service.started.wait(), 1)
-        stream.continuity_token = 2
-        await asyncio.wait_for(daemon._on_event(events[1]), 1)
-        assert daemon._event_queue.qsize() == 1
-        assert service.receipts == []
-        assert daemon._state.snapshot(events[0].received_at).balances[
-            0
-        ].wallet_balance == Decimal("100")
-        service.release.set()
-        await asyncio.wait_for(daemon._event_queue.join(), 1)
-        assert [r["event"] for r in service.receipts] == events
-        assert [r["stream_token"] for r in service.receipts] == [1, 2]
-        assert daemon._event_queue.empty()
-        assert daemon._state.snapshot(events[1].received_at).balances[
-            0
-        ].wallet_balance == Decimal("102")
-    finally:
-        service.release.set()
-        await daemon._stop_pipeline()
-
-
-async def test_queued_journal_failure_cannot_apply_unrecorded_event():
-    class FailingJournal(FakeService):
-        async def record_user_data_event(self, **receipt):
-            raise RuntimeError("journal unavailable")
-
-    service = FailingJournal(_snapshot())
-    applied = []
-    daemon = UserDataAccountSyncDaemon(
-        service=service,
-        stream=BlockingStream(),
-        config=UserDataAccountSyncConfig(),
-        on_event_applied=lambda *args: applied.append(args),
-    )
-    await daemon._reconcile(include_fills=True)
-    daemon._start_pipeline()
-    event = parse_user_data_event(
-        {"e": "ACCOUNT_CONFIG_UPDATE", "E": 1783123201000},
-        received_at=datetime(2026, 7, 4, tzinfo=UTC),
-    )
-    try:
-        await asyncio.wait_for(daemon._on_event(event), 1)
-        await asyncio.wait_for(daemon._event_queue.join(), 1)
-        assert daemon._pipeline_recovery_event.is_set()
-        assert not daemon._accept_events
-        assert not applied
-        assert daemon._event_queue.empty()
-    finally:
-        await daemon._stop_pipeline()
-
-
-async def test_receipt_queue_overflow_requests_repair_without_blocking_reader():
-    class SlowJournal(FakeService):
-        def __init__(self):
-            super().__init__(_snapshot())
-            self.started = asyncio.Event()
-            self.release = asyncio.Event()
-
-        async def record_user_data_event(self, **receipt):
-            self.started.set()
-            await self.release.wait()
-            return 1
-
-    service = SlowJournal()
+async def test_event_queue_overflow_requests_reconciliation():
+    service = FakeService(_snapshot())
     daemon = UserDataAccountSyncDaemon(
         service=service,
         stream=BlockingStream(),
@@ -1069,19 +809,18 @@ async def test_receipt_queue_overflow_requests_repair_without_blocking_reader():
         received_at=datetime(2026, 7, 4, tzinfo=UTC),
     )
     try:
-        await daemon._on_event(event)
-        await asyncio.wait_for(service.started.wait(), 1)
-        await daemon._on_event(event)
-        await asyncio.wait_for(daemon._on_event(event), 1)
+        async with daemon._state_lock:
+            await daemon._on_event(event)
+            await asyncio.sleep(0)
+            await daemon._on_event(event)
+            await daemon._on_event(event)
         assert daemon._pipeline_recovery_event.is_set()
         assert daemon._pipeline_recovery_reason == "event_queue_overflow"
         assert not daemon._accept_events
         assert daemon._event_queue.qsize() == 1
-        service.release.set()
         await asyncio.wait_for(daemon._event_queue.join(), 1)
         assert daemon._event_queue.empty()
     finally:
-        service.release.set()
         await daemon._stop_pipeline()
 
 

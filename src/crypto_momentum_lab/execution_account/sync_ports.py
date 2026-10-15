@@ -4,7 +4,6 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Protocol
 
-from crypto_momentum_lab.domain.account.event_journal import AccountEventReceipt
 from crypto_momentum_lab.domain.account.models import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
@@ -58,22 +57,6 @@ class ReadOnlyAccountClient(Protocol):
 
 
 class AccountSyncRepository(Protocol):
-    async def append_user_data_event(
-        self,
-        *,
-        environment: str,
-        account_label: str,
-        receiver_session_id: str,
-        stream_token: int | None,
-        event: AccountEventReceipt,
-    ) -> int:
-        pass
-
-    async def user_data_journal_cursor(
-        self, *, environment: str, account_label: str
-    ) -> int:
-        pass
-
     async def save_process_state(self, state: ExecutionAccountProcessState) -> None:
         pass
 
