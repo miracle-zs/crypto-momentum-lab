@@ -21,7 +21,9 @@ from crypto_momentum_lab.domain.execution.ports import ExecutionEvidenceIdentity
 from crypto_momentum_lab.domain.execution.position_book import PositionBook
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
+    PositionHealthStatus,
     PositionKey,
+    PositionView,
 )
 from crypto_momentum_lab.domain.execution.recovery_models import AccountFacts
 from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
@@ -73,6 +75,9 @@ def apply_flat_snapshot(
         and evidence.stream_checkpoint_adoption is None
     ):
         return None
+    snapshot = evidence.snapshot
+    if snapshot is None:
+        return None
     current_scope = book._stream_scopes.get(canon)
     if (
         book._execution_unit_of_work is not None
@@ -103,7 +108,7 @@ def apply_flat_snapshot(
     position_book.apply_delta(
         AccountFacts(
             position_key=key,
-            snapshots=(evidence.snapshot,),
+            snapshots=(snapshot,),
             stream_scope=scope,
             prefix_facts_complete=False,
         )
@@ -123,12 +128,15 @@ def evaluate_stream_rollover(
     is_unfilled_terminal_order: bool,
     requires_verified_stream_adoption: bool,
     has_active_commands: bool,
+    matching_nonflat_snapshot: bool,
 ) -> tuple[bool, bool]:
     """Return ``(can_rollover, requires_recovery_proof)`` for a new stream.
 
     Pure computation receiving explicit inputs and returning decision tuple.
     """
     key = evidence.scope.to_position_key()
+    if evidence.stream_id is None or evidence.stream_epoch is None:
+        return False, False
     reservations_held_by_event = (
         is_unfilled_terminal_order
         and evidence.order_event is not None
@@ -159,6 +167,7 @@ def evaluate_stream_rollover(
                 and has_plain_flat_snapshot
                 and not has_active_commands
             )
+            or (matching_nonflat_snapshot and not has_active_commands)
             or (
                 not requires_verified_stream_adoption
                 and is_flat
@@ -181,6 +190,47 @@ def evaluate_stream_rollover(
         )
     )
     return can_rollover, recovery_proof_required
+
+
+def matching_nonflat_snapshot_can_rollover(
+    *,
+    current_view: PositionView | None,
+    current_scope: AccountFactStreamScope | None,
+    evidence: ExecutionEvidence,
+) -> bool:
+    """Whether a plain current snapshot matches an allocated existing position."""
+    snapshot = evidence.snapshot
+    if current_view is None or current_scope is None or snapshot is None:
+        return False
+    key = evidence.scope.to_position_key()
+    return (
+        current_view.stream_scope == current_scope
+        and current_view.health_status is not PositionHealthStatus.CONFLICT
+        and current_view.discrepancy is None
+        and current_view.reconciliation_gap in (None, Decimal("0"))
+        and current_view.unallocated_quantity == Decimal("0")
+        and current_view.total_quantity > Decimal("0")
+        and snapshot.position_amt != Decimal("0")
+        and snapshot.position_amt.copy_abs() == current_view.total_quantity
+        and snapshot.environment == key.environment
+        and snapshot.account_label == key.account_label
+        and snapshot.symbol == key.symbol
+        and snapshot.position_side == key.position_side.value
+        and (
+            current_view.event_cut is None
+            or snapshot.observed_at >= current_view.event_cut
+        )
+        and not evidence.fills
+        and evidence.fill is None
+        and evidence.boundary is None
+        and evidence.order_event is None
+        and evidence.coverage is None
+        and evidence.coverage_evidence is None
+        and evidence.stream_checkpoint_adoption is None
+        and evidence.source_anchor_snapshot is None
+        and evidence.fill_load_provenance is None
+        and evidence.cumulative_order is None
+    )
 
 
 def apply_stream_rollover(

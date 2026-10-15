@@ -35,6 +35,7 @@ from crypto_momentum_lab.domain.execution.execution_evidence_state import (
     apply_stream_rollover,
     durable_evidence_identity,
     evaluate_stream_rollover,
+    matching_nonflat_snapshot_can_rollover,
 )
 from crypto_momentum_lab.domain.execution.execution_head import (
     build_execution_head_payload,
@@ -113,20 +114,26 @@ async def observe_evidence_transaction(
             if flat_result is not None:
                 return flat_result
 
-            # A restored non-flat position from an earlier stream cannot be adopted by
-            # an ordinary snapshot. Reject it before cloning current state or
-            # opening a transaction; account snapshots may contain thousands
-            # of historical symbols on every refresh.
+            # A restored non-flat position normally needs source history before
+            # adopting a new stream. A matching current snapshot may continue a
+            # coherent, fully allocated ledger without replacing its batches.
+            # Reject other cases before cloning or opening a transaction.
             terminal_without_fill = is_unfilled_terminal_order(evidence)
             pos_book = book._books.get(canon)
             current_view = pos_book.get_view() if pos_book is not None else None
+            current_scope = book._stream_scopes.get(canon)
             is_flat = current_view is not None and (
                 current_view.total_quantity == Decimal("0")
                 and not current_view.batches
                 and not current_view.unallocated_quantity
             )
+            matching_nonflat_snapshot = matching_nonflat_snapshot_can_rollover(
+                current_view=current_view,
+                current_scope=current_scope,
+                evidence=evidence,
+            )
             can_rollover, recovery_proof_required = evaluate_stream_rollover(
-                current_scope=book._stream_scopes.get(canon),
+                current_scope=current_scope,
                 is_flat=is_flat,
                 active_reservations=book._coordinator.get_active_reservations(key),
                 evidence=evidence,
@@ -135,6 +142,7 @@ async def observe_evidence_transaction(
                     key
                 ),
                 has_active_commands=_has_active_commands(book, key),
+                matching_nonflat_snapshot=matching_nonflat_snapshot,
             )
             if recovery_proof_required:
                 return WaitingForEvidence(

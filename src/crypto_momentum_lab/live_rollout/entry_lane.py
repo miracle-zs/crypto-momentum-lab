@@ -49,6 +49,7 @@ log = structlog.get_logger()
 
 
 EntrySymbolLoader = Callable[[datetime], Awaitable[frozenset[str]]]
+EntrySymbolPreparer = Callable[[str, datetime], Awaitable[None]]
 EntryFilterContextLoader = Callable[
     [MarketState15s], Awaitable[LiveEntryFilterContext | None]
 ]
@@ -143,6 +144,7 @@ class EntryExecutionLane:
         signal_recorder: LiveSignalRecorderPort | None = None,
         trading_gate_state: Callable[[], TradingGateState],
         is_symbol_entry_allowed: Callable[[str], tuple[bool, str]],
+        prepare_entry_symbol: EntrySymbolPreparer | None = None,
     ) -> None:
         self._config = config
         self._clock = clock
@@ -153,6 +155,7 @@ class EntryExecutionLane:
         self._signal_recorder = signal_recorder
         self._trading_gate_state = trading_gate_state
         self._is_symbol_entry_allowed = is_symbol_entry_allowed
+        self._prepare_entry_symbol = prepare_entry_symbol
         self._entry_symbols: frozenset[str] | None = None
         self._entry_symbols_loaded_at: datetime | None = None
 
@@ -384,6 +387,38 @@ class EntryExecutionLane:
                     exc_info=True,
                 )
                 entry_filter_context = None
+        if gate_active and self._prepare_entry_symbol is not None:
+            prewarm_pending_symbols: frozenset[str] = getattr(
+                context, "pending_position_symbols", frozenset()
+            )
+            prewarm_unmanaged_symbols: frozenset[str] = getattr(
+                context, "unmanaged_position_symbols", frozenset()
+            )
+            prepared_symbols: set[str] = set()
+            for candidate in decision.candidates:
+                if (
+                    candidate.reduce_only
+                    or candidate.symbol in prepared_symbols
+                    or candidate.symbol in prewarm_pending_symbols
+                    or candidate.symbol in prewarm_unmanaged_symbols
+                ):
+                    continue
+                allowed, reason = self._is_symbol_entry_allowed(candidate.symbol)
+                if allowed or reason != f"symbol_not_prewarmed:{candidate.symbol}":
+                    continue
+                prepared_symbols.add(candidate.symbol)
+                try:
+                    await self._prepare_entry_symbol(
+                        candidate.symbol,
+                        state.bucket_start,
+                    )
+                except Exception as error:
+                    log.warning(
+                        "live_entry_symbol_prepare_failed",
+                        run_id=self._config.run_id,
+                        symbol=candidate.symbol,
+                        error_type=type(error).__name__,
+                    )
         if self._telemetry is not None:
             await self._telemetry.entry_filter_ready(
                 state,

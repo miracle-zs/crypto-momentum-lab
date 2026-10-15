@@ -235,3 +235,45 @@ async def test_entry_runtime_is_symbol_warmed_and_trigger_warmup() -> None:
     await asyncio.sleep(0.01)
 
     assert runtime.is_symbol_warmed("BTCUSDT") is True
+
+
+@pytest.mark.asyncio
+async def test_prepare_symbol_for_entry_waits_for_exchange_and_trading_rules() -> None:
+    class WarmedFakeClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.warmed_leverage: set[str] = set()
+            self.warmed_margin: set[str] = set()
+
+        def is_entry_leverage_configured(self, symbol: str) -> bool:
+            return symbol in self.warmed_leverage
+
+        def is_entry_margin_type_configured(self, symbol: str) -> bool:
+            return symbol in self.warmed_margin
+
+        async def warm_entry_margin_type(self, symbols) -> None:
+            self.warmed_margin.update(symbols)
+
+        async def warm_entry_leverage(self, symbols) -> None:
+            self.warmed_leverage.update(symbols)
+
+    client = WarmedFakeClient()
+    runtime = LiveEntryRuntime(
+        universe_reader=None,
+        client=client,
+        ema_provider=None,
+        positive_gainer_top_count=None,
+        entry_leverage=5,
+        margin_type="ISOLATED",
+    )
+    rules_warmed: list[tuple[frozenset[str], datetime]] = []
+
+    async def warm_rules(symbols, observed_at: datetime) -> None:
+        rules_warmed.append((frozenset(symbols), observed_at))
+
+    runtime.set_trading_rules_warmer(warm_rules)
+    observed_at = datetime(2026, 10, 15, tzinfo=UTC)
+    await runtime.prepare_symbol_for_entry("ACUUSDT", observed_at)
+
+    assert runtime.is_symbol_warmed("ACUUSDT") is True
+    assert rules_warmed == [(frozenset({"ACUUSDT"}), observed_at)]

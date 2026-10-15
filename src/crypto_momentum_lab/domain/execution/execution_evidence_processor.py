@@ -18,6 +18,10 @@ from crypto_momentum_lab.domain.execution.evidence_lifecycle import (
 )
 from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
 from crypto_momentum_lab.domain.execution.evidence_rules import _evidence_identity
+from crypto_momentum_lab.domain.execution.execution_evidence_state import (
+    _has_active_commands,
+    matching_nonflat_snapshot_can_rollover,
+)
 from crypto_momentum_lab.domain.execution.fill_attribution import plan_fill_observation
 
 if TYPE_CHECKING:
@@ -118,25 +122,36 @@ async def mutate_evidence(
             )
             has_blocking_reservations = bool(active_res) and not res_held_by_order
             current_view = current_book.get_view() if current_book is not None else None
+            is_flat = current_view is not None and (
+                current_view.total_quantity == Decimal("0")
+                and not current_view.batches
+                and not current_view.unallocated_quantity
+            )
+            matching_nonflat_snapshot = matching_nonflat_snapshot_can_rollover(
+                current_view=current_view,
+                current_scope=current_scope,
+                evidence=evidence,
+            )
             can_rollover = (
                 evidence.coverage_evidence is None
                 and current_book is not None
+                and not has_blocking_reservations
                 and (
                     (
-                        evidence.snapshot is not None
-                        and evidence.snapshot.position_amt == Decimal("0")
+                        is_flat
+                        and (
+                            (
+                                evidence.snapshot is not None
+                                and evidence.snapshot.position_amt == Decimal("0")
+                            )
+                            or terminal_without_fill
+                        )
                     )
                     or (
-                        terminal_without_fill
-                        and current_view is not None
-                        and current_view.total_quantity == Decimal("0")
+                        matching_nonflat_snapshot
+                        and not _has_active_commands(execution_book, key)
                     )
                 )
-                and current_view is not None
-                and current_view.total_quantity == Decimal("0")
-                and not current_view.batches
-                and not current_view.unallocated_quantity
-                and not has_blocking_reservations
             )
             if can_rollover:
                 execution_book._stream_scopes[key.canonical_id] = scope

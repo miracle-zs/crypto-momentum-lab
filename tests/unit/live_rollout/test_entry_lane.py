@@ -265,6 +265,59 @@ async def test_entry_lane_rejects_candidate_when_symbol_not_allowed() -> None:
     assert outcome.submitted_order_count == 1
 
 
+async def test_entry_lane_waits_for_symbol_warmup_before_recording_and_execution() -> (
+    None
+):
+    executed: list[str] = []
+    prepared: list[tuple[str, datetime]] = []
+    warmed_symbols: set[str] = set()
+    context = cast(LiveDaemonRuntimeContext, object())
+
+    async def execute(candidate, *, requested_quantity, state, context):
+        del requested_quantity, state, context
+        executed.append(candidate.candidate_id)
+        return OrderExecutionResult(
+            client_order_id=candidate.candidate_id,
+            state=ExchangeOrderState.ACKNOWLEDGED,
+            exchange_order_id="exchange-1",
+        )
+
+    async def prepare_symbol(symbol: str, observed_at: datetime) -> None:
+        prepared.append((symbol, observed_at))
+        warmed_symbols.add(symbol)
+
+    def is_symbol_allowed(symbol: str) -> tuple[bool, str]:
+        if symbol not in warmed_symbols:
+            return False, f"symbol_not_prewarmed:{symbol}"
+        return True, "entry_allowed"
+
+    lane = EntryExecutionLane(
+        config=EntryLaneConfig(run_id="run-1"),
+        clock=lambda: NOW,
+        entry_enabled_reason=lambda: "ready",
+        execute_candidate=execute,
+        invalidate_context=lambda: None,
+        trading_gate_state=lambda: TradingGateState.ACTIVE,
+        is_symbol_entry_allowed=is_symbol_allowed,
+        prepare_entry_symbol=prepare_symbol,
+    )
+    candidate = replace(_intent(), symbol="ACUUSDT")
+    state = _state()
+
+    outcome = await lane.process(
+        decision=_decision(candidate),
+        state=state,
+        context=context,
+        gate_reasons=(),
+        recorded_at=NOW,
+    )
+
+    assert prepared == [("ACUUSDT", state.bucket_start)]
+    assert executed == [candidate.candidate_id]
+    assert outcome.approved_intent_count == 1
+    assert outcome.submitted_order_count == 1
+
+
 async def test_entry_lane_rejects_candidate_when_symbol_facts_pending() -> None:
     from tests.unit.live_rollout.test_daemon import _runtime_context
 

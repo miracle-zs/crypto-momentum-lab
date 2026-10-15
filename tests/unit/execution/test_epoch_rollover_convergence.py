@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from contextlib import asynccontextmanager
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
@@ -22,16 +25,64 @@ from crypto_momentum_lab.domain.execution.observation_models import (
     WaitingForEvidence,
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
+from crypto_momentum_lab.domain.execution.ports import ExecutionHeadSnapshot
+from crypto_momentum_lab.live_rollout.exits import managed_live_positions_from_views
 
 
+class _DurableTx:
+    def __init__(self) -> None:
+        self.head: ExecutionHeadSnapshot | None = None
+
+    async def load_head(self, key: Any) -> ExecutionHeadSnapshot | None:
+        del key
+        return self.head
+
+    async def load_checkpoint_from_head(self, **kwargs: Any) -> None:
+        del kwargs
+        return None
+
+    async def record_evidence(self, **kwargs: Any) -> bool:
+        del kwargs
+        return True
+
+    async def record_trade(self, **kwargs: Any) -> bool:
+        del kwargs
+        return True
+
+    async def persist_watermark(self, **kwargs: Any) -> None:
+        del kwargs
+
+    async def persist_head(self, **kwargs: Any) -> int:
+        self.head = ExecutionHeadSnapshot(
+            revision=int(kwargs.get("expected_revision") or 0) + 1,
+            stream_id=kwargs["stream_id"],
+            stream_epoch=kwargs["stream_epoch"],
+            projection_version=kwargs["projection_version"],
+            state_payload=kwargs["state_payload"],
+        )
+        return self.head.revision
+
+
+class _DurableUow:
+    def __init__(self) -> None:
+        self.tx = _DurableTx()
+
+    @asynccontextmanager
+    async def transaction(self, key: Any):
+        del key
+        yield self.tx
+
+
+@pytest.mark.parametrize("durable", [False, True])
 @pytest.mark.asyncio
-async def test_equal_nonflat_quantity_cannot_prove_epoch_continuity() -> None:
-    """Close and reopen can leave the same quantity with a different batch.
-
-    A snapshot alone cannot establish whether that happened during downtime.
-    Only source-backed history may adopt an occupied position into a new epoch.
-    """
-    book = ExecutionBook()
+async def test_matching_nonflat_snapshot_adopts_epoch_and_keeps_exit_batch(
+    durable: bool,
+) -> None:
+    """A matching snapshot continues a healthy existing lot without a history scan."""
+    book = ExecutionBook(
+        execution_unit_of_work=_DurableUow() if durable else None
+    )
+    book._persistence_failed = False
     scope = ExecutionScope(
         environment="live",
         account_label="primary",
@@ -69,21 +120,7 @@ async def test_equal_nonflat_quantity_cannot_prove_epoch_continuity() -> None:
     )
     assert not isinstance(obs_1, EvidenceConflict)
 
-    view_epoch_1 = await book.read(
-        scope, stream_id="account_event_hub", stream_epoch="epoch-1"
-    )
-    assert view_epoch_1.total_quantity == Decimal("137.6")
-    assert not view_epoch_1.is_ready_for_trade
-
-    # 2. Register new stream epoch (simulating execution-account container restart)
-    book.register_active_stream(
-        environment="live",
-        account_label="primary",
-        stream_id="account_event_hub",
-        stream_epoch="epoch-2",
-    )
-
-    # 3. New stream pushes an account snapshot with the exact matching quantity (137.6)
+    # 2. Confirm that the original stream reconciled the current quantity.
     snapshot = AccountPositionSnapshot(
         environment="live",
         account_label="primary",
@@ -99,6 +136,39 @@ async def test_equal_nonflat_quantity_cannot_prove_epoch_continuity() -> None:
         observed_at=datetime(2026, 9, 29, 14, 0, tzinfo=UTC),
         raw_payload={"positionSide": "LONG"},
     )
+    original_stream_snapshot = replace(
+        snapshot,
+        observed_at=start + timedelta(hours=1),
+    )
+    obs_original_snapshot = await book.observe(
+        ExecutionEvidence(
+            evidence_id="evidence-snapshot-epoch-1",
+            scope=scope,
+            observed_at=original_stream_snapshot.observed_at,
+            snapshot=original_stream_snapshot,
+            stream_id="account_event_hub",
+            stream_epoch="epoch-1",
+            sequence=2,
+        )
+    )
+    assert not isinstance(obs_original_snapshot, (EvidenceConflict, WaitingForEvidence))
+    view_epoch_1 = await book.read(
+        scope, stream_id="account_event_hub", stream_epoch="epoch-1"
+    )
+    assert view_epoch_1.total_quantity == Decimal("137.6")
+    assert view_epoch_1.discrepancy is None
+    assert view_epoch_1.reconciliation_gap in (None, Decimal("0"))
+    assert view_epoch_1.unallocated_quantity == Decimal("0")
+
+    if not durable:
+        book._head_revisions[scope.to_position_key().canonical_id] = 1
+    # 3. Register new stream epoch (simulating execution-account container restart).
+    book.register_active_stream(
+        environment="live",
+        account_label="primary",
+        stream_id="account_event_hub",
+        stream_epoch="epoch-2",
+    )
 
     evidence_new_epoch = ExecutionEvidence(
         evidence_id="evidence-snapshot-epoch-2",
@@ -112,13 +182,18 @@ async def test_equal_nonflat_quantity_cannot_prove_epoch_continuity() -> None:
 
     obs_2 = await book.observe(evidence_new_epoch)
 
-    assert isinstance(obs_2, WaitingForEvidence)
-    assert obs_2.reason is EvidencePendingReason.STREAM_RECOVERY_PROOF_REQUIRED
-    preserved = await book.read(
-        scope, stream_id="account_event_hub", stream_epoch="epoch-1"
+    assert not isinstance(obs_2, (EvidenceConflict, WaitingForEvidence))
+    adopted = await book.read(
+        scope, stream_id="account_event_hub", stream_epoch="epoch-2"
     )
-    assert preserved.projection_version == view_epoch_1.projection_version
-    assert preserved.total_quantity == view_epoch_1.total_quantity
+    assert adopted.stream_scope is not None
+    assert adopted.stream_scope.stream_epoch == "epoch-2"
+    assert adopted.total_quantity == view_epoch_1.total_quantity
+    assert len(adopted.batches) == len(view_epoch_1.batches) == 1
+    managed = managed_live_positions_from_views((adopted,))
+    assert len(managed) == 1
+    assert managed[0].symbol == "GRASSUSDT"
+    assert managed[0].quantity == Decimal("137.6")
 
 
 @pytest.mark.asyncio
@@ -213,48 +288,6 @@ async def test_durable_empty_flat_rollover_resets_sequence_monotonicity() -> Non
     must NOT compare the new stream's sequence (e.g. 11) against the old stream's
     prior sequence (e.g. 463).
     """
-    from contextlib import asynccontextmanager
-    from typing import Any
-
-    from crypto_momentum_lab.domain.execution.ports import ExecutionHeadSnapshot
-
-    class _DurableTx:
-        def __init__(self) -> None:
-            self.head: ExecutionHeadSnapshot | None = None
-
-        async def load_head(self, key: Any) -> ExecutionHeadSnapshot | None:
-            return self.head
-
-        async def load_checkpoint_from_head(self, **kwargs: Any) -> None:
-            return None
-
-        async def record_evidence(self, **kwargs: Any) -> bool:
-            return True
-
-        async def record_trade(self, **kwargs: Any) -> bool:
-            return True
-
-        async def persist_watermark(self, **kwargs: Any) -> None:
-            pass
-
-        async def persist_head(self, **kwargs: Any) -> int:
-            self.head = ExecutionHeadSnapshot(
-                revision=int(kwargs.get("expected_revision") or 0) + 1,
-                stream_id=kwargs["stream_id"],
-                stream_epoch=kwargs["stream_epoch"],
-                projection_version=kwargs["projection_version"],
-                state_payload=kwargs["state_payload"],
-            )
-            return self.head.revision
-
-    class _DurableUow:
-        def __init__(self) -> None:
-            self.tx = _DurableTx()
-
-        @asynccontextmanager
-        async def transaction(self, key: Any):
-            yield self.tx
-
     uow = _DurableUow()
     book = ExecutionBook(execution_unit_of_work=uow)
     book._persistence_failed = False

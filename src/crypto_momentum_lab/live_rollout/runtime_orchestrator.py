@@ -1401,6 +1401,7 @@ async def run_live_daemon(
                 and context_provider.is_symbol_rules_warmed(s)
             ),
             on_unwarmed_symbol=entry_runtime.trigger_symbol_warmup,
+            prepare_entry_symbol=entry_runtime.prepare_symbol_for_entry,
             strategy=strategy,
             risk_gateway=RiskGateway(
                 limits=FixedLiveLimits(

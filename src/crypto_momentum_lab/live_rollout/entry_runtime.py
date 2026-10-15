@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Protocol
 
 import structlog
@@ -87,7 +87,7 @@ class LiveEntryRuntime:
         self._entry_symbol_cache: LiveEntrySymbolCache | None = None
         self._trading_rules_warmer: TradingRulesWarmer | None = None
         self._last_entry_universe_symbols: frozenset[str] = frozenset()
-        self._warming_symbols: set[str] = set()
+        self._symbol_warmup_tasks: dict[str, asyncio.Task[None]] = {}
         if self._universe_repository is not None:
             universe_loader = self._load_entry_universe_data
             if ema_provider is not None:
@@ -116,24 +116,52 @@ class LiveEntryRuntime:
 
     def trigger_symbol_warmup(self, symbol: str) -> None:
         """Initialize symbol in background if not yet warmed."""
-        if symbol in self._warming_symbols:
-            return
-        self._warming_symbols.add(symbol)
+        self._start_symbol_warmup(symbol, datetime.now(UTC))
+
+    async def prepare_symbol_for_entry(
+        self,
+        symbol: str,
+        observed_at: datetime,
+    ) -> None:
+        """Wait for exchange configuration and trading rules before an entry."""
+        await self._start_symbol_warmup(symbol, observed_at)
+
+    def _start_symbol_warmup(
+        self,
+        symbol: str,
+        observed_at: datetime,
+    ) -> asyncio.Task[None]:
+        task = self._symbol_warmup_tasks.get(symbol)
+        if task is not None and not task.done():
+            return task
         task = asyncio.create_task(
-            self._warm_symbol_background(symbol),
+            self._warm_symbol_background(symbol, observed_at),
             name=f"live-symbol-warmup:{symbol}",
         )
+        self._symbol_warmup_tasks[symbol] = task
 
-        def _done(_: asyncio.Task[None]) -> None:
-            self._warming_symbols.discard(symbol)
+        def _done(completed: asyncio.Task[None]) -> None:
+            if self._symbol_warmup_tasks.get(symbol) is completed:
+                self._symbol_warmup_tasks.pop(symbol, None)
 
         task.add_done_callback(_done)
+        return task
 
-    async def _warm_symbol_background(self, symbol: str) -> None:
+    async def _warm_symbol_background(
+        self,
+        symbol: str,
+        observed_at: datetime,
+    ) -> None:
         try:
-            if self._margin_type is not None:
+            if (
+                self._margin_type is not None
+                and not self._client.is_entry_margin_type_configured(symbol)
+            ):
                 await self._client.warm_entry_margin_type([symbol])
-            if self._entry_leverage is not None:
+            if (
+                self._entry_leverage is not None
+                and not self._client.is_entry_leverage_configured(symbol)
+            ):
                 await self._client.warm_entry_leverage([symbol])
         except Exception as error:
             log.warning(
@@ -141,6 +169,16 @@ class LiveEntryRuntime:
                 symbol=symbol,
                 error_type=type(error).__name__,
             )
+            return
+        if self._trading_rules_warmer is not None:
+            try:
+                await self._trading_rules_warmer([symbol], observed_at)
+            except Exception as error:
+                log.warning(
+                    "live_entry_symbol_rules_warmup_failed",
+                    symbol=symbol,
+                    error_type=type(error).__name__,
+                )
 
     @property
     def entry_filter_cache_required(self) -> bool:

@@ -190,6 +190,9 @@ class LiveStrategyDaemon:
         ],
         is_symbol_warmed: Callable[[str], bool] | None = None,
         on_unwarmed_symbol: Callable[[str], None] | None = None,
+        prepare_entry_symbol: (
+            Callable[[str, datetime], Awaitable[None]] | None
+        ) = None,
         is_symbol_fact_ready: Callable[[str], bool] | None = None,
         is_account_facts_ready: Callable[[], bool] | None = None,
     ) -> None:
@@ -371,6 +374,7 @@ class LiveStrategyDaemon:
             signal_recorder=self._signal_recorder,
             trading_gate_state=lambda: self.trading_gate_state,
             is_symbol_entry_allowed=self.is_symbol_entry_allowed,
+            prepare_entry_symbol=prepare_entry_symbol,
         )
         self._market_loop = LiveMarketLoop(
             run_id=config.run_id,

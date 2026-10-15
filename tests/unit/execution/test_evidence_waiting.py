@@ -71,8 +71,10 @@ def snapshot(quantity: str):
     )
 
 
-@pytest.mark.parametrize("quantity,flat", [("5", False), ("100", False), ("0", True)])
-async def test_missing_epoch_proof_waits_and_preserves_committed_book(quantity, flat):
+@pytest.mark.parametrize("quantity,flat", [("100", False), ("0", True)])
+async def test_mismatching_or_unconfirmed_flat_epoch_proof_waits_and_preserves_book(
+    quantity, flat
+):
     book = await restored_book(flat=flat)
     before = await book.read(SCOPE, stream_id="hub", stream_epoch="epoch")
     head_revision = book._head_revisions.copy()
