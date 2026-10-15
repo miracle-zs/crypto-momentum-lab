@@ -36,24 +36,37 @@ class LiveRuntimeTasks:
     account_producer: asyncio.Task[None] | None = None
     shutdown: asyncio.Task[bool] | None = None
 
+    def critical_task_roles(self) -> tuple[tuple[asyncio.Task[Any], str], ...]:
+        """Return every task whose unexpected completion stops the worker."""
+
+        roles = [
+            (self.market, "market runtime"),
+            (self.account, "account event channel"),
+            (self.reconcile, "live order reconcile task"),
+        ]
+        optional_roles = (
+            (self.startup_market, "startup market buffer"),
+            (self.account_producer, "account stream producer"),
+            (self.risk_control, "risk-control channel"),
+            (self.quote, "market quote channel"),
+            (self.closed_candle, "closed candle exit channel"),
+            (self.grace_timeout, "grace timeout exit channel"),
+            (self.entry_filter_cache, "live entry filter cache task"),
+            (self.entry_symbol_cache, "live entry symbol cache task"),
+            (self.local_health, "local health monitor"),
+        )
+        roles.extend(
+            (task, label) for task, label in optional_roles if task is not None
+        )
+        return tuple(roles)
+
     def monitored(self) -> set[asyncio.Task[Any]]:
         """Return tasks whose unexpected completion stops the worker."""
 
-        return {
-            self.market,
-            self.account,
-            self.reconcile,
-            *(() if self.startup_market is None else (self.startup_market,)),
-            *(() if self.quote is None else (self.quote,)),
-            *(() if self.closed_candle is None else (self.closed_candle,)),
-            *(() if self.grace_timeout is None else (self.grace_timeout,)),
-            *(() if self.risk_control is None else (self.risk_control,)),
-            *(() if self.entry_filter_cache is None else (self.entry_filter_cache,)),
-            *(() if self.entry_symbol_cache is None else (self.entry_symbol_cache,)),
-            *(() if self.local_health is None else (self.local_health,)),
-            *(() if self.account_producer is None else (self.account_producer,)),
-            *(() if self.shutdown is None else (self.shutdown,)),
-        }
+        tasks = {task for task, _label in self.critical_task_roles()}
+        if self.shutdown is not None:
+            tasks.add(self.shutdown)
+        return tasks
 
     def all_tasks(self) -> tuple[asyncio.Task[Any], ...]:
         """Return every task that must be joined during shutdown."""
@@ -249,46 +262,35 @@ class LiveRuntimeSupervisor:
             )
 
     async def _raise_if_unexpected_completion(self) -> None:
-        checks = (
-            (self._tasks.startup_market, "startup market buffer"),
-            (self._tasks.account, "account event channel"),
-            (self._tasks.risk_control, "risk-control channel"),
-            (self._tasks.quote, "market quote channel"),
-            (self._tasks.closed_candle, "closed candle exit channel"),
-            (self._tasks.grace_timeout, "grace timeout exit channel"),
-            (self._tasks.reconcile, "live order reconcile task"),
-            (self._tasks.entry_filter_cache, "live entry filter cache task"),
-            (self._tasks.entry_symbol_cache, "live entry symbol cache task"),
-            (self._tasks.local_health, "local health monitor"),
-        )
-        for task, label in checks:
-            if task is not None and task.done():
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    log.error(
-                        "live_runtime_critical_task_cancelled",
-                        run_id=self._run_id,
-                        task_name=task.get_name(),
-                        task_role=label,
-                    )
-                    raise
-                except Exception as error:
-                    log.exception(
-                        "live_runtime_critical_task_failed",
-                        run_id=self._run_id,
-                        task_name=task.get_name(),
-                        task_role=label,
-                        error_type=type(error).__name__,
-                    )
-                    raise
+        for task, label in self._tasks.critical_task_roles():
+            if not task.done():
+                continue
+            try:
+                await task
+            except asyncio.CancelledError:
                 log.error(
-                    "live_runtime_critical_task_stopped",
+                    "live_runtime_critical_task_cancelled",
                     run_id=self._run_id,
                     task_name=task.get_name(),
                     task_role=label,
                 )
-                raise RuntimeError(f"{label} stopped unexpectedly")
+                raise
+            except Exception as error:
+                log.exception(
+                    "live_runtime_critical_task_failed",
+                    run_id=self._run_id,
+                    task_name=task.get_name(),
+                    task_role=label,
+                    error_type=type(error).__name__,
+                )
+                raise
+            log.error(
+                "live_runtime_critical_task_stopped",
+                run_id=self._run_id,
+                task_name=task.get_name(),
+                task_role=label,
+            )
+            raise RuntimeError(f"{label} stopped unexpectedly")
 
     @staticmethod
     def _cancel(task: asyncio.Task[Any] | None) -> None:

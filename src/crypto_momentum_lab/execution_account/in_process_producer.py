@@ -61,6 +61,7 @@ BaselinePublisher = Callable[
     [AccountSnapshot, AccountEvent], Awaitable[AccountSnapshot | None]
 ]
 SnapshotPersister = Callable[[AccountSnapshot, AccountEvent], Awaitable[None]]
+FillPersister = Callable[[tuple[AccountFillEvent, ...]], Awaitable[None]]
 
 
 def _is_nonzero_quantity(value: object) -> bool:
@@ -230,6 +231,7 @@ class InProcessAccountStreamProducer:
         expected_hedge_mode: bool = True,
         publish_baseline: BaselinePublisher | None = None,
         persist_snapshot: SnapshotPersister | None = None,
+        persist_fills: FillPersister | None = None,
     ) -> None:
         if require_live_stream and (websocket_url is None or not websocket_url.strip()):
             raise ValueError("websocket_url is required for a live account producer")
@@ -252,6 +254,7 @@ class InProcessAccountStreamProducer:
         self._expected_hedge_mode = expected_hedge_mode
         self._publish_baseline = publish_baseline
         self._persist_snapshot = persist_snapshot
+        self._persist_fills = persist_fills
         self._state: AccountUserDataState | None = None
         self._account_state = ExecutionAccountStatus.STARTING
         self._require_baseline = True
@@ -501,12 +504,11 @@ class InProcessAccountStreamProducer:
                 sequence=self._sequence,
             )
         self._source.publish(account_event)
-        if (
-            update.changed
-            and self._persist_snapshot is not None
-            and self._is_new_observation(update.snapshot.config.observed_at)
-        ):
+        snapshot_is_new = self._is_new_observation(update.snapshot.config.observed_at)
+        if update.changed and self._persist_snapshot is not None and snapshot_is_new:
             await self._schedule_persistence(update.snapshot, account_event)
+        elif account_event.fills and self._persist_fills is not None:
+            await self._schedule_fill_persistence(account_event)
 
     def _is_new_observation(self, observed_at: datetime) -> bool:
         """Reject older merged observations so they cannot roll state back."""
@@ -544,6 +546,23 @@ class InProcessAccountStreamProducer:
             or observed_at > self._last_persisted_observed_at
         ):
             self._last_persisted_observed_at = observed_at
+
+    async def _schedule_fill_persistence(self, event: AccountEvent) -> None:
+        persister = self._persist_fills
+        if persister is None:
+            return
+        try:
+            await persister(event.fills)
+        except Exception as error:
+            affected = tuple(sorted(set(event.symbols))) or ("*",)
+            log.error(
+                "in_process_account_fill_persist_failed",
+                account_label=self._account_label,
+                event_id=event.event_id,
+                error=str(error),
+            )
+            self._source._set_fact_gap(affected)
+            self._source._request_recovery(affected)
 
     async def run(self) -> None:
         if self._stream is None:

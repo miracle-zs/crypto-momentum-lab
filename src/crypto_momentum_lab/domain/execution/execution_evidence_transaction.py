@@ -84,7 +84,7 @@ async def observe_evidence_transaction(
         result = await observe_evidence_group(
             evidence,
             observe_one=book._observe_mutating,
-            forget_identity=book._seen_evidence_ids.discard,
+            forget_identity=book.forget_evidence_id,
         )
         book._context_revision += 1
         return result
@@ -137,13 +137,12 @@ async def observe_evidence_transaction(
                 evidence=evidence,
                 known_trade_ids=book._seen_trade_ids,
             )
-            matching_snapshot_with_fills = (
-                bool(evidence.fills or evidence.fill is not None)
-                and matching_nonflat_position_snapshot_matches(
-                    current_view=current_view,
-                    current_scope=current_scope,
-                    evidence=evidence,
-                )
+            matching_snapshot_with_fills = bool(
+                evidence.fills or evidence.fill is not None
+            ) and matching_nonflat_position_snapshot_matches(
+                current_view=current_view,
+                current_scope=current_scope,
+                evidence=evidence,
             )
             can_rollover, recovery_proof_required = evaluate_stream_rollover(
                 current_scope=current_scope,
@@ -405,7 +404,9 @@ async def observe_evidence_transaction(
                                 quantity=fill.quantity,
                                 price=fill.price,
                                 payload_digest=trade_payload_digest(fill),
-                                payload_digest_aliases=trade_payload_digest_aliases(fill),
+                                payload_digest_aliases=trade_payload_digest_aliases(
+                                    fill
+                                ),
                             ),
                         )
                     except DecisionCommitConflict as err:
@@ -529,7 +530,7 @@ async def observe_evidence_transaction(
                 result = await observe_evidence_group(
                     observation_evidence,
                     observe_one=candidate._observe_mutating,
-                    forget_identity=candidate._seen_evidence_ids.discard,
+                    forget_identity=candidate.forget_evidence_id,
                 )
                 if isinstance(result, (EvidenceConflict, WaitingForEvidence)):
                     raise AbortObservation(result)
@@ -667,7 +668,7 @@ async def observe_evidence_transaction(
                         .get_view(now=evidence.observed_at)
                         .projection_version
                     )
-                    book._seen_evidence_ids.add(
+                    book.remember_evidence_id(
                         _scoped_evidence_identity(scope, evidence.evidence_id)
                     )
                     if (

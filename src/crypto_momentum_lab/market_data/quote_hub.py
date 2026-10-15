@@ -244,10 +244,36 @@ class MarketQuoteHub:
                     subscriber.queue.get_nowait()
                 except asyncio.QueueEmpty:
                     break
+            latest_messages = self._latest_messages(subscriber)
+            if len(latest_messages) <= subscriber.queue.maxsize:
+                for latest_message in latest_messages:
+                    subscriber.queue.put_nowait(latest_message)
+                return
         try:
             subscriber.queue.put_nowait(message)
         except asyncio.QueueFull:
             self._dropped_quote_count += 1
+
+    def _latest_messages(self, subscriber: _Subscriber) -> tuple[str, ...]:
+        if subscriber.kind == "quote":
+            quotes = (
+                (symbol, quote)
+                for (environment, symbol), quote in self._latest.items()
+                if environment == subscriber.environment
+            )
+            return tuple(
+                encode_market_quote(quote)
+                for _symbol, quote in sorted(quotes, key=lambda item: item[0])
+            )
+        volumes = (
+            (symbol, volume)
+            for (environment, symbol), volume in self._latest_volumes.items()
+            if environment == subscriber.environment
+        )
+        return tuple(
+            encode_quote_volume(volume)
+            for _symbol, volume in sorted(volumes, key=lambda item: item[0])
+        )
 
     async def _handle_connection(self, connection: ServerConnection) -> None:
         subscriber: _Subscriber | None = None

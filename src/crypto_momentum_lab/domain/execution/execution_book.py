@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -127,6 +128,7 @@ from crypto_momentum_lab.domain.execution.trade_command import (
 log = structlog.get_logger(__name__)
 
 T = TypeVar("T")
+_RECENT_EVIDENCE_ID_LIMIT = 4096
 
 
 class ExecutionBook:
@@ -167,7 +169,7 @@ class ExecutionBook:
         self._position_write_locks: dict[str, asyncio.Lock] = {}
         self._requests_by_id: dict[str, ExecutionRequest] = {}
         self._receipts_by_id: dict[str, ExecutionReceipt] = {}
-        self._seen_evidence_ids: set[str] = set()
+        self._seen_evidence_ids: OrderedDict[str, None] = OrderedDict()
         self._seen_trade_ids: set[str] = set()
         self._outbox_by_command_id: dict[str, OutboxEntry] = {}
         self._command_reservations: dict[str, list[str]] = {}
@@ -239,6 +241,15 @@ class ExecutionBook:
         if clear_requests is not None:
             clear_requests()
         self._coordinator.clear_reservations()
+
+    def remember_evidence_id(self, identity: str) -> None:
+        self._seen_evidence_ids.pop(identity, None)
+        self._seen_evidence_ids[identity] = None
+        while len(self._seen_evidence_ids) > _RECENT_EVIDENCE_ID_LIMIT:
+            self._seen_evidence_ids.popitem(last=False)
+
+    def forget_evidence_id(self, identity: str) -> None:
+        self._seen_evidence_ids.pop(identity, None)
 
     def register_active_stream(
         self,
@@ -586,7 +597,7 @@ class ExecutionBook:
             dict(self._receipts_by_id) if key is None else self._receipts_by_id
         )
         candidate._seen_evidence_ids = (
-            set() if key is not None else set(self._seen_evidence_ids)
+            OrderedDict() if key is not None else OrderedDict(self._seen_evidence_ids)
         )
         candidate._seen_trade_ids = (
             set() if key is not None else set(self._seen_trade_ids)
@@ -689,7 +700,8 @@ class ExecutionBook:
         if candidate._receipts_by_id is not self._receipts_by_id:
             self._receipts_by_id.update(candidate._receipts_by_id)
         if key is None or self._execution_unit_of_work is None:
-            self._seen_evidence_ids.update(candidate._seen_evidence_ids)
+            for identity in candidate._seen_evidence_ids:
+                self.remember_evidence_id(identity)
             self._seen_trade_ids.update(candidate._seen_trade_ids)
         if candidate._active_streams is not self._active_streams:
             self._active_streams.update(candidate._active_streams)

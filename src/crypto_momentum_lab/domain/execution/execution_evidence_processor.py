@@ -349,7 +349,7 @@ async def mutate_evidence(
     ):
         book.remove_exit_boundaries(evidence.order_event.client_order_id)
 
-    execution_book._seen_evidence_ids.add(identity)
+    execution_book.remember_evidence_id(identity)
     updated_view = book.get_view(now=evidence.observed_at)
 
     # An external exit has no command or reservation lifecycle. Resolve

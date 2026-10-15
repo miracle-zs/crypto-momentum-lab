@@ -20,6 +20,15 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 import crypto_momentum_lab.live_rollout.order_identity_errors as order_identity_errors
 import crypto_momentum_lab.live_rollout.runtime_errors as runtime_errors
 import crypto_momentum_lab.live_rollout.session_state as session_state
+from crypto_momentum_lab.domain.account import (
+    ExecutionAccountProcessState,
+    ExecutionAccountStatus,
+)
+from crypto_momentum_lab.domain.account.models import (
+    AccountFillEvent,
+    AccountFillLoadScan,
+)
+from crypto_momentum_lab.domain.account.snapshot_models import AccountSnapshot
 from crypto_momentum_lab.domain.decision.decision_engine import (
     create_authoritative_async_decision_filter,
 )
@@ -40,6 +49,10 @@ from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
 from crypto_momentum_lab.domain.live_rollout import (
     LiveSessionState,
 )
+from crypto_momentum_lab.domain.live_rollout.authorization import (
+    CANCEL_ALL_OPEN_ENTRIES_COMMAND,
+    EMERGENCY_FLATTEN_COMMAND,
+)
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.runtime_state_models import RuntimeStateCursor
 from crypto_momentum_lab.domain.operational.runtime_metadata import (
@@ -59,6 +72,11 @@ from crypto_momentum_lab.domain.strategy.position_exit import (
     PositionExitPolicy,
 )
 from crypto_momentum_lab.domain.strategy.sizing import SymbolLotRules
+from crypto_momentum_lab.execution_account.balance_history import (
+    BalanceValue,
+    balance_value,
+    select_balance_history,
+)
 from crypto_momentum_lab.execution_account.binance.client import (
     BinanceUsdMPrivateReadClient,
     BinanceUsdMTradeClient,
@@ -69,6 +87,7 @@ from crypto_momentum_lab.execution_account.binance.user_data import (
 from crypto_momentum_lab.execution_account.expectations import (
     AccountPositionExpectationRegistry,
 )
+from crypto_momentum_lab.execution_account.fill_scan_plan import plan_fill_scan
 from crypto_momentum_lab.execution_account.hub import (
     AccountEvent,
     InProcessAccountEventSource,
@@ -77,49 +96,25 @@ from crypto_momentum_lab.execution_account.hub import (
 from crypto_momentum_lab.execution_account.in_process_producer import (
     InProcessAccountStreamProducer,
 )
-from crypto_momentum_lab.domain.live_rollout.authorization import (
-    CANCEL_ALL_OPEN_ENTRIES_COMMAND,
-    EMERGENCY_FLATTEN_COMMAND,
-)
-from crypto_momentum_lab.execution_account.risk_control_hub import (
-    RiskControlAction,
-    RiskControlEvent,
-)
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator,
-)
-from crypto_momentum_lab.health.resources import ProcessResourceSampler
-from crypto_momentum_lab.live_rollout.account_channel import LiveAccountEventRuntime
-from crypto_momentum_lab.live_rollout.closed_candle_feed import (
-    BinanceClosedCandle15mFeed,
-)
-from crypto_momentum_lab.domain.account import (
-    ExecutionAccountProcessState,
-    ExecutionAccountStatus,
-)
-from crypto_momentum_lab.domain.account.snapshot_models import AccountSnapshot
-from crypto_momentum_lab.domain.account.models import (
-    AccountFillLoadScan,
-)
-from crypto_momentum_lab.execution_account.fill_scan_plan import plan_fill_scan
-from crypto_momentum_lab.persistence.postgres.fill_recovery_sources import (
-    load_fill_recovery_sources,
-)
-from crypto_momentum_lab.execution_account.balance_history import (
-    BalanceValue,
-    balance_value,
-    select_balance_history,
 )
 from crypto_momentum_lab.execution_account.reconciliation_records import (
     position_state_details,
     reconciliation_run,
     user_data_reconciliation_id,
 )
+from crypto_momentum_lab.execution_account.risk_control_hub import (
+    RiskControlAction,
+    RiskControlEvent,
+)
 from crypto_momentum_lab.execution_account.sync_models import (
     ExecutionAccountSyncConfig,
 )
-from crypto_momentum_lab.persistence.postgres.account_repository import (
-    PostgresAccountRepository,
+from crypto_momentum_lab.health.resources import ProcessResourceSampler
+from crypto_momentum_lab.live_rollout.account_channel import LiveAccountEventRuntime
+from crypto_momentum_lab.live_rollout.closed_candle_feed import (
+    BinanceClosedCandle15mFeed,
 )
 from crypto_momentum_lab.live_rollout.control_plane import LiveControlPlaneRuntime
 from crypto_momentum_lab.live_rollout.daemon import LiveDaemonConfig, LiveStrategyDaemon
@@ -267,8 +262,14 @@ from crypto_momentum_lab.market_data.candle_source import (
     BinanceRestClosedCandle15mSource,
 )
 from crypto_momentum_lab.market_data.hub import WebSocketMarketStateSource
+from crypto_momentum_lab.persistence.postgres.account_repository import (
+    PostgresAccountRepository,
+)
 from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
     AsyncPostgresDecisionUnitOfWork,
+)
+from crypto_momentum_lab.persistence.postgres.fill_recovery_sources import (
+    load_fill_recovery_sources,
 )
 from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
     PostgresLiveRolloutRepository,
@@ -898,6 +899,13 @@ async def run_live_daemon(
                     )
                 )
 
+            async def _persist_in_process_fills(
+                fills: tuple[AccountFillEvent, ...],
+            ) -> None:
+                await account_repository.save_reconciliation_fills_and_cursors(
+                    fills=fills,
+                )
+
             in_process_producer = InProcessAccountStreamProducer(
                 client=read_client,
                 registry=in_process_registry,
@@ -912,6 +920,7 @@ async def run_live_daemon(
                 expected_hedge_mode=hedge_mode,
                 publish_baseline=_publish_in_process_baseline,
                 persist_snapshot=_persist_in_process_snapshot,
+                persist_fills=_persist_in_process_fills,
             )
         register_expected_entry = LiveEntryExpectationRegistrar(
             account_label=account_label,
