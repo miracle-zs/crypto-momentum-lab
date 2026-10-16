@@ -233,7 +233,7 @@ services:
       timeout: 15s
       retries: 2
       start_period: 2m
-    mem_limit: 192m
+    mem_limit: 256m
 
   live-strategy:
     <<: *app

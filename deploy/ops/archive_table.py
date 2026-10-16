@@ -26,7 +26,9 @@ point ``--host`` at one over ssh.
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
+import io
 import json
 import shlex
 import subprocess
@@ -240,9 +242,14 @@ def export_range(
             f"{retention_row_predicate(table)} "
             f'ORDER BY "{column}") t'
         )
-        # COPY text escapes JSON backslashes again. Decision archives are read
-        # directly as JSONL, so emit unescaped text with psql's tuples-only mode.
-        copy = select if table == "decision_traces" else f"COPY ({select}) TO STDOUT"
+        # COPY text escapes JSON backslashes again. CSV lets us stream each
+        # row through Python's CSV reader and recover the original JSON value.
+        # This keeps psql from buffering a complete PGresult for this table.
+        copy = (
+            f"COPY ({select}) TO STDOUT WITH (FORMAT csv)"
+            if table == "decision_traces"
+            else f"COPY ({select}) TO STDOUT"
+        )
     else:
         copy = (
             f'COPY (SELECT * FROM "{table}" '
@@ -258,16 +265,58 @@ def export_range(
             stderr=subprocess.PIPE,
         )
         assert psql.stdout is not None
-        compress = subprocess.Popen(  # noqa: S603
-            ["zstd", "-3", "-q", "-f", "-o", str(destination), "-"],
-            stdin=psql.stdout,
-            stdout=sink,
-            stderr=subprocess.PIPE,
-        )
-        psql.stdout.close()  # let psql see EPIPE if zstd dies first
-        _, compress_err = compress.communicate()
-        psql_err = psql.stderr.read() if psql.stderr else b""
-        psql.wait()
+        if table == "decision_traces":
+            compress = subprocess.Popen(  # noqa: S603
+                ["zstd", "-3", "-q", "-f", "-o", str(destination), "-"],
+                stdin=subprocess.PIPE,
+                stdout=sink,
+                stderr=subprocess.PIPE,
+            )
+            assert compress.stdin is not None
+            stream_error: Exception | None = None
+            try:
+                # COPY CSV is decoded one record at a time. Only one archive
+                # row is resident in Python, regardless of the range size.
+                text = io.TextIOWrapper(psql.stdout, encoding="utf-8", newline="")
+                for row in csv.reader(text):
+                    if len(row) != 1:
+                        raise ValueError(
+                            "decision archive COPY returned a row with "
+                            f"{len(row)} fields"
+                        )
+                    compress.stdin.write(row[0].encode("utf-8") + b"\n")
+            except (OSError, UnicodeError, csv.Error, ValueError) as error:
+                stream_error = error
+            finally:
+                try:
+                    psql.stdout.close()
+                except OSError as error:
+                    stream_error = stream_error or error
+                try:
+                    compress.stdin.close()
+                except OSError as error:
+                    stream_error = stream_error or error
+                compress.stdin = None
+
+            if stream_error is not None:
+                psql.terminate()
+                compress.terminate()
+            psql_err = psql.stderr.read() if psql.stderr else b""
+            psql.wait()
+            _, compress_err = compress.communicate()
+            if stream_error is not None:
+                raise SystemExit(f"decision archive stream failed: {stream_error}")
+        else:
+            compress = subprocess.Popen(  # noqa: S603
+                ["zstd", "-3", "-q", "-f", "-o", str(destination), "-"],
+                stdin=psql.stdout,
+                stdout=sink,
+                stderr=subprocess.PIPE,
+            )
+            psql.stdout.close()  # let psql see EPIPE if zstd dies first
+            _, compress_err = compress.communicate()
+            psql_err = psql.stderr.read() if psql.stderr else b""
+            psql.wait()
 
     if psql.returncode != 0:
         raise SystemExit(f"copy failed: {psql_err.decode(errors='replace').strip()}")

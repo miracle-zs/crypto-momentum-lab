@@ -41,6 +41,7 @@ from deploy.ops.maintenance_window import (
 _DEFAULT_SERVICES = (
     "postgres",
     "market-data",
+    "research-collector",
     "live-strategy",
 )
 _DEFAULT_INTERVAL_SECONDS = 60.0
@@ -6240,7 +6241,7 @@ def _discover_live_accounts(
 def _monitor_services_for_accounts(
     live_accounts: Sequence[tuple[str, str]],
 ) -> tuple[str, ...]:
-    services = ["postgres", "market-data"]
+    services = ["postgres", "market-data", "research-collector"]
     for account_label, _run_id in live_accounts:
         suffix = "" if account_label == "primary" else f"-{account_label}"
         services.append(f"live-strategy{suffix}")
