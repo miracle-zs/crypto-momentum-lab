@@ -48,6 +48,7 @@ _DEFAULT_CONTAINER = "crypto-momentum-lab-postgres-1"
 _DEFAULT_DATABASE = "cml"
 _DEFAULT_USER = "cml"
 _MAINTENANCE_PGOPTIONS = "-c work_mem=4MB -c temp_file_limit=256MB"
+_DECISION_ARCHIVE_CSV_FIELD_LIMIT = 64 * 1024 * 1024
 
 
 def retention_row_predicate(table: str, *, alias: str | None = None) -> str:
@@ -278,6 +279,10 @@ def export_range(
                 # COPY CSV is decoded one record at a time. Only one archive
                 # row is resident in Python, regardless of the range size.
                 text = io.TextIOWrapper(psql.stdout, encoding="utf-8", newline="")
+                # The stdlib default is 128 KiB, smaller than some serialized
+                # decision rows. This remains a per-field bound, not a result
+                # set buffer.
+                csv.field_size_limit(_DECISION_ARCHIVE_CSV_FIELD_LIMIT)
                 for row in csv.reader(text):
                     if len(row) != 1:
                         raise ValueError(
