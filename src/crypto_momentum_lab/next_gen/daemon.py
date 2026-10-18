@@ -93,9 +93,7 @@ class NextGenDaemon:
         5. 启动 TaskGroup 结构化并发协程 (WS 流、Keepalive、策略计算、退出评估)；
         6. 退出后释放资源并设置 STOPPED 状态。
         """
-        lock_key = compute_advisory_lock_key(
-            self.environment, self.account_label
-        )
+        lock_key = compute_advisory_lock_key(self.environment, self.account_label)
         async with self.db.acquire_dedicated_advisory_lock(lock_key):
             log.info(
                 "daemon_starting",
@@ -134,12 +132,8 @@ class NextGenDaemon:
                             stop_event=self.stop_event,
                         )
                     )
-                    tg.create_task(
-                        self.strategy_engine.run(stop_event=self.stop_event)
-                    )
-                    tg.create_task(
-                        self.exit_manager.run(stop_event=self.stop_event)
-                    )
+                    tg.create_task(self.strategy_engine.run(stop_event=self.stop_event))
+                    tg.create_task(self.exit_manager.run(stop_event=self.stop_event))
                     tg.create_task(self._wait_for_stop())
             finally:
                 self.state.set_system_mode(SystemMode.STOPPED)

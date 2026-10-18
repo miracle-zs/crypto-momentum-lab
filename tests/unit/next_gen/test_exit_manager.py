@@ -159,4 +159,3 @@ async def test_exit_manager_run_loop_lifecycle(exit_setup):
     asyncio.create_task(stop_soon())
     await exit_mgr.run(stop_event=stop_event)
     await exit_mgr.close()
-

@@ -1,8 +1,8 @@
 # Next-Gen 极简现代异步架构设计蓝图 (Clean-Slate Proposal)
 > **设计版本**: 2026.10-NextGen-Proposal-v2-Streamlined  
-> **设计基准**: Git 仓库真实源码（HEAD 提交 [`1ed9f185`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab)，Alembic 迁移 `20261015_0066_compact_execution_trade_identities`，Schema Version 4）  
+> **设计基准**: Git 仓库真实源码（Alembic 迁移 `20261018_0067_next_gen_execution_tables` 已合并，Schema Version 5，包含生产发单安全门、错误分类、WS 撤单成交核对与 Compose 部署定义）  
 > **架构定位**: 现代 Python 3.12+ 结构化异步、内存权威、低认知负荷的中低频量化交易执行引擎  
-> **多账户部署现状**: 线上 4 账户（`primary`、`account-2`、`account-3`、`account-4`）共用同一个 PostgreSQL 数据库实例（[`compose.live.accounts.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.live.accounts.yaml)）  
+> **多账户部署现状**: 线上 4 账户（`primary`、`account-2`、`account-3`、`account-4`）共用同一个 PostgreSQL 数据库实例（[`compose.live.accounts.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.live.accounts.yaml) / [`compose.next_gen.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.next_gen.yaml)）  
 
 ---
 
@@ -1020,8 +1020,8 @@ flowchart TD
 
 ### 附录 A：数据库平迁与旧表归档实施指南（Database Migration Runbook）
 
-> [!WARNING] **草案定位说明（Draft Specification）**
-> 本节给出的停机改名与 DDL 仅为存储层演进的设计草案，尚未包含应用代码同步切换、SQLAlchemy ORM 模型定义、Alembic 迁移版本链以及一键回滚应急预案。直接执行旧表改名会导致当前主干旧版本代码因找不到表而崩溃。在进入正式生产实施阶段前，必须输出完整的代码适配、灰度发布与双向回滚 Runbook。
+> [!NOTE] **实施状态说明（Implementation Status）**
+> Alembic 迁移版本链已正式合并 [`20261018_0067_next_gen_execution_tables.py`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/alembic/versions/20261018_0067_next_gen_execution_tables.py)，包含全新两张表结构定义（`live_position_batches`、`live_orders`）与历史表归档逻辑。对应的 SQLAlchemy 2.0 ORM 模型与仓储层已在 [`next_gen_models.py`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/persistence/postgres/next_gen_models.py) 和 [`PostgresTradingRepository`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/next_gen/persistence.py) 中全部实现并通过集成测试验证。上线时通过 [`compose.next_gen.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.next_gen.yaml) 即可启动。
 
 针对当前 10 张执行/决策持久化表，系统采取**一次性干净停机平迁移（Flat-State Clean Cutover）**：
 
@@ -1056,7 +1056,7 @@ ALTER TABLE IF EXISTS durable_policy_commits SET SCHEMA cml_legacy_execution_006
 
 ### 附录 B：新旧架构量化指标与设计目标对比
 
-| 评估维度 | 当前架构（As-Is 现状 - HEAD `1ed9f185`, Alembic 0066） | 下一代架构（To-Be 预期设计目标） | 预期收益与质变 |
+| 评估维度 | 旧版架构（Legacy Engine - Alembic 0066） | Next-Gen 架构（To-Be 现已实现 - Alembic 0067） | 实际收益与质变 |
 | :--- | :--- | :--- | :--- |
 | **核心调度代码量** | ~2,500 行 | ~600 行 | **预期大幅精简核心调度代码**，心智模型清晰 |
 | **状态机维度** | 3 维正交交叉 (Dispatch, Continuity, Session 6状态) | **1 个运行模式 (4态) + 1 个订单生命周期** | 彻底消除概念交叉与局部 Fact Gap 状态撕扯 |

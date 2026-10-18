@@ -29,6 +29,15 @@ class BinanceOrderRejectedError(Exception):
         self.message = message
 
 
+class BinanceNetworkError(Exception):
+    """网络超时或 5xx 异常，订单状态属于【存疑 (in-doubt)】，严禁判定为 REJECTED"""
+
+    def __init__(self, status_code: int | None, message: str) -> None:
+        super().__init__(f"Binance network/server error [{status_code}]: {message}")
+        self.status_code = status_code
+        self.message = message
+
+
 class BinanceRestClient:
     """下一代极简币安 USDⓈ-M 交易客户端"""
 
@@ -74,21 +83,37 @@ class BinanceRestClient:
         if signed:
             req_params = self.sign_params(req_params)
 
-        response = await self._client.request(
-            method=method,
-            url=url,
-            params=req_params if method.upper() in ("GET", "DELETE") else None,
-            data=req_params if method.upper() in ("POST", "PUT") else None,
-            headers=headers,
-        )
+        try:
+            response = await self._client.request(
+                method=method,
+                url=url,
+                params=req_params if method.upper() in ("GET", "DELETE") else None,
+                data=req_params if method.upper() in ("POST", "PUT") else None,
+                headers=headers,
+            )
+        except (httpx.TimeoutException, httpx.NetworkError) as e:
+            raise BinanceNetworkError(
+                status_code=None,
+                message=f"HTTP network/timeout failure: {e}",
+            ) from e
 
         if response.is_error:
+            # 5xx 服务端错误或网关超时：状态存疑，严禁标记为已拒单
+            if response.status_code >= 500:
+                raise BinanceNetworkError(
+                    status_code=response.status_code,
+                    message=f"Server returned {response.status_code}: {response.text}",
+                )
+
+            # 4xx 业务错误：确定被交易所拒单
             try:
                 err_data = response.json()
                 code = err_data.get("code", response.status_code)
                 msg = err_data.get("msg", response.text)
                 raise BinanceOrderRejectedError(code=code, message=msg)
-            except (ValueError, KeyError):
+            except BinanceOrderRejectedError:
+                raise
+            except Exception:
                 response.raise_for_status()
 
         return response.json()
@@ -182,9 +207,7 @@ class BinanceRestClient:
         res = await self._request("POST", "/fapi/v1/order", signed=True, params=params)
         return dict(res)
 
-    async def cancel_order(
-        self, symbol: str, client_order_id: str
-    ) -> dict[str, Any]:
+    async def cancel_order(self, symbol: str, client_order_id: str) -> dict[str, Any]:
         """DELETE /fapi/v1/order - 撤单"""
         params = {"symbol": symbol, "origClientOrderId": client_order_id}
         res = await self._request(
@@ -192,9 +215,7 @@ class BinanceRestClient:
         )
         return dict(res)
 
-    async def query_order(
-        self, symbol: str, client_order_id: str
-    ) -> dict[str, Any]:
+    async def query_order(self, symbol: str, client_order_id: str) -> dict[str, Any]:
         """GET /fapi/v1/order - 只读探针查单 (绝不回写内存)"""
         params = {"symbol": symbol, "origClientOrderId": client_order_id}
         res = await self._request("GET", "/fapi/v1/order", signed=True, params=params)
@@ -242,9 +263,13 @@ class BinanceUserDataStream:
                 "FILLED": OrderStatus.FILLED,
                 "CANCELED": OrderStatus.CANCELED,
                 "EXPIRED": OrderStatus.CANCELED,
+                "EXPIRED_IN_MATCH": OrderStatus.CANCELED,
                 "REJECTED": OrderStatus.REJECTED,
             }
-            mapped_status = status_mapping.get(status_str, OrderStatus.OPEN)
+            if status_str not in status_mapping:
+                log.warning("unknown_order_status_from_ws", raw_status=status_str)
+                return
+            mapped_status = status_mapping[status_str]
 
             await on_order_trade_update(
                 client_order_id=o.get("c", ""),

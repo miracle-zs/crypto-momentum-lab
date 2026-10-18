@@ -240,7 +240,9 @@ async def test_user_data_stream_physical_connect_and_stream_messages():
     await stream.connect(on_event=received_events.append)
     assert stream.is_connected is True
     assert status_changes == [True]
-    mock_connector.assert_awaited_once_with("wss://fstream.binance.com/ws/fake_listen_key")
+    mock_connector.assert_awaited_once_with(
+        "wss://fstream.binance.com/ws/fake_listen_key"
+    )
 
     stop_event = asyncio.Event()
     await stream.run_stream(stop_event=stop_event)

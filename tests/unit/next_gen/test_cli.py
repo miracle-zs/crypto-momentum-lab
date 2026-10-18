@@ -67,9 +67,7 @@ def test_cli_status_json() -> None:
         "crypto_momentum_lab.apps.next_gen.cli._resolve_repository",
         return_value=(repo, None),
     ):
-        result = runner.invoke(
-            app, ["status", "-e", "live", "-a", "a1", "--json"]
-        )
+        result = runner.invoke(app, ["status", "-e", "live", "-a", "a1", "--json"])
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert data["environment"] == "live"

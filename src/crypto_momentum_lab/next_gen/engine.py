@@ -101,12 +101,32 @@ class AccountState:
         log.warning("operator_reset_fault_state", account=self.account_label)
         self.recheck_system_mode()
 
+    def on_ws_status_change(self, connected: bool) -> None:
+        """WebSocket 连接状态变动回调：
+        若断连则立即降级进入 DEGRADED 阻断新开仓；
+        若重连成功则尝试触发状态收敛回到 RUNNING。
+        """
+        self.ws_connected = connected
+        log.info(
+            "ws_connection_status_changed",
+            connected=connected,
+            account=self.account_label,
+        )
+        if connected:
+            self.recheck_system_mode()
+        else:
+            if self.system_mode == SystemMode.RUNNING:
+                self.set_system_mode(SystemMode.DEGRADED)
+
+    def set_ws_connected(self, connected: bool) -> None:
+        self.on_ws_status_change(connected)
+
     def update_balances(
         self,
         balances: dict[str, Decimal],
         available_balance_snapshot: Decimal | None = None,
     ) -> None:
-        self.wallet_balances = dict(balances)
+        self.wallet_balances.update(balances)
         self.wallet_balance = self.wallet_balances.get("USDT", Decimal("0"))
         if available_balance_snapshot is not None:
             self.available_balance_snapshot = available_balance_snapshot
@@ -342,15 +362,6 @@ class AccountState:
             log.info("probe_order_result", id=order.client_order_id, result=str(res))
         except Exception as e:
             log.warning("probe_order_failed", id=order.client_order_id, err=str(e))
-
-    def on_ws_status_change(self, connected: bool) -> None:
-        self.ws_connected = connected
-        if not connected:
-            self.set_system_mode(SystemMode.DEGRADED)
-            log.warning("ws_disconnected_entering_degraded")
-        else:
-            log.info("ws_connected_online")
-            self.recheck_system_mode()
 
     def on_account_update(
         self,

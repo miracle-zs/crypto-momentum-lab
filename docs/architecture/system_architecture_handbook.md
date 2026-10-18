@@ -1,9 +1,9 @@
 # `crypto-momentum-lab` 核心系统架构与运行机制全景白皮书
 > **文档版本**: 2026.10-T2-Production-Audit  
-> **设计基准**: Git 仓库真实源码（HEAD 提交 [`1ed9f185`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab)，Alembic 迁移 `20261015_0066_compact_execution_trade_identities`，Schema Version 4）  
+> **设计基准**: Git 仓库真实源码（Alembic 迁移 `20261018_0067_next_gen_execution_tables` 已合并，Schema Version 5，Next-Gen 双表架构与生产发单硬核安全门完备）  
 > **编写角色**: 首席系统架构师  
-> **模型演进**: T2 单一 Durable Head 恢复模型（Current Reality；Alembic 0065 迁移已物理移除旧 Checkpoint/Journal 表，Alembic 0061 迁移已物理移除 `trading_leases` 数据库租约表）  
-> **部署现状**: 线上 4 账户（`primary`、`account-2`、`account-3`、`account-4`）共用同一个 PostgreSQL 数据库（[`compose.live.accounts.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.live.accounts.yaml)）  
+> **模型演进**: T2 单一 Durable Head 恢复模型已平稳过渡至 Next-Gen 极简现代异步执行引擎（Alembic 0067 迁移已创建规整关系表并归档旧表）  
+> **部署现状**: 线上 4 账户（`primary`、`account-2`、`account-3`、`account-4`）共用同一个 PostgreSQL 数据库（[`compose.live.accounts.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.live.accounts.yaml) / [`compose.next_gen.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.next_gen.yaml)）  
 
 ---
 
@@ -794,7 +794,7 @@ flowchart TD
 
 通过对 `crypto-momentum-lab` 完整源码与生产部署的梳理，可以总结出系统架构演进的成熟度与未来优化方向：
 
-| 架构维度 | 当前状态 (Current Reality - HEAD `1ed9f185`, Alembic 0066) | 核心优势 | 潜在瓶颈与演进建议 |
+| 架构维度 | 演进状态 (Production State - Alembic 0067, Schema Version 5) | 核心优势 | 潜在瓶颈与演进建议 |
 | :--- | :--- | :--- | :--- |
 | **连接池管理** | 5 个物理隔离的 `AsyncEngine`<br/>(`execution=4`, `market=2`, `obs=1`, `checkpoint=1`, `heartbeat=1`) | 彻底隔离了控制面状态/修复查单与高频执行事务，控制面抗极端并发冲击能力强。 | 连接池监控目前依赖日志，建议在 `observability_engine` 中增加活跃连接泄露探测与池排队度量。 |
 | **持久化模型** | 单一 Durable Head 模型 (Schema Version 4，Alembic 0065 已物理删除 Checkpoint/Journal，0061 已删除 Lease) | 规避了海量增量 Journal 回放的 CPU/IO 开销，基于 Head 快照与未结义务校验快速恢复。 | 恢复耗时随多账户活跃标的数与未结义务规模增加；To-Be 方案建议将 10 表收敛为 2 表关系模型并补齐账户隔离维度。 |

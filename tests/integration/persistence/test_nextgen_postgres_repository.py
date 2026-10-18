@@ -27,15 +27,11 @@ async def postgres_repo(
     # 清理测试数据
     async with engine.begin() as conn:
         await conn.execute(
-            text(
-                "DELETE FROM live_orders WHERE environment = :env;"
-            ),
+            text("DELETE FROM live_orders WHERE environment = :env;"),
             {"env": ENVIRONMENT},
         )
         await conn.execute(
-            text(
-                "DELETE FROM live_position_batches WHERE environment = :env;"
-            ),
+            text("DELETE FROM live_position_batches WHERE environment = :env;"),
             {"env": ENVIRONMENT},
         )
 
@@ -44,15 +40,11 @@ async def postgres_repo(
     finally:
         async with engine.begin() as conn:
             await conn.execute(
-                text(
-                    "DELETE FROM live_orders WHERE environment = :env;"
-                ),
+                text("DELETE FROM live_orders WHERE environment = :env;"),
                 {"env": ENVIRONMENT},
             )
             await conn.execute(
-                text(
-                    "DELETE FROM live_position_batches WHERE environment = :env;"
-                ),
+                text("DELETE FROM live_position_batches WHERE environment = :env;"),
                 {"env": ENVIRONMENT},
             )
         await engine.dispose()
@@ -150,9 +142,7 @@ async def test_postgres_save_and_retrieve_batch(
 
     await postgres_repo.async_save_batch(batch)
 
-    loaded = await postgres_repo.async_get_batch(
-        ENVIRONMENT, ACCOUNT_LABEL, "b_002"
-    )
+    loaded = await postgres_repo.async_get_batch(ENVIRONMENT, ACCOUNT_LABEL, "b_002")
     assert loaded is not None
     assert loaded.batch_id == "b_002"
     assert loaded.symbol == "ETHUSDT"

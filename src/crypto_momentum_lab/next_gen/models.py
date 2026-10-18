@@ -158,29 +158,34 @@ def generate_batch_id(
 ) -> str:
     """生成带多账户标签且严格控制在 <= 31 字符的 batch_id。
 
-    格式模板: {base_sym}_{side}_{ts}_{acc_tag}_{salt}_b{counter}
-    如: BTC_L_261018120035_a1_9f_b1 (27 字符)
-    对长标的 (如 1000LUNC)，若全长超过 31 字符，则自动裁剪时间戳或盐值保障总长 <= 31。
+    格式: {base_sym}_{side}_{ts}_{acc}_{salt}_{cnt}
+    始终保留随机盐与秒级时间戳，杜绝重启或并发时 ON CONFLICT 覆盖旧批次。
     """
-    base_sym = symbol.removesuffix("USDT")
+    raw_base = symbol.removesuffix("USDT")
     side = "L" if position_side.upper() == "LONG" else "S"
-    acc = account_label
-    s = salt if salt is not None else secrets.token_hex(1)
+    acc = account_label[:3]
+    s = salt if salt is not None else secrets.token_hex(1)  # 2 hex chars
     cnt = f"b{counter}"
 
     if timestamp_str is None:
-        ts = datetime.now(UTC).strftime("%y%m%d%H%M%S")
+        ts = datetime.now(UTC).strftime("%y%m%d%H%M%S")  # 12 位
     else:
         ts = timestamp_str
 
+    # 动态裁剪 base_sym，确保总长度严格 <= 31，且绝对保留随机盐与时间戳
+    fixed_len = len(side) + len(ts) + len(acc) + len(s) + len(cnt) + 5
+    max_base_len = 31 - fixed_len
+    base_sym = raw_base[: max(3, max_base_len)]
+
     candidate = f"{base_sym}_{side}_{ts}_{acc}_{s}_{cnt}"
     if len(candidate) > 31:
-        # 如果超出 31 字符，优先缩短时间戳到 YYMMDDHH (8位)
-        if len(ts) > 8:
-            ts = ts[:8]
-        candidate = f"{base_sym}_{side}_{ts}_{acc}_{cnt}"
-        if len(candidate) > 31:
-            candidate = f"{base_sym[:8]}_{side}_{ts[:6]}_{acc}_{cnt}"
+        excess = len(candidate) - 31
+        if len(base_sym) - excess >= 3:
+            base_sym = base_sym[:-excess]
+            candidate = f"{base_sym}_{side}_{ts}_{acc}_{s}_{cnt}"
+        else:
+            ts_short = ts[:-excess]
+            candidate = f"{base_sym}_{side}_{ts_short}_{acc}_{s}_{cnt}"
 
     assert len(candidate) <= 31, (
         f"生成的 batch_id 超过 31 字符限制: {candidate} ({len(candidate)})"

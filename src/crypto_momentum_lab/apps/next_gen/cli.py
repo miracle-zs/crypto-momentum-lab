@@ -54,11 +54,28 @@ def _resolve_db_url(database_url: str | None) -> str | None:
 def _resolve_credentials(
     api_key: str | None = None,
     api_secret: str | None = None,
+    account_label: str = "a1",
     dry_run: bool = False,
 ) -> tuple[str, str]:
     """Resolve Binance API credentials securely."""
     if api_key and api_secret:
         return api_key, api_secret
+
+    # Check account-specific env variables first (e.g. BINANCE_TRADE_API_KEY_ACCOUNT_2)
+    normalized = account_label.replace("-", "_").upper()
+    acct_key_env = f"BINANCE_TRADE_API_KEY_{normalized}"
+    acct_secret_env = f"BINANCE_TRADE_API_SECRET_{normalized}"
+    if acct_key_env in os.environ and acct_secret_env in os.environ:
+        try:
+            resolved = resolve_role_credentials(
+                BinanceCredentialRole.TRADE,
+                api_key_env=acct_key_env,
+                api_secret_env=acct_secret_env,
+            )
+            return resolved.api_key, resolved.api_secret
+        except (CredentialResolutionError, ValueError):
+            pass
+
     try:
         resolved = resolve_role_credentials(BinanceCredentialRole.TRADE)
         return resolved.api_key, resolved.api_secret
@@ -184,7 +201,12 @@ def run_command(
     ] = 1800.0,
 ) -> None:
     """Launch Next-Gen continuous trading daemon."""
-    key, secret = _resolve_credentials(api_key, api_secret, dry_run=dry_run)
+    key, secret = _resolve_credentials(
+        account_label=account_label,
+        api_key=api_key,
+        api_secret=api_secret,
+        dry_run=dry_run,
+    )
     repo, engine = _resolve_repository(database_url, dry_run=dry_run)
 
     symbol_list = (
@@ -255,7 +277,12 @@ def drain_command(
     ] = False,
 ) -> None:
     """Liquidate all active batches cleanly and halt trading."""
-    key, secret = _resolve_credentials(api_key, api_secret, dry_run=dry_run)
+    key, secret = _resolve_credentials(
+        account_label=account_label,
+        api_key=api_key,
+        api_secret=api_secret,
+        dry_run=dry_run,
+    )
     repo, engine = _resolve_repository(database_url, dry_run=dry_run)
 
     log.info(
@@ -391,9 +418,7 @@ def status_command(
     if json_output:
         typer.echo(json.dumps(status_data, indent=2))
     else:
-        typer.echo(
-            f"=== Next-Gen Status [{environment}:{account_label}] ==="
-        )
+        typer.echo(f"=== Next-Gen Status [{environment}:{account_label}] ===")
         typer.echo(f"Active Batches: {status_data['active_batches_count']}")
         for b in status_data["active_batches"]:
             typer.echo(

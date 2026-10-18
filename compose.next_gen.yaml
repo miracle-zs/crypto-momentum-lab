@@ -1,0 +1,100 @@
+name: crypto-momentum-lab-nextgen
+
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "10"
+
+x-nextgen-account-app: &nextgen-account-app
+  image: crypto-momentum-lab-app:${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
+  environment: &nextgen-account-environment
+    CML_DATABASE_URL: postgresql+asyncpg://cml:${CML_POSTGRES_PASSWORD:?set CML_POSTGRES_PASSWORD}@postgres:5432/cml
+    CML_EXECUTION_DATABASE_URL: ${CML_EXECUTION_DATABASE_URL:-}
+    CML_LOCAL_HEALTH_DIR: /run/cml/health
+    CML_CODE_COMMIT: ${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
+  entrypoint: ["cml-next-gen"]
+  restart: unless-stopped
+  stop_grace_period: 90s
+  logging: *default-logging
+
+x-nextgen-account-depends: &nextgen-account-depends
+  migrate:
+    condition: service_completed_successfully
+
+services:
+  nextgen-strategy-primary:
+    <<: *nextgen-account-app
+    profiles: ["nextgen", "live"]
+    container_name: cml-nextgen-strategy-primary
+    environment:
+      <<: *nextgen-account-environment
+      BINANCE_TRADE_API_KEY: ${BINANCE_TRADE_API_KEY_PRIMARY:-${BINANCE_TRADE_API_KEY:?set BINANCE_TRADE_API_KEY}}
+      BINANCE_TRADE_API_SECRET: ${BINANCE_TRADE_API_SECRET_PRIMARY:-${BINANCE_TRADE_API_SECRET:?set BINANCE_TRADE_API_SECRET}}
+    command:
+      - run
+      - --environment
+      - live
+      - --account-label
+      - primary
+      - --symbols
+      - ${NEXTGEN_SYMBOLS_PRIMARY:-BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,DOGEUSDT}
+      - --keepalive-interval
+      - "1800"
+
+  nextgen-strategy-account-2:
+    <<: *nextgen-account-app
+    profiles: ["nextgen", "live"]
+    container_name: cml-nextgen-strategy-account-2
+    environment:
+      <<: *nextgen-account-environment
+      BINANCE_TRADE_API_KEY: ${BINANCE_TRADE_API_KEY_ACCOUNT_2:?set BINANCE_TRADE_API_KEY_ACCOUNT_2}
+      BINANCE_TRADE_API_SECRET: ${BINANCE_TRADE_API_SECRET_ACCOUNT_2:?set BINANCE_TRADE_API_SECRET_ACCOUNT_2}
+    command:
+      - run
+      - --environment
+      - live
+      - --account-label
+      - account-2
+      - --symbols
+      - ${NEXTGEN_SYMBOLS_ACCOUNT_2:-BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,DOGEUSDT}
+      - --keepalive-interval
+      - "1800"
+
+  nextgen-strategy-account-3:
+    <<: *nextgen-account-app
+    profiles: ["nextgen", "live"]
+    container_name: cml-nextgen-strategy-account-3
+    environment:
+      <<: *nextgen-account-environment
+      BINANCE_TRADE_API_KEY: ${BINANCE_TRADE_API_KEY_ACCOUNT_3:?set BINANCE_TRADE_API_KEY_ACCOUNT_3}
+      BINANCE_TRADE_API_SECRET: ${BINANCE_TRADE_API_SECRET_ACCOUNT_3:?set BINANCE_TRADE_API_SECRET_ACCOUNT_3}
+    command:
+      - run
+      - --environment
+      - live
+      - --account-label
+      - account-3
+      - --symbols
+      - ${NEXTGEN_SYMBOLS_ACCOUNT_3:-BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,DOGEUSDT}
+      - --keepalive-interval
+      - "1800"
+
+  nextgen-strategy-account-4:
+    <<: *nextgen-account-app
+    profiles: ["nextgen", "live"]
+    container_name: cml-nextgen-strategy-account-4
+    environment:
+      <<: *nextgen-account-environment
+      BINANCE_TRADE_API_KEY: ${BINANCE_TRADE_API_KEY_ACCOUNT_4:?set BINANCE_TRADE_API_KEY_ACCOUNT_4}
+      BINANCE_TRADE_API_SECRET: ${BINANCE_TRADE_API_SECRET_ACCOUNT_4:?set BINANCE_TRADE_API_SECRET_ACCOUNT_4}
+    command:
+      - run
+      - --environment
+      - live
+      - --account-label
+      - account-4
+      - --symbols
+      - ${NEXTGEN_SYMBOLS_ACCOUNT_4:-BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,DOGEUSDT}
+      - --keepalive-interval
+      - "1800"
