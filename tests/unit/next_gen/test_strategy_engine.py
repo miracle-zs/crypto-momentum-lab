@@ -1,6 +1,5 @@
-from __future__ import annotations
-
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock
@@ -9,250 +8,198 @@ import pytest
 
 from crypto_momentum_lab.next_gen.engine import AccountState
 from crypto_momentum_lab.next_gen.executor import OrderExecutor
-from crypto_momentum_lab.next_gen.models import OrderStatus, SystemMode
+from crypto_momentum_lab.next_gen.models import OrderStatus, PositionBatch, SystemMode
 from crypto_momentum_lab.next_gen.persistence import InMemoryTradingRepository
-from crypto_momentum_lab.next_gen.strategy_engine import Bar15s, MomentumStrategyEngine
+from crypto_momentum_lab.next_gen.strategy_engine import MomentumStrategyEngine
+from crypto_momentum_lab.next_gen.symbol_rules import SymbolRulesRegistry
+from tests.unit.next_gen.factories import risk_config
+from tests.unit.strategies.order_flow_impulse.test_order_flow_impulse_runtime import (
+    _impulse_states,
+)
 
 
-def generate_bars(
-    symbol: str,
-    start_price: Decimal,
-    end_price: Decimal,
-    count: int = 150,
-) -> list[Bar15s]:
-    base_time = datetime.now(UTC) - timedelta(seconds=15 * count)
-    step = (end_price - start_price) / Decimal(count)
-    bars = []
-    current_p = start_price
-    for i in range(count):
-        close_t = base_time + timedelta(seconds=15 * (i + 1))
-        current_p += step
-        bars.append(
-            Bar15s(
-                symbol=symbol,
-                close_time=close_t,
-                open_price=current_p,
-                high_price=current_p * Decimal("1.001"),
-                low_price=current_p * Decimal("0.999"),
-                close_price=current_p,
-                volume=Decimal("10.0"),
-            )
-        )
-    return bars
+def exchange_info():
+    return {
+        "symbols": [
+            {
+                "symbol": symbol,
+                "status": "TRADING",
+                "quoteAsset": "USDT",
+                "contractType": "PERPETUAL",
+                "filters": [
+                    {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
+                    {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.001"},
+                    {"filterType": "MIN_NOTIONAL", "notional": "5"},
+                ],
+            }
+            for symbol in ["BTCUSDT", "ETHUSDT"]
+        ]
+    }
 
 
 @pytest.fixture
-def strategy_setup():
-    repo = InMemoryTradingRepository()
-    mock_rest = AsyncMock()
-    mock_rest.post_order.return_value = {"orderId": 12345}
-
-    state = AccountState(
-        environment="live",
-        account_label="a1",
-        db=repo,
-        rest_client=mock_rest,
+async def strategy_setup(account_config):
+    profile = replace(
+        account_config.strategy_inputs.profile,
+        impulse_window_buckets=3,
+        min_return_pct=Decimal("0.01"),
+        min_aggressive_imbalance=Decimal("0.5"),
+        min_notional_intensity=Decimal("2"),
+        min_notional_5m_vs_30m=Decimal("0"),
     )
+    config = replace(
+        account_config,
+        strategy_inputs=replace(
+            account_config.strategy_inputs,
+            profile=profile,
+        ),
+    )
+    repository = InMemoryTradingRepository()
+    repository.entry_symbols = frozenset({"BTCUSDT"})
+    rest = AsyncMock()
+    rest.fetch_exchange_info.return_value = exchange_info()
+    state = AccountState("live", "a1", repository, rest)
+    state.risk_config = risk_config(state.environment, state.account_label)
     state.set_system_mode(SystemMode.RUNNING)
-    state.ws_connected = True
-
-    executor = OrderExecutor(rest_client=mock_rest, state=state, db=repo)
-    engine = MomentumStrategyEngine(
-        state=state,
-        order_executor=executor,
-        symbols=["BTCUSDT", "ETHUSDT"],
-        min_warmup_bars=10,
-        momentum_window=10,
-        min_momentum_threshold=Decimal("0.01"),  # +1%
-        batch_notional=Decimal("100.0"),
-        symbol_cap=Decimal("1000.0"),
-        account_cap=Decimal("5000.0"),
-        eval_interval_sec=0.05,
+    state.set_ws_connected(True)
+    executor = OrderExecutor(rest, state, repository)
+    strategy = MomentumStrategyEngine(
+        state,
+        executor,
+        config,
+        market_environment="research",
+        symbols=["BTCUSDT"],
+        symbol_rules=SymbolRulesRegistry(),
     )
-    return state, executor, engine, mock_rest
-
-
-@pytest.mark.asyncio
-async def test_strategy_warmup_and_bar_buffering(strategy_setup):
-    _, _, engine, _ = strategy_setup
-    bars = generate_bars("BTCUSDT", Decimal("50000"), Decimal("55000"), count=25)
-    engine.feed_bars(bars)
-
-    assert len(engine.bar_buffers["BTCUSDT"]) == 20  # clamped to 2 * min_warmup_bars
-    assert engine.latest_prices["BTCUSDT"] == bars[-1].close_price
-    await engine.warmup_market_data()
-
-
-def test_strategy_momentum_calculation(strategy_setup):
-    _, _, engine, _ = strategy_setup
-    # 10 bars from 100 to 110 (+10% gain)
-    bars = generate_bars("BTCUSDT", Decimal("100"), Decimal("110"), count=11)
-    engine.feed_bars(bars)
-
-    mom = engine.calculate_momentum("BTCUSDT")
-    assert mom is not None
-    assert mom > Decimal("0.07")
-
-
-@pytest.mark.asyncio
-async def test_strategy_evaluate_generates_and_submits_entry_order(strategy_setup):
-    state, executor, engine, mock_rest = strategy_setup
-    try:
-        # BTC up 10%
-        btc_bars = generate_bars(
-            "BTCUSDT", Decimal("50000"), Decimal("55000"), count=15
+    end = datetime.now(UTC)
+    original = _impulse_states()
+    shift = end - original[-1].bucket_end
+    states = tuple(
+        replace(
+            row,
+            bucket_start=row.bucket_start + shift,
+            bucket_end=row.bucket_end + shift,
         )
-        # ETH up 2%
-        eth_bars = generate_bars("ETHUSDT", Decimal("3000"), Decimal("3060"), count=15)
-        engine.feed_bars(btc_bars)
-        engine.feed_bars(eth_bars)
-
-        submitted = await engine.evaluate_and_generate_orders()
-        assert len(submitted) == 1  # top_n=1, BTC chosen
-        order_id = submitted[0]
-        assert "BTC" in order_id
-        assert order_id in state.orders
-
-        order = state.orders[order_id]
-        assert order.status == OrderStatus.SUBMITTED
-        assert order.symbol == "BTCUSDT"
-        assert order.position_side == "LONG"
-        mock_rest.post_order.assert_awaited_once()
-
-        # Duplicate check: running again shouldn't re-submit for BTC
-        second_run = await engine.evaluate_and_generate_orders()
-        assert len(second_run) == 0
+        for row in original
+    )
+    repository.market_states = list(states[:-1])
+    await strategy.warmup_market_data(rest, repository)
+    strategy.market_connected = True
+    try:
+        yield state, repository, rest, executor, strategy, states[-1]
     finally:
         await executor.close()
 
 
 @pytest.mark.asyncio
-async def test_strategy_notional_cap_rejects_oversized_intent(strategy_setup):
-    state, executor, engine, mock_rest = strategy_setup
-    try:
-        # Set symbol cap very low so $100 notional exceeds it
-        engine.symbol_cap = Decimal("50.0")
-        btc_bars = generate_bars(
-            "BTCUSDT", Decimal("50000"), Decimal("55000"), count=15
-        )
-        engine.feed_bars(btc_bars)
-
-        submitted = await engine.evaluate_and_generate_orders()
-        assert len(submitted) == 0
-        mock_rest.post_order.assert_not_awaited()
-    finally:
-        await executor.close()
+async def test_original_order_flow_signal_submits_configured_limit(strategy_setup):
+    state, _, rest, _, strategy, last = strategy_setup
+    result = await strategy.on_market_state(last)
+    assert len(result) == 1
+    order = state.orders[result[0]]
+    assert order.order_type == "LIMIT"
+    assert order.price == Decimal("102")
+    assert order.quantity == Decimal("0.980")
+    assert strategy.account_config.strategy_inputs.entry_limit_ttl_seconds == 900
+    rest.post_order.assert_awaited_once()
+    assert await strategy.on_market_state(last) == []
 
 
 @pytest.mark.asyncio
-async def test_strategy_loop_lifecycle_with_stop_event(strategy_setup):
-    _, executor, engine, _ = strategy_setup
-    try:
-        stop_event = asyncio.Event()
-
-        async def stop_soon():
-            await asyncio.sleep(0.02)
-            stop_event.set()
-
-        asyncio.create_task(stop_soon())
-        await engine.run(stop_event=stop_event)
-    finally:
-        await executor.close()
-
-
-@pytest.mark.asyncio
-async def test_strategy_entry_ttl_cancellation(strategy_setup):
-    state, executor, engine, mock_rest = strategy_setup
-    try:
-        # Create an entry order that is 70 seconds old (exceeding entry_ttl_sec = 60s)
-        order = state.create_entry_order(
-            symbol="BTCUSDT",
-            position_side="LONG",
-            quantity=Decimal("0.1"),
-            price=Decimal("60000"),
-            batch_id="b_btc_01",
-        )
-        order.created_at = datetime.now(UTC) - timedelta(seconds=70)
-        assert not order.is_terminal
-
-        # Run cancel_stale_entry_orders
-        await engine.cancel_stale_entry_orders()
-        mock_rest.cancel_order.assert_awaited_once_with(
-            symbol="BTCUSDT",
-            client_order_id=order.client_order_id,
-        )
-    finally:
-        await executor.close()
+@pytest.mark.parametrize("exit_started", [False, True])
+async def test_entry_batch_merges_until_first_exit(strategy_setup, exit_started):
+    state, _, _, _, strategy, last = strategy_setup
+    batch = PositionBatch(
+        "live",
+        "a1",
+        "existing",
+        "BTCUSDT",
+        "LONG",
+        Decimal("1"),
+        Decimal("100"),
+        last.bucket_end - timedelta(minutes=5),
+        exit_order_submitted_at=datetime.now(UTC) if exit_started else None,
+    )
+    state.batches[batch.batch_id] = batch
+    result = await strategy.on_market_state(last)
+    assert len(result) == 1
+    assert (state.orders[result[0]].batch_id == batch.batch_id) is not exit_started
 
 
 @pytest.mark.asyncio
-async def test_strategy_skip_entry_if_symbol_has_active_batch(strategy_setup):
-    state, executor, engine, mock_rest = strategy_setup
-    try:
-        from crypto_momentum_lab.next_gen.models import PositionBatch
-
-        # Add an active batch for BTCUSDT
-        active_batch = PositionBatch(
-            environment="live",
-            account_label="a1",
-            batch_id="b_btc_existing",
-            symbol="BTCUSDT",
-            position_side="LONG",
-            quantity=Decimal("0.5"),
-            entry_price=Decimal("60000"),
-            entry_bar_time=datetime.now(UTC),
-            status="ACTIVE",
+@pytest.mark.parametrize("reason", ["stale", "disconnected", "outside_universe"])
+async def test_signal_cannot_bypass_admission(strategy_setup, reason):
+    _, repository, rest, _, strategy, last = strategy_setup
+    if reason == "stale":
+        # The strategy can process history, but may not trade its old signal.
+        shift = timedelta(days=1)
+        strategy.runtime.clear_market_state_buffers()
+        strategy._last_state_at.clear()
+        history = tuple(
+            replace(
+                row,
+                bucket_start=row.bucket_start - shift,
+                bucket_end=row.bucket_end - shift,
+            )
+            for row in repository.market_states
         )
-        state.batches[active_batch.batch_id] = active_batch
-
-        # Feed strong positive momentum for BTCUSDT
-        btc_bars = generate_bars(
-            "BTCUSDT", Decimal("50000"), Decimal("55000"), count=15
+        for row in history:
+            strategy.runtime.warm_market_state(row)
+        last = replace(
+            last,
+            bucket_start=last.bucket_start - shift,
+            bucket_end=last.bucket_end - shift,
         )
-        engine.feed_bars(btc_bars)
-
-        # BTCUSDT should be skipped because of active batch concurrency guard
-        submitted = await engine.evaluate_and_generate_orders()
-        assert len(submitted) == 0
-        mock_rest.post_order.assert_not_awaited()
-    finally:
-        await executor.close()
+    elif reason == "disconnected":
+        strategy.market_connected = False
+    else:
+        repository.entry_symbols = frozenset()
+    assert await strategy.on_market_state(last) == []
+    rest.post_order.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_strategy_warmup_from_db_without_false_kline_fallback(
-    strategy_setup,
-):
-    _, executor, engine, mock_rest = strategy_setup
-    try:
-        engine.min_warmup_bars = 4
-        mock_db = AsyncMock()
-        mock_db.async_get_historical_15s_bars.return_value = {
-            "BTCUSDT": [
-                {
-                    "bucket_end": datetime.now(UTC) - timedelta(seconds=30),
-                    "open_price": 50000,
-                    "high_price": 50100,
-                    "low_price": 49900,
-                    "close_price": 50050,
-                    "trade_notional": 1000,
-                },
-                {
-                    "bucket_end": datetime.now(UTC) - timedelta(seconds=15),
-                    "open_price": 50050,
-                    "high_price": 50200,
-                    "low_price": 50000,
-                    "close_price": 50150,
-                    "trade_notional": 1200,
-                },
-            ],
-            "ETHUSDT": [],
-        }
+async def test_entry_ttl_uses_account_configuration(strategy_setup):
+    state, _, rest, _, strategy, _ = strategy_setup
+    order = state.create_entry_order(
+        "BTCUSDT", "LONG", Decimal("1"), Decimal("100"), "ttl"
+    )
+    order.created_at = datetime.now(UTC) - timedelta(seconds=70)
+    await strategy.cancel_stale_entry_orders()
+    rest.cancel_order.assert_not_awaited()
+    order.created_at = datetime.now(UTC) - timedelta(seconds=901)
 
-        await engine.warmup_market_data(rest_client=mock_rest, db=mock_db)
-        mock_db.async_get_historical_15s_bars.assert_awaited_once()
-        # Verify fetch_klines was NOT invoked to falsely fabricate 15s bars
-        mock_rest.fetch_klines.assert_not_awaited()
-        assert len(engine.bar_buffers["BTCUSDT"]) == 2
-    finally:
-        await executor.close()
+    async def cancelled(**kwargs):
+        await state.on_order_trade_update(
+            order.client_order_id,
+            order.symbol,
+            order.position_side,
+            order.side,
+            OrderStatus.CANCELED,
+            Decimal("0"),
+            Decimal("0"),
+            Decimal("0"),
+            Decimal("0"),
+        )
+
+    rest.cancel_order.side_effect = cancelled
+    await strategy.cancel_stale_entry_orders()
+    rest.cancel_order.assert_awaited_once()
+    rest.query_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_strategy_task_stops(strategy_setup):
+    *_, strategy, _ = strategy_setup
+    stopped = asyncio.Event()
+    stopped.set()
+    await strategy.run(stopped)
+
+
+@pytest.mark.asyncio
+async def test_active_halt_is_checked_before_submitting_signal(strategy_setup):
+    state, repository, rest, _, strategy, last = strategy_setup
+    repository.halted_accounts.add((state.environment, state.account_label))
+    assert await strategy.on_market_state(last) == []
+    assert state.entry_halted
+    rest.post_order.assert_not_awaited()

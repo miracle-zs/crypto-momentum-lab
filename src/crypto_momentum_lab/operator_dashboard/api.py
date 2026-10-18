@@ -295,6 +295,8 @@ class _ResponseCache:
 
 def create_dashboard_app(
     *,
+    execution_engine: str = "legacy",
+    runtime_manifest: Path | None = None,
     database_url: str | None = None,
     queries: DashboardQueryProtocol | None = None,
     auth_username: str | None = None,
@@ -322,8 +324,19 @@ def create_dashboard_app(
     resolved_queries = queries
     if resolved_queries is None and database_url is not None:
         engine = create_dashboard_database_engine(database_url)
+        nextgen_accounts = None
+        if execution_engine == "nextgen":
+            from crypto_momentum_lab.live_rollout.runtime_manifest import (
+                load_live_runtime_manifest,
+            )
+
+            if runtime_manifest is None:
+                raise ValueError("NextGen dashboard requires a runtime manifest path")
+            nextgen_accounts = load_live_runtime_manifest(runtime_manifest).accounts
         resolved_queries = DashboardQueries(
             async_sessionmaker(engine, expire_on_commit=False),
+            execution_engine=execution_engine,
+            nextgen_accounts=nextgen_accounts,
             paper_run_ids=paper_run_ids,
             live_cash_flow_adjustments=live_cash_flow_adjustments,
             common_equity_start_at=common_equity_start_at,

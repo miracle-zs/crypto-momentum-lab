@@ -5,15 +5,18 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
 from crypto_momentum_lab.next_gen.engine import AccountState
 from crypto_momentum_lab.next_gen.executor import OrderExecutor
 from crypto_momentum_lab.next_gen.exit_manager import ExitManager
 from crypto_momentum_lab.next_gen.models import (
+    OrderStatus,
     PositionBatch,
     SystemMode,
     generate_batch_id,
 )
 from crypto_momentum_lab.next_gen.persistence import InMemoryTradingRepository
+from tests.unit.next_gen.factories import risk_config, symbol_rules
 
 
 @pytest.fixture
@@ -31,10 +34,19 @@ async def exit_setup():
         db=repo,
         rest_client=mock_rest,
     )
+    state.risk_config = risk_config(state.environment, state.account_label)
     state.set_system_mode(SystemMode.RUNNING)
     state.ws_connected = True
     executor = OrderExecutor(rest_client=mock_rest, state=state, db=repo)
-    exit_mgr = ExitManager(rest_client=mock_rest, state=state, executor=executor)
+    exit_mgr = ExitManager(
+        rest_client=mock_rest,
+        state=state,
+        executor=executor,
+        symbol_rules=symbol_rules(),
+        grace_period_sec=7200,
+        decision_profit_pct=Decimal("0.001"),
+        grace_profit_pct=Decimal("0.0088"),
+    )
     try:
         yield state, repo, mock_rest, exit_mgr
     finally:
@@ -67,6 +79,21 @@ async def test_exit_manager_grace_timeout_cancels_limit_and_sweeps_market(exit_s
     )
     state.batches[batch_id] = batch
 
+    async def observe_cancel(**params):
+        order = state.orders[params["client_order_id"]]
+        await state.on_order_trade_update(
+            order.client_order_id,
+            order.symbol,
+            order.position_side,
+            order.side,
+            OrderStatus.CANCELED,
+            Decimal("0"),
+            Decimal("0"),
+            Decimal("0"),
+            Decimal("0"),
+        )
+
+    mock_rest.cancel_order.side_effect = observe_cancel
     # Execute exit with 0.05s grace timeout
     await exit_mgr.execute_batch_exit(
         batch_id=batch_id,
@@ -93,7 +120,7 @@ async def test_exit_manager_grace_timeout_cancels_limit_and_sweeps_market(exit_s
 
 
 @pytest.mark.asyncio
-async def test_exit_manager_evaluate_holding_expired(exit_setup):
+async def test_exit_manager_elapsed_time_alone_does_not_trigger_exit(exit_setup):
     state, repo, mock_rest, exit_mgr = exit_setup
     mock_rest.post_order.return_value = {"orderId": 111}
     mock_rest.cancel_order.return_value = {"orderId": 111, "status": "CANCELED"}
@@ -115,9 +142,10 @@ async def test_exit_manager_evaluate_holding_expired(exit_setup):
     state.batches[batch_id] = batch
 
     scheduled = exit_mgr.evaluate_active_batches()
-    assert scheduled == [batch_id]
+    assert scheduled == []
 
     # Clean up background tasks
+    mock_rest.query_order.assert_not_awaited()
     await exit_mgr.close()
 
 
@@ -146,9 +174,12 @@ async def test_exit_manager_evaluate_drain_triggers_immediately(exit_setup):
 
     # Admin Drains account
     state.is_draining = True
-    scheduled = exit_mgr.evaluate_active_batches()
+    scheduled = exit_mgr.evaluate_active_batches(
+        current_prices={"BTCUSDT": Decimal("65000")}
+    )
     assert scheduled == [batch_id]
 
+    mock_rest.query_order.assert_not_awaited()
     await exit_mgr.close()
 
 
@@ -163,6 +194,7 @@ async def test_exit_manager_run_loop_lifecycle(exit_setup):
 
     asyncio.create_task(stop_soon())
     await exit_mgr.run(stop_event=stop_event)
+    mock_rest.query_order.assert_not_awaited()
     await exit_mgr.close()
 
 
@@ -207,6 +239,7 @@ async def test_exit_manager_cancels_unfilled_entry_orders_before_exit(exit_setup
         symbol="BTCUSDT",
         client_order_id=entry_order.client_order_id,
     )
+    mock_rest.query_order.assert_not_awaited()
     await exit_mgr.close()
 
 
@@ -246,6 +279,7 @@ async def test_exit_manager_refuses_market_sweep_if_cancel_unconfirmed(exit_setu
     assert mock_rest.post_order.call_count == 1
     # System must fail-closed into DEGRADED to protect from oversell/reversal
     assert state.system_mode == SystemMode.DEGRADED
+    mock_rest.query_order.assert_not_awaited()
     await exit_mgr.close()
 
 
@@ -282,6 +316,7 @@ async def test_exit_manager_refuses_market_sweep_on_unknown_status(exit_setup):
     # Must NOT assume CANCELED! Market sweep must be refused!
     assert mock_rest.post_order.call_count == 1
     assert state.system_mode == SystemMode.DEGRADED
+    mock_rest.query_order.assert_not_awaited()
     await exit_mgr.close()
 
 
@@ -315,4 +350,85 @@ async def test_exit_manager_refuses_market_sweep_on_invalid_payload(exit_setup):
     # Must NOT assume CANCELED!
     assert mock_rest.post_order.call_count == 1
     assert state.system_mode == SystemMode.DEGRADED
+    mock_rest.query_order.assert_not_awaited()
     await exit_mgr.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "candle_offset, open_price, close_price, expected",
+    [(0, "100", "90", False), (15, "100", "90", True), (15, "90", "100", False)],
+)
+async def test_exit_requires_eligible_formal_candle(
+    exit_setup, candle_offset, open_price, close_price, expected
+):
+    state, _, _, manager = exit_setup
+    entry = datetime(2026, 10, 18, 12, 5, tzinfo=UTC)
+    batch = PositionBatch(
+        "live",
+        "a1",
+        "candle_batch",
+        "BTCUSDT",
+        "LONG",
+        Decimal("1"),
+        Decimal("100"),
+        entry,
+    )
+    state.batches[batch.batch_id] = batch
+    start = entry.replace(minute=0) + timedelta(minutes=candle_offset)
+    candle = ClosedCandle15m(
+        "BTCUSDT",
+        start,
+        start + timedelta(minutes=15),
+        Decimal(open_price),
+        Decimal(close_price),
+    )
+    result = manager.evaluate_active_batches(
+        now=candle.candle_end,
+        closed_candle=candle,
+        current_prices={"BTCUSDT": candle.close_price},
+    )
+    assert result == ([batch.batch_id] if expected else [])
+    await manager.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reference_price, immediate", [("99", False), ("101", True)])
+async def test_candle_exit_uses_configured_profit_targets(
+    exit_setup, reference_price, immediate
+):
+    state, _, _, manager = exit_setup
+    entry = datetime(2026, 10, 18, 12, 5, tzinfo=UTC)
+    batch = PositionBatch(
+        "live",
+        "a1",
+        "profit_target",
+        "BTCUSDT",
+        "LONG",
+        Decimal("1"),
+        Decimal("100"),
+        entry,
+    )
+    state.batches[batch.batch_id] = batch
+    start = entry.replace(minute=15)
+    candle = ClosedCandle15m(
+        "BTCUSDT",
+        start,
+        start + timedelta(minutes=15),
+        Decimal("102"),
+        Decimal(reference_price),
+    )
+    execute = AsyncMock()
+    manager.execute_batch_exit = execute
+    manager.evaluate_active_batches(
+        now=candle.candle_end,
+        closed_candle=candle,
+        current_prices={"BTCUSDT": candle.close_price},
+    )
+    await asyncio.sleep(0)
+    execute.assert_awaited_once_with(
+        batch_id=batch.batch_id,
+        limit_price=Decimal("100.8800"),
+        immediate=immediate,
+    )
+    await manager.close()

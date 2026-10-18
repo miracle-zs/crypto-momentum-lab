@@ -4,17 +4,21 @@ import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import partial
 from typing import Any
 
 import structlog
 
-from crypto_momentum_lab.next_gen.client import (
-    BinanceOrderRejectedError,
-    BinanceRestClient,
+from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
+from crypto_momentum_lab.domain.strategy.models import StrategySide
+from crypto_momentum_lab.domain.strategy.position_exit import (
+    PositionExitPolicy,
+    position_exit_reason,
 )
+from crypto_momentum_lab.next_gen.client import BinanceRestClient
 from crypto_momentum_lab.next_gen.engine import AccountState
 from crypto_momentum_lab.next_gen.executor import OrderExecutor
-from crypto_momentum_lab.next_gen.models import Order, OrderStatus, SystemMode
+from crypto_momentum_lab.next_gen.models import Order, SystemMode
 from crypto_momentum_lab.next_gen.symbol_rules import SymbolRulesRegistry
 
 log = structlog.get_logger("exit_manager")
@@ -29,17 +33,20 @@ class ExitManager:
         state: AccountState,
         executor: OrderExecutor | None = None,
         symbol_rules: SymbolRulesRegistry | None = None,
-        grace_period_sec: float = 7200.0,
-        max_holding_sec: float = 900.0,
+        *,
+        grace_period_sec: float,
+        decision_profit_pct: Decimal,
+        grace_profit_pct: Decimal,
         eval_interval_sec: float = 1.0,
     ) -> None:
         self._rest = rest_client
         self._state = state
         self.symbol_rules = symbol_rules or SymbolRulesRegistry()
         self.grace_period_sec = grace_period_sec
-        self.max_holding_sec = max_holding_sec
+        self.decision_profit_pct = decision_profit_pct
+        self.grace_profit_pct = grace_profit_pct
         self.eval_interval_sec = eval_interval_sec
-        self._active_exit_tasks: set[asyncio.Task[Any]] = set()
+        self._active_exit_tasks: dict[str, asyncio.Task[Any]] = {}
 
         if executor is not None:
             self._executor = executor
@@ -48,26 +55,12 @@ class ExitManager:
         else:
             raise ValueError("必须提供 executor 或 state.db 不能为空")
 
-    async def _wait_for_order_terminal(
-        self, order: Order, timeout_sec: float = 5.0
-    ) -> None:
-        """等待 WebSocket 推流将订单推进至终态 (CANCELED/FILLED/REJECTED)"""
-        start = asyncio.get_running_loop().time()
-        while not order.is_terminal:
-            if asyncio.get_running_loop().time() - start >= timeout_sec:
-                log.warning(
-                    "timeout_waiting_for_order_terminal_from_ws",
-                    order_id=order.client_order_id,
-                    status=order.status.name,
-                )
-                break
-            await asyncio.sleep(0.05)
-
     async def execute_batch_exit(
         self,
         batch_id: str,
         limit_price: Decimal,
         grace_period_sec: float | None = None,
+        immediate: bool = False,
     ) -> None:
         """执行单个批次平仓退出：
         1. 发送限价平仓单 (LIMIT fl_{batch_id})；
@@ -90,22 +83,12 @@ class ExitManager:
                     order.position_side == "SHORT" and order.side == "SELL"
                 )
                 if is_entry:
-                    try:
-                        await self._rest.cancel_order(
-                            symbol=order.symbol,
-                            client_order_id=order.client_order_id,
-                        )
-                        log.info(
-                            "cancelled_unfilled_entry_order_before_exit",
-                            order_id=order.client_order_id,
-                            batch_id=batch_id,
-                        )
-                    except Exception as e:
-                        log.warning(
-                            "failed_to_cancel_unfilled_entry_order_before_exit",
-                            order_id=order.client_order_id,
-                            err=str(e),
-                        )
+                    if not await self._executor.cancel_and_confirm(order):
+                        return
+
+        batch = self._state.batches.get(batch_id)
+        if not batch or batch.quantity <= 0:
+            return
 
         # 1. 提交限价退出单 (按标的规则对齐价格与数量)
         rounded_limit_price = self.symbol_rules.round_price(batch.symbol, limit_price)
@@ -118,130 +101,40 @@ class ExitManager:
         limit_order = self._state.create_exit_order(
             batch_id=batch_id,
             quantity=rounded_exit_qty,
-            price=rounded_limit_price,
-            order_type="LIMIT",
+            price=None if immediate else rounded_limit_price,
+            order_type="MARKET" if immediate else "LIMIT",
         )
         await self._executor.submit_order(limit_order)
+        if immediate:
+            return
 
-        # 2. 宽限期等待
-        await asyncio.sleep(grace_sec)
+        await self._complete_limit_exit(limit_order, grace_sec)
+
+    async def _complete_limit_exit(self, limit_order: Order, grace_sec: float) -> None:
+        batch_id = limit_order.batch_id
+        batch = self._state.batches[batch_id]
+        # Keep the original persisted deadline across process restarts.
+        submitted_at = batch.exit_order_submitted_at or datetime.now(UTC)
+        elapsed = (datetime.now(UTC) - submitted_at).total_seconds()
+        await asyncio.sleep(max(0, grace_sec - elapsed))
 
         # 3. 检查批次是否仍有敞口
-        batch = self._state.batches.get(batch_id)
-        if not batch or batch.quantity <= Decimal("0"):
+        current_batch = self._state.batches.get(batch_id)
+        if not current_batch or current_batch.quantity <= Decimal("0"):
             return
-        if limit_order.is_terminal and limit_order.status == OrderStatus.FILLED:
-            return
-
-        # 4. 宽限期超时仍未完全成交：向交易所发出撤单请求
-        try:
-            await self._rest.cancel_order(
-                symbol=batch.symbol,
-                client_order_id=limit_order.client_order_id,
-            )
-        except BinanceOrderRejectedError as e:
-            # 交易所明确拒单 (如 -2011 订单不存在或已完成)，说明订单在撤单前已 FILLED
-            log.info(
-                "cancel_order_rejected_order_likely_already_filled",
-                order_id=limit_order.client_order_id,
-                code=e.code,
-                msg=e.message,
-            )
-        except Exception as e:
-            log.warning(
-                "exit_manager_cancel_limit_order_network_error",
-                order_id=limit_order.client_order_id,
-                err=str(e),
-            )
-            # 网络故障时不盲目发市价单，保持现状由看门狗查证
+        # Replacement requires the final private WebSocket observation.
+        if not await self._executor.cancel_and_confirm(limit_order):
             return
 
-        # 5. 严格等待 WebSocket 事件将 limit_order 推进至终态
-        # (吸收撤单期间可能发生的在途成交)
-        await self._wait_for_order_terminal(limit_order, timeout_sec=2.0)
-
-        # 若由于 WS 延迟未推来终态，主动调用 REST 探针查证真实订单状态
-        if not limit_order.is_terminal:
-            try:
-                order_info = await self._rest.query_order(
-                    symbol=limit_order.symbol,
-                    client_order_id=limit_order.client_order_id,
-                )
-                if isinstance(order_info, dict) and "status" in order_info:
-                    binance_status = str(order_info["status"]).upper()
-
-                    def _parse_dec(val: Any) -> Decimal:
-                        if isinstance(val, (int, float, str, Decimal)):
-                            try:
-                                return Decimal(str(val))
-                            except Exception:
-                                return Decimal("0")
-                        return Decimal("0")
-
-                    executed_qty = _parse_dec(order_info.get("executedQty"))
-                    avg_price = _parse_dec(order_info.get("avgPrice"))
-                    status_mapping = {
-                        "NEW": OrderStatus.OPEN,
-                        "PARTIALLY_FILLED": OrderStatus.PARTIALLY_FILLED,
-                        "FILLED": OrderStatus.FILLED,
-                        "CANCELED": OrderStatus.CANCELED,
-                        "EXPIRED": OrderStatus.CANCELED,
-                        "REJECTED": OrderStatus.REJECTED,
-                    }
-                    mapped_status = status_mapping.get(binance_status)
-                    if mapped_status is not None:
-                        delta_qty = max(
-                            Decimal("0"), executed_qty - limit_order.filled_qty
-                        )
-                        await self._state.on_order_trade_update(
-                            client_order_id=limit_order.client_order_id,
-                            symbol=limit_order.symbol,
-                            position_side=limit_order.position_side,
-                            side=limit_order.side,
-                            order_status=mapped_status,
-                            cum_filled_qty=executed_qty,
-                            avg_price=avg_price,
-                            last_filled_qty=delta_qty,
-                            last_filled_price=avg_price
-                            if avg_price > Decimal("0")
-                            else (limit_order.price or Decimal("0")),
-                        )
-                    else:
-                        log.warning(
-                            "exit_manager_unknown_order_status_from_rest",
-                            order_id=limit_order.client_order_id,
-                            raw_status=binance_status,
-                        )
-                else:
-                    log.warning(
-                        "exit_manager_query_order_invalid_payload",
-                        order_id=limit_order.client_order_id,
-                        payload=order_info,
-                    )
-            except Exception as e:
-                log.warning(
-                    "exit_manager_failed_to_query_ground_truth_order",
-                    order_id=limit_order.client_order_id,
-                    err=str(e),
-                )
-
-        # 6. 市价清扫剩余未结数量 (根据 WS/REST 真实终态确认后的确切 batch.quantity)
-        if not limit_order.is_terminal:
-            log.critical(
-                "limit_exit_order_not_terminal_refusing_market_sweep",
-                order_id=limit_order.client_order_id,
-                status=limit_order.status.name,
-            )
-            self._state.set_system_mode(SystemMode.DEGRADED)
-            return
-
-        batch = self._state.batches.get(batch_id)
+        remaining_batch = self._state.batches.get(batch_id)
         if (
-            batch
-            and batch.quantity > Decimal("0")
+            remaining_batch
+            and remaining_batch.quantity > Decimal("0")
             and self._state.can_submit_exit_order()
         ):
-            sweep_qty = self.symbol_rules.round_quantity(batch.symbol, batch.quantity)
+            sweep_qty = self.symbol_rules.round_quantity(
+                remaining_batch.symbol, remaining_batch.quantity
+            )
             if sweep_qty > Decimal("0"):
                 market_order = self._state.create_exit_order(
                     batch_id=batch_id,
@@ -255,6 +148,7 @@ class ExitManager:
         self,
         now: datetime | None = None,
         current_prices: dict[str, Decimal] | None = None,
+        closed_candle: ClosedCandle15m | None = None,
     ) -> list[str]:
         """评估当前所有活跃批次，触发到期退出或 Drain 排空退出"""
         if not self._state.can_submit_exit_order():
@@ -265,11 +159,14 @@ class ExitManager:
         prices = current_prices or {}
 
         for batch in list(self._state.batches.values()):
-            if batch.status != "ACTIVE" or batch.quantity <= Decimal("0"):
+            if batch.status == "CLOSED" or batch.quantity <= Decimal("0"):
                 continue
 
             exit_key = (self._state.account_label, batch.batch_id)
-            if exit_key in self._state.active_exit_orders:
+            if (
+                exit_key in self._state.active_exit_orders
+                or batch.batch_id in self._active_exit_tasks
+            ):
                 # 批次已存在活跃平仓挂单，不重复调度
                 continue
 
@@ -281,14 +178,40 @@ class ExitManager:
                 should_exit = True
                 exit_reason = "drain_active"
             else:
-                # 规则 2: 最大持仓周期到期退出 (15m = 900s)
-                holding_sec = (eval_now - batch.entry_bar_time).total_seconds()
-                if holding_sec >= self.max_holding_sec:
+                # Only a formal, fully closed 15m candle can trigger normal exit.
+                reason = position_exit_reason(
+                    held_until=eval_now,
+                    opened_at=batch.entry_bar_time,
+                    symbol=batch.symbol,
+                    side=StrategySide(batch.position_side.lower()),
+                    policy=PositionExitPolicy(max_holding_seconds=None),
+                    closed_candle=closed_candle,
+                )
+                if reason is not None:
                     should_exit = True
-                    exit_reason = f"max_holding_expired_{holding_sec:.1f}s"
+                    exit_reason = reason
 
             if should_exit:
-                limit_price = prices.get(batch.symbol, batch.entry_price)
+                if batch.symbol not in prices:
+                    continue
+                reference_price = prices[batch.symbol]
+                direction = (
+                    Decimal("1") if batch.position_side == "LONG" else Decimal("-1")
+                )
+                gross_return = (
+                    direction
+                    * (reference_price - batch.entry_price)
+                    / batch.entry_price
+                )
+                immediate = (
+                    self._state.is_draining
+                    or self.grace_period_sec == 0
+                    or self.grace_profit_pct == 0
+                    or gross_return >= self.decision_profit_pct
+                )
+                limit_price = batch.entry_price * (
+                    1 + direction * self.grace_profit_pct
+                )
                 log.info(
                     "scheduling_batch_exit",
                     batch_id=batch.batch_id,
@@ -300,13 +223,26 @@ class ExitManager:
                     self.execute_batch_exit(
                         batch_id=batch.batch_id,
                         limit_price=limit_price,
+                        immediate=immediate,
                     )
                 )
-                self._active_exit_tasks.add(task)
-                task.add_done_callback(self._active_exit_tasks.discard)
+                self._active_exit_tasks[batch.batch_id] = task
+                task.add_done_callback(partial(self._exit_task_done, batch.batch_id))
                 scheduled_batch_ids.append(batch.batch_id)
 
         return scheduled_batch_ids
+
+    def resume_active_exits(self) -> None:
+        for order in self._state.orders.values():
+            if order.is_terminal or not order.client_order_id.startswith("fl_"):
+                continue
+            if order.batch_id in self._active_exit_tasks:
+                continue
+            task = asyncio.create_task(
+                self._complete_limit_exit(order, self.grace_period_sec)
+            )
+            self._active_exit_tasks[order.batch_id] = task
+            task.add_done_callback(partial(self._exit_task_done, order.batch_id))
 
     async def run(
         self,
@@ -314,6 +250,7 @@ class ExitManager:
         price_provider: Callable[[str], Decimal | None] | None = None,
     ) -> None:
         """持续盯盘协程 (由 TaskGroup 结构化调度)"""
+        self.resume_active_exits()
         log.info("exit_manager_loop_started")
         while True:
             if stop_event and stop_event.is_set():
@@ -346,10 +283,20 @@ class ExitManager:
 
         log.info("exit_manager_loop_stopped")
 
+    def _exit_task_done(self, batch_id: str, task: asyncio.Task[Any]) -> None:
+        self._active_exit_tasks.pop(batch_id, None)
+        if not task.cancelled() and task.exception() is not None:
+            log.error(
+                "batch_exit_failed", batch_id=batch_id, error=str(task.exception())
+            )
+            self._state.has_unrecoverable_fault = True
+            self._state.set_system_mode(SystemMode.DEGRADED)
+
     async def close(self) -> None:
         """平稳取消并等待所有活跃平仓任务完成"""
-        for task in list(self._active_exit_tasks):
+        tasks = list(self._active_exit_tasks.values())
+        for task in tasks:
             task.cancel()
-        if self._active_exit_tasks:
-            await asyncio.gather(*self._active_exit_tasks, return_exceptions=True)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         await self._executor.close()

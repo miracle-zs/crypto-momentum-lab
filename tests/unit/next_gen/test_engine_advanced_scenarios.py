@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock
@@ -11,6 +12,7 @@ from crypto_momentum_lab.next_gen.models import (
     SystemMode,
     generate_batch_id,
 )
+from tests.unit.next_gen.factories import risk_config
 
 
 @pytest.fixture
@@ -23,6 +25,7 @@ def account_state():
         db=mock_db,
         rest_client=mock_rest,
     )
+    state.risk_config = risk_config(state.environment, state.account_label)
     state.set_system_mode(SystemMode.RUNNING)
     state.ws_connected = True
     return state
@@ -222,31 +225,37 @@ def test_notional_cap_check(account_state: AccountState):
 
     # Check adding 0.5 BTC @ 65000:
     # Symbol notional = (1.0 + 0.5) * 65000 = 97,500
-    # Case 1: symbol_cap = 100,000 -> passes
+    account_state.latest_prices["BTCUSDT"] = Decimal("65000")
+    account_state.risk_config = replace(
+        account_state.risk_config, max_gross_notional=Decimal("200000")
+    )
+    # Account gross exposure remains below the configured cap.
     assert account_state.check_notional_limits(
         symbol="BTCUSDT",
         new_quantity=Decimal("0.5"),
         current_price=Decimal("65000"),
-        symbol_cap=Decimal("100000"),
-        account_cap=Decimal("200000"),
     )
 
-    # Case 2: symbol_cap = 90,000 -> fails (97,500 > 90,000)
+    account_state.risk_config = replace(
+        account_state.risk_config, max_order_notional=Decimal("30000")
+    )
+    # The requested order exceeds the configured per-order cap.
     assert not account_state.check_notional_limits(
         symbol="BTCUSDT",
         new_quantity=Decimal("0.5"),
         current_price=Decimal("65000"),
-        symbol_cap=Decimal("90000"),
-        account_cap=Decimal("200000"),
     )
 
-    # Case 3: account_cap = 95,000 -> fails
+    account_state.risk_config = replace(
+        account_state.risk_config,
+        max_order_notional=Decimal("100000"),
+        max_gross_notional=Decimal("95000"),
+    )
+    # Account gross exposure exceeds the configured cap.
     assert not account_state.check_notional_limits(
         symbol="BTCUSDT",
         new_quantity=Decimal("0.5"),
         current_price=Decimal("65000"),
-        symbol_cap=Decimal("150000"),
-        account_cap=Decimal("95000"),
     )
 
 

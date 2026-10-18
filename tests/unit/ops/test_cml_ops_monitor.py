@@ -427,11 +427,7 @@ def test_log_signals_alert_on_persist_failure_and_dead_task() -> None:
 
 def test_log_signals_alert_on_binance_avg_price_schema_drift() -> None:
     alerts = evaluate_log_signals(
-        LogSignals(
-            avg_price_schema_drifts=(
-                ("account-4", "BTCUSDT", "number"),
-            )
-        )
+        LogSignals(avg_price_schema_drifts=(("account-4", "BTCUSDT", "number"),))
     )
 
     assert len(alerts) == 1
@@ -955,9 +951,7 @@ def test_postgres_memory_pressure_context_is_aggregate_and_query_text_free(
     context = monitor._postgres_memory_pressure_context("postgres")
 
     assert context["connections"] == {"total": 65, "active": 1}
-    assert context["temp_heavy_queries"] == [
-        {"queryid": "42", "temp_blks_written": 99}
-    ]
+    assert context["temp_heavy_queries"] == [{"queryid": "42", "temp_blks_written": 99}]
     assert runner.args is not None
     sql = str(runner.args[-1])
     assert "pg_stat_statements" in sql
@@ -1272,10 +1266,13 @@ def test_coalesce_shared_market_state_alerts_keeps_partial_failure_scoped() -> N
         ),
     )
 
-    assert coalesce_shared_market_state_alerts(
-        alerts,
-        account_labels=("primary", "account-2"),
-    ) == alerts
+    assert (
+        coalesce_shared_market_state_alerts(
+            alerts,
+            account_labels=("primary", "account-2"),
+        )
+        == alerts
+    )
 
 
 def test_evaluate_database_state_reconciliation_ready_with_large_age() -> None:
@@ -1531,7 +1528,9 @@ def test_output_event_does_not_override_the_durable_signal_count(tmp_path) -> No
     assert signals[0].candidate_count == 3
 
 
-def test_order_intent_comparison_excludes_account_local_closing_orders(tmp_path) -> None:
+def test_order_intent_comparison_excludes_account_local_closing_orders(
+    tmp_path,
+) -> None:
     """Closing execution follows account facts, not the common strategy intent.
 
     After the 04:26 partial fill, account-4 held 198 while its peers held 262.
@@ -1739,8 +1738,7 @@ def test_build_config_supports_multiple_compose_files_and_live_accounts(
     monkeypatch.setenv("CML_COMPOSE_PROFILES", "live")
     monkeypatch.setenv(
         "CML_MONITOR_LIVE_ACCOUNTS",
-        "primary|live-primary-v1,"
-        "account-2|live-account-2-v1",
+        "primary|live-primary-v1,account-2|live-account-2-v1",
     )
     args = argparse.Namespace(
         project_directory=str(tmp_path),
@@ -1795,9 +1793,7 @@ def test_build_config_discovers_live_accounts_from_compose_files(
         encoding="utf-8",
     )
     overlay_file.write_text(
-        "services:\n"
-        "  live-strategy-account-2:\n"
-        "  live-strategy-account-4:\n",
+        "services:\n  live-strategy-account-2:\n  live-strategy-account-4:\n",
         encoding="utf-8",
     )
     env_file.write_text(
@@ -2105,15 +2101,18 @@ def test_cooldown_persists_across_resolutions(monkeypatch, tmp_path) -> None:
     monitor._emit(alert, now=200.0)
     # Must NOT send another ops_alert notification!
     assert len(delivered) == 2
-    assert "live_market_state_delay:live-strategy-account-2" not in monitor._state[
-        "active_alerts"
-    ]
-    assert "live_market_state_delay:live-strategy-account-2" not in monitor._state[
-        "active_alert_context"
-    ]
-    assert "live_market_state_delay:live-strategy-account-2" not in monitor._state[
-        "alert_occurrences"
-    ]
+    assert (
+        "live_market_state_delay:live-strategy-account-2"
+        not in monitor._state["active_alerts"]
+    )
+    assert (
+        "live_market_state_delay:live-strategy-account-2"
+        not in monitor._state["active_alert_context"]
+    )
+    assert (
+        "live_market_state_delay:live-strategy-account-2"
+        not in monitor._state["alert_occurrences"]
+    )
 
 
 def test_orphaned_active_alert_is_repaired_without_fake_recovery(
@@ -2130,12 +2129,8 @@ def test_orphaned_active_alert_is_repaired_without_fake_recovery(
             consecutive_resolutions_required=1,
         ),
     )
-    monitor._state.setdefault("active_alerts", {})[
-        "database_storage_growth"
-    ] = 100.0
-    monitor._state.setdefault("alert_cooldowns", {})[
-        "database_storage_growth"
-    ] = 150.0
+    monitor._state.setdefault("active_alerts", {})["database_storage_growth"] = 100.0
+    monitor._state.setdefault("alert_cooldowns", {})["database_storage_growth"] = 150.0
 
     monitor._emit(
         Alert("database_storage_growth", "warning", "growth"),
@@ -2218,11 +2213,19 @@ def test_flapping_detection_flags_frequent_state_changes(monkeypatch, tmp_path) 
 
 
 @pytest.mark.parametrize("maintenance", [False, True])
+@pytest.mark.parametrize("engine", ["legacy", "nextgen"])
 def test_unhealthy_live_account_is_restarted_with_cooldown_and_cap(
     tmp_path,
     monkeypatch,
     maintenance,
+    engine,
 ) -> None:
+    expected_service = (
+        "nextgen-strategy-account-2"
+        if engine == "nextgen"
+        else "live-strategy-account-2"
+    )
+
     class Runner:
         def __init__(self) -> None:
             self.calls: list[list[str]] = []
@@ -2233,7 +2236,7 @@ def test_unhealthy_live_account_is_restarted_with_cooldown_and_cap(
             self.calls.append(command)
             if command[:3] == ["docker", "ps", "--filter"]:
                 service = command[3].rsplit("=", 1)[1]
-                if service == "live-strategy-account-2":
+                if service == expected_service:
                     return "account-2-container\n"
                 if service == "postgres":
                     return "postgres-container\n"
@@ -2276,15 +2279,14 @@ def test_unhealthy_live_account_is_restarted_with_cooldown_and_cap(
     runner = Runner()
     monitor = OpsMonitor(
         MonitorConfig(
+            trading_engine=engine,
             project_directory=tmp_path,
             compose_file=tmp_path / "compose.yaml",
             compose_files=(tmp_path / "compose.yaml",),
-            compose_profiles=("live",),
+            compose_profiles=("nextgen" if engine == "nextgen" else "live",),
             compose_env_file=None,
-            services=("live-strategy-account-2",),
-            live_accounts=(
-                ("account-2", "live-account-2-v1"),
-            ),
+            services=(expected_service,),
+            live_accounts=(("account-2", "live-account-2-v1"),),
             state_path=tmp_path / "state.json",
             auto_restart_stale_live_services=True,
             live_restart_cooldown_seconds=900.0,
@@ -2314,7 +2316,7 @@ def test_unhealthy_live_account_is_restarted_with_cooldown_and_cap(
         call for call in runner.calls if call[:2] == ["docker", "compose"]
     ]
     assert len(restart_commands) == 1
-    assert restart_commands[0][-2:] == ["restart", "live-strategy-account-2"]
+    assert restart_commands[0][-2:] == ["restart", expected_service]
     assert any(alert.name == "live_heartbeat_stale:account-2" for alert in first_alerts)
     archives = tuple((tmp_path / "crash-logs").glob("*.log"))
     assert len(archives) == 1
@@ -3133,9 +3135,7 @@ def test_observation_queue_oldest_pending_age_alerts() -> None:
         observation_queue_capacity=256,
         observation_queue_oldest_age_seconds=45.0,
     )
-    assert [alert.name for alert in fresh] == [
-        "live_order_observation_backpressure"
-    ]
+    assert [alert.name for alert in fresh] == ["live_order_observation_backpressure"]
     assert fresh[0].severity == "warning"
 
     saturated = _queue_alerts(
@@ -3181,3 +3181,44 @@ def test_observation_queue_below_thresholds_does_not_alert() -> None:
         )
         == ()
     )
+
+
+def test_nextgen_monitor_reads_persisted_engine_and_never_targets_legacy(
+    tmp_path, monkeypatch
+):
+    from pathlib import Path
+
+    root = Path(__file__).parents[3]
+    env_file = tmp_path / ".env.server"
+    env_file.write_text("CML_TRADING_ENGINE=nextgen\n")
+    monkeypatch.setenv("CML_COMPOSE_ENV_FILE", str(env_file))
+    monkeypatch.delenv("CML_TRADING_ENGINE", raising=False)
+    monkeypatch.delenv("CML_MONITOR_LIVE_ACCOUNTS", raising=False)
+    monkeypatch.delenv("CML_MONITOR_SERVICES", raising=False)
+    monkeypatch.setenv("CML_COMPOSE_PROFILES", "live")
+    args = argparse.Namespace(
+        project_directory=str(root),
+        compose_file=str(root / "compose.server.yaml"),
+        services=None,
+        live_run_id=None,
+        interval_seconds=60,
+        log_window_seconds=120,
+        telemetry_stale_after_seconds=900,
+        rss_warning_fraction=0.75,
+        rss_critical_fraction=0.9,
+        rss_growth_bytes=64 * 1024 * 1024,
+        rss_growth_window_seconds=1800,
+        alert_cooldown_seconds=900,
+        command_timeout_seconds=15,
+        state_path=str(tmp_path / "state.json"),
+    )
+    config = build_config(args)
+    assert config.trading_engine == "nextgen"
+    assert config.compose_profiles == ("nextgen",)
+    assert config.compose_files == (
+        root / "compose.server.yaml",
+        root / "compose.next_gen.yaml",
+    )
+    assert "nextgen-strategy-primary" in config.services
+    assert "nextgen-strategy-account-4" in config.services
+    assert not any(service.startswith("live-strategy") for service in config.services)

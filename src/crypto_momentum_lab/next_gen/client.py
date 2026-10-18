@@ -41,7 +41,10 @@ class BinanceNetworkError(Exception):
 
 def get_binance_urls(environment: str = "live") -> tuple[str, str, str]:
     """返回 (rest_base_url, ws_private_base_url, ws_public_base_url)"""
-    if environment.lower() in ("testnet", "test"):
+    environment = environment.strip().lower()
+    if environment not in ("live", "testnet"):
+        raise ValueError(f"Unsupported trading environment: {environment}")
+    if environment == "testnet":
         return (
             "https://testnet.binancefuture.com",
             "wss://stream.binancefuture.com/private/ws",
@@ -74,6 +77,11 @@ class BinanceRestClient:
             default_rest, _, _ = get_binance_urls(environment)
             self.base_url = default_rest
         self._client = http_client or httpx.AsyncClient(timeout=10.0)
+        self._owns_client = http_client is None
+
+    async def close(self) -> None:
+        if self._owns_client:
+            await self._client.aclose()
 
     def sign_params(
         self,
@@ -172,16 +180,16 @@ class BinanceRestClient:
         res = await self._request("GET", "/fapi/v3/account", signed=True)
 
         wallet_balances: dict[str, Decimal] = {}
-        for asset_data in res.get("assets", []):
+        for asset_data in res["assets"]:
             asset = asset_data["asset"]
-            wb = Decimal(str(asset_data.get("walletBalance", "0")))
+            wb = Decimal(str(asset_data["walletBalance"]))
             wallet_balances[asset] = wb
 
-        avail = Decimal(str(res.get("availableBalance", "0")))
+        avail = Decimal(str(res["availableBalance"]))
 
         positions: list[PositionSnapshot] = []
-        for pos_data in res.get("positions", []):
-            pos_amt = Decimal(str(pos_data.get("positionAmt", "0")))
+        for pos_data in res["positions"]:
+            pos_amt = Decimal(str(pos_data["positionAmt"]))
             positions.append(
                 PositionSnapshot(
                     symbol=pos_data["symbol"],
@@ -194,6 +202,40 @@ class BinanceRestClient:
             wallet_balances=wallet_balances,
             available_balance=avail,
             positions=positions,
+        )
+
+    async def fetch_startup_order(
+        self, symbol: str, client_order_id: str
+    ) -> dict[str, Any]:
+        """Read a stored order once during process startup, never during RUNNING."""
+        return dict(
+            await self._request(
+                "GET",
+                "/fapi/v1/order",
+                signed=True,
+                params={"symbol": symbol, "origClientOrderId": client_order_id},
+            )
+        )
+
+    async def fetch_startup_realized_pnl(self, cutoff: datetime) -> Decimal:
+        """Read the UTC day's exchange realized PNL at a fixed startup cutoff."""
+        start = cutoff.replace(hour=0, minute=0, second=0, microsecond=0)
+        rows = await self._request(
+            "GET",
+            "/fapi/v1/income",
+            signed=True,
+            params={
+                "incomeType": "REALIZED_PNL",
+                "startTime": int(start.timestamp() * 1000),
+                "endTime": int(cutoff.timestamp() * 1000),
+                "limit": 1000,
+            },
+        )
+        if len(rows) >= 1000:
+            raise RuntimeError("Startup daily PNL exceeds a complete income response")
+        return sum(
+            (Decimal(row["income"]) for row in rows if row["asset"] == "USDT"),
+            Decimal("0"),
         )
 
     async def create_listen_key(self) -> str:
@@ -261,32 +303,6 @@ class BinanceRestClient:
         )
         return dict(res)
 
-    async def query_order(
-        self,
-        symbol: str,
-        client_order_id: str | None = None,
-        order_id: int | None = None,
-    ) -> dict[str, Any]:
-        """GET /fapi/v1/order - 只读探针查单 (绝不回写内存)"""
-        params: dict[str, Any] = {"symbol": symbol}
-        if client_order_id:
-            params["origClientOrderId"] = client_order_id
-        if order_id is not None:
-            params["orderId"] = order_id
-        res = await self._request("GET", "/fapi/v1/order", signed=True, params=params)
-        return dict(res)
-
-    async def fetch_klines(
-        self,
-        symbol: str,
-        interval: str = "1m",
-        limit: int = 140,
-    ) -> list[list[Any]]:
-        """GET /fapi/v1/klines - 获取标的历史 K 线"""
-        params = {"symbol": symbol, "interval": interval, "limit": limit}
-        res = await self._request("GET", "/fapi/v1/klines", signed=False, params=params)
-        return list(res)
-
     async def fetch_exchange_info(self) -> dict[str, Any]:
         """GET /fapi/v1/exchangeInfo - 获取交易所元数据与交易对过滤器"""
         res = await self._request("GET", "/fapi/v1/exchangeInfo", signed=False)
@@ -295,7 +311,10 @@ class BinanceRestClient:
     async def get_position_mode(self) -> bool:
         """GET /fapi/v1/positionSide/dual - 查询持仓模式 (True 为双向持仓 Hedge Mode)"""
         res = await self._request("GET", "/fapi/v1/positionSide/dual", signed=True)
-        return bool(res.get("dualSidePosition", False))
+        mode = res["dualSidePosition"]
+        if not isinstance(mode, bool):
+            raise ValueError("Invalid dualSidePosition in account response")
+        return mode
 
     async def set_position_mode(self, dual_side: bool = True) -> None:
         """POST /fapi/v1/positionSide/dual - 设置持仓模式为双向持仓"""
@@ -313,26 +332,31 @@ class BinanceRestClient:
 
     async def set_leverage(self, symbol: str, leverage: int = 5) -> dict[str, Any]:
         """POST /fapi/v1/leverage - 设置杠杆倍数"""
-        try:
-            res = await self._request(
-                "POST",
-                "/fapi/v1/leverage",
-                signed=True,
-                params={"symbol": symbol.upper(), "leverage": leverage},
-            )
-            return dict(res)
-        except Exception as e:
-            log.warning(
-                "failed_to_set_leverage",
-                symbol=symbol,
-                leverage=leverage,
-                err=str(e),
-            )
-            return {}
+        res = await self._request(
+            "POST",
+            "/fapi/v1/leverage",
+            signed=True,
+            params={"symbol": symbol.upper(), "leverage": leverage},
+        )
+        return dict(res)
 
-    # 兼容性别名
-    get_open_orders = fetch_open_orders
-    get_account_v3 = fetch_account_information
+    async def set_margin_type(self, symbol: str, margin_type: str) -> None:
+        """POST /fapi/v1/marginType - 设置全仓/逐仓保证金模式。"""
+        normalized = margin_type.strip().upper()
+        if normalized not in ("CROSSED", "ISOLATED"):
+            raise ValueError(f"Unsupported margin type: {margin_type}")
+        try:
+            await self._request(
+                "POST",
+                "/fapi/v1/marginType",
+                signed=True,
+                params={"symbol": symbol.upper(), "marginType": normalized},
+            )
+        except BinanceOrderRejectedError as error:
+            # Binance returns -4046 when the requested mode already applies.
+            if error.code == -4046:
+                return
+            raise
 
 
 class BinanceUserDataStream:
@@ -407,6 +431,7 @@ class BinanceUserDataStream:
                 last_filled_price=Decimal(str(o.get("L", "0"))),
                 exchange_order_id=int(o.get("i", 0)) if o.get("i") else None,
                 trade_time=trade_time,
+                exchange_realized_pnl=Decimal(str(o["rp"])) if "rp" in o else None,
             )
             if asyncio.iscoroutine(res):
                 await res
@@ -439,7 +464,7 @@ class BinanceUserDataStream:
 
     async def _ensure_connection(self) -> None:
         """建立物理 WebSocket 连接"""
-        if self._ws is not None and not getattr(self._ws, "closed", False):
+        if self._ws is not None:
             return
 
         if not self.listen_key:
@@ -453,7 +478,7 @@ class BinanceUserDataStream:
         try:
             if self._ws_connector is not None:
                 self._ws = await self._ws_connector(ws_url)
-            elif not self.listen_key.startswith("fake_"):
+            else:
                 self._ws = await websockets.connect(
                     ws_url,
                     ping_interval=20,

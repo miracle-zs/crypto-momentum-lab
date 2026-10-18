@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -13,6 +15,7 @@ from crypto_momentum_lab.next_gen.client import (
 from crypto_momentum_lab.next_gen.engine import AccountState
 from crypto_momentum_lab.next_gen.models import Order, OrderStatus, SystemMode
 from crypto_momentum_lab.next_gen.persistence import TradingRepositoryProtocol
+from crypto_momentum_lab.next_gen.symbol_rules import SymbolRulesRegistry
 
 log = structlog.get_logger("order_executor")
 
@@ -25,11 +28,16 @@ class OrderExecutor:
         rest_client: BinanceRestClient,
         state: AccountState,
         db: TradingRepositoryProtocol,
+        read_client: BinanceRestClient | None = None,
     ) -> None:
         self._rest = rest_client
+        self._read = read_client or rest_client
         self._state = state
         self._db = db
         self._watchdog_tasks: set[asyncio.Task[Any]] = set()
+        self._inflight_submissions = 0
+        self._submissions_idle = asyncio.Event()
+        self._submissions_idle.set()
 
     @property
     def rest_client(self) -> BinanceRestClient:
@@ -42,7 +50,194 @@ class OrderExecutor:
         if self._watchdog_tasks:
             await asyncio.gather(*self._watchdog_tasks, return_exceptions=True)
 
+    async def cancel_and_confirm(self, order: Order, timeout_sec: float = 2.0) -> bool:
+        """Cancel once and confirm the final cumulative fill before replacing it."""
+        if order.is_terminal:
+            return True
+        try:
+            await self._rest.cancel_order(
+                symbol=order.symbol,
+                client_order_id=order.client_order_id,
+            )
+        except Exception as error:
+            log.warning("cancel_request_failed_waiting_for_ws", error=str(error))
+        if not order.is_terminal:
+            await self._state.wait_for_terminal(order, timeout_sec)
+        if not order.is_terminal:
+            order.status = OrderStatus.RECONCILING
+            self._state.set_system_mode(SystemMode.DEGRADED)
+        return order.is_terminal
+
+    async def load_active_state(self) -> None:
+        """Restore outstanding orders and their batches, without replaying history."""
+        env, account = self._state.environment, self._state.account_label
+        self._state.orders.clear()
+        self._state.active_entry_orders.clear()
+        self._state.active_exit_orders.clear()
+        batches = await self._db.async_get_active_batches(env, account)
+        active_orders = await self._db.async_get_active_orders(env, account)
+        self._state.batches = {b.batch_id: deepcopy(b) for b in batches}
+        for order in active_orders:
+            self._state.orders[order.client_order_id] = order
+            if order.batch_id not in self._state.batches:
+                batch = await self._db.async_get_batch(env, account, order.batch_id)
+                if batch is not None:
+                    self._state.batches[batch.batch_id] = deepcopy(batch)
+        for batch in self._state.batches.values():
+            orders = await self._db.async_get_batch_orders(env, account, batch.batch_id)
+            self._state.orders.update({o.client_order_id: o for o in orders})
+            batch.exiting_quantity = Decimal("0")
+            for order in orders:
+                if order.client_order_id.startswith(("fl_", "fm_")):
+                    sequence = int(order.client_order_id.rsplit("_", 1)[-1])
+                    batch.exit_order_counter = max(batch.exit_order_counter, sequence)
+            if batch.quantity > 0:
+                batch.status = "ACTIVE"
+        for order in self._state.orders.values():
+            if order.is_terminal:
+                continue
+            is_exit = (order.position_side == "LONG" and order.side == "SELL") or (
+                order.position_side == "SHORT" and order.side == "BUY"
+            )
+            if is_exit:
+                key = (account, order.batch_id)
+                if key in self._state.active_exit_orders:
+                    raise ValueError("Multiple outstanding exits for one batch")
+                self._state.active_exit_orders[key] = order.client_order_id
+                batch = self._state.batches[order.batch_id]
+                batch.exiting_quantity += order.quantity - order.filled_qty
+                batch.status = "EXITING"
+            else:
+                entry_key = (account, order.symbol, order.position_side)
+                if entry_key in self._state.active_entry_orders:
+                    raise ValueError("Multiple outstanding entries for one symbol")
+                self._state.active_entry_orders[entry_key] = order.client_order_id
+
+    async def restore_startup_state(self) -> None:
+        """Recover stored responsibility once, before admitting strategy orders."""
+        if self._state.system_mode != SystemMode.BOOTING:
+            raise RuntimeError("REST recovery is only allowed during startup")
+        mapping = {
+            "NEW": OrderStatus.OPEN,
+            "PARTIALLY_FILLED": OrderStatus.PARTIALLY_FILLED,
+            "FILLED": OrderStatus.FILLED,
+            "CANCELED": OrderStatus.CANCELED,
+            "EXPIRED": OrderStatus.CANCELED,
+            "EXPIRED_IN_MATCH": OrderStatus.CANCELED,
+            "REJECTED": OrderStatus.REJECTED,
+        }
+        for order in list(self._state.orders.values()):
+            if order.is_terminal:
+                continue
+            row = await self._read.fetch_startup_order(
+                order.symbol, order.client_order_id
+            )
+            if (
+                row["clientOrderId"] != order.client_order_id
+                or row["symbol"] != order.symbol
+                or row["side"] != order.side
+                or row["positionSide"] != order.position_side
+            ):
+                raise RuntimeError(
+                    "Startup order identity does not match stored command"
+                )
+            quantity, average = Decimal(row["executedQty"]), Decimal(row["avgPrice"])
+            if (
+                not quantity.is_finite()
+                or not average.is_finite()
+                or quantity > order.quantity
+            ):
+                raise RuntimeError("Invalid startup order execution values")
+            if quantity < order.filled_qty:
+                # The connected stream has already advanced this order.
+                continue
+            status = mapping[row["status"]]
+            if quantity > 0 and average <= 0:
+                raise RuntimeError("Startup filled order has no execution price")
+            if status == OrderStatus.FILLED and quantity != order.quantity:
+                raise RuntimeError(
+                    "Startup FILLED order has incomplete execution quantity"
+                )
+            await self._state.on_order_trade_update(
+                order.client_order_id,
+                order.symbol,
+                order.position_side,
+                order.side,
+                status,
+                quantity,
+                average,
+                quantity - order.filled_qty,
+                average,
+                exchange_order_id=int(row["orderId"]),
+                trade_time=datetime.fromtimestamp(row["updateTime"] / 1000, tz=UTC),
+            )
+        snapshot, open_orders = await asyncio.gather(
+            self._read.fetch_account_information(),
+            self._read.fetch_open_orders(),
+        )
+        expected: dict[tuple[str, str], Decimal] = {}
+        for batch in self._state.batches.values():
+            if batch.quantity > 0:
+                key = (batch.symbol, batch.position_side)
+                expected[key] = expected.get(key, Decimal("0")) + batch.quantity
+        actual = {
+            (p.symbol, p.position_side): abs(p.position_amt)
+            for p in snapshot.positions
+            if p.position_amt != 0
+        }
+        exchange_ids = {row["clientOrderId"] for row in open_orders}
+        local_ids = {
+            order.client_order_id
+            for order in self._state.orders.values()
+            if not order.is_terminal
+        }
+        if actual != expected or exchange_ids != local_ids:
+            raise RuntimeError("启动基线不一致：检测到交易所存在未结挂单或持仓差异")
+        self._state.update_balances(
+            snapshot.wallet_balances, snapshot.available_balance
+        )
+        if self._state.has_unrecoverable_fault or self._state.private_stream_gap:
+            raise RuntimeError("Startup private state is not trustworthy")
+
+    async def drain(self, rules: SymbolRulesRegistry) -> int:
+        """Close loaded batches; only private WebSocket events confirm execution."""
+        if not self._state.ws_connected:
+            raise RuntimeError("Drain requires a connected private WebSocket")
+        for order in list(self._state.orders.values()):
+            if not order.is_terminal and not await self.cancel_and_confirm(order):
+                raise RuntimeError("Drain cancellation was not confirmed by WebSocket")
+        count = 0
+        for batch in list(self._state.batches.values()):
+            if batch.quantity <= 0:
+                continue
+            quantity = rules.round_quantity(batch.symbol, batch.quantity)
+            if quantity <= 0 or quantity != batch.quantity:
+                raise RuntimeError("Exchange quantity does not align with symbol rules")
+            order = self._state.create_exit_order(
+                batch.batch_id, quantity, None, order_type="MARKET"
+            )
+            await self.submit_order(order)
+            await self._state.wait_for_terminal(order, timeout_sec=10.0)
+            if not order.is_terminal or batch.quantity != 0:
+                self._state.set_system_mode(SystemMode.DEGRADED)
+                raise RuntimeError("Drain market exit was not confirmed by WebSocket")
+            count += 1
+        return count
+
+    async def wait_for_submissions(self) -> None:
+        await self._submissions_idle.wait()
+
     async def submit_order(self, order: Order) -> dict[str, Any]:
+        self._inflight_submissions += 1
+        self._submissions_idle.clear()
+        try:
+            return await self._submit_order(order)
+        finally:
+            self._inflight_submissions -= 1
+            if self._inflight_submissions == 0:
+                self._submissions_idle.set()
+
+    async def _submit_order(self, order: Order) -> dict[str, Any]:
         """提交订单：
         1. 幂等与状态校验：必须处于 PENDING；
         2. 执行发单安全门与名义价值上限校验；

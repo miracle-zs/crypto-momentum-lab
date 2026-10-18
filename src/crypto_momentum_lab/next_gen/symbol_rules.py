@@ -18,117 +18,60 @@ class SymbolFilter:
     min_notional: Decimal
 
 
-# 预置主流标的默认过滤规则 (以防启动时网络瞬断未能拉取 exchangeInfo)
-DEFAULT_SYMBOL_FILTERS: dict[str, SymbolFilter] = {
-    "BTCUSDT": SymbolFilter(
-        symbol="BTCUSDT",
-        tick_size=Decimal("0.10"),
-        step_size=Decimal("0.001"),
-        min_qty=Decimal("0.001"),
-        min_notional=Decimal("5.0"),
-    ),
-    "ETHUSDT": SymbolFilter(
-        symbol="ETHUSDT",
-        tick_size=Decimal("0.01"),
-        step_size=Decimal("0.001"),
-        min_qty=Decimal("0.001"),
-        min_notional=Decimal("5.0"),
-    ),
-    "SOLUSDT": SymbolFilter(
-        symbol="SOLUSDT",
-        tick_size=Decimal("0.01"),
-        step_size=Decimal("0.01"),
-        min_qty=Decimal("0.01"),
-        min_notional=Decimal("5.0"),
-    ),
-    "BNBUSDT": SymbolFilter(
-        symbol="BNBUSDT",
-        tick_size=Decimal("0.01"),
-        step_size=Decimal("0.01"),
-        min_qty=Decimal("0.01"),
-        min_notional=Decimal("5.0"),
-    ),
-    "DOGEUSDT": SymbolFilter(
-        symbol="DOGEUSDT",
-        tick_size=Decimal("0.00001"),
-        step_size=Decimal("1"),
-        min_qty=Decimal("1"),
-        min_notional=Decimal("5.0"),
-    ),
-    "1000PEPEUSDT": SymbolFilter(
-        symbol="1000PEPEUSDT",
-        tick_size=Decimal("0.0000001"),
-        step_size=Decimal("1"),
-        min_qty=Decimal("1"),
-        min_notional=Decimal("5.0"),
-    ),
-}
-
-
 class SymbolRulesRegistry:
     """标的交易精度与过滤器注册表"""
 
     def __init__(self, custom_filters: dict[str, SymbolFilter] | None = None) -> None:
-        self._filters: dict[str, SymbolFilter] = dict(DEFAULT_SYMBOL_FILTERS)
-        if custom_filters:
-            self._filters.update(custom_filters)
+        self._filters = dict(custom_filters) if custom_filters is not None else {}
 
     def update_from_exchange_info(self, exchange_info: dict[str, Any]) -> None:
-        """从 Binance exchangeInfo 接口响应中动态更新所有交易对的精度规则"""
-        if not isinstance(exchange_info, dict):
-            return
-        symbols_list = exchange_info.get("symbols")
-        if not isinstance(symbols_list, list):
-            return
-        for sym_data in symbols_list:
-            if not isinstance(sym_data, dict):
+        """Load exact exchange filters; missing fields are configuration errors."""
+        parsed = {}
+        for row in exchange_info["symbols"]:
+            if not isinstance(row, dict):
+                raise TypeError("exchange symbol entries must be mappings")
+            filters: dict[Any, Any] = {}
+            for item in row.get("filters", ()):
+                if not isinstance(item, dict):
+                    raise TypeError("exchange filter entries must be mappings")
+                filters[item.get("filterType")] = item
+            price = filters.get("PRICE_FILTER")
+            lot = filters.get("LOT_SIZE")
+            notional = filters.get("MIN_NOTIONAL")
+            if price is None or lot is None or notional is None:
+                # Delisted/settling symbols can omit one of the filters. They
+                # are simply not tradable here; do not fail the whole startup.
+                log.warning(
+                    "symbol_rules_missing_filters",
+                    symbol=row.get("symbol"),
+                )
                 continue
-            symbol = sym_data.get("symbol", "").upper()
-            tick_size = Decimal("0.01")
-            step_size = Decimal("0.001")
-            min_qty = Decimal("0.001")
-            min_notional = Decimal("5.0")
-
-            for f in sym_data.get("filters", []):
-                filter_type = f.get("filterType")
-                if filter_type == "PRICE_FILTER":
-                    if "tickSize" in f and Decimal(f["tickSize"]) > 0:
-                        tick_size = Decimal(f["tickSize"])
-                elif filter_type == "LOT_SIZE":
-                    if "stepSize" in f and Decimal(f["stepSize"]) > 0:
-                        step_size = Decimal(f["stepSize"])
-                    if "minQty" in f and Decimal(f["minQty"]) > 0:
-                        min_qty = Decimal(f["minQty"])
-                elif filter_type == "MIN_NOTIONAL":
-                    if "notional" in f and Decimal(f["notional"]) > 0:
-                        min_notional = Decimal(f["notional"])
-
-            self._filters[symbol] = SymbolFilter(
-                symbol=symbol,
-                tick_size=tick_size,
-                step_size=step_size,
-                min_qty=min_qty,
-                min_notional=min_notional,
+            rule = SymbolFilter(
+                symbol=row["symbol"],
+                tick_size=Decimal(price["tickSize"]),
+                step_size=Decimal(lot["stepSize"]),
+                min_qty=Decimal(lot["minQty"]),
+                min_notional=Decimal(notional["notional"]),
             )
+            values = (rule.tick_size, rule.step_size, rule.min_qty, rule.min_notional)
+            if any(not value.is_finite() or value <= 0 for value in values):
+                raise ValueError(f"Invalid exchange filters for {rule.symbol}")
+            parsed[rule.symbol] = rule
+        self._filters = parsed
+
+    def has_filter(self, symbol: str) -> bool:
+        return symbol.upper() in self._filters
 
     def get_filter(self, symbol: str) -> SymbolFilter:
-        sym = symbol.upper()
-        if sym in self._filters:
-            return self._filters[sym]
-        return SymbolFilter(
-            symbol=sym,
-            tick_size=Decimal("0.01"),
-            step_size=Decimal("0.001"),
-            min_qty=Decimal("0.001"),
-            min_notional=Decimal("5.0"),
-        )
+        try:
+            return self._filters[symbol.upper()]
+        except KeyError as error:
+            raise ValueError(f"Missing exchange filters for {symbol}") from error
 
     def round_quantity(self, symbol: str, raw_qty: Decimal) -> Decimal:
         """根据标的 stepSize 向下取整截断 (Floor)，确保不会超额开仓或超过可用数量"""
         flt = self.get_filter(symbol)
         step = flt.step_size
-        if step <= Decimal("0"):
-            return raw_qty
         units = (raw_qty / step).quantize(Decimal("1"), rounding=ROUND_DOWN)
         rounded = (units * step).normalize()
         # 避免 normalize 产生科学计数法 (如 1E+2)
@@ -138,8 +81,6 @@ class SymbolRulesRegistry:
         """根据标的 tickSize 四舍五入对齐价格"""
         flt = self.get_filter(symbol)
         tick = flt.tick_size
-        if tick <= Decimal("0"):
-            return raw_price
         units = (raw_price / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
         rounded = (units * tick).normalize()
         return Decimal(f"{rounded:f}")

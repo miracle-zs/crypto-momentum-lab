@@ -24,6 +24,7 @@ from crypto_momentum_lab.next_gen.models import (
     generate_batch_id,
 )
 from crypto_momentum_lab.next_gen.persistence import InMemoryTradingRepository
+from tests.unit.next_gen.factories import risk_config, symbol_rules
 
 
 @pytest.mark.asyncio
@@ -55,6 +56,7 @@ async def test_order_executor_network_error_keeps_order_in_doubt_and_locks_held(
     mock_rest.post_order.side_effect = BinanceNetworkError(504, "Gateway Timeout")
 
     state = AccountState("live", "a1", db=repo)
+    state.risk_config = risk_config(state.environment, state.account_label)
     state.set_system_mode(SystemMode.RUNNING)
     state.set_ws_connected(True)
     order = state.create_entry_order(
@@ -83,6 +85,7 @@ async def test_order_executor_safety_gate_blocks_entry_when_not_running() -> Non
     mock_rest = AsyncMock()
 
     state = AccountState("live", "a1", db=repo)
+    state.risk_config = risk_config(state.environment, state.account_label)
     state.set_system_mode(SystemMode.DEGRADED)  # 降级模式
     order = Order(
         environment="live",
@@ -143,6 +146,7 @@ async def test_user_data_stream_parses_expired_in_match() -> None:
 
 def test_account_update_merges_balances_without_wiping_other_assets() -> None:
     state = AccountState("live", "a1")
+    state.risk_config = risk_config(state.environment, state.account_label)
     # 初始快照：持有 USDT 与 BTC
     state.update_balances(
         {
@@ -198,6 +202,7 @@ async def test_exit_manager_waits_for_ws_terminal_before_market_sweep() -> None:
     mock_rest.cancel_order.return_value = {"orderId": 888, "status": "CANCELED"}
 
     state = AccountState("live", "a1", db=repo)
+    state.risk_config = risk_config(state.environment, state.account_label)
     state.set_system_mode(SystemMode.RUNNING)
     state.set_ws_connected(True)
 
@@ -221,7 +226,10 @@ async def test_exit_manager_waits_for_ws_terminal_before_market_sweep() -> None:
         rest_client=mock_rest,
         state=state,
         executor=executor,
+        symbol_rules=symbol_rules(),
         grace_period_sec=0.01,
+        decision_profit_pct=Decimal("0.001"),
+        grace_profit_pct=Decimal("0.0088"),
     )
 
     # 模拟在 cancel 发出后，WS 异步推来终态 CANCELED 并核算剩余

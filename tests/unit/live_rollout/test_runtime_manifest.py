@@ -20,10 +20,10 @@ def test_checked_in_live_runtime_manifest_resolves_account_identity() -> None:
 
     assert primary.strategy == "orderflow_impulse"
     assert primary.image_commit == "a" * 40
-    assert primary.migration_revision == "20260925_0043"
+    assert primary.migration_revision == "20261018_0067"
     assert primary.services == ("live-strategy",)
     assert account_3.session_id == "live-account-3-v1"
-    assert account_3.migration_revision == "20260925_0043"
+    assert account_3.migration_revision == "20261018_0067"
     assert len(primary.strategy_config_hash) == 64
     assert primary.strategy_config_hash != "unset"
     assert primary.execution_inputs.hedge_mode is True

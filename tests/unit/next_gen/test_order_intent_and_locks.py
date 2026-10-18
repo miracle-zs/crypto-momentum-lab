@@ -11,6 +11,7 @@ from crypto_momentum_lab.next_gen.models import (
     SystemMode,
     generate_batch_id,
 )
+from tests.unit.next_gen.factories import risk_config
 
 
 @pytest.fixture
@@ -23,6 +24,7 @@ def account_state():
         db=mock_db,
         rest_client=mock_rest,
     )
+    state.risk_config = risk_config(state.environment, state.account_label)
     state.set_system_mode(SystemMode.RUNNING)
     state.ws_connected = True
     return state

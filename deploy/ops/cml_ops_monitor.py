@@ -351,9 +351,11 @@ _ALERT_ACTIONS = {
 _COMPOSE_SERVICE_HEADER = re.compile(r"^  (?P<service>[A-Za-z0-9][A-Za-z0-9_-]*):\s*$")
 
 
-def _live_strategy_service(account_label: str) -> str:
+def _live_strategy_service(account_label: str, trading_engine: str = "legacy") -> str:
     """Map a configured account label to its Compose strategy service."""
 
+    if trading_engine == "nextgen":
+        return f"nextgen-strategy-{account_label}"
     return (
         "live-strategy"
         if account_label == "primary"
@@ -1899,6 +1901,7 @@ def evaluate_disk_usage(
 
 @dataclass(frozen=True, slots=True)
 class MonitorConfig:
+    trading_engine: str = "legacy"
     project_directory: Path = Path("/opt/crypto-momentum-lab")
     compose_file: Path = Path("/opt/crypto-momentum-lab/compose.server.yaml")
     compose_files: tuple[Path, ...] = ()
@@ -2549,11 +2552,14 @@ SELECT json_build_object(
 
     def _evaluate_once(self) -> tuple[Alert, ...]:
         now = self._clock()
+        live_accounts = self._config.live_accounts
         alerts: list[Alert] = []
         containers = self._container_snapshots()
         live_strategy_accounts = {
-            _live_strategy_service(account_label): account_label
-            for account_label, _run_id in self._config.live_accounts
+            _live_strategy_service(
+                account_label, self._config.trading_engine
+            ): account_label
+            for account_label, _run_id in live_accounts
         }
         seen_services = {snapshot.service for snapshot in containers}
         for service in self._config.services:
@@ -2610,8 +2616,8 @@ SELECT json_build_object(
 
         market_id = self._container_id("market-data")
         strategy_services = tuple(
-            _live_strategy_service(account_label)
-            for account_label, _run_id in self._config.live_accounts
+            _live_strategy_service(account_label, self._config.trading_engine)
+            for account_label, _run_id in live_accounts
         )
         combined_signals = LogSignals()
         for strategy_service in strategy_services:
@@ -2690,141 +2696,141 @@ SELECT json_build_object(
                     alerts.extend(
                         self._database_storage_growth_alerts(footprint, now=now)
                     )
-            for account_label, run_id in self._config.live_accounts:
+            if self._config.trading_engine == "legacy":
+                for account_label, run_id in live_accounts:
+                    try:
+                        database_state = self._database_state(
+                            postgres_id,
+                            live_run_id=run_id,
+                            live_account_label=account_label,
+                        )
+                    except Exception as error:
+                        alerts.append(
+                            Alert(
+                                f"database_check_failed:{account_label}",
+                                "critical",
+                                "PostgreSQL observability query failed",
+                                {
+                                    "account_label": account_label,
+                                    "error_type": type(error).__name__,
+                                    "error": str(error),
+                                },
+                            )
+                        )
+                    else:
+                        account_alerts = evaluate_database_state(
+                            now=datetime.fromtimestamp(now, UTC),
+                            latest_checkpoint_age_seconds=(
+                                database_state.latest_checkpoint_age_seconds
+                            ),
+                            live_session_ready=database_state.live_session_ready,
+                            live_session_state_ready=(
+                                database_state.live_session_state_ready
+                            ),
+                            live_checkpoint_present=(
+                                database_state.live_checkpoint_present
+                            ),
+                            pg_stat_statements_ready=database_state.pg_stat_statements_ready,
+                            track_io_timing=database_state.track_io_timing,
+                            track_wal_io_timing=database_state.track_wal_io_timing,
+                            max_parallel_maintenance_workers=(
+                                database_state.max_parallel_maintenance_workers
+                            ),
+                            stale_after_seconds=self._config.telemetry_stale_after_seconds,
+                            market_state_stale_after_seconds=(
+                                self._config.market_state_stale_after_seconds
+                            ),
+                            market_delay_warning_ms=self._config.market_delay_warning_ms,
+                            market_delay_critical_ms=self._config.market_delay_critical_ms,
+                            account_state_stale_after_seconds=(
+                                self._config.account_state_stale_after_seconds
+                            ),
+                            account_process_state=database_state.account_process_state,
+                            account_process_age_seconds=(
+                                database_state.account_process_age_seconds
+                            ),
+                            latest_reconciliation_status=(
+                                database_state.latest_reconciliation_status
+                            ),
+                            latest_reconciliation_age_seconds=(
+                                database_state.latest_reconciliation_age_seconds
+                            ),
+                            latest_market_progress_age_seconds=(
+                                database_state.latest_market_progress_age_seconds
+                            ),
+                            latest_market_delay_ms=database_state.latest_market_delay_ms,
+                            unknown_order_count=database_state.unknown_order_count,
+                            oldest_unknown_order_age_seconds=(
+                                database_state.oldest_unknown_order_age_seconds
+                            ),
+                            observation_queue_depth=(
+                                database_state.observation_queue_depth
+                            ),
+                            observation_queue_capacity=(
+                                database_state.observation_queue_capacity
+                            ),
+                            observation_queue_oldest_age_seconds=(
+                                database_state.observation_queue_oldest_age_seconds
+                            ),
+                            observation_queue_overflow_count=(
+                                database_state.observation_queue_overflow_count
+                            ),
+                            terminal_state_mismatch_count=(
+                                database_state.terminal_state_mismatch_count
+                            ),
+                            oldest_terminal_mismatch_age_seconds=(
+                                database_state.oldest_terminal_mismatch_age_seconds
+                            ),
+                        )
+                        alerts.extend(
+                            replace(
+                                alert,
+                                name=f"{alert.name}:{account_label}",
+                                details={
+                                    **alert.details,
+                                    "account_label": account_label,
+                                },
+                            )
+                            for alert in account_alerts
+                        )
+
                 try:
-                    database_state = self._database_state(
-                        postgres_id,
-                        live_run_id=run_id,
-                        live_account_label=account_label,
-                    )
+                    (
+                        signal_observations,
+                        position_observations,
+                        order_intent_observations,
+                    ) = self._consistency_observations(postgres_id)
                 except Exception as error:
                     alerts.append(
                         Alert(
-                            f"database_check_failed:{account_label}",
+                            "live_consistency_check_failed",
                             "critical",
-                            "PostgreSQL observability query failed",
+                            "Cross-account consistency query failed",
                             {
-                                "account_label": account_label,
                                 "error_type": type(error).__name__,
                                 "error": str(error),
+                                "accounts": [
+                                    account_label
+                                    for account_label, _run_id in live_accounts
+                                ],
                             },
                         )
                     )
                 else:
-                    account_alerts = evaluate_database_state(
-                        now=datetime.fromtimestamp(now, UTC),
-                        latest_checkpoint_age_seconds=(
-                            database_state.latest_checkpoint_age_seconds
-                        ),
-                        live_session_ready=database_state.live_session_ready,
-                        live_session_state_ready=(
-                            database_state.live_session_state_ready
-                        ),
-                        live_checkpoint_present=(
-                            database_state.live_checkpoint_present
-                        ),
-                        pg_stat_statements_ready=database_state.pg_stat_statements_ready,
-                        track_io_timing=database_state.track_io_timing,
-                        track_wal_io_timing=database_state.track_wal_io_timing,
-                        max_parallel_maintenance_workers=(
-                            database_state.max_parallel_maintenance_workers
-                        ),
-                        stale_after_seconds=self._config.telemetry_stale_after_seconds,
-                        market_state_stale_after_seconds=(
-                            self._config.market_state_stale_after_seconds
-                        ),
-                        market_delay_warning_ms=self._config.market_delay_warning_ms,
-                        market_delay_critical_ms=self._config.market_delay_critical_ms,
-                        account_state_stale_after_seconds=(
-                            self._config.account_state_stale_after_seconds
-                        ),
-                        account_process_state=database_state.account_process_state,
-                        account_process_age_seconds=(
-                            database_state.account_process_age_seconds
-                        ),
-                        latest_reconciliation_status=(
-                            database_state.latest_reconciliation_status
-                        ),
-                        latest_reconciliation_age_seconds=(
-                            database_state.latest_reconciliation_age_seconds
-                        ),
-                        latest_market_progress_age_seconds=(
-                            database_state.latest_market_progress_age_seconds
-                        ),
-                        latest_market_delay_ms=database_state.latest_market_delay_ms,
-                        unknown_order_count=database_state.unknown_order_count,
-                        oldest_unknown_order_age_seconds=(
-                            database_state.oldest_unknown_order_age_seconds
-                        ),
-                        observation_queue_depth=(
-                            database_state.observation_queue_depth
-                        ),
-                        observation_queue_capacity=(
-                            database_state.observation_queue_capacity
-                        ),
-                        observation_queue_oldest_age_seconds=(
-                            database_state.observation_queue_oldest_age_seconds
-                        ),
-                        observation_queue_overflow_count=(
-                            database_state.observation_queue_overflow_count
-                        ),
-                        terminal_state_mismatch_count=(
-                            database_state.terminal_state_mismatch_count
-                        ),
-                        oldest_terminal_mismatch_age_seconds=(
-                            database_state.oldest_terminal_mismatch_age_seconds
-                        ),
-                    )
+                    alerts.extend(evaluate_signal_divergence(signal_observations))
                     alerts.extend(
-                        replace(
-                            alert,
-                            name=f"{alert.name}:{account_label}",
-                            details={
-                                **alert.details,
-                                "account_label": account_label,
-                            },
-                        )
-                        for alert in account_alerts
+                        evaluate_position_intent_divergence(order_intent_observations)
                     )
-
-            try:
-                (
-                    signal_observations,
-                    position_observations,
-                    order_intent_observations,
-                ) = self._consistency_observations(postgres_id)
-            except Exception as error:
-                alerts.append(
-                    Alert(
-                        "live_consistency_check_failed",
-                        "critical",
-                        "Cross-account consistency query failed",
-                        {
-                            "error_type": type(error).__name__,
-                            "error": str(error),
-                            "accounts": [
-                                account_label
-                                for account_label, _run_id in self._config.live_accounts
-                            ],
-                        },
-                    )
-                )
-            else:
-                alerts.extend(evaluate_signal_divergence(signal_observations))
-                alerts.extend(
-                    evaluate_position_intent_divergence(order_intent_observations)
-                )
-                # The spread between accounts is recorded, not alerted: it is
-                # the *result* of execution, so a difference here is the normal
-                # outcome of a partially filled order, not a fault.
-                self._record_position_spread(position_observations)
+                    # The spread between accounts is recorded, not alerted: it is
+                    # the *result* of execution, so a difference here is the normal
+                    # outcome of a partially filled order, not a fault.
+                    self._record_position_spread(position_observations)
 
         alerts = list(
             coalesce_shared_market_state_alerts(
                 alerts,
                 account_labels=tuple(
-                    account_label
-                    for account_label, _run_id in self._config.live_accounts
+                    account_label for account_label, _run_id in live_accounts
                 ),
             )
         )
@@ -5111,7 +5117,7 @@ def _service_scope(service: object) -> str | None:
         return None
     if service == "live-strategy":
         return "primary"
-    for prefix in ("live-strategy-", "execution-account-live-"):
+    for prefix in ("live-strategy-", "execution-account-live-", "nextgen-strategy-"):
         if service.startswith(prefix):
             return service.removeprefix(prefix)
     return service
@@ -6178,7 +6184,7 @@ def _compose_service_names(compose_files: Sequence[Path]) -> tuple[str, ...]:
 
 
 def _live_account_label_for_service(service: str) -> str | None:
-    for prefix in ("execution-account-live", "live-strategy"):
+    for prefix in ("execution-account-live", "live-strategy", "nextgen-strategy"):
         if service == prefix:
             return "primary"
         prefix_with_separator = f"{prefix}-"
@@ -6240,11 +6246,11 @@ def _discover_live_accounts(
 
 def _monitor_services_for_accounts(
     live_accounts: Sequence[tuple[str, str]],
+    trading_engine: str = "legacy",
 ) -> tuple[str, ...]:
     services = ["postgres", "market-data", "research-collector"]
     for account_label, _run_id in live_accounts:
-        suffix = "" if account_label == "primary" else f"-{account_label}"
-        services.append(f"live-strategy{suffix}")
+        services.append(_live_strategy_service(account_label, trading_engine))
     return tuple(dict.fromkeys(services))
 
 
@@ -6276,6 +6282,18 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
         for item in os.environ.get("CML_COMPOSE_PROFILES", "").split(",")
         if item.strip()
     )
+    trading_engine = (
+        _configured_env_value(compose_env_file, "CML_TRADING_ENGINE") or "legacy"
+    )
+    if trading_engine not in ("legacy", "nextgen"):
+        raise ValueError("Unsupported CML_TRADING_ENGINE")
+    if trading_engine == "nextgen":
+        project = Path(args.project_directory)
+        compose_files = (
+            project / "compose.server.yaml",
+            project / "compose.next_gen.yaml",
+        )
+        profile_values = ("nextgen",)
     configured_live_accounts = os.environ.get("CML_MONITOR_LIVE_ACCOUNTS")
     live_accounts = (
         _parse_live_accounts(configured_live_accounts)
@@ -6290,8 +6308,13 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
             item.strip() for item in configured_services.split(",") if item.strip()
         )
     else:
-        services = _monitor_services_for_accounts(live_accounts)
+        services = _monitor_services_for_accounts(live_accounts, trading_engine)
+    if trading_engine == "nextgen" and any(
+        name.startswith("live-strategy") for name in services
+    ):
+        raise ValueError("CML_MONITOR_SERVICES still names the retired legacy workers")
     return MonitorConfig(
+        trading_engine=trading_engine,
         project_directory=Path(args.project_directory),
         compose_file=(compose_files[0] if compose_files else Path(args.compose_file)),
         compose_files=compose_files,

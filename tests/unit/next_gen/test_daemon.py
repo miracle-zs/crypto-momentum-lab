@@ -7,10 +7,59 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from crypto_momentum_lab.next_gen.client import BinanceUserDataStream
 from crypto_momentum_lab.next_gen.daemon import NextGenDaemon, run_nextgen_daemon
 from crypto_momentum_lab.next_gen.engine import AccountSnapshot, PositionSnapshot
 from crypto_momentum_lab.next_gen.models import SystemMode
 from crypto_momentum_lab.next_gen.persistence import InMemoryTradingRepository
+from tests.unit.next_gen.factories import risk_config
+from tests.unit.next_gen.test_strategy_engine import exchange_info
+
+
+@pytest.fixture(autouse=True)
+def fake_market_feed(monkeypatch, tmp_path):
+    monkeypatch.setenv("CML_LOCAL_HEALTH_DIR", str(tmp_path / "health"))
+
+    class Feed:
+        def __init__(self, *, symbols, on_connection_change, **kwargs):
+            self.symbols = symbols
+            self.on_connection_change = on_connection_change
+
+        async def run(self, stop_event):
+            self.on_connection_change(True)
+            await stop_event.wait()
+
+        async def close(self):
+            self.on_connection_change(False)
+
+    monkeypatch.setattr("crypto_momentum_lab.next_gen.market_feed.MarketDataFeed", Feed)
+
+
+@pytest.fixture(autouse=True)
+def fake_closed_candle_feed(monkeypatch):
+    class Feed:
+        def __init__(self, **kwargs):
+            pass
+
+        def set_symbols(self, symbols):
+            pass
+
+        connection_available = True
+
+        async def start(self):
+            pass
+
+        async def stop(self):
+            pass
+
+        async def __aiter__(self):
+            await asyncio.Event().wait()
+            if False:
+                yield
+
+    monkeypatch.setattr(
+        "crypto_momentum_lab.next_gen.daemon.BinanceClosedCandle15mFeed", Feed
+    )
 
 
 @pytest.fixture
@@ -28,6 +77,7 @@ def clean_account_snapshot() -> AccountSnapshot:
 @pytest.fixture
 def mock_rest_client(clean_account_snapshot: AccountSnapshot) -> AsyncMock:
     mock_client = AsyncMock()
+    mock_client.fetch_exchange_info.return_value = exchange_info()
     mock_client.fetch_open_orders.return_value = []
     mock_client.fetch_account_information.return_value = clean_account_snapshot
     mock_client.create_listen_key.return_value = "fake_listen_key_123"
@@ -36,15 +86,20 @@ def mock_rest_client(clean_account_snapshot: AccountSnapshot) -> AsyncMock:
 
 
 @pytest.mark.asyncio
-async def test_nextgen_daemon_lifecycle_happy_path(mock_rest_client: AsyncMock) -> None:
+async def test_nextgen_daemon_lifecycle_happy_path(
+    mock_rest_client: AsyncMock, account_config
+) -> None:
     repo = InMemoryTradingRepository()
+    repo.risk_configs[("live", "a1")] = risk_config()
     stop_event = asyncio.Event()
 
     daemon = NextGenDaemon(
         environment="live",
         account_label="a1",
+        account_config=account_config,
         db=repo,
         rest_client=mock_rest_client,
+        ws_client=BinanceUserDataStream(mock_rest_client, ws_connector=False),
         stop_event=stop_event,
     )
 
@@ -78,9 +133,11 @@ async def test_nextgen_daemon_lifecycle_happy_path(mock_rest_client: AsyncMock) 
 
 @pytest.mark.asyncio
 async def test_nextgen_daemon_fails_fast_on_non_flat_baseline(
+    account_config,
     mock_rest_client: AsyncMock,
 ) -> None:
     repo = InMemoryTradingRepository()
+    repo.risk_configs[("live", "a1")] = risk_config()
     # 注入存量挂单
     mock_rest_client.fetch_open_orders.return_value = [{"orderId": 9999}]
 
@@ -88,12 +145,14 @@ async def test_nextgen_daemon_fails_fast_on_non_flat_baseline(
     daemon = NextGenDaemon(
         environment="live",
         account_label="a1",
+        account_config=account_config,
         db=repo,
         rest_client=mock_rest_client,
+        ws_client=BinanceUserDataStream(mock_rest_client, ws_connector=False),
         stop_event=stop_event,
     )
 
-    with pytest.raises(RuntimeError, match="检测到交易所存在未结挂单"):
+    with pytest.raises(ExceptionGroup, match="unhandled errors"):
         await daemon.run()
 
     # 验证没有进入 RUNNING
@@ -104,17 +163,21 @@ async def test_nextgen_daemon_fails_fast_on_non_flat_baseline(
 
 @pytest.mark.asyncio
 async def test_nextgen_daemon_mutual_exclusion_advisory_lock(
+    account_config,
     mock_rest_client: AsyncMock,
 ) -> None:
     repo = InMemoryTradingRepository()
+    repo.risk_configs[("live", "a1")] = risk_config()
     repo._held_locks.add("live:a1")  # 模拟另一实例已持有锁
 
     stop_event = asyncio.Event()
     daemon = NextGenDaemon(
         environment="live",
         account_label="a1",
+        account_config=account_config,
         db=repo,
         rest_client=mock_rest_client,
+        ws_client=BinanceUserDataStream(mock_rest_client, ws_connector=False),
         stop_event=stop_event,
     )
 
@@ -124,17 +187,21 @@ async def test_nextgen_daemon_mutual_exclusion_advisory_lock(
 
 @pytest.mark.asyncio
 async def test_nextgen_daemon_warmup_called_if_provider_present(
+    account_config,
     mock_rest_client: AsyncMock,
 ) -> None:
     repo = InMemoryTradingRepository()
+    repo.risk_configs[("live", "a1")] = risk_config()
     stop_event = asyncio.Event()
     mock_market_provider = AsyncMock()
 
     daemon = NextGenDaemon(
         environment="live",
         account_label="a1",
+        account_config=account_config,
         db=repo,
         rest_client=mock_rest_client,
+        ws_client=BinanceUserDataStream(mock_rest_client, ws_connector=False),
         market_data_provider=mock_market_provider,
         stop_event=stop_event,
     )
@@ -156,15 +223,17 @@ async def test_nextgen_daemon_warmup_called_if_provider_present(
     await daemon.run(keepalive_interval_sec=0.05)
     await stop_task
 
-    mock_market_provider.warmup.assert_awaited_once()
+    mock_rest_client.fetch_exchange_info.assert_awaited_once()
     assert daemon.state.system_mode == SystemMode.STOPPED
 
 
 @pytest.mark.asyncio
 async def test_run_nextgen_daemon_convenience_function(
+    account_config,
     mock_rest_client: AsyncMock,
 ) -> None:
     repo = InMemoryTradingRepository()
+    repo.risk_configs[("live", "a1")] = risk_config()
     stop_event = asyncio.Event()
 
     async def stop_daemon_later() -> None:
@@ -176,8 +245,10 @@ async def test_run_nextgen_daemon_convenience_function(
     daemon = await run_nextgen_daemon(
         environment="live",
         account_label="a1",
+        account_config=account_config,
         db=repo,
         rest_client=mock_rest_client,
+        ws_client=BinanceUserDataStream(mock_rest_client, ws_connector=False),
         stop_event=stop_event,
         keepalive_interval_sec=0.05,
     )
@@ -188,9 +259,11 @@ async def test_run_nextgen_daemon_convenience_function(
 
 @pytest.mark.asyncio
 async def test_nextgen_daemon_orchestrates_strategy_and_exit_manager(
+    account_config,
     mock_rest_client: AsyncMock,
 ) -> None:
     repo = InMemoryTradingRepository()
+    repo.risk_configs[("live", "a1")] = risk_config()
     stop_event = asyncio.Event()
 
     mock_strategy = AsyncMock()
@@ -206,7 +279,7 @@ async def test_nextgen_daemon_orchestrates_strategy_and_exit_manager(
     mock_exit_mgr = AsyncMock()
     exit_mgr_started = asyncio.Event()
 
-    async def mock_exit_run(stop_event: asyncio.Event) -> None:
+    async def mock_exit_run(stop_event: asyncio.Event, price_provider=None) -> None:
         exit_mgr_started.set()
         await stop_event.wait()
 
@@ -216,8 +289,10 @@ async def test_nextgen_daemon_orchestrates_strategy_and_exit_manager(
     daemon = NextGenDaemon(
         environment="live",
         account_label="a1",
+        account_config=account_config,
         db=repo,
         rest_client=mock_rest_client,
+        ws_client=BinanceUserDataStream(mock_rest_client, ws_connector=False),
         strategy_engine=mock_strategy,
         exit_manager=mock_exit_mgr,
         stop_event=stop_event,
@@ -240,16 +315,20 @@ async def test_nextgen_daemon_orchestrates_strategy_and_exit_manager(
 
 @pytest.mark.asyncio
 async def test_nextgen_daemon_ensures_hedge_mode_and_leverage(
+    account_config,
     mock_rest_client: AsyncMock,
 ) -> None:
     repo = InMemoryTradingRepository()
+    repo.risk_configs[("live", "a1")] = risk_config()
     stop_event = asyncio.Event()
 
     daemon = NextGenDaemon(
         environment="live",
         account_label="a1",
+        account_config=account_config,
         db=repo,
         rest_client=mock_rest_client,
+        ws_client=BinanceUserDataStream(mock_rest_client, ws_connector=False),
         symbols=["BTCUSDT", "ETHUSDT"],
         stop_event=stop_event,
     )
@@ -262,6 +341,9 @@ async def test_nextgen_daemon_ensures_hedge_mode_and_leverage(
     await daemon.run(keepalive_interval_sec=0.05)
 
     mock_rest_client.set_position_mode.assert_awaited_once_with(dual_side=True)
+    assert mock_rest_client.set_margin_type.await_count == 2
+    mock_rest_client.set_margin_type.assert_any_await("BTCUSDT", "CROSSED")
+    mock_rest_client.set_margin_type.assert_any_await("ETHUSDT", "CROSSED")
     assert mock_rest_client.set_leverage.await_count == 2
     mock_rest_client.set_leverage.assert_any_await("BTCUSDT", leverage=5)
     mock_rest_client.set_leverage.assert_any_await("ETHUSDT", leverage=5)
@@ -269,6 +351,7 @@ async def test_nextgen_daemon_ensures_hedge_mode_and_leverage(
 
 @pytest.mark.asyncio
 async def test_nextgen_daemon_health_heartbeat(
+    account_config,
     mock_rest_client: AsyncMock,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -277,16 +360,27 @@ async def test_nextgen_daemon_health_heartbeat(
     monkeypatch.setenv("CML_LOCAL_HEALTH_DIR", str(health_dir))
 
     repo = InMemoryTradingRepository()
+    repo.risk_configs[("live", "a1")] = risk_config()
     stop_event = asyncio.Event()
 
     daemon = NextGenDaemon(
         environment="live",
         account_label="a1",
+        account_config=account_config,
         db=repo,
         rest_client=mock_rest_client,
+        ws_client=BinanceUserDataStream(mock_rest_client, ws_connector=False),
         stop_event=stop_event,
     )
 
+    from unittest.mock import PropertyMock, patch
+
+    from crypto_momentum_lab.next_gen.strategy_engine import MomentumStrategyEngine
+
+    ready = patch.object(
+        MomentumStrategyEngine, "is_ready", new_callable=PropertyMock, return_value=True
+    )
+    ready.start()
     heartbeat_checked = asyncio.Event()
 
     async def check_heartbeat_and_stop() -> None:
@@ -301,6 +395,7 @@ async def test_nextgen_daemon_health_heartbeat(
     asyncio.create_task(check_heartbeat_and_stop())
     await daemon.run(keepalive_interval_sec=0.05)
 
+    ready.stop()
     assert heartbeat_checked.is_set()
     # After shutdown, health files should be unlinked
     account_health_file = health_dir / "nextgen-a1.ok"

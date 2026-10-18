@@ -11,6 +11,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from crypto_momentum_lab.live_rollout.runtime_manifest import LiveRuntimeAccount
+from crypto_momentum_lab.next_gen.dashboard import NextGenDashboardQueries
 from crypto_momentum_lab.operator_dashboard import (
     account_queries as _account_queries,
 )
@@ -190,6 +192,8 @@ class DashboardQueries:
         live_cash_flow_adjustments: Sequence[LiveCashFlowAdjustment] | None = None,
         common_equity_start_at: datetime | None = None,
         research_collector_root: Path = DEFAULT_RESEARCH_COLLECTOR_ROOT,
+        execution_engine: str = "legacy",
+        nextgen_accounts: tuple[LiveRuntimeAccount, ...] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._clock = clock
@@ -249,14 +253,57 @@ class DashboardQueries:
             decision_slo_queries=self._telemetry_queries,
         )
 
+        self._nextgen_queries = None
+        if execution_engine not in ("legacy", "nextgen"):
+            raise ValueError("Unsupported dashboard execution engine")
+        if execution_engine == "nextgen":
+            if not nextgen_accounts:
+                raise ValueError(
+                    "NextGen dashboard requires the runtime account manifest"
+                )
+            self._nextgen_queries = NextGenDashboardQueries(
+                session_factory,
+                nextgen_accounts,
+                clock=clock,
+            )
+            self._account_queries = self._nextgen_queries
+            self._risk_execution_queries = self._nextgen_queries
+            self._live_account_metrics_queries = self._nextgen_queries
+
     async def health(self) -> dict[str, str]:
         return await self._overview_queries.health()
 
     async def operational_health(self) -> dict[str, Any]:
+        if self._nextgen_queries is not None:
+            readiness = await self.readiness()
+            ready = readiness.status is OperationalStatus.READY
+            return {
+                "scope": "nextgen",
+                "overall_status": "healthy" if ready else "degraded",
+                "is_execution_ready": ready,
+                "source_as_of": readiness.observed_at.isoformat(),
+                "evaluated_at": readiness.observed_at.isoformat(),
+                "dimensions": [],
+                "details": {
+                    "accounts": {
+                        account.account_label: account.readiness
+                        for account in readiness.accounts
+                    }
+                },
+                "account_capabilities": {
+                    account.account_label: (
+                        None
+                        if account.runtime_tradeability is None
+                        else account.runtime_tradeability.model_dump()
+                    )
+                    for account in readiness.accounts
+                },
+            }
         return await self._overview_queries.operational_health()
 
     async def readiness(self) -> SystemReadinessResponse:
-
+        if self._nextgen_queries is not None:
+            return await self._nextgen_queries.readiness(await self.health())
         return await self._overview_queries.readiness()
 
     async def decision_slo(
@@ -275,6 +322,8 @@ class DashboardQueries:
         return await self._overview_queries.research_collector()
 
     async def live_accounts(self) -> LiveAccountsResponse:
+        if self._nextgen_queries is not None:
+            return await self._nextgen_queries.live_accounts()
         return await self._overview_queries.live_accounts()
 
     async def live_account_metrics(
@@ -286,7 +335,17 @@ class DashboardQueries:
         )
 
     async def overview(self) -> SystemOverviewResponse:
-        return await self._overview_queries.overview()
+        overview = await self._overview_queries.overview()
+        if self._nextgen_queries is not None:
+            fleet = await self._nextgen_queries.live_accounts()
+            overview.account_statuses = fleet.accounts
+            overview.services = [
+                service
+                for service in overview.services
+                if not service.name.startswith("execution-account")
+                and service.name != "live-rollout"
+            ]
+        return overview
 
     async def universe(self) -> UniverseStatusResponse:
         return await self._overview_queries.universe()
@@ -359,7 +418,6 @@ class DashboardQueries:
                 for row in live
             ],
         )
-
 
     async def account_performance(
         self,

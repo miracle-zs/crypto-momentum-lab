@@ -3,13 +3,27 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from copy import deepcopy
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Protocol
+from uuid import uuid4
 
 import structlog
-from sqlalchemy import text
+from sqlalchemy import insert, select, text
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.domain.risk.models import RiskConfigSnapshot
 from crypto_momentum_lab.next_gen.models import Order, OrderStatus, PositionBatch
+from crypto_momentum_lab.persistence.postgres.models import (
+    RiskConfigSnapshotRow,
+    RiskHaltRow,
+    RuntimeMarketState15sRow,
+    StrategyRuntimeEventRow,
+)
+from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
+    market_state_from_row,
+)
 
 log = structlog.get_logger("next_gen_persistence")
 
@@ -42,9 +56,31 @@ class TradingRepositoryProtocol(Protocol):
     async def async_get_recent_orders(
         self, environment: str, account_label: str, limit: int = 50
     ) -> list[Order]: ...
-    async def async_get_historical_15s_bars(
-        self, environment: str, symbols: list[str], limit: int = 140
-    ) -> dict[str, list[dict[str, Any]]]: ...
+    async def async_get_active_orders(
+        self, environment: str, account_label: str
+    ) -> list[Order]: ...
+    async def async_get_batch_orders(
+        self, environment: str, account_label: str, batch_id: str
+    ) -> list[Order]: ...
+    async def async_save_runtime_status(
+        self,
+        environment: str,
+        account_label: str,
+        observed_at: datetime,
+        payload: dict[str, Any],
+    ) -> None: ...
+    async def async_has_active_halt(
+        self, environment: str, account_label: str
+    ) -> bool: ...
+    async def async_get_risk_config(
+        self, environment: str, account_label: str
+    ) -> RiskConfigSnapshot: ...
+    async def async_get_historical_market_states(
+        self, environment: str, symbols: list[str], limit: int
+    ) -> list[MarketState15s]: ...
+    async def async_get_entry_symbols(
+        self, observed_at: datetime, top_count: int
+    ) -> frozenset[str]: ...
 
 
 class InMemoryTradingRepository:
@@ -55,6 +91,11 @@ class InMemoryTradingRepository:
         self.batches: dict[tuple[str, str, str], PositionBatch] = {}
         self._fail_writes_remaining: int = 0
         self._held_locks: set[str] = set()
+        self.risk_configs: dict[tuple[str, str], RiskConfigSnapshot] = {}
+        self.market_states: list[MarketState15s] = []
+        self.entry_symbols: frozenset[str] = frozenset()
+        self.runtime_observations: list[dict[str, Any]] = []
+        self.halted_accounts: set[tuple[str, str]] = set()
 
     @asynccontextmanager
     async def acquire_dedicated_advisory_lock(
@@ -92,9 +133,8 @@ class InMemoryTradingRepository:
         key = (batch.environment, batch.account_label, batch.batch_id)
         existing = self.batches.get(key)
         saved = deepcopy(batch)
-        if existing and existing.status == "CLOSED":
-            saved.status = "CLOSED"
-            saved.quantity = Decimal("0")
+        if existing and saved.updated_at < existing.updated_at:
+            return
         self.batches[key] = saved
 
     async def async_save_order_and_batch(
@@ -147,10 +187,66 @@ class InMemoryTradingRepository:
         orders.sort(key=lambda o: o.created_at, reverse=True)
         return orders[:limit]
 
-    async def async_get_historical_15s_bars(
-        self, environment: str, symbols: list[str], limit: int = 140
-    ) -> dict[str, list[dict[str, Any]]]:
-        return {sym: [] for sym in symbols}
+    async def async_save_runtime_status(
+        self,
+        environment: str,
+        account_label: str,
+        observed_at: datetime,
+        payload: dict[str, Any],
+    ) -> None:
+        self._check_and_decrement_failure()
+        self.runtime_observations.append(deepcopy(payload))
+
+    async def async_has_active_halt(self, environment: str, account_label: str) -> bool:
+        return (environment, account_label) in self.halted_accounts
+
+    async def async_get_risk_config(
+        self, environment: str, account_label: str
+    ) -> RiskConfigSnapshot:
+        return self.risk_configs[(environment, account_label)]
+
+    async def async_get_historical_market_states(
+        self, environment: str, symbols: list[str], limit: int
+    ) -> list[MarketState15s]:
+        result = []
+        for symbol in symbols:
+            rows = sorted(
+                (
+                    s
+                    for s in self.market_states
+                    if s.symbol == symbol and s.environment == environment
+                ),
+                key=lambda s: s.bucket_end,
+            )
+            result.extend(rows[-limit:])
+        return result
+
+    async def async_get_entry_symbols(
+        self, observed_at: datetime, top_count: int
+    ) -> frozenset[str]:
+        return self.entry_symbols
+
+    async def async_get_active_orders(
+        self, environment: str, account_label: str
+    ) -> list[Order]:
+        return [
+            deepcopy(o)
+            for o in self.orders.values()
+            if o.environment == environment
+            and o.account_label == account_label
+            and not o.is_terminal
+        ]
+
+    async def async_get_batch_orders(
+        self, environment: str, account_label: str, batch_id: str
+    ) -> list[Order]:
+        return [
+            deepcopy(o)
+            for o in self.orders.values()
+            if o.environment == environment
+            and o.account_label == account_label
+            and o.batch_id == batch_id
+        ]
 
 
 class PostgresTradingRepository:
@@ -160,6 +256,54 @@ class PostgresTradingRepository:
 
     def __init__(self, async_engine: Any) -> None:
         self._engine = async_engine
+
+    async def _load_orders(
+        self, environment: str, account_label: str, *, batch_id: str | None = None
+    ) -> list[Order]:
+        condition = (
+            "batch_id = :batch_id"
+            if batch_id is not None
+            else "status NOT IN ('FILLED', 'CANCELED', 'REJECTED', 'EXPIRED')"
+        )
+        async with self._engine.connect() as conn:
+            result = await conn.execute(
+                text(
+                    "SELECT * FROM live_orders WHERE environment = :env "
+                    "AND account_label = :acc AND " + condition
+                ),
+                {"env": environment, "acc": account_label, "batch_id": batch_id},
+            )
+            return [
+                Order(
+                    environment=r["environment"],
+                    account_label=r["account_label"],
+                    client_order_id=r["client_order_id"],
+                    batch_id=r["batch_id"],
+                    symbol=r["symbol"],
+                    side=r["side"],
+                    position_side=r["position_side"],
+                    order_type=r["order_type"],
+                    quantity=r["quantity"],
+                    price=r["price"],
+                    status=OrderStatus[r["status"]],
+                    exchange_order_id=r["exchange_order_id"],
+                    filled_qty=r["filled_quantity"],
+                    avg_price=r["average_price"],
+                    created_at=r["created_at"],
+                    updated_at=r["updated_at"],
+                )
+                for r in result.mappings()
+            ]
+
+    async def async_get_active_orders(
+        self, environment: str, account_label: str
+    ) -> list[Order]:
+        return await self._load_orders(environment, account_label)
+
+    async def async_get_batch_orders(
+        self, environment: str, account_label: str, batch_id: str
+    ) -> list[Order]:
+        return await self._load_orders(environment, account_label, batch_id=batch_id)
 
     @asynccontextmanager
     async def acquire_dedicated_advisory_lock(
@@ -263,22 +407,18 @@ class PostgresTradingRepository:
         )
         ON CONFLICT (environment, account_label, batch_id)
         DO UPDATE SET
-            quantity = CASE
-                WHEN live_position_batches.status = 'CLOSED' THEN 0
-                ELSE EXCLUDED.quantity
-            END,
+            quantity = EXCLUDED.quantity,
             entry_price = EXCLUDED.entry_price,
+            entry_bar_time = EXCLUDED.entry_bar_time,
             exit_order_submitted_at = COALESCE(
                 EXCLUDED.exit_order_submitted_at,
                 live_position_batches.exit_order_submitted_at
             ),
-            status = CASE
-                WHEN live_position_batches.status = 'CLOSED' THEN 'CLOSED'
-                ELSE EXCLUDED.status
-            END,
+            status = EXCLUDED.status,
             realized_pnl = EXCLUDED.realized_pnl,
             exiting_quantity = EXCLUDED.exiting_quantity,
-            updated_at = EXCLUDED.updated_at;
+            updated_at = EXCLUDED.updated_at
+        WHERE EXCLUDED.updated_at >= live_position_batches.updated_at;
         """
         params = {
             "environment": batch.environment,
@@ -378,23 +518,18 @@ class PostgresTradingRepository:
                         )
                         ON CONFLICT (environment, account_label, batch_id)
                         DO UPDATE SET
-                            quantity = CASE
-                                WHEN live_position_batches.status = 'CLOSED' THEN 0
-                                ELSE EXCLUDED.quantity
-                            END,
+                            quantity = EXCLUDED.quantity,
                             entry_price = EXCLUDED.entry_price,
+            entry_bar_time = EXCLUDED.entry_bar_time,
                             exit_order_submitted_at = COALESCE(
                                 EXCLUDED.exit_order_submitted_at,
                                 live_position_batches.exit_order_submitted_at
                             ),
-                            status = CASE
-                                WHEN live_position_batches.status = 'CLOSED'
-                                THEN 'CLOSED'
-                                ELSE EXCLUDED.status
-                            END,
+                            status = EXCLUDED.status,
                             realized_pnl = EXCLUDED.realized_pnl,
                             exiting_quantity = EXCLUDED.exiting_quantity,
-                            updated_at = EXCLUDED.updated_at;
+                            updated_at = EXCLUDED.updated_at
+                        WHERE EXCLUDED.updated_at >= live_position_batches.updated_at;
                         """
                     ),
                     {
@@ -560,32 +695,101 @@ class PostgresTradingRepository:
                 for r in rows
             ]
 
-    async def async_get_historical_15s_bars(
-        self, environment: str, symbols: list[str], limit: int = 140
-    ) -> dict[str, list[dict[str, Any]]]:
-        """从 runtime_market_states_15s 查询历史 15s Bar 用于策略预热"""
-        result: dict[str, list[dict[str, Any]]] = {sym: [] for sym in symbols}
-        sql = """
-        SELECT symbol, bucket_end, open_price, high_price, low_price,
-               close_price, trade_notional
-        FROM runtime_market_states_15s
-        WHERE environment = :env AND symbol = :sym
-        ORDER BY bucket_end DESC
-        LIMIT :limit;
-        """
-        async with self._engine.connect() as conn:
-            for sym in symbols:
-                try:
-                    res = await conn.execute(
-                        text(sql), {"env": environment, "sym": sym, "limit": limit}
+    async def async_save_runtime_status(
+        self,
+        environment: str,
+        account_label: str,
+        observed_at: datetime,
+        payload: dict[str, Any],
+    ) -> None:
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                insert(StrategyRuntimeEventRow).values(
+                    event_id=str(uuid4()),
+                    run_id=f"nextgen:{environment}:{account_label}",
+                    event_type="nextgen_runtime_status",
+                    occurred_at=observed_at,
+                    symbol=None,
+                    bucket_start=None,
+                    details=payload,
+                )
+            )
+
+    async def async_has_active_halt(self, environment: str, account_label: str) -> bool:
+        async with async_sessionmaker(self._engine)() as session:
+            return bool(
+                await session.scalar(
+                    select(
+                        select(RiskHaltRow.halt_id)
+                        .where(
+                            RiskHaltRow.environment == environment,
+                            RiskHaltRow.account_label == account_label,
+                            RiskHaltRow.active.is_(True),
+                        )
+                        .exists()
                     )
-                    rows = list(res.mappings().all())
-                    rows.reverse()
-                    result[sym] = [dict(r) for r in rows]
-                except Exception as e:
-                    log.warning(
-                        "failed_to_query_historical_15s_bars",
-                        symbol=sym,
-                        err=str(e),
+                )
+            )
+
+    async def async_get_risk_config(
+        self, environment: str, account_label: str
+    ) -> RiskConfigSnapshot:
+        async with async_sessionmaker(self._engine)() as session:
+            row = await session.scalar(
+                select(RiskConfigSnapshotRow)
+                .where(
+                    RiskConfigSnapshotRow.environment == environment,
+                    RiskConfigSnapshotRow.account_label == account_label,
+                )
+                .order_by(RiskConfigSnapshotRow.created_at.desc())
+                .limit(1)
+            )
+        if row is None:
+            raise RuntimeError("No persisted risk configuration for account")
+        return RiskConfigSnapshot(
+            environment=row.environment,
+            account_label=row.account_label,
+            max_order_notional=row.max_order_notional,
+            max_gross_notional=row.max_gross_notional,
+            max_daily_loss=row.max_daily_loss,
+            max_open_positions=row.max_open_positions,
+            allow_reduce_only_while_draining=row.allow_reduce_only_while_draining,
+            created_at=row.created_at,
+        )
+
+    async def async_get_historical_market_states(
+        self, environment: str, symbols: list[str], limit: int
+    ) -> list[MarketState15s]:
+        result: list[MarketState15s] = []
+        factory = async_sessionmaker(self._engine)
+        async with factory() as session:
+            for symbol in symbols:
+                rows = (
+                    await session.scalars(
+                        select(RuntimeMarketState15sRow)
+                        .where(
+                            RuntimeMarketState15sRow.environment == environment,
+                            RuntimeMarketState15sRow.symbol == symbol,
+                        )
+                        .order_by(RuntimeMarketState15sRow.bucket_end.desc())
+                        .limit(limit)
                     )
+                ).all()
+                result.extend(market_state_from_row(row) for row in reversed(rows))
         return result
+
+    async def async_get_entry_symbols(
+        self, observed_at: datetime, top_count: int
+    ) -> frozenset[str]:
+        async with self._engine.connect() as conn:
+            rows = await conn.execute(
+                text("""
+                SELECT symbol FROM universe_entries WHERE snapshot_id = (
+                    SELECT snapshot_id FROM universe_snapshots
+                    WHERE activated = TRUE AND observed_at <= :observed_at
+                    ORDER BY observed_at DESC LIMIT 1
+                ) AND gainer_rank <= :top_count AND utc_day_return > 0
+            """),
+                {"observed_at": observed_at, "top_count": top_count},
+            )
+            return frozenset(rows.scalars())

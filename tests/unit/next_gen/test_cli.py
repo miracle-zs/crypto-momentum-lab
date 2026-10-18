@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
@@ -17,6 +16,21 @@ from crypto_momentum_lab.apps.next_gen.cli import (
 )
 from crypto_momentum_lab.next_gen.models import Order, OrderStatus, PositionBatch
 from crypto_momentum_lab.next_gen.persistence import InMemoryTradingRepository
+from tests.unit.next_gen.test_strategy_engine import exchange_info
+
+
+@pytest.fixture(autouse=True)
+def test_manifest_for_cli(monkeypatch, account_config):
+    class Manifest:
+        def account(self, label):
+            assert label == "a1"
+            return account_config
+
+    monkeypatch.setattr(
+        "crypto_momentum_lab.apps.next_gen.cli.load_live_runtime_manifest",
+        lambda path: Manifest(),
+    )
+
 
 runner = CliRunner()
 
@@ -99,7 +113,7 @@ def test_cli_drain_dry_run() -> None:
 def test_cli_drain_live_flow_cancels_and_sweeps() -> None:
     from datetime import UTC, datetime
 
-    from crypto_momentum_lab.next_gen.engine import AccountSnapshot
+    from crypto_momentum_lab.next_gen.engine import AccountSnapshot, PositionSnapshot
 
     repo = InMemoryTradingRepository()
     batch = PositionBatch(
@@ -115,27 +129,79 @@ def test_cli_drain_live_flow_cancels_and_sweeps() -> None:
     repo.batches[("testnet", "a1", "b_drain_1")] = batch
 
     mock_rest = AsyncMock()
-    mock_rest.fetch_open_orders.return_value = [
-        {"symbol": "BTCUSDT", "clientOrderId": "open_ord_1", "orderId": 12345}
-    ]
-    mock_rest.cancel_order.return_value = {"orderId": 12345, "status": "CANCELED"}
-    mock_rest.fetch_exchange_info.return_value = {"symbols": []}
-    mock_rest.post_order.return_value = {"orderId": 999, "clientOrderId": "sweep_1"}
-    mock_rest.query_order.return_value = {
-        "status": "FILLED",
-        "executedQty": "0.5",
-        "avgPrice": "50000",
-    }
-    mock_rest.fetch_account_information.return_value = AccountSnapshot(
-        wallet_balances={"USDT": Decimal("1000")},
-        available_balance=Decimal("1000"),
-        positions=[],
+    old_order = Order(
+        environment="testnet",
+        account_label="a1",
+        client_order_id="fl_b_drain_1_01",
+        batch_id=batch.batch_id,
+        symbol="BTCUSDT",
+        side="SELL",
+        position_side="LONG",
+        order_type="LIMIT",
+        quantity=Decimal("0.5"),
+        price=Decimal("50000"),
+        status=OrderStatus.OPEN,
     )
+    batch.status = "EXITING"
+    batch.exiting_quantity = batch.quantity
+    repo.orders[("testnet", "a1", old_order.client_order_id)] = old_order
+    mock_rest.fetch_open_orders.return_value = []
+    mock_rest.cancel_order.return_value = {"orderId": 12345, "status": "CANCELED"}
+    mock_rest.fetch_exchange_info.return_value = exchange_info()
+    mock_rest.post_order.return_value = {"orderId": 999, "clientOrderId": "sweep_1"}
+    mock_ws = AsyncMock()
+
+    async def connect(*, on_event):
+        state = on_event.__self__
+        state.set_ws_connected(True)
+
+        async def cancel(**params):
+            order = state.orders[params["client_order_id"]]
+            await state.on_order_trade_update(
+                order.client_order_id,
+                order.symbol,
+                order.position_side,
+                order.side,
+                OrderStatus.CANCELED,
+                Decimal("0"),
+                Decimal("0"),
+                Decimal("0"),
+                Decimal("0"),
+            )
+
+        async def fill(**params):
+            order = state.orders[params["client_order_id"]]
+            await state.on_order_trade_update(
+                order.client_order_id,
+                order.symbol,
+                order.position_side,
+                order.side,
+                OrderStatus.FILLED,
+                order.quantity,
+                Decimal("50000"),
+                order.quantity,
+                Decimal("50000"),
+            )
+
+        mock_rest.cancel_order.side_effect = cancel
+        mock_rest.post_order.side_effect = fill
+
+    mock_ws.connect.side_effect = connect
+    mock_rest.fetch_account_information.side_effect = [
+        AccountSnapshot(
+            {}, Decimal("1000"), [PositionSnapshot("BTCUSDT", "LONG", Decimal("0.5"))]
+        ),
+        AccountSnapshot({}, Decimal("1000"), []),
+    ]
 
     with (
         patch(
             "crypto_momentum_lab.apps.next_gen.cli._resolve_credentials",
             return_value=("fake_k", "fake_s"),
+        ),
+        patch(
+            "crypto_momentum_lab.apps.next_gen.cli._resolve_read_credentials",
+            return_value=("fake_read_k", "fake_read_s"),
         ),
         patch(
             "crypto_momentum_lab.apps.next_gen.cli._resolve_repository",
@@ -145,58 +211,78 @@ def test_cli_drain_live_flow_cancels_and_sweeps() -> None:
             "crypto_momentum_lab.apps.next_gen.cli.BinanceRestClient",
             return_value=mock_rest,
         ),
+        patch(
+            "crypto_momentum_lab.apps.next_gen.cli.BinanceUserDataStream",
+            return_value=mock_ws,
+        ),
     ):
         result = runner.invoke(app, ["drain", "-e", "testnet", "-a", "a1"])
         assert result.exit_code == 0
-        mock_rest.fetch_open_orders.assert_awaited_once()
+        assert mock_rest.fetch_open_orders.await_count == 1
+        mock_rest.query_order.assert_not_awaited()
         mock_rest.cancel_order.assert_awaited_once()
         mock_rest.post_order.assert_awaited_once()
-        mock_rest.fetch_account_information.assert_awaited_once()
+        assert mock_rest.fetch_account_information.await_count == 1
 
 
-def test_cli_run_dry_run_invokes_daemon() -> None:
-    mock_run_daemon = AsyncMock()
+def test_cli_run_dry_run_does_not_connect() -> None:
+    with (
+        patch("crypto_momentum_lab.apps.next_gen.cli.run_nextgen_daemon") as daemon,
+        patch("crypto_momentum_lab.apps.next_gen.cli.BinanceRestClient") as rest,
+    ):
+        result = runner.invoke(app, ["run", "--dry-run", "-e", "live", "-a", "a1"])
+        assert result.exit_code == 0
+        daemon.assert_not_called()
+        rest.assert_not_called()
 
+
+def test_cli_testnet_routes_both_clients_to_testnet() -> None:
+    rest = AsyncMock()
+    daemon = AsyncMock()
     with (
         patch(
-            "crypto_momentum_lab.apps.next_gen.cli.run_nextgen_daemon",
-            mock_run_daemon,
+            "crypto_momentum_lab.apps.next_gen.cli._resolve_credentials",
+            return_value=("key", "secret"),
         ),
         patch(
-            "crypto_momentum_lab.apps.next_gen.cli._run_with_signal_handlers"
-        ) as mock_signal_runner,
+            "crypto_momentum_lab.apps.next_gen.cli._resolve_read_credentials",
+            return_value=("read_key", "read_secret"),
+        ),
+        patch(
+            "crypto_momentum_lab.apps.next_gen.cli.BinanceRestClient", return_value=rest
+        ) as factory,
+        patch("crypto_momentum_lab.apps.next_gen.cli.run_nextgen_daemon", daemon),
     ):
-        # 拦截 _run_with_signal_handlers 并直接调用其传入的协程
-        async def fake_signal_runner(
-            runner_fn: Callable[[asyncio.Event], Awaitable[None]],
-        ) -> None:
-            stop_event = asyncio.Event()
-            await runner_fn(stop_event)
-
-        mock_signal_runner.side_effect = fake_signal_runner
-
-        result = runner.invoke(
-            app,
-            [
-                "run",
-                "--dry-run",
-                "-e",
-                "live",
-                "-a",
-                "a1",
-                "--symbols",
-                "BTCUSDT,ETHUSDT",
-                "--keepalive-interval",
-                "60",
-            ],
-        )
+        result = runner.invoke(app, ["run", "-e", "testnet", "-a", "a1"])
         assert result.exit_code == 0
-        mock_run_daemon.assert_awaited_once()
-        _, kwargs = mock_run_daemon.call_args
-        assert kwargs["environment"] == "live"
-        assert kwargs["account_label"] == "a1"
-        assert kwargs["symbols"] == ["BTCUSDT", "ETHUSDT"]
-        assert kwargs["keepalive_interval_sec"] == 60.0
+        assert factory.call_args.kwargs["environment"] == "testnet"
+        assert daemon.await_args.kwargs["ws_client"].environment == "testnet"
+
+
+def test_cli_keeps_read_and_trade_clients_separate() -> None:
+    trade_client = AsyncMock()
+    read_client = AsyncMock()
+    daemon = AsyncMock()
+    with (
+        patch(
+            "crypto_momentum_lab.apps.next_gen.cli._resolve_credentials",
+            return_value=("trade_key", "trade_secret"),
+        ),
+        patch(
+            "crypto_momentum_lab.apps.next_gen.cli._resolve_read_credentials",
+            return_value=("read_key", "read_secret"),
+        ),
+        patch(
+            "crypto_momentum_lab.apps.next_gen.cli.BinanceRestClient",
+            side_effect=[trade_client, read_client],
+        ),
+        patch("crypto_momentum_lab.apps.next_gen.cli.run_nextgen_daemon", daemon),
+    ):
+        result = runner.invoke(app, ["run", "-e", "testnet", "-a", "a1"])
+        assert result.exit_code == 0
+        assert daemon.await_args.kwargs["rest_client"] is trade_client
+        assert daemon.await_args.kwargs["read_client"] is read_client
+        assert daemon.await_args.kwargs["ws_client"]._rest is read_client
 
 
 def test_resolve_credentials_fallbacks() -> None:

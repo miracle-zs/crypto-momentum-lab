@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
+
 from crypto_momentum_lab.next_gen.symbol_rules import (
     SymbolRulesRegistry,
 )
+from tests.unit.next_gen.factories import symbol_rules
 
 
-def test_symbol_rules_defaults() -> None:
-    registry = SymbolRulesRegistry()
+def test_symbol_rules_explicit_filters() -> None:
+    registry = symbol_rules()
     flt = registry.get_filter("BTCUSDT")
     assert flt.step_size == Decimal("0.001")
     assert flt.tick_size == Decimal("0.10")
@@ -21,7 +24,7 @@ def test_symbol_rules_defaults() -> None:
 
 
 def test_symbol_rules_round_quantity_floored() -> None:
-    registry = SymbolRulesRegistry()
+    registry = symbol_rules()
     # BTCUSDT step size = 0.001
     assert registry.round_quantity("BTCUSDT", Decimal("0.1239")) == Decimal("0.123")
     assert registry.round_quantity("BTCUSDT", Decimal("0.0011")) == Decimal("0.001")
@@ -32,7 +35,7 @@ def test_symbol_rules_round_quantity_floored() -> None:
 
 
 def test_symbol_rules_round_price_half_up() -> None:
-    registry = SymbolRulesRegistry()
+    registry = symbol_rules()
     # BTCUSDT tick size = 0.10
     assert registry.round_price("BTCUSDT", Decimal("65000.14")) == Decimal("65000.1")
     assert registry.round_price("BTCUSDT", Decimal("65000.16")) == Decimal("65000.2")
@@ -42,7 +45,7 @@ def test_symbol_rules_round_price_half_up() -> None:
 
 
 def test_symbol_rules_validation() -> None:
-    registry = SymbolRulesRegistry()
+    registry = symbol_rules()
     # 满足要求
     valid, msg = registry.validate_order("BTCUSDT", Decimal("0.001"), Decimal("65000"))
     assert valid is True
@@ -60,7 +63,7 @@ def test_symbol_rules_validation() -> None:
 
 
 def test_symbol_rules_dynamic_update_from_exchange_info() -> None:
-    registry = SymbolRulesRegistry()
+    registry = symbol_rules()
     mock_info = {
         "symbols": [
             {
@@ -81,10 +84,40 @@ def test_symbol_rules_dynamic_update_from_exchange_info() -> None:
     assert flt.min_notional == Decimal("10.0")
 
 
-def test_symbol_rules_defensive_on_malformed_exchange_info() -> None:
+@pytest.mark.parametrize("info", [{}, {"symbols": None}, {"symbols": ["not_a_dict"]}])
+def test_symbol_rules_reject_malformed_exchange_info(info):
     registry = SymbolRulesRegistry()
-    # 传入非法格式时不崩溃
-    registry.update_from_exchange_info({})
-    registry.update_from_exchange_info({"symbols": None})  # type: ignore[dict-item]
-    registry.update_from_exchange_info({"symbols": ["not_a_dict"]})  # type: ignore[list-item]
-    assert registry.get_filter("UNKNOWNUSDT").step_size == Decimal("0.001")
+    with pytest.raises((KeyError, TypeError)):
+        registry.update_from_exchange_info(info)
+    with pytest.raises(ValueError, match="Missing exchange filters"):
+        registry.get_filter("BTCUSDT")
+
+
+def test_unknown_symbol_never_gets_guessed_precision():
+    with pytest.raises(ValueError, match="Missing exchange filters"):
+        symbol_rules().get_filter("UNKNOWNUSDT")
+
+
+def test_symbol_rules_skip_symbols_without_required_filters() -> None:
+    registry = SymbolRulesRegistry()
+    registry.update_from_exchange_info(
+        {
+            "symbols": [
+                {
+                    "symbol": "BTCUSDT",
+                    "filters": [
+                        {"filterType": "PRICE_FILTER", "tickSize": "0.10"},
+                        {
+                            "filterType": "LOT_SIZE",
+                            "stepSize": "0.001",
+                            "minQty": "0.001",
+                        },
+                        {"filterType": "MIN_NOTIONAL", "notional": "5"},
+                    ],
+                },
+                {"symbol": "SETTLINGUSDT", "filters": []},
+            ]
+        }
+    )
+    assert registry.has_filter("BTCUSDT") is True
+    assert registry.has_filter("SETTLINGUSDT") is False

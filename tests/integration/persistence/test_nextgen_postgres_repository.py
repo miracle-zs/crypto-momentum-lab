@@ -296,3 +296,224 @@ async def test_postgres_get_active_batches_and_recent_orders(
     # 按 created_at DESC 排序
     assert recent[0].client_order_id == "ord_second"
     assert recent[1].client_order_id == "ord_first"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_full_market_state_warmup_preserves_order_flow_fields(postgres_repo):
+    from dataclasses import replace
+
+    from sqlalchemy import delete, insert
+
+    from crypto_momentum_lab.persistence.postgres.models import RuntimeMarketState15sRow
+    from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
+        runtime_state_row,
+    )
+    from tests.unit.persistence.postgres.test_runtime_state_repository import (
+        fixture_state,
+    )
+
+    states = tuple(
+        replace(fixture_state("BTCUSDT", i), environment=ENVIRONMENT) for i in range(3)
+    )
+    async with postgres_repo._engine.begin() as connection:
+        await connection.execute(
+            delete(RuntimeMarketState15sRow).where(
+                RuntimeMarketState15sRow.environment == ENVIRONMENT,
+            )
+        )
+        await connection.execute(
+            insert(RuntimeMarketState15sRow),
+            [
+                runtime_state_row(
+                    row,
+                    source_watermark_at=row.bucket_end,
+                    input_sequence_min=None,
+                    input_sequence_max=None,
+                )
+                for row in states
+            ],
+        )
+    try:
+        loaded = await postgres_repo.async_get_historical_market_states(
+            ENVIRONMENT,
+            ["BTCUSDT"],
+            2,
+        )
+        assert loaded == list(states[-2:])
+        assert loaded[-1].aggressive_buy_notional == states[-1].aggressive_buy_notional
+        assert loaded[-1].last_ask_price == states[-1].last_ask_price
+    finally:
+        async with postgres_repo._engine.begin() as connection:
+            await connection.execute(
+                delete(RuntimeMarketState15sRow).where(
+                    RuntimeMarketState15sRow.environment == ENVIRONMENT,
+                )
+            )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_risk_configuration_is_required_and_scoped_to_account(postgres_repo):
+    from dataclasses import asdict, replace
+
+    from sqlalchemy import delete, insert
+
+    from crypto_momentum_lab.persistence.postgres.models import RiskConfigSnapshotRow
+    from tests.unit.next_gen.factories import risk_config
+
+    config = replace(
+        risk_config(ENVIRONMENT, "risk-test"), max_gross_notional=Decimal("321")
+    )
+    async with postgres_repo._engine.begin() as connection:
+        await connection.execute(
+            delete(RiskConfigSnapshotRow).where(
+                RiskConfigSnapshotRow.environment == ENVIRONMENT,
+            )
+        )
+        await connection.execute(
+            insert(RiskConfigSnapshotRow).values(
+                config_hash=config.config_hash,
+                **asdict(config),
+            )
+        )
+    try:
+        loaded = await postgres_repo.async_get_risk_config(ENVIRONMENT, "risk-test")
+        assert loaded == config
+        with pytest.raises(RuntimeError, match="No persisted risk"):
+            await postgres_repo.async_get_risk_config(ENVIRONMENT, "different-account")
+    finally:
+        async with postgres_repo._engine.begin() as connection:
+            await connection.execute(
+                delete(RiskConfigSnapshotRow).where(
+                    RiskConfigSnapshotRow.environment == ENVIRONMENT,
+                )
+            )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_dashboard_reads_nextgen_state_and_never_invents_margin(postgres_repo):
+    from dataclasses import replace
+    from pathlib import Path
+
+    from sqlalchemy import delete
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from crypto_momentum_lab.live_rollout.runtime_manifest import (
+        load_live_runtime_manifest,
+    )
+    from crypto_momentum_lab.next_gen.dashboard import NextGenDashboardQueries
+    from crypto_momentum_lab.next_gen.db_models import (
+        LiveOrderRow,
+        LivePositionBatchRow,
+    )
+    from crypto_momentum_lab.operator_dashboard.status import OperationalStatus
+    from crypto_momentum_lab.persistence.postgres.models import StrategyRuntimeEventRow
+
+    label = "nextgen-dashboard-test"
+    now = datetime.now(UTC)
+    manifest = load_live_runtime_manifest(
+        Path("deploy/live-runtime.yaml"), environment={"CML_CODE_COMMIT": "test"}
+    )
+    config = replace(manifest.account("primary"), label=label)
+    queries = NextGenDashboardQueries(
+        async_sessionmaker(postgres_repo._engine), (config,), clock=lambda: now
+    )
+    batch = PositionBatch(
+        "live",
+        label,
+        "dashboard-batch",
+        "BTCUSDT",
+        "LONG",
+        Decimal("1"),
+        Decimal("100"),
+        now,
+    )
+    order = Order(
+        "live",
+        label,
+        "e_dashboard_batch_01",
+        batch.batch_id,
+        "BTCUSDT",
+        "BUY",
+        "LONG",
+        "LIMIT",
+        Decimal("1"),
+        Decimal("100"),
+        status=OrderStatus.OPEN,
+    )
+
+    async def cleanup():
+        async with postgres_repo._engine.begin() as connection:
+            await connection.execute(
+                delete(StrategyRuntimeEventRow).where(
+                    StrategyRuntimeEventRow.run_id == f"nextgen:live:{label}",
+                )
+            )
+            for model in (LiveOrderRow, LivePositionBatchRow):
+                await connection.execute(
+                    delete(model).where(model.account_label == label)
+                )
+
+    await cleanup()
+    try:
+        await postgres_repo.async_save_order_and_batch(order, batch)
+        await postgres_repo.async_save_runtime_status(
+            "live",
+            label,
+            now,
+            {
+                "halt_active": False,
+                "mode": "RUNNING",
+                "ready": True,
+                "strategy_name": "orderflow_impulse",
+                "entry_gate_open": True,
+                "exit_gate_open": True,
+                "ws_connected": True,
+                "balances": {"USDT": "1000"},
+                "unrealized_pnl": "5",
+            },
+        )
+        account = await queries.account(account_label=label)
+        assert account.status is OperationalStatus.READY
+        assert account.positions[0]["batch_id"] == batch.batch_id
+        assert account.positions[0]["position_amt"] == "1.0000000000"
+        assert account.open_orders[0]["client_order_id"] == order.client_order_id
+        assert account.balances[0]["wallet_balance"] == "1000"
+        assert account.balances[0]["available_balance"] is None
+        metrics = await queries.live_account_metrics()
+        point = metrics.accounts[0].metrics_curve[-1]
+        assert Decimal(point.equity) == Decimal("1005")
+        assert point.margin_used is None
+        import httpx
+
+        from crypto_momentum_lab.operator_dashboard.api import create_dashboard_app
+        from crypto_momentum_lab.operator_dashboard.queries import DashboardQueries
+
+        facade = DashboardQueries(
+            async_sessionmaker(postgres_repo._engine),
+            clock=lambda: now,
+            execution_engine="nextgen",
+            nextgen_accounts=(config,),
+        )
+        app = create_dashboard_app(queries=facade)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get("/api/account", params={"account_label": label})
+            assert response.status_code == 200, response.text
+            assert response.json()["positions"][0]["batch_id"] == batch.batch_id
+            response = await client.get("/api/readiness")
+            assert response.status_code == 200, response.text
+            assert response.json()["tradeability"]["entry_gate_open"] is True
+        stale = NextGenDashboardQueries(
+            async_sessionmaker(postgres_repo._engine),
+            (config,),
+            clock=lambda: now + timedelta(seconds=181),
+        )
+        assert (await stale.live_accounts()).accounts[
+            0
+        ].status is OperationalStatus.STALE
+    finally:
+        await cleanup()

@@ -10,6 +10,7 @@ from crypto_momentum_lab.next_gen.models import (
     SystemMode,
     generate_batch_id,
 )
+from tests.unit.next_gen.factories import risk_config
 
 
 @pytest.fixture
@@ -22,6 +23,7 @@ def account_state():
         db=mock_db,
         rest_client=mock_rest,
     )
+    state.risk_config = risk_config(state.environment, state.account_label)
     state.set_system_mode(SystemMode.RUNNING)
     state.ws_connected = True
     return state
@@ -57,6 +59,7 @@ async def test_watchdog_triggers_reconciling_and_freezes_ordering_on_timeout(
 
     # Order must be in doubt (RECONCILING)
     assert order.status == OrderStatus.RECONCILING
+    account_state._rest_client.query_order.assert_not_awaited()
     # System must be frozen into DEGRADED
     assert account_state.system_mode == SystemMode.DEGRADED
     assert not account_state.can_submit_entry_order()
@@ -126,6 +129,7 @@ async def test_system_mode_recovery_when_in_doubt_order_resolves(
         order.client_order_id, timeout_sec=0.01
     )
     assert order.status == OrderStatus.RECONCILING
+    account_state._rest_client.query_order.assert_not_awaited()
     assert account_state.system_mode == SystemMode.DEGRADED
     assert not account_state.can_submit_entry_order()
 

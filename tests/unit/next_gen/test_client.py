@@ -162,6 +162,7 @@ async def test_user_data_stream_parse_order_trade_update():
         last_filled_price=Decimal("65000.00"),
         exchange_order_id=88888888,
         trade_time=datetime.fromtimestamp(1700000000005 / 1000.0, tz=UTC),
+        exchange_realized_pnl=None,
     )
 
 
@@ -350,3 +351,28 @@ async def test_user_data_stream_auto_reconnects_on_disconnect() -> None:
     assert len(received) == 2
     assert received[0]["e"] == "ACCOUNT_UPDATE"
     assert received[1]["e"] == "ORDER_TRADE_UPDATE"
+
+
+@pytest.mark.asyncio
+async def test_set_margin_type_accepts_already_applied(rest_client: BinanceRestClient):
+    with patch.object(rest_client, "_request", new_callable=AsyncMock) as mock_req:
+        mock_req.side_effect = BinanceOrderRejectedError(
+            code=-4046, message="No need to change margin type."
+        )
+        await rest_client.set_margin_type("BTCUSDT", "CROSSED")
+
+    mock_req.assert_awaited_once()
+    params = mock_req.await_args.kwargs["params"]
+    assert params == {"symbol": "BTCUSDT", "marginType": "CROSSED"}
+
+
+@pytest.mark.asyncio
+async def test_set_margin_type_propagates_other_rejections(
+    rest_client: BinanceRestClient,
+):
+    with patch.object(rest_client, "_request", new_callable=AsyncMock) as mock_req:
+        mock_req.side_effect = BinanceOrderRejectedError(
+            code=-4048, message="Invalid margin type."
+        )
+        with pytest.raises(BinanceOrderRejectedError):
+            await rest_client.set_margin_type("BTCUSDT", "CROSSED")

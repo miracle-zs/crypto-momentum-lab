@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock
@@ -24,6 +25,7 @@ from crypto_momentum_lab.next_gen.models import (
     generate_exit_order_id,
 )
 from crypto_momentum_lab.next_gen.persistence import InMemoryTradingRepository
+from tests.unit.next_gen.factories import risk_config
 
 
 @pytest.mark.asyncio
@@ -60,6 +62,7 @@ async def test_order_executor_in_doubt_error_keeps_lock_and_submitted_status() -
     )
 
     state = AccountState("live", "primary", db=repo)
+    state.risk_config = risk_config(state.environment, state.account_label)
     state.set_system_mode(SystemMode.RUNNING)
     state.on_ws_status_change(True)
 
@@ -89,6 +92,7 @@ async def test_order_executor_in_doubt_error_keeps_lock_and_submitted_status() -
 async def test_account_update_event_dispatches_safely_to_engine() -> None:
     stream = BinanceUserDataStream(rest_client=AsyncMock())
     state = AccountState("live", "account-2")
+    state.risk_config = risk_config(state.environment, state.account_label)
 
     # 预设 USDT 与 BNB
     state.update_balances(
@@ -141,6 +145,7 @@ async def test_order_executor_prewrite_db_failure_rolls_back_and_degrades() -> N
     repo = FailingRepo()
     mock_rest = AsyncMock()
     state = AccountState("live", "account-3", db=repo)
+    state.risk_config = risk_config(state.environment, state.account_label)
     state.set_system_mode(SystemMode.RUNNING)
     state.on_ws_status_change(True)
 
@@ -262,6 +267,7 @@ def test_generate_batch_id_length_and_uniqueness() -> None:
 
 def test_check_notional_limits_excludes_exit_orders_and_accounts_correctly() -> None:
     state = AccountState("live", "primary")
+    state.risk_config = risk_config(state.environment, state.account_label)
     state.batches["b1"] = PositionBatch(
         environment="live",
         account_label="primary",
@@ -274,14 +280,14 @@ def test_check_notional_limits_excludes_exit_orders_and_accounts_correctly() -> 
     )
 
     # 现价 60000 下，当前持仓名义价值 60000
-    # 设置 symbol_cap = 100000, account_cap = 150000
+    state.latest_prices["BTCUSDT"] = Decimal("65000")
+    state.risk_config = replace(state.risk_config, max_gross_notional=Decimal("100000"))
+    # Count pending entries, and exclude exit orders from exposure.
     # 尝试再买 0.5 BTC (名义价值 +30000 = 90000 <= 100000) -> 允许
     assert state.check_notional_limits(
         symbol="BTCUSDT",
         new_quantity=Decimal("0.5"),
         current_price=Decimal("60000.0"),
-        symbol_cap=Decimal("100000"),
-        account_cap=Decimal("150000"),
     )
 
     # 尝试再买 1.0 BTC (名义价值 +60000 = 120000 > 100000) -> 阻断
@@ -289,6 +295,4 @@ def test_check_notional_limits_excludes_exit_orders_and_accounts_correctly() -> 
         symbol="BTCUSDT",
         new_quantity=Decimal("1.0"),
         current_price=Decimal("60000.0"),
-        symbol_cap=Decimal("100000"),
-        account_cap=Decimal("150000"),
     )

@@ -103,7 +103,7 @@ class LiveAccountMetricPointResponse(DashboardSchema):
     observed_at: datetime
     equity: str
     equity_change_ratio: str | None = None
-    margin_used: str
+    margin_used: str | None
     margin_occupancy_ratio: str | None = None
     drawdown: str
     drawdown_ratio: str | None = None

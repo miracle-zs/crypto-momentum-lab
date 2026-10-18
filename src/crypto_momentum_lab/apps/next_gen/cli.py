@@ -6,6 +6,7 @@ import os
 import signal
 from collections.abc import Awaitable, Callable
 from decimal import Decimal
+from pathlib import Path
 from typing import Annotated, Any
 
 import structlog
@@ -17,6 +18,7 @@ from crypto_momentum_lab.config import (
     resolve_database_url,
     resolve_role_credentials,
 )
+from crypto_momentum_lab.live_rollout.runtime_manifest import load_live_runtime_manifest
 from crypto_momentum_lab.next_gen.client import (
     BinanceRestClient,
     BinanceUserDataStream,
@@ -24,7 +26,7 @@ from crypto_momentum_lab.next_gen.client import (
 from crypto_momentum_lab.next_gen.daemon import run_nextgen_daemon
 from crypto_momentum_lab.next_gen.engine import AccountState
 from crypto_momentum_lab.next_gen.executor import OrderExecutor
-from crypto_momentum_lab.next_gen.models import OrderStatus, SystemMode
+from crypto_momentum_lab.next_gen.models import SystemMode
 from crypto_momentum_lab.next_gen.persistence import (
     InMemoryTradingRepository,
     PostgresTradingRepository,
@@ -97,6 +99,42 @@ def _resolve_credentials(
         "Binance API credentials missing. Provide --api-key and --api-secret "
         "or set BINANCE_TRADE_API_KEY/BINANCE_TRADE_API_SECRET or "
         "BINANCE_API_KEY/BINANCE_API_SECRET."
+    )
+
+
+def _resolve_read_credentials(
+    account_label: str = "a1",
+    dry_run: bool = False,
+) -> tuple[str, str]:
+    """Resolve the read-only credential role used for baseline and private stream."""
+    normalized = account_label.replace("-", "_").upper()
+    acct_key_env = f"BINANCE_READ_API_KEY_{normalized}"
+    acct_secret_env = f"BINANCE_READ_API_SECRET_{normalized}"
+    if acct_key_env in os.environ and acct_secret_env in os.environ:
+        try:
+            resolved = resolve_role_credentials(
+                BinanceCredentialRole.READ,
+                api_key_env=acct_key_env,
+                api_secret_env=acct_secret_env,
+            )
+            return resolved.api_key, resolved.api_secret
+        except (CredentialResolutionError, ValueError):
+            pass
+
+    try:
+        resolved = resolve_role_credentials(BinanceCredentialRole.READ)
+        return resolved.api_key, resolved.api_secret
+    except (CredentialResolutionError, ValueError):
+        pass
+
+    if dry_run:
+        log.warning("using_mock_read_credentials_for_dry_run")
+        return "mock_read_api_key", "mock_read_api_secret"
+
+    raise ValueError(
+        "Binance read-only credentials missing. Set "
+        "BINANCE_READ_API_KEY/BINANCE_READ_API_SECRET (or the account-specific "
+        "BINANCE_READ_API_KEY_<ACCOUNT> pair)."
     )
 
 
@@ -197,9 +235,12 @@ def run_command(
         bool,
         typer.Option(
             "--dry-run",
-            help="Run in dry-run mode with in-memory persistence",
+            help="Validate configuration without connecting to the exchange",
         ),
     ] = False,
+    runtime_manifest: Annotated[
+        Path, typer.Option("--runtime-manifest", help="Account trading configuration")
+    ] = Path("deploy/live-runtime.yaml"),
     keepalive_interval: Annotated[
         float,
         typer.Option(
@@ -209,10 +250,15 @@ def run_command(
     ] = 1800.0,
 ) -> None:
     """Launch Next-Gen continuous trading daemon."""
+    account_config = load_live_runtime_manifest(runtime_manifest).account(account_label)
     key, secret = _resolve_credentials(
         account_label=account_label,
         api_key=api_key,
         api_secret=api_secret,
+        dry_run=dry_run,
+    )
+    read_key, read_secret = _resolve_read_credentials(
+        account_label=account_label,
         dry_run=dry_run,
     )
     repo, engine = _resolve_repository(
@@ -233,29 +279,48 @@ def run_command(
         dry_run=dry_run,
     )
 
-    rest_client = BinanceRestClient(api_key=key, api_secret=secret)
-    ws_client = (
-        BinanceUserDataStream(rest_client=rest_client, ws_connector=False)
-        if dry_run
-        else BinanceUserDataStream(rest_client=rest_client)
+    if dry_run:
+        log.info(
+            "next_gen_configuration_validated",
+            environment=environment,
+            account=account_label,
+            symbols=symbol_list,
+        )
+        return
+
+    trade_client = BinanceRestClient(
+        api_key=key, api_secret=secret, environment=environment
+    )
+    read_client = BinanceRestClient(
+        api_key=read_key, api_secret=read_secret, environment=environment
+    )
+    ws_client = BinanceUserDataStream(
+        rest_client=read_client,
+        environment=environment,
     )
     hub_url = os.environ.get("CML_MARKET_STATE_HUB_URL")
+    market_environment = os.environ.get("CML_MARKET_STATE_ENVIRONMENT", "research")
 
     async def _runner(stop_event: asyncio.Event) -> None:
         try:
             await run_nextgen_daemon(
+                account_config=account_config,
                 environment=environment,
                 account_label=account_label,
                 db=repo,
-                rest_client=rest_client,
+                rest_client=trade_client,
+                read_client=read_client,
                 symbols=symbol_list,
                 ws_client=ws_client,
                 stop_event=stop_event,
                 keepalive_interval_sec=keepalive_interval,
                 hub_url=hub_url,
                 market_feed_connector=False if dry_run else None,
+                market_environment=market_environment,
             )
         finally:
+            await read_client.close()
+            await trade_client.close()
             if engine:
                 await engine.dispose()
 
@@ -296,6 +361,10 @@ def drain_command(
         api_secret=api_secret,
         dry_run=dry_run,
     )
+    read_key, read_secret = _resolve_read_credentials(
+        account_label=account_label,
+        dry_run=dry_run,
+    )
     repo, engine = _resolve_repository(
         database_url, dry_run=dry_run, environment=environment
     )
@@ -315,137 +384,68 @@ def drain_command(
         )
         return
 
-    rest_client = BinanceRestClient(api_key=key, api_secret=secret)
+    trade_client = BinanceRestClient(
+        api_key=key, api_secret=secret, environment=environment
+    )
+    read_client = BinanceRestClient(
+        api_key=read_key, api_secret=read_secret, environment=environment
+    )
 
     async def _drainer() -> None:
+        state = AccountState(
+            environment, account_label, db=repo, rest_client=read_client
+        )
+        state.is_draining = True
+        state.set_system_mode(SystemMode.DRAINING)
+        executor = OrderExecutor(
+            trade_client, state, repo, read_client=read_client
+        )
+        ws_client = BinanceUserDataStream(read_client, environment=environment)
+        ws_client.on_status_change = state.on_ws_status_change
+        state.attach_ws_client(ws_client)
+        stream_task = None
         try:
             lock_key = compute_advisory_lock_key(environment, account_label)
             async with repo.acquire_dedicated_advisory_lock(lock_key):
-                state = AccountState(
-                    environment=environment,
-                    account_label=account_label,
-                    db=repo,
-                    rest_client=rest_client,
-                )
-                state.is_draining = True
-                state.set_system_mode(SystemMode.DRAINING)
-
-                # 1. 撤销交易所现存所有未结挂单 (防止与市价平仓冲突)
-                try:
-                    open_orders = await rest_client.fetch_open_orders()
-                    for o in open_orders:
-                        sym = str(o.get("symbol", ""))
-                        cid = o.get("clientOrderId")
-                        oid = o.get("orderId")
-                        try:
-                            await rest_client.cancel_order(
-                                symbol=sym,
-                                client_order_id=cid,
-                                order_id=oid,
-                            )
-                            log.info(
-                                "drain_cancelled_open_order",
-                                symbol=sym,
-                                client_order_id=cid,
-                                order_id=oid,
-                            )
-                        except Exception as e:
-                            log.warning(
-                                "drain_cancel_order_failed",
-                                symbol=sym,
-                                client_order_id=cid,
-                                err=str(e),
-                            )
-                except Exception as e:
-                    log.warning("drain_fetch_open_orders_failed", err=str(e))
-
-                # 2. 载入持久化活跃批次
-                active_batches = await repo.async_get_active_batches(
-                    environment, account_label
-                )
-                for b in active_batches:
-                    state.batches[b.batch_id] = b
-
-                executor = OrderExecutor(
-                    rest_client=rest_client,
-                    state=state,
-                    db=repo,
-                )
-
                 rules = SymbolRulesRegistry()
-                try:
-                    info = await rest_client.fetch_exchange_info()
-                    rules.update_from_exchange_info(info)
-                except Exception:
-                    pass
-
-                # 3. 对每个活跃批次下达市价清扫单
-                drained_count = 0
-                for b in active_batches:
-                    remaining_qty = b.quantity - b.exiting_quantity
-                    sweep_qty = rules.round_quantity(b.symbol, remaining_qty)
-                    if sweep_qty > Decimal("0"):
-                        exit_order = state.create_exit_order(
-                            batch_id=b.batch_id,
-                            quantity=sweep_qty,
-                            price=None,
-                            order_type="MARKET",
-                        )
-                        try:
-                            await executor.submit_order(exit_order)
-                            if not exit_order.is_terminal:
-                                q_res = await rest_client.query_order(
-                                    symbol=b.symbol,
-                                    client_order_id=exit_order.client_order_id,
-                                )
-                                exec_qty = Decimal(
-                                    str(q_res.get("executedQty", sweep_qty))
-                                )
-                                avg_px = Decimal(str(q_res.get("avgPrice", "0")))
-                                await state.on_order_trade_update(
-                                    client_order_id=exit_order.client_order_id,
-                                    symbol=b.symbol,
-                                    position_side=exit_order.position_side,
-                                    side=exit_order.side,
-                                    order_status=OrderStatus.FILLED,
-                                    cum_filled_qty=exec_qty,
-                                    avg_price=avg_px,
-                                    last_filled_qty=exec_qty,
-                                    last_filled_price=avg_px,
-                                )
-                            drained_count += 1
-                        except Exception as e:
-                            log.error(
-                                "drain_batch_exit_failed",
-                                batch_id=b.batch_id,
-                                err=str(e),
-                            )
-
-                await executor.close()
-
-                # 4. 校验账户最终是否完全空仓 (严格基线复核)
-                acct_snap = await rest_client.fetch_account_information()
-                non_zero_positions = [
-                    p for p in acct_snap.positions if abs(p.position_amt) > Decimal("0")
-                ]
-                if non_zero_positions:
-                    log.error(
-                        "drain_finished_with_lingering_positions",
-                        positions=[
-                            f"{p.symbol}:{p.position_side}:{p.position_amt}"
-                            for p in non_zero_positions
-                        ],
-                    )
+                rules.update_from_exchange_info(
+                    await read_client.fetch_exchange_info()
+                )
+                await executor.load_active_state()
+                # This is the drain process startup baseline, before any command.
+                snapshot = await read_client.fetch_account_information()
+                open_orders = await read_client.fetch_open_orders()
+                expected: dict[tuple[str, str], Decimal] = {}
+                for batch in state.batches.values():
+                    if batch.quantity > 0:
+                        key = (batch.symbol, batch.position_side)
+                        expected[key] = expected.get(key, 0) + batch.quantity
+                actual = {
+                    (p.symbol, p.position_side): abs(p.position_amt)
+                    for p in snapshot.positions
+                    if p.position_amt != 0
+                }
+                if actual != expected or any(
+                    o["clientOrderId"] not in state.orders for o in open_orders
+                ):
                     raise RuntimeError(
-                        "Drain 完成后交易所仍存在未结持仓，请人工介入核查！"
+                        "Drain startup baseline differs from stored state"
                     )
-
+                await ws_client.connect(on_event=state.on_live_event)
+                stream_task = asyncio.create_task(ws_client.run_stream())
+                drained_count = await executor.drain(rules)
                 state.set_system_mode(SystemMode.STOPPED)
                 log.info(
-                    "next_gen_drain_completed",
-                    drained_batches_count=drained_count,
+                    "next_gen_drain_completed", drained_batches_count=drained_count
                 )
         finally:
+            if stream_task is not None:
+                stream_task.cancel()
+                await asyncio.gather(stream_task, return_exceptions=True)
+            await ws_client.close()
+            await executor.close()
+            await read_client.close()
+            await trade_client.close()
             if engine:
                 await engine.dispose()
 

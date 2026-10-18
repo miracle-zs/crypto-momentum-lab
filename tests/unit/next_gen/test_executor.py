@@ -12,6 +12,7 @@ from crypto_momentum_lab.next_gen.models import (
     generate_batch_id,
 )
 from crypto_momentum_lab.next_gen.persistence import InMemoryTradingRepository
+from tests.unit.next_gen.factories import risk_config
 
 
 @pytest.fixture
@@ -24,6 +25,7 @@ async def test_setup():
         db=repo,
         rest_client=mock_rest,
     )
+    state.risk_config = risk_config(state.environment, state.account_label)
     state.set_system_mode(SystemMode.RUNNING)
     state.ws_connected = True
     executor = OrderExecutor(rest_client=mock_rest, state=state, db=repo)

@@ -1,9 +1,9 @@
 # `crypto-momentum-lab` 核心系统架构与运行机制全景白皮书
-> **文档版本**: 2026.10-T2-Production-Audit  
-> **设计基准**: Git 仓库真实源码（Alembic 迁移 `20261018_0067_next_gen_execution_tables` 已合并，Schema Version 4，Next-Gen 双表架构与生产发单硬核安全门完备）  
-> **编写角色**: 首席系统架构师  
-> **模型演进**: T2 单一 Durable Head 恢复模型已平稳过渡至 Next-Gen 极简现代异步执行引擎（Alembic 0067 迁移已创建规整关系表并保持旧表解耦兼容；NextGen ORM 模型定义在 `src/crypto_momentum_lab/next_gen/db_models.py`）  
-> **部署现状**: 线上 4 账户（`primary`、`account-2`、`account-3`、`account-4`）共用同一个 PostgreSQL 数据库，NextGen 交易守护进程通过独立 Profile（`--profile nextgen`，见 [`compose.next_gen.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.next_gen.yaml)）与 Legacy 执行栈（`--profile live`）完全隔离运行  
+> **文档版本**: 2026.10-T2-Production-Audit
+> **设计基准**: Git 仓库真实源码（Alembic 迁移 `20261018_0067_next_gen_execution_tables` 已合并；执行 Head schema 仍为 4，NextGen 另用两张独立关系表）
+> **编写角色**: 首席系统架构师
+> **模型演进**: Legacy T2 单一 Durable Head 与 NextGen 极简执行引擎并存；NextGen 代码、PostgreSQL 集成测试和部署定义已完成，生产尚未切换（切换需显式 `CML_TRADING_ENGINE=nextgen` 并完成空仓/停机演练；NextGen ORM 定义在 `src/crypto_momentum_lab/next_gen/db_models.py`）
+> **部署现状**: 线上 4 账户（`primary`、`account-2`、`account-3`、`account-4`）共用同一个 PostgreSQL 数据库；Legacy 仍为默认执行栈（`--profile live`），NextGen 通过独立 Profile（`--profile nextgen`，见 [`compose.next_gen.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.next_gen.yaml)）部署并与 Legacy 隔离
 
 ---
 
@@ -794,7 +794,7 @@ flowchart TD
 
 通过对 `crypto-momentum-lab` 完整源码与生产部署的梳理，可以总结出系统架构演进的成熟度与未来优化方向：
 
-| 架构维度 | 演进状态 (Production State - Alembic 0067, Schema Version 4) | 核心优势 | 潜在瓶颈与演进建议 |
+| 架构维度 | 演进状态 (Implementation State - Alembic 0067, Head Schema 4) | 核心优势 | 潜在瓶颈与演进建议 |
 | :--- | :--- | :--- | :--- |
 | **连接池管理** | 5 个物理隔离的 `AsyncEngine`<br/>(`execution=4`, `market=2`, `obs=1`, `checkpoint=1`, `heartbeat=1`) | 彻底隔离了控制面状态/修复查单与高频执行事务，控制面抗极端并发冲击能力强。 | 连接池监控目前依赖日志，建议在 `observability_engine` 中增加活跃连接泄露探测与池排队度量。 |
 | **持久化模型** | 单一 Durable Head 模型 (Schema Version 4，Alembic 0065 已物理删除 Checkpoint/Journal，0061 已删除 Lease) | 规避了海量增量 Journal 回放的 CPU/IO 开销，基于 Head 快照与未结义务校验快速恢复。 | 恢复耗时随多账户活跃标的数与未结义务规模增加；To-Be 方案建议将 10 表收敛为 2 表关系模型并补齐账户隔离维度。 |

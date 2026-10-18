@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
 import structlog
 
+from crypto_momentum_lab.domain.risk.models import RiskConfigSnapshot
 from crypto_momentum_lab.next_gen.models import (
     Order,
     OrderStatus,
@@ -66,10 +67,18 @@ class AccountState:
 
         self.system_mode: SystemMode = SystemMode.BOOTING
         self.is_draining: bool = False
+        self.entry_halted = False
         self.ws_connected: bool = False
         self.has_unrecoverable_fault: bool = False
-        self.symbol_cap: Decimal = Decimal("1000000")
-        self.account_cap: Decimal = Decimal("2000000")
+        self.private_stream_gap = False
+        self._update_lock = asyncio.Lock()
+        self._terminal_waiters: dict[str, asyncio.Event] = {}
+        self.risk_config: RiskConfigSnapshot | None = None
+        self.latest_prices: dict[str, Decimal] = {}
+        self.daily_realized_pnl = Decimal("0")
+        self.risk_day = datetime.now(UTC).date()
+        self.daily_pnl_ready = False
+        self.income_cutoff: datetime | None = None
 
     @property
     def db(self) -> TradingRepositoryProtocol | None:
@@ -88,7 +97,12 @@ class AccountState:
         """
         if self.system_mode != SystemMode.DEGRADED:
             return
-        if self.is_draining or self.has_unrecoverable_fault or not self.ws_connected:
+        if (
+            self.is_draining
+            or self.has_unrecoverable_fault
+            or not self.ws_connected
+            or self.private_stream_gap
+        ):
             return
         has_in_doubt = any(
             o.status == OrderStatus.RECONCILING for o in self.orders.values()
@@ -100,6 +114,7 @@ class AccountState:
     def reset_fault_state(self) -> None:
         """【运维人工核实复位】：排查底层数据库或网络异常后，显式清除不可恢复故障标记"""
         self.has_unrecoverable_fault = False
+        self.private_stream_gap = False
         log.warning("operator_reset_fault_state", account=self.account_label)
         self.recheck_system_mode()
 
@@ -117,6 +132,13 @@ class AccountState:
         if connected:
             self.recheck_system_mode()
         else:
+            if any(not order.is_terminal for order in self.orders.values()) or any(
+                batch.quantity > 0 for batch in self.batches.values()
+            ):
+                self.private_stream_gap = True
+                for order in self.orders.values():
+                    if not order.is_terminal:
+                        order.status = OrderStatus.RECONCILING
             if self.system_mode == SystemMode.RUNNING:
                 self.set_system_mode(SystemMode.DEGRADED)
 
@@ -134,23 +156,38 @@ class AccountState:
             self.available_balance_snapshot = available_balance_snapshot
 
     def can_submit_entry_order(self) -> bool:
-        if self.system_mode != SystemMode.RUNNING or self.is_draining:
+        if (
+            self.system_mode != SystemMode.RUNNING
+            or self.is_draining
+            or self.risk_config is None
+            or self.entry_halted
+        ):
             return False
         has_in_doubt = any(
             o.status == OrderStatus.RECONCILING for o in self.orders.values()
         )
         return (
-            self.ws_connected and not self.has_unrecoverable_fault and not has_in_doubt
+            self.ws_connected
+            and not self.has_unrecoverable_fault
+            and not has_in_doubt
+            and not self.private_stream_gap
         )
 
     def can_submit_exit_order(self) -> bool:
         has_in_doubt = any(
             o.status == OrderStatus.RECONCILING for o in self.orders.values()
         )
-        if has_in_doubt or self.has_unrecoverable_fault:
+        if (
+            has_in_doubt
+            or self.has_unrecoverable_fault
+            or self.private_stream_gap
+            or self.system_mode in (SystemMode.BOOTING, SystemMode.STOPPED)
+        ):
             return False
         if self.is_draining:
-            return True
+            # Draining is not an excuse to send exits without a live private
+            # stream: every cancel/fill must still be confirmed by WS.
+            return self.ws_connected
         if not self.ws_connected:
             return False
         if self.system_mode in (SystemMode.RUNNING, SystemMode.DEGRADED):
@@ -162,65 +199,63 @@ class AccountState:
         symbol: str,
         new_quantity: Decimal,
         current_price: Decimal,
-        symbol_cap: Decimal | None = None,
-        account_cap: Decimal | None = None,
         latest_prices: dict[str, Decimal] | None = None,
         exclude_order_id: str | None = None,
     ) -> bool:
-        """账户维度与标的维度静态名义价值双上限校验 (纯内存计算，零外部调用)"""
-        s_cap = symbol_cap if symbol_cap is not None else self.symbol_cap
-        a_cap = account_cap if account_cap is not None else self.account_cap
-        prices = dict(latest_prices or {})
-        prices[symbol] = current_price
-
-        # 1. 单标的名义价值校验:
-        # (已持有批次数量 + 未结开仓单剩余量 + 新意图数量) * 现价 <= symbol_cap
-        symbol_batch_qty = sum(
-            (
-                b.quantity
-                for b in self.batches.values()
-                if b.symbol == symbol and b.status != "CLOSED"
-            ),
-            Decimal("0"),
-        )
-        symbol_open_entry_qty = sum(
-            (
-                (o.quantity - o.filled_qty)
-                for o in self.orders.values()
-                if o.symbol == symbol
-                and not o.is_terminal
-                and o.client_order_id.startswith("e_")
-                and o.client_order_id != exclude_order_id
-            ),
-            Decimal("0"),
-        )
-
-        projected_symbol_notional = (
-            symbol_batch_qty + symbol_open_entry_qty + new_quantity
-        ) * current_price
-        if projected_symbol_notional > s_cap:
+        """Apply the persisted account limits, including pending entry exposure."""
+        config = self.risk_config
+        if config is None:
             return False
-
-        # 2. 全账户名义价值校验 (仅包含持仓与未成交开仓单，严禁平仓单重复计入)
-        total_account_notional = Decimal("0")
-        for b in self.batches.values():
-            if b.status != "CLOSED" and b.quantity > Decimal("0"):
-                p = prices.get(b.symbol, b.entry_price)
-                total_account_notional += b.quantity * p
-
-        for o in self.orders.values():
-            if (
-                not o.is_terminal
-                and o.client_order_id.startswith("e_")
-                and o.client_order_id != exclude_order_id
-            ):
-                rem = o.quantity - o.filled_qty
-                if rem > Decimal("0"):
-                    p = prices.get(o.symbol, o.price or current_price)
-                    total_account_notional += rem * p
-
-        total_account_notional += new_quantity * current_price
-        return total_account_notional <= a_cap
+        prices = dict(self.latest_prices if latest_prices is None else latest_prices)
+        prices[symbol] = current_price
+        notional = new_quantity * current_price
+        if (
+            config.max_order_notional is not None
+            and notional > config.max_order_notional
+        ):
+            return False
+        gross = Decimal("0")
+        unrealized = Decimal("0")
+        occupied_symbols = set()
+        for batch in self.batches.values():
+            if batch.quantity <= 0:
+                continue
+            price = prices.get(batch.symbol)
+            if price is None:
+                return False
+            occupied_symbols.add(batch.symbol)
+            gross += batch.quantity * price
+            direction = Decimal("1") if batch.position_side == "LONG" else Decimal("-1")
+            unrealized += direction * (price - batch.entry_price) * batch.quantity
+        for order in self.orders.values():
+            if order.is_terminal or not order.client_order_id.startswith("e_"):
+                continue
+            if order.client_order_id == exclude_order_id:
+                continue
+            price = prices.get(order.symbol)
+            if price is None:
+                return False
+            occupied_symbols.add(order.symbol)
+            gross += (order.quantity - order.filled_qty) * price
+        if (
+            config.max_gross_notional is not None
+            and gross + notional > config.max_gross_notional
+        ):
+            return False
+        if config.max_open_positions is not None and symbol not in occupied_symbols:
+            if len(occupied_symbols) >= config.max_open_positions:
+                return False
+        today = datetime.now(UTC).date()
+        if today != self.risk_day:
+            self.risk_day = today
+            self.daily_realized_pnl = Decimal("0")
+            self.daily_pnl_ready = True
+        if config.max_daily_loss is not None:
+            if not self.daily_pnl_ready:
+                return False
+            if self.daily_realized_pnl + unrealized <= -config.max_daily_loss:
+                return False
+        return True
 
     def _release_active_order_lock(self, order: Order) -> None:
         """根据订单意图性质精确释放对应的锁"""
@@ -365,7 +400,7 @@ class AccountState:
         self, client_order_id: str, timeout_sec: float = 3.0
     ) -> None:
         """单次延时看门狗: 发一单盯一单，超时后若仍为 SUBMITTED/PENDING
-        则转 RECONCILING 并触发只读探针。
+        则转 RECONCILING，等待 WebSocket 确认，不发起 REST 查询。
         """
         await asyncio.sleep(timeout_sec)
         order = self.orders.get(client_order_id)
@@ -377,60 +412,18 @@ class AccountState:
             )
             order.status = OrderStatus.RECONCILING
             self.set_system_mode(SystemMode.DEGRADED)
-            if self._rest_client and hasattr(self._rest_client, "query_order"):
-                asyncio.create_task(self.probe_order_status(order))
 
-    async def probe_order_status(self, order: Order) -> None:
-        """诊断探针：离线查询交易所，超时由 REST 补齐终态与成交批次。"""
+    async def wait_for_terminal(self, order: Order, timeout_sec: float) -> None:
+        event = self._terminal_waiters.setdefault(
+            order.client_order_id, asyncio.Event()
+        )
         try:
-            res = await self._rest_client.query_order(
-                symbol=order.symbol,
-                client_order_id=order.client_order_id,
-            )
-            log.info("probe_order_result", id=order.client_order_id, result=str(res))
-            if isinstance(res, dict) and "status" in res:
-                raw_status = str(res["status"]).upper()
-                status_mapping = {
-                    "NEW": OrderStatus.OPEN,
-                    "PARTIALLY_FILLED": OrderStatus.PARTIALLY_FILLED,
-                    "FILLED": OrderStatus.FILLED,
-                    "CANCELED": OrderStatus.CANCELED,
-                    "EXPIRED": OrderStatus.CANCELED,
-                    "REJECTED": OrderStatus.REJECTED,
-                }
-                mapped_status = status_mapping.get(raw_status)
-                if mapped_status in (
-                    OrderStatus.FILLED,
-                    OrderStatus.CANCELED,
-                    OrderStatus.REJECTED,
-                ):
-
-                    def _parse_dec(val: Any) -> Decimal:
-                        if isinstance(val, (int, float, str, Decimal)):
-                            try:
-                                return Decimal(str(val))
-                            except Exception:
-                                return Decimal("0")
-                        return Decimal("0")
-
-                    executed_qty = _parse_dec(res.get("executedQty"))
-                    avg_price = _parse_dec(res.get("avgPrice"))
-                    delta_qty = max(Decimal("0"), executed_qty - order.filled_qty)
-                    await self.on_order_trade_update(
-                        client_order_id=order.client_order_id,
-                        symbol=order.symbol,
-                        position_side=order.position_side,
-                        side=order.side,
-                        order_status=mapped_status,
-                        cum_filled_qty=executed_qty,
-                        avg_price=avg_price,
-                        last_filled_qty=delta_qty,
-                        last_filled_price=avg_price
-                        if avg_price > Decimal("0")
-                        else (order.price or Decimal("0")),
-                    )
-        except Exception as e:
-            log.warning("probe_order_failed", id=order.client_order_id, err=str(e))
+            if not order.is_terminal:
+                await asyncio.wait_for(event.wait(), timeout_sec)
+        except TimeoutError:
+            pass
+        finally:
+            self._terminal_waiters.pop(order.client_order_id, None)
 
     async def on_account_update(
         self,
@@ -462,6 +455,38 @@ class AccountState:
         last_filled_price: Decimal,
         exchange_order_id: int | None = None,
         trade_time: datetime | None = None,
+        exchange_realized_pnl: Decimal | None = None,
+    ) -> None:
+        async with self._update_lock:
+            await self._apply_order_trade_update(
+                client_order_id,
+                symbol,
+                position_side,
+                side,
+                order_status,
+                cum_filled_qty,
+                avg_price,
+                last_filled_qty,
+                last_filled_price,
+                exchange_order_id,
+                trade_time,
+                exchange_realized_pnl,
+            )
+
+    async def _apply_order_trade_update(
+        self,
+        client_order_id: str,
+        symbol: str,
+        position_side: str,
+        side: str,
+        order_status: OrderStatus,
+        cum_filled_qty: Decimal,
+        avg_price: Decimal,
+        last_filled_qty: Decimal,
+        last_filled_price: Decimal,
+        exchange_order_id: int | None = None,
+        trade_time: datetime | None = None,
+        exchange_realized_pnl: Decimal | None = None,
     ) -> None:
         """【单笔成交原子状态转移】：推进订单与批次 ->
         原地异步直调写透 DB (支持微退避重试)。
@@ -478,12 +503,32 @@ class AccountState:
             self.set_system_mode(SystemMode.DEGRADED)
             return
 
+        previous_quantity, previous_average = order.filled_qty, order.avg_price
         delta_qty = order.apply_update(
             new_status=order_status,
             cum_filled_qty=cum_filled_qty,
             avg_price=avg_price,
             exchange_order_id=exchange_order_id,
         )
+        if delta_qty > 0 and avg_price > 0:
+            # Derive the new fill notional from the cumulative average.
+            last_filled_price = (
+                order.filled_qty * avg_price - previous_quantity * previous_average
+            ) / delta_qty
+
+        if (
+            delta_qty > 0
+            and exchange_realized_pnl is not None
+            and trade_time is not None
+        ):
+            if trade_time.date() > self.risk_day:
+                self.risk_day = trade_time.date()
+                self.daily_realized_pnl = Decimal("0")
+                self.daily_pnl_ready = True
+            if trade_time.date() == self.risk_day and (
+                self.income_cutoff is None or trade_time > self.income_cutoff
+            ):
+                self.daily_realized_pnl += exchange_realized_pnl
 
         batch = self.batches.get(order.batch_id)
         is_exit = (order.position_side == "LONG" and order.side == "SELL") or (
@@ -491,6 +536,9 @@ class AccountState:
         )
 
         if order.is_terminal:
+            waiter = self._terminal_waiters.get(order.client_order_id)
+            if waiter is not None:
+                waiter.set()
             self._release_active_order_lock(order)
             if (
                 is_exit
@@ -526,6 +574,8 @@ class AccountState:
                 )
                 if batch.quantity == Decimal("0"):
                     batch.status = "CLOSED"
+                elif batch.exiting_quantity == 0 and order.is_terminal:
+                    batch.status = "ACTIVE"
             else:
                 total_qty = batch.quantity + delta_qty
                 batch.entry_price = (
@@ -533,6 +583,8 @@ class AccountState:
                     + (delta_qty * last_filled_price)
                 ) / total_qty
                 batch.quantity = total_qty
+                if trade_time is not None:
+                    batch.entry_bar_time = max(batch.entry_bar_time, trade_time)
                 if batch.status == "CLOSED":
                     log.warning(
                         "late_entry_fill_on_closed_batch_reopening",
@@ -548,8 +600,7 @@ class AccountState:
             saved = False
             for attempt in range(2):
                 try:
-                    if hasattr(self._db, "async_save_order_and_batch"):
-                        await self._db.async_save_order_and_batch(order, batch)
+                    await self._db.async_save_order_and_batch(order, batch)
                     saved = True
                     break
                 except Exception as e:
@@ -569,61 +620,3 @@ class AccountState:
                 self.set_system_mode(SystemMode.DEGRADED)
 
         self.recheck_system_mode()
-
-
-async def assert_flat_baseline_or_abort(
-    rest_client: Any,
-    state: AccountState,
-    timeout_sec: float = 5.0,
-) -> None:
-    """阶段 3: 严格空仓基线检查与资金初始化
-    (若检测到存量持仓/挂单，则 Fail-Fast 拒绝启动)。
-    """
-    try:
-        fetch_orders = getattr(
-            rest_client,
-            "fetch_open_orders",
-            getattr(rest_client, "get_open_orders", None),
-        )
-        fetch_account = getattr(
-            rest_client,
-            "fetch_account_information",
-            getattr(rest_client, "get_account_v3", None),
-        )
-
-        if not fetch_orders or not fetch_account:
-            raise AttributeError("rest_client 缺少获取挂单或账户快照的方法")
-
-        async with asyncio.timeout(timeout_sec):
-            open_orders, account_info = await asyncio.gather(
-                fetch_orders(),
-                fetch_account(),
-            )
-    except Exception as e:
-        log.critical("restore_baseline_failed_abort", err=str(e))
-        raise RuntimeError(f"冷启动拉取交易所快照失败: {e}") from e
-
-    non_zero_positions = [
-        f"{p.symbol}:{p.position_side}={p.position_amt}"
-        for p in account_info.positions
-        if abs(p.position_amt) > Decimal("0")
-    ]
-    if len(open_orders) > 0 or len(non_zero_positions) > 0:
-        log.critical(
-            "cold_start_non_flat_abort",
-            open_orders_cnt=len(open_orders),
-            non_zero_positions=non_zero_positions,
-        )
-        raise RuntimeError(
-            f"冷启动拒绝准入：检测到交易所存在未结挂单 ({len(open_orders)} 个) "
-            f"或未平持仓 ({non_zero_positions})。"
-            "一期架构限定纯净空仓部署，请先人工或脚本清仓！"
-        )
-
-    state.update_balances(
-        balances=account_info.wallet_balances,
-        available_balance_snapshot=account_info.available_balance,
-    )
-    log.info(
-        "cold_start_baseline_aligned", available=str(account_info.available_balance)
-    )

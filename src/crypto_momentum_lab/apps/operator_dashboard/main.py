@@ -15,6 +15,14 @@ from crypto_momentum_lab.operator_dashboard.queries import (
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the operator dashboard")
     parser.add_argument("--database-url")
+    parser.add_argument(
+        "--execution-engine",
+        choices=("legacy", "nextgen"),
+        default=os.environ.get("CML_TRADING_ENGINE", "legacy"),
+    )
+    parser.add_argument(
+        "--runtime-manifest", type=Path, default=Path("/app/deploy/live-runtime.yaml")
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
@@ -32,6 +40,8 @@ def main() -> None:
     uvicorn.run(
         create_dashboard_app(
             database_url=database_url,
+            execution_engine=args.execution_engine,
+            runtime_manifest=args.runtime_manifest,
             auth_username=args.username,
             auth_password=args.password,
             paper_run_ids=parse_paper_run_ids(),

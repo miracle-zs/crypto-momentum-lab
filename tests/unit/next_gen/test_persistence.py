@@ -14,6 +14,7 @@ from crypto_momentum_lab.next_gen.persistence import (
     InMemoryTradingRepository,
     compute_advisory_lock_key,
 )
+from tests.unit.next_gen.factories import risk_config
 
 
 def test_compute_advisory_lock_key():
@@ -48,6 +49,7 @@ async def test_in_memory_repository_save_and_retrieve():
         account_label="a1",
         db=repo,
     )
+    state.risk_config = risk_config(state.environment, state.account_label)
     state.set_system_mode(SystemMode.RUNNING)
     state.ws_connected = True
 
@@ -83,6 +85,7 @@ async def test_db_retry_succeeds_on_second_attempt():
         account_label="a1",
         db=repo,
     )
+    state.risk_config = risk_config(state.environment, state.account_label)
     state.set_system_mode(SystemMode.RUNNING)
     state.ws_connected = True
 
@@ -131,6 +134,7 @@ async def test_db_failure_exhausted_enters_degraded():
         account_label="a1",
         db=repo,
     )
+    state.risk_config = risk_config(state.environment, state.account_label)
     state.set_system_mode(SystemMode.RUNNING)
     state.ws_connected = True
 
@@ -170,10 +174,9 @@ async def test_db_failure_exhausted_enters_degraded():
 
 
 @pytest.mark.asyncio
-async def test_async_get_historical_15s_bars():
+async def test_async_get_historical_market_states():
     repo = InMemoryTradingRepository()
-    bars = await repo.async_get_historical_15s_bars("live", ["BTCUSDT", "ETHUSDT"])
-    assert "BTCUSDT" in bars
-    assert "ETHUSDT" in bars
-    assert bars["BTCUSDT"] == []
-    assert bars["ETHUSDT"] == []
+    bars = await repo.async_get_historical_market_states(
+        "research", ["BTCUSDT", "ETHUSDT"], 140
+    )
+    assert bars == []

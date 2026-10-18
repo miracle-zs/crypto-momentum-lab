@@ -1021,9 +1021,11 @@ flowchart TD
 ### 附录 A：数据库平迁与旧表归档实施指南（Database Migration Runbook）
 
 > [!NOTE] **实施状态说明（Implementation Status）**
-> Alembic 迁移版本链已正式合并 [`20261018_0067_next_gen_execution_tables.py`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/alembic/versions/20261018_0067_next_gen_execution_tables.py)，创建了全新的两张 Next-Gen 执行表（`live_position_batches`、`live_orders`），与原有表并存保持兼容。对应的 SQLAlchemy 2.0 ORM 模型与仓储层已在 [`db_models.py`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/next_gen/db_models.py) 和 [`PostgresTradingRepository`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/next_gen/persistence.py) 中全部实现并通过集成测试验证。上线时通过独立 Profile [`compose.next_gen.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.next_gen.yaml)（`--profile nextgen`）即可启动，与 legacy 服务（`--profile live`）完全隔离。
+> Alembic 迁移 [`20261018_0067_next_gen_execution_tables.py`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/alembic/versions/20261018_0067_next_gen_execution_tables.py) 创建了全新的两张 Next-Gen 执行表（`live_position_batches`、`live_orders`），**只新增、不归档或重命名旧表**；旧表在切换后仍可作为回滚与只读审计依据，物理归档需另行批准。对应的 SQLAlchemy 2.0 ORM 模型与仓储层已在 [`db_models.py`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/next_gen/db_models.py) 和 [`PostgresTradingRepository`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/next_gen/persistence.py) 中实现并通过真实 PostgreSQL 集成测试。切换时以 [`compose.next_gen.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.next_gen.yaml) 作为 `compose.server.yaml` 的 overlay，设置 `CML_TRADING_ENGINE=nextgen`、`--profile nextgen`，并确保 `migrate` 与 `market-data` 就绪；legacy 服务（`--profile live`）必须停止，不能与新引擎并行运行。
+>
+> **关于旧表清理**：下面的 Flat-State 归档步骤是可选的历史清理 Runbook，不是 0067 迁移的一部分，也不是 NextGen 启动的前置条件；执行前必须完成代码切换、灰度与回滚演练。
 
-针对当前 10 张执行/决策持久化表，系统采取**一次性干净停机平迁移（Flat-State Clean Cutover）**：
+如决定物理归档当前 10 张执行/决策持久化表，可采用**一次性干净停机平迁（Flat-State Cutover，可选）**：
 
 #### Step 1: 停机与 4 账户扁平确认
 - 在 15m K线收盘时下发 `operator_drain`，等待 4 个账户在持批次全部平仓完毕；

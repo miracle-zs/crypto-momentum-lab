@@ -2,21 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
 
+from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.domain.market.state_codec import market_state_to_payload
 from crypto_momentum_lab.next_gen.market_feed import MarketDataFeed
-from crypto_momentum_lab.next_gen.strategy_engine import Bar15s
+from tests.unit.persistence.postgres.test_runtime_state_repository import fixture_state
 
 
 @pytest.mark.asyncio
 async def test_market_feed_rejects_1m_kline_stream() -> None:
-    received_bars: list[Bar15s] = []
+    received_bars: list[MarketState15s] = []
 
     feed = MarketDataFeed(
         symbols=["BTCUSDT"],
-        on_bar=received_bars.append,
+        on_market_state=received_bars.append,
     )
 
     sample_binance_msg = {
@@ -47,26 +50,23 @@ async def test_market_feed_rejects_1m_kline_stream() -> None:
 
 @pytest.mark.asyncio
 async def test_market_feed_hub_dispatch() -> None:
-    received_bars: list[Bar15s] = []
+    received_bars: list[MarketState15s] = []
 
     feed = MarketDataFeed(
         symbols=["ETHUSDT"],
-        on_bar=received_bars.append,
+        on_market_state=received_bars.append,
     )
 
-    sample_hub_msg = {
-        "states": [
-            {
-                "symbol": "ETHUSDT",
-                "bucket_end": 1729252800000,
-                "open_price": "2600.00",
-                "high_price": "2620.00",
-                "low_price": "2595.00",
-                "close_price": "2615.50",
-                "trade_notional": "100.5",
-            }
-        ]
-    }
+    market_state = replace(
+        fixture_state("BTCUSDT", 0),
+        symbol="ETHUSDT",
+        open_price=Decimal("2600"),
+        high_price=Decimal("2620"),
+        low_price=Decimal("2595"),
+        close_price=Decimal("2615.50"),
+        trade_notional=Decimal("100.5"),
+    )
+    sample_hub_msg = {"states": [market_state_to_payload(market_state)]}
 
     await feed._dispatch_message(sample_hub_msg)
 
@@ -77,33 +77,26 @@ async def test_market_feed_hub_dispatch() -> None:
     assert bar.high_price == Decimal("2620.00")
     assert bar.low_price == Decimal("2595.00")
     assert bar.close_price == Decimal("2615.50")
-    assert bar.volume == Decimal("100.5")
+    assert bar.trade_notional == Decimal("100.5")
 
 
 @pytest.mark.asyncio
 async def test_market_feed_run_with_mock_connector() -> None:
-    received_bars: list[Bar15s] = []
+    received_bars: list[MarketState15s] = []
     stop_event = asyncio.Event()
 
     class MockWSStream:
         def __init__(self) -> None:
-            self.messages = [
-                json.dumps(
-                    {
-                        "states": [
-                            {
-                                "symbol": "BTCUSDT",
-                                "bucket_end": 1729252800000,
-                                "open_price": "65000",
-                                "high_price": "65100",
-                                "low_price": "64900",
-                                "close_price": "65050",
-                                "volume": "5",
-                            }
-                        ]
-                    }
-                )
-            ]
+            state = replace(fixture_state("BTCUSDT", 0), close_price=Decimal("65050"))
+            self.messages = [json.dumps({"states": [market_state_to_payload(state)]})]
+
+        async def send(self, message: str) -> None:
+            assert json.loads(message)["type"] == "subscribe_market_states"
+
+        async def recv(self) -> str:
+            return json.dumps(
+                {"type": "market_state_hub_ready", "environment": "research"}
+            )
 
         def __aiter__(self) -> MockWSStream:
             return self
@@ -122,7 +115,7 @@ async def test_market_feed_run_with_mock_connector() -> None:
 
     feed = MarketDataFeed(
         symbols=["BTCUSDT"],
-        on_bar=received_bars.append,
+        on_market_state=received_bars.append,
         ws_connector=mock_connector,
         initial_backoff=0.01,
     )
