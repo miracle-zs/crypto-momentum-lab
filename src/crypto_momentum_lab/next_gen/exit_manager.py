@@ -15,6 +15,7 @@ from crypto_momentum_lab.next_gen.client import (
 from crypto_momentum_lab.next_gen.engine import AccountState
 from crypto_momentum_lab.next_gen.executor import OrderExecutor
 from crypto_momentum_lab.next_gen.models import Order, OrderStatus
+from crypto_momentum_lab.next_gen.symbol_rules import SymbolRulesRegistry
 
 log = structlog.get_logger("exit_manager")
 
@@ -27,12 +28,14 @@ class ExitManager:
         rest_client: BinanceRestClient,
         state: AccountState,
         executor: OrderExecutor | None = None,
+        symbol_rules: SymbolRulesRegistry | None = None,
         grace_period_sec: float = 7200.0,
         max_holding_sec: float = 900.0,
         eval_interval_sec: float = 1.0,
     ) -> None:
         self._rest = rest_client
         self._state = state
+        self.symbol_rules = symbol_rules or SymbolRulesRegistry()
         self.grace_period_sec = grace_period_sec
         self.max_holding_sec = max_holding_sec
         self.eval_interval_sec = eval_interval_sec
@@ -80,11 +83,18 @@ class ExitManager:
         if not batch or batch.quantity <= Decimal("0"):
             return
 
-        # 1. 提交限价退出单
+        # 1. 提交限价退出单 (按标的规则对齐价格与数量)
+        rounded_limit_price = self.symbol_rules.round_price(batch.symbol, limit_price)
+        rounded_exit_qty = self.symbol_rules.round_quantity(
+            batch.symbol, batch.quantity
+        )
+        if rounded_exit_qty <= Decimal("0") or rounded_limit_price <= Decimal("0"):
+            return
+
         limit_order = self._state.create_exit_order(
             batch_id=batch_id,
-            quantity=batch.quantity,
-            price=limit_price,
+            quantity=rounded_exit_qty,
+            price=rounded_limit_price,
             order_type="LIMIT",
         )
         await self._executor.submit_order(limit_order)
@@ -100,13 +110,11 @@ class ExitManager:
             return
 
         # 4. 宽限期超时仍未完全成交：向交易所发出撤单请求
-        cancel_succeeded = False
         try:
             await self._rest.cancel_order(
                 symbol=batch.symbol,
                 client_order_id=limit_order.client_order_id,
             )
-            cancel_succeeded = True
         except BinanceOrderRejectedError as e:
             # 交易所明确拒单 (如 -2011 订单不存在或已完成)，说明订单在撤单前已 FILLED
             log.info(
@@ -128,13 +136,79 @@ class ExitManager:
         # (吸收撤单期间可能发生的在途成交)
         await self._wait_for_order_terminal(limit_order, timeout_sec=2.0)
 
-        # 若由于 WS 断连超时仍未置终态且撤单已成功，安全降级兜底收敛
-        if not limit_order.is_terminal and cancel_succeeded:
-            limit_order.apply_update(OrderStatus.CANCELED)
-            self._state._release_active_order_lock(limit_order)
-            limit_order.release_batch_reservation(batch)
+        # 若由于 WS 延迟未推来终态，主动调用 REST 探针查证真实订单状态
+        if not limit_order.is_terminal:
+            try:
+                order_info = await self._rest.query_order(
+                    symbol=limit_order.symbol,
+                    client_order_id=limit_order.client_order_id,
+                )
+                if isinstance(order_info, dict):
+                    raw_status = order_info.get("status")
+                    binance_status = (
+                        str(raw_status) if isinstance(raw_status, str) else "CANCELED"
+                    )
 
-        # 6. 市价清扫剩余未结数量 (根据 WS 终态确认后的确切 batch.quantity)
+                    def _parse_dec(val: Any) -> Decimal:
+                        if isinstance(val, (int, float, str, Decimal)):
+                            try:
+                                return Decimal(str(val))
+                            except Exception:
+                                return Decimal("0")
+                        return Decimal("0")
+
+                    executed_qty = _parse_dec(order_info.get("executedQty"))
+                    avg_price = _parse_dec(order_info.get("avgPrice"))
+                    status_mapping = {
+                        "NEW": OrderStatus.OPEN,
+                        "PARTIALLY_FILLED": OrderStatus.PARTIALLY_FILLED,
+                        "FILLED": OrderStatus.FILLED,
+                        "CANCELED": OrderStatus.CANCELED,
+                        "EXPIRED": OrderStatus.CANCELED,
+                        "REJECTED": OrderStatus.REJECTED,
+                    }
+                    mapped_status = status_mapping.get(
+                        binance_status, OrderStatus.CANCELED
+                    )
+                    if mapped_status in (
+                        OrderStatus.CANCELED,
+                        OrderStatus.FILLED,
+                        OrderStatus.REJECTED,
+                    ):
+                        delta_qty = max(
+                            Decimal("0"), executed_qty - limit_order.filled_qty
+                        )
+                        await self._state.on_order_trade_update(
+                            client_order_id=limit_order.client_order_id,
+                            symbol=limit_order.symbol,
+                            position_side=limit_order.position_side,
+                            side=limit_order.side,
+                            order_status=mapped_status,
+                            cum_filled_qty=executed_qty,
+                            avg_price=avg_price,
+                            last_filled_qty=delta_qty,
+                            last_filled_price=avg_price,
+                        )
+                else:
+                    await self._state.on_order_trade_update(
+                        client_order_id=limit_order.client_order_id,
+                        symbol=limit_order.symbol,
+                        position_side=limit_order.position_side,
+                        side=limit_order.side,
+                        order_status=OrderStatus.CANCELED,
+                        cum_filled_qty=limit_order.filled_qty,
+                        avg_price=limit_order.avg_price,
+                        last_filled_qty=Decimal("0"),
+                        last_filled_price=limit_order.avg_price,
+                    )
+            except Exception as e:
+                log.warning(
+                    "exit_manager_failed_to_query_ground_truth_order",
+                    order_id=limit_order.client_order_id,
+                    err=str(e),
+                )
+
+        # 6. 市价清扫剩余未结数量 (根据 WS/REST 真实终态确认后的确切 batch.quantity)
         batch = self._state.batches.get(batch_id)
         if (
             batch
@@ -142,13 +216,15 @@ class ExitManager:
             and limit_order.is_terminal
             and self._state.can_submit_exit_order()
         ):
-            market_order = self._state.create_exit_order(
-                batch_id=batch_id,
-                quantity=batch.quantity,
-                price=None,
-                order_type="MARKET",
-            )
-            await self._executor.submit_order(market_order)
+            sweep_qty = self.symbol_rules.round_quantity(batch.symbol, batch.quantity)
+            if sweep_qty > Decimal("0"):
+                market_order = self._state.create_exit_order(
+                    batch_id=batch_id,
+                    quantity=sweep_qty,
+                    price=None,
+                    order_type="MARKET",
+                )
+                await self._executor.submit_order(market_order)
 
     def evaluate_active_batches(
         self,

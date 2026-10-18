@@ -3,14 +3,16 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 import structlog
 
 from crypto_momentum_lab.next_gen.engine import AccountState
 from crypto_momentum_lab.next_gen.executor import OrderExecutor
 from crypto_momentum_lab.next_gen.models import generate_batch_id
+from crypto_momentum_lab.next_gen.symbol_rules import SymbolRulesRegistry
 
 log = structlog.get_logger("momentum_strategy_engine")
 
@@ -36,6 +38,7 @@ class MomentumStrategyEngine:
         state: AccountState,
         order_executor: OrderExecutor,
         symbols: list[str] | None = None,
+        symbol_rules: SymbolRulesRegistry | None = None,
         min_warmup_bars: int = 140,
         momentum_window: int = 140,
         top_n: int = 1,
@@ -48,6 +51,7 @@ class MomentumStrategyEngine:
         self.state = state
         self.order_executor = order_executor
         self.symbols = [s.upper() for s in (symbols or ["BTCUSDT", "ETHUSDT"])]
+        self.symbol_rules = symbol_rules or SymbolRulesRegistry()
         self.min_warmup_bars = min_warmup_bars
         self.momentum_window = momentum_window
         self.top_n = top_n
@@ -76,8 +80,45 @@ class MomentumStrategyEngine:
         for b in bars:
             self.on_bar(b)
 
-    async def warmup_market_data(self) -> None:
-        """阶段 2 策略行情预热：校验各标的历史数据深度 >= 140 Bar"""
+    async def warmup_market_data(self, rest_client: Any = None) -> None:
+        """阶段 2 策略行情预热：优先通过 REST API 拉取 exchangeInfo 和历史 K 线"""
+        if rest_client is not None:
+            try:
+                if hasattr(rest_client, "fetch_exchange_info"):
+                    info = await rest_client.fetch_exchange_info()
+                    self.symbol_rules.update_from_exchange_info(info)
+                    log.info("symbol_rules_updated_from_exchange_info")
+            except Exception as e:
+                log.warning("failed_to_fetch_exchange_info_for_rules", err=str(e))
+
+            for sym in self.symbols:
+                if len(self.bar_buffers.get(sym, [])) < self.min_warmup_bars:
+                    try:
+                        if hasattr(rest_client, "fetch_klines"):
+                            klines = await rest_client.fetch_klines(
+                                symbol=sym,
+                                interval="1m",
+                                limit=self.min_warmup_bars,
+                            )
+                            for k in klines:
+                                close_time = datetime.fromtimestamp(
+                                    k[6] / 1000.0, tz=UTC
+                                )
+                                bar = Bar15s(
+                                    symbol=sym,
+                                    close_time=close_time,
+                                    open_price=Decimal(str(k[1])),
+                                    high_price=Decimal(str(k[2])),
+                                    low_price=Decimal(str(k[3])),
+                                    close_price=Decimal(str(k[4])),
+                                    volume=Decimal(str(k[5])),
+                                )
+                                self.on_bar(bar)
+                    except Exception as e:
+                        log.warning(
+                            "failed_to_fetch_historical_klines", symbol=sym, err=str(e)
+                        )
+
         for sym in self.symbols:
             count = len(self.bar_buffers.get(sym, []))
             if count < self.min_warmup_bars:
@@ -133,18 +174,27 @@ class MomentumStrategyEngine:
                 log.debug("skip_entry_already_has_active_order", symbol=sym)
                 continue
 
-            # 计算拟开仓数量
+            # 计算拟开仓数量与对齐精度规则
             raw_qty = self.batch_notional / price
-            # 币安精度规则粗约保留 3 位小数
-            qty = Decimal(f"{raw_qty:.3f}")
-            if qty <= Decimal("0"):
+            qty = self.symbol_rules.round_quantity(sym, raw_qty)
+            entry_price = self.symbol_rules.round_price(sym, price)
+            if qty <= Decimal("0") or entry_price <= Decimal("0"):
+                continue
+
+            valid, reason = self.symbol_rules.validate_order(sym, qty, entry_price)
+            if not valid:
+                log.warning(
+                    "strategy_entry_rejected_by_symbol_filter",
+                    symbol=sym,
+                    reason=reason,
+                )
                 continue
 
             # 3. 严格全账户与单标的名义价值上限校验 (Fail-Closed)
             if not self.state.check_notional_limits(
                 symbol=sym,
                 new_quantity=qty,
-                current_price=price,
+                current_price=entry_price,
                 symbol_cap=self.symbol_cap,
                 account_cap=self.account_cap,
             ):
@@ -152,7 +202,7 @@ class MomentumStrategyEngine:
                     "strategy_entry_rejected_by_notional_cap",
                     symbol=sym,
                     qty=str(qty),
-                    price=str(price),
+                    price=str(entry_price),
                 )
                 continue
 
@@ -166,7 +216,7 @@ class MomentumStrategyEngine:
                 symbol=sym,
                 position_side="LONG",
                 quantity=qty,
-                price=price,
+                price=entry_price,
                 batch_id=batch_id,
                 order_type="LIMIT",
             )

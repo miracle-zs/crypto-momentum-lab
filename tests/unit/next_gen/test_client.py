@@ -239,14 +239,20 @@ async def test_user_data_stream_physical_connect_and_stream_messages():
     )
 
     received_events = []
-    await stream.connect(on_event=received_events.append)
+    stop_event = asyncio.Event()
+
+    def handle_event(e):
+        received_events.append(e)
+        if len(received_events) >= 2:
+            stop_event.set()
+
+    await stream.connect(on_event=handle_event)
     assert stream.is_connected is True
     assert status_changes == [True]
     mock_connector.assert_awaited_once_with(
-        "wss://fstream.binance.com/ws/fake_listen_key"
+        "wss://fstream.binance.com/private/ws/fake_listen_key"
     )
 
-    stop_event = asyncio.Event()
     await stream.run_stream(stop_event=stop_event)
 
     assert len(received_events) == 2
@@ -277,3 +283,70 @@ async def test_user_data_stream_connect_network_failure_triggers_degraded():
 
     assert stream.is_connected is False
     assert status_changes == [False]
+
+
+def test_get_binance_urls() -> None:
+    from crypto_momentum_lab.next_gen.client import get_binance_urls
+
+    rest_live, ws_live, pub_live = get_binance_urls("live")
+    assert rest_live == "https://fapi.binance.com"
+    assert ws_live == "wss://fstream.binance.com/private/ws"
+    assert pub_live == "wss://fstream.binance.com/ws"
+
+    rest_test, ws_test, pub_test = get_binance_urls("testnet")
+    assert rest_test == "https://testnet.binancefuture.com"
+    assert ws_test == "wss://stream.binancefuture.com/private/ws"
+    assert pub_test == "wss://stream.binancefuture.com/ws"
+
+
+@pytest.mark.asyncio
+async def test_user_data_stream_auto_reconnects_on_disconnect() -> None:
+    mock_rest = AsyncMock()
+    mock_rest.create_listen_key.side_effect = ["key_1", "key_2"]
+
+    class MockWS:
+        def __init__(self, msgs: list[str]) -> None:
+            self.msgs = msgs
+            self.closed = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not self.msgs:
+                raise StopAsyncIteration
+            return self.msgs.pop(0)
+
+        async def close(self) -> None:
+            self.closed = True
+
+    ws1 = MockWS(['{"e": "ACCOUNT_UPDATE", "E": 1}'])
+    ws2 = MockWS(['{"e": "ORDER_TRADE_UPDATE", "E": 2}'])
+    mock_connector = AsyncMock(side_effect=[ws1, ws2])
+
+    status_history: list[bool] = []
+    stream = BinanceUserDataStream(
+        rest_client=mock_rest,
+        on_status_change=status_history.append,
+        ws_connector=mock_connector,
+        initial_backoff=0.01,
+    )
+
+    received: list[dict] = []
+    stop_event = asyncio.Event()
+
+    def handle_event(e: dict) -> None:
+        received.append(e)
+        if len(received) >= 2:
+            stop_event.set()
+
+    stream._on_event = handle_event
+
+    # 运行流接收循环（自动重连）
+    await stream.run_stream(stop_event=stop_event)
+
+    # 确认重连发生了两次，分别收到了两批消息
+    assert mock_connector.call_count >= 2
+    assert len(received) == 2
+    assert received[0]["e"] == "ACCOUNT_UPDATE"
+    assert received[1]["e"] == "ORDER_TRADE_UPDATE"

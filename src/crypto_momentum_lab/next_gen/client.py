@@ -39,6 +39,21 @@ class BinanceNetworkError(Exception):
         self.message = message
 
 
+def get_binance_urls(environment: str = "live") -> tuple[str, str, str]:
+    """返回 (rest_base_url, ws_private_base_url, ws_public_base_url)"""
+    if environment.lower() in ("testnet", "test"):
+        return (
+            "https://testnet.binancefuture.com",
+            "wss://stream.binancefuture.com/private/ws",
+            "wss://stream.binancefuture.com/ws",
+        )
+    return (
+        "https://fapi.binance.com",
+        "wss://fstream.binance.com/private/ws",
+        "wss://fstream.binance.com/ws",
+    )
+
+
 class BinanceRestClient:
     """下一代极简币安 USDⓈ-M 交易客户端"""
 
@@ -46,12 +61,18 @@ class BinanceRestClient:
         self,
         api_key: str,
         api_secret: str,
-        base_url: str = "https://fapi.binance.com",
+        base_url: str | None = None,
+        environment: str = "live",
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self.api_key = api_key
         self.api_secret = api_secret
-        self.base_url = base_url.rstrip("/")
+        self.environment = environment
+        if base_url:
+            self.base_url = base_url.rstrip("/")
+        else:
+            default_rest, _, _ = get_binance_urls(environment)
+            self.base_url = default_rest
         self._client = http_client or httpx.AsyncClient(timeout=10.0)
 
     def sign_params(
@@ -218,18 +239,52 @@ class BinanceRestClient:
         res = await self._request("POST", "/fapi/v1/order", signed=True, params=params)
         return dict(res)
 
-    async def cancel_order(self, symbol: str, client_order_id: str) -> dict[str, Any]:
+    async def cancel_order(
+        self,
+        symbol: str,
+        client_order_id: str | None = None,
+        order_id: int | None = None,
+    ) -> dict[str, Any]:
         """DELETE /fapi/v1/order - 撤单"""
-        params = {"symbol": symbol, "origClientOrderId": client_order_id}
+        params: dict[str, Any] = {"symbol": symbol}
+        if client_order_id:
+            params["origClientOrderId"] = client_order_id
+        if order_id is not None:
+            params["orderId"] = order_id
         res = await self._request(
             "DELETE", "/fapi/v1/order", signed=True, params=params
         )
         return dict(res)
 
-    async def query_order(self, symbol: str, client_order_id: str) -> dict[str, Any]:
+    async def query_order(
+        self,
+        symbol: str,
+        client_order_id: str | None = None,
+        order_id: int | None = None,
+    ) -> dict[str, Any]:
         """GET /fapi/v1/order - 只读探针查单 (绝不回写内存)"""
-        params = {"symbol": symbol, "origClientOrderId": client_order_id}
+        params: dict[str, Any] = {"symbol": symbol}
+        if client_order_id:
+            params["origClientOrderId"] = client_order_id
+        if order_id is not None:
+            params["orderId"] = order_id
         res = await self._request("GET", "/fapi/v1/order", signed=True, params=params)
+        return dict(res)
+
+    async def fetch_klines(
+        self,
+        symbol: str,
+        interval: str = "1m",
+        limit: int = 140,
+    ) -> list[list[Any]]:
+        """GET /fapi/v1/klines - 获取标的历史 K 线"""
+        params = {"symbol": symbol, "interval": interval, "limit": limit}
+        res = await self._request("GET", "/fapi/v1/klines", signed=False, params=params)
+        return list(res)
+
+    async def fetch_exchange_info(self) -> dict[str, Any]:
+        """GET /fapi/v1/exchangeInfo - 获取交易所元数据与交易对过滤器"""
+        res = await self._request("GET", "/fapi/v1/exchangeInfo", signed=False)
         return dict(res)
 
     # 兼容性别名
@@ -238,19 +293,27 @@ class BinanceRestClient:
 
 
 class BinanceUserDataStream:
-    """币安私有流监听组件 (物理网络长连、事件反序列化分发、30m 续期与断连守卫)"""
+    """币安私有流监听组件 (物理网络长连、事件反序列化分发、自动重连与断连守卫)"""
 
     def __init__(
         self,
         rest_client: BinanceRestClient,
-        ws_base_url: str = "wss://fstream.binance.com/ws",
+        ws_base_url: str | None = None,
+        environment: str = "live",
         on_status_change: Callable[[bool], None] | None = None,
         ws_connector: Any = None,
+        initial_backoff: float = 1.0,
     ) -> None:
         self._rest = rest_client
-        self._ws_base_url = ws_base_url.rstrip("/")
+        self.environment = environment
+        if ws_base_url:
+            self._ws_base_url = ws_base_url.rstrip("/")
+        else:
+            _, default_ws, _ = get_binance_urls(environment)
+            self._ws_base_url = default_ws
         self.on_status_change = on_status_change
         self._ws_connector = ws_connector
+        self.initial_backoff = initial_backoff
         self.listen_key: str | None = None
         self.is_connected: bool = False
         self._ws: Any = None
@@ -320,9 +383,48 @@ class BinanceUserDataStream:
 
         elif event_type == "listenKeyExpired":
             log.warning("binance_listen_key_expired", event=event)
+            self.listen_key = None
             self.is_connected = False
             if self.on_status_change:
                 self.on_status_change(False)
+            if self._ws:
+                try:
+                    await self._ws.close()
+                except Exception:
+                    pass
+                self._ws = None
+
+    async def _ensure_connection(self) -> None:
+        """建立物理 WebSocket 连接"""
+        if self._ws is not None and not getattr(self._ws, "closed", False):
+            return
+
+        if not self.listen_key:
+            self.listen_key = await self._rest.create_listen_key()
+
+        if self._ws_connector is False:
+            self.is_connected = True
+            return
+
+        ws_url = f"{self._ws_base_url}/{self.listen_key}"
+        try:
+            if self._ws_connector is not None:
+                self._ws = await self._ws_connector(ws_url)
+            elif not self.listen_key.startswith("fake_"):
+                self._ws = await websockets.connect(
+                    ws_url,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    close_timeout=10,
+                )
+            self.is_connected = True
+            if self.on_status_change:
+                self.on_status_change(True)
+        except Exception as e:
+            self.is_connected = False
+            if self.on_status_change:
+                self.on_status_change(False)
+            raise ConnectionError(f"WebSocket 物理连接失败: {e}") from e
 
     async def connect(
         self,
@@ -330,73 +432,83 @@ class BinanceUserDataStream:
         connect_network: bool = True,
     ) -> None:
         """建立 UserData WebSocket 长连并握手获取 listenKey"""
-        self.listen_key = await self._rest.create_listen_key()
         self._on_event = on_event
-
         if connect_network and self._ws_connector is not False:
-            ws_url = f"{self._ws_base_url}/{self.listen_key}"
-            try:
-                if self._ws_connector is not None:
-                    self._ws = await self._ws_connector(ws_url)
-                elif not self.listen_key.startswith("fake_"):
-                    self._ws = await websockets.connect(
-                        ws_url,
-                        ping_interval=20,
-                        ping_timeout=20,
-                        close_timeout=10,
-                    )
-            except Exception as e:
-                log.error("ws_connect_failed", url=ws_url, err=str(e))
-                self.is_connected = False
-                if self.on_status_change:
-                    self.on_status_change(False)
-                raise ConnectionError(f"WebSocket 物理连接失败: {e}") from e
-
-        self.is_connected = True
-        if self.on_status_change:
-            self.on_status_change(True)
+            await self._ensure_connection()
+        else:
+            if not self.listen_key:
+                self.listen_key = await self._rest.create_listen_key()
+            self.is_connected = True
+            if self.on_status_change:
+                self.on_status_change(True)
 
     async def run_stream(
         self,
         stop_event: asyncio.Event | None = None,
     ) -> None:
-        """私有流接收循环：读取原始文本帧，反序列化后调用 dispatch_raw_event"""
-        if self._ws is None:
-            if stop_event is not None:
-                await stop_event.wait()
-            return
+        """持久化私有流接收循环：支持 24h 断连自愈与指数退避自动重连"""
+        backoff = self.initial_backoff
+        while not (stop_event and stop_event.is_set()):
+            try:
+                await self._ensure_connection()
+                backoff = self.initial_backoff
 
-        try:
-            async for raw_msg in self._ws:
-                if stop_event and stop_event.is_set():
+                if self._ws is None:
+                    if stop_event is not None:
+                        await stop_event.wait()
                     break
-                try:
-                    text_msg = (
-                        raw_msg.decode("utf-8")
-                        if isinstance(raw_msg, bytes)
-                        else str(raw_msg)
-                    )
-                    data = json.loads(text_msg)
-                    if self._on_event:
-                        res = self._on_event(data)
-                        if asyncio.iscoroutine(res):
-                            await res
-                except Exception as e:
-                    log.error(
-                        "ws_event_dispatch_error",
-                        err=str(e),
-                        payload=str(raw_msg)[:200],
-                    )
-                    if self.on_status_change:
-                        self.on_status_change(False)
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            log.warning("ws_connection_lost", err=str(e))
-        finally:
-            self.is_connected = False
-            if self.on_status_change:
-                self.on_status_change(False)
+
+                async for raw_msg in self._ws:
+                    if stop_event and stop_event.is_set():
+                        break
+                    try:
+                        text_msg = (
+                            raw_msg.decode("utf-8")
+                            if isinstance(raw_msg, bytes)
+                            else str(raw_msg)
+                        )
+                        data = json.loads(text_msg)
+                        if self._on_event:
+                            res = self._on_event(data)
+                            if asyncio.iscoroutine(res):
+                                await res
+                    except Exception as e:
+                        log.error(
+                            "ws_event_dispatch_error",
+                            err=str(e),
+                            payload=str(raw_msg)[:200],
+                        )
+                        if self.on_status_change:
+                            self.on_status_change(False)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                log.warning("ws_connection_interrupted", err=str(e), retry_in=backoff)
+            finally:
+                self.is_connected = False
+                if self.on_status_change:
+                    self.on_status_change(False)
+                if self._ws:
+                    try:
+                        await self._ws.close()
+                    except Exception:
+                        pass
+                    self._ws = None
+
+            if stop_event and stop_event.is_set():
+                break
+
+            # 发生断连，清空过期 listen_key 并退避等待后重连
+            self.listen_key = None
+            try:
+                if stop_event:
+                    await asyncio.wait_for(stop_event.wait(), timeout=backoff)
+                    break
+                else:
+                    await asyncio.sleep(backoff)
+            except TimeoutError:
+                pass
+            backoff = min(30.0, backoff * 2.0)
 
     async def run_with_keepalive(
         self,

@@ -79,15 +79,79 @@ def test_cli_status_json() -> None:
 
 
 def test_cli_status_human_readable() -> None:
-    result = runner.invoke(app, ["status", "-e", "live", "-a", "a1"])
+    result = runner.invoke(app, ["status", "-e", "testnet", "-a", "a1"])
     assert result.exit_code == 0
-    assert "Next-Gen Status [live:a1]" in result.output
+    assert "Next-Gen Status [testnet:a1]" in result.output
     assert "Active Batches: 0" in result.output
+
+
+def test_cli_live_without_db_url_fails_closed() -> None:
+    result = runner.invoke(app, ["status", "-e", "live", "-a", "a1"])
+    assert result.exit_code != 0
+    assert "严禁退回内存仓储" in str(result.exception)
 
 
 def test_cli_drain_dry_run() -> None:
     result = runner.invoke(app, ["drain", "--dry-run", "-e", "live", "-a", "a1"])
     assert result.exit_code == 0
+
+
+def test_cli_drain_live_flow_cancels_and_sweeps() -> None:
+    from datetime import UTC, datetime
+
+    from crypto_momentum_lab.next_gen.engine import AccountSnapshot
+
+    repo = InMemoryTradingRepository()
+    batch = PositionBatch(
+        environment="testnet",
+        account_label="a1",
+        batch_id="b_drain_1",
+        symbol="BTCUSDT",
+        position_side="LONG",
+        quantity=Decimal("0.5"),
+        entry_price=Decimal("50000"),
+        entry_bar_time=datetime.now(UTC),
+    )
+    repo.batches[("testnet", "a1", "b_drain_1")] = batch
+
+    mock_rest = AsyncMock()
+    mock_rest.fetch_open_orders.return_value = [
+        {"symbol": "BTCUSDT", "clientOrderId": "open_ord_1", "orderId": 12345}
+    ]
+    mock_rest.cancel_order.return_value = {"orderId": 12345, "status": "CANCELED"}
+    mock_rest.fetch_exchange_info.return_value = {"symbols": []}
+    mock_rest.post_order.return_value = {"orderId": 999, "clientOrderId": "sweep_1"}
+    mock_rest.query_order.return_value = {
+        "status": "FILLED",
+        "executedQty": "0.5",
+        "avgPrice": "50000",
+    }
+    mock_rest.fetch_account_information.return_value = AccountSnapshot(
+        wallet_balances={"USDT": Decimal("1000")},
+        available_balance=Decimal("1000"),
+        positions=[],
+    )
+
+    with (
+        patch(
+            "crypto_momentum_lab.apps.next_gen.cli._resolve_credentials",
+            return_value=("fake_k", "fake_s"),
+        ),
+        patch(
+            "crypto_momentum_lab.apps.next_gen.cli._resolve_repository",
+            return_value=(repo, None),
+        ),
+        patch(
+            "crypto_momentum_lab.apps.next_gen.cli.BinanceRestClient",
+            return_value=mock_rest,
+        ),
+    ):
+        result = runner.invoke(app, ["drain", "-e", "testnet", "-a", "a1"])
+        assert result.exit_code == 0
+        mock_rest.fetch_open_orders.assert_awaited_once()
+        mock_rest.cancel_order.assert_awaited_once()
+        mock_rest.post_order.assert_awaited_once()
+        mock_rest.fetch_account_information.assert_awaited_once()
 
 
 def test_cli_run_dry_run_invokes_daemon() -> None:

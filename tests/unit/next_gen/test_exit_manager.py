@@ -20,6 +20,11 @@ from crypto_momentum_lab.next_gen.persistence import InMemoryTradingRepository
 async def exit_setup():
     repo = InMemoryTradingRepository()
     mock_rest = AsyncMock()
+    mock_rest.query_order.return_value = {
+        "status": "CANCELED",
+        "executedQty": "0",
+        "avgPrice": "0",
+    }
     state = AccountState(
         environment="live",
         account_label="a1",

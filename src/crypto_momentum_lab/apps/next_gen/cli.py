@@ -5,6 +5,7 @@ import json
 import os
 import signal
 from collections.abc import Awaitable, Callable
+from decimal import Decimal
 from typing import Annotated, Any
 
 import structlog
@@ -23,13 +24,14 @@ from crypto_momentum_lab.next_gen.client import (
 from crypto_momentum_lab.next_gen.daemon import run_nextgen_daemon
 from crypto_momentum_lab.next_gen.engine import AccountState
 from crypto_momentum_lab.next_gen.executor import OrderExecutor
-from crypto_momentum_lab.next_gen.exit_manager import ExitManager
-from crypto_momentum_lab.next_gen.models import SystemMode
+from crypto_momentum_lab.next_gen.models import OrderStatus, SystemMode
 from crypto_momentum_lab.next_gen.persistence import (
     InMemoryTradingRepository,
     PostgresTradingRepository,
     TradingRepositoryProtocol,
+    compute_advisory_lock_key,
 )
+from crypto_momentum_lab.next_gen.symbol_rules import SymbolRulesRegistry
 from crypto_momentum_lab.persistence.postgres.session import (
     create_execution_database_engine,
 )
@@ -101,14 +103,20 @@ def _resolve_credentials(
 def _resolve_repository(
     database_url: str | None = None,
     dry_run: bool = False,
+    environment: str = "live",
 ) -> tuple[TradingRepositoryProtocol, Any]:
-    """Resolve TradingRepository (Postgres if URL available, else InMemory)."""
+    """Resolve TradingRepository (Postgres or InMemory). Fail-closed in live."""
     resolved_url = _resolve_db_url(database_url)
-    if dry_run or not resolved_url:
-        if not dry_run and not resolved_url:
-            log.warning(
-                "no_database_url_configured_falling_back_to_in_memory_repository"
+    if dry_run:
+        return InMemoryTradingRepository(), None
+
+    if not resolved_url:
+        if environment == "live":
+            raise ValueError(
+                "生产实盘环境 (live) 必须配置 "
+                "CML_DATABASE_URL / CML_EXECUTION_DATABASE_URL，严禁退回内存仓储！"
             )
+        log.warning("no_database_url_configured_falling_back_to_in_memory_repository")
         return InMemoryTradingRepository(), None
 
     engine = create_execution_database_engine(resolved_url)
@@ -207,7 +215,9 @@ def run_command(
         api_secret=api_secret,
         dry_run=dry_run,
     )
-    repo, engine = _resolve_repository(database_url, dry_run=dry_run)
+    repo, engine = _resolve_repository(
+        database_url, dry_run=dry_run, environment=environment
+    )
 
     symbol_list = (
         [s.strip().upper() for s in symbols.split(",") if s.strip()]
@@ -229,6 +239,7 @@ def run_command(
         if dry_run
         else BinanceUserDataStream(rest_client=rest_client)
     )
+    hub_url = os.environ.get("CML_MARKET_STATE_HUB_URL")
 
     async def _runner(stop_event: asyncio.Event) -> None:
         try:
@@ -241,6 +252,8 @@ def run_command(
                 ws_client=ws_client,
                 stop_event=stop_event,
                 keepalive_interval_sec=keepalive_interval,
+                hub_url=hub_url,
+                market_feed_connector=False if dry_run else None,
             )
         finally:
             if engine:
@@ -276,60 +289,162 @@ def drain_command(
         typer.Option("--dry-run", help="Dry run mode"),
     ] = False,
 ) -> None:
-    """Liquidate all active batches cleanly and halt trading."""
+    """Liquidate all active batches cleanly, verify 100% flat, and halt trading."""
     key, secret = _resolve_credentials(
         account_label=account_label,
         api_key=api_key,
         api_secret=api_secret,
         dry_run=dry_run,
     )
-    repo, engine = _resolve_repository(database_url, dry_run=dry_run)
+    repo, engine = _resolve_repository(
+        database_url, dry_run=dry_run, environment=environment
+    )
 
     log.info(
         "next_gen_drain_initiated",
         environment=environment,
         account=account_label,
+        dry_run=dry_run,
     )
+
+    if dry_run:
+        log.info(
+            "next_gen_drain_dry_run_completed",
+            account=account_label,
+            environment=environment,
+        )
+        return
 
     rest_client = BinanceRestClient(api_key=key, api_secret=secret)
 
     async def _drainer() -> None:
         try:
-            state = AccountState(
-                environment=environment,
-                account_label=account_label,
-                db=repo,
-                rest_client=rest_client,
-            )
-            state.set_system_mode(SystemMode.DRAINING)
+            lock_key = compute_advisory_lock_key(environment, account_label)
+            async with repo.acquire_dedicated_advisory_lock(lock_key):
+                state = AccountState(
+                    environment=environment,
+                    account_label=account_label,
+                    db=repo,
+                    rest_client=rest_client,
+                )
+                state.is_draining = True
+                state.set_system_mode(SystemMode.DRAINING)
 
-            # 载入持久化活跃批次
-            active_batches = await repo.async_get_active_batches(
-                environment, account_label
-            )
-            for b in active_batches:
-                state.batches[b.batch_id] = b
+                # 1. 撤销交易所现存所有未结挂单 (防止与市价平仓冲突)
+                try:
+                    open_orders = await rest_client.fetch_open_orders()
+                    for o in open_orders:
+                        sym = str(o.get("symbol", ""))
+                        cid = o.get("clientOrderId")
+                        oid = o.get("orderId")
+                        try:
+                            await rest_client.cancel_order(
+                                symbol=sym,
+                                client_order_id=cid,
+                                order_id=oid,
+                            )
+                            log.info(
+                                "drain_cancelled_open_order",
+                                symbol=sym,
+                                client_order_id=cid,
+                                order_id=oid,
+                            )
+                        except Exception as e:
+                            log.warning(
+                                "drain_cancel_order_failed",
+                                symbol=sym,
+                                client_order_id=cid,
+                                err=str(e),
+                            )
+                except Exception as e:
+                    log.warning("drain_fetch_open_orders_failed", err=str(e))
 
-            executor = OrderExecutor(
-                rest_client=rest_client,
-                state=state,
-                db=repo,
-            )
-            exit_mgr = ExitManager(
-                rest_client=rest_client,
-                state=state,
-                executor=executor,
-            )
+                # 2. 载入持久化活跃批次
+                active_batches = await repo.async_get_active_batches(
+                    environment, account_label
+                )
+                for b in active_batches:
+                    state.batches[b.batch_id] = b
 
-            # 立即触发所有活跃批次市价退出
-            exit_mgr.evaluate_active_batches()
-            await exit_mgr.close()
-            await executor.close()
-            state.set_system_mode(SystemMode.STOPPED)
-            log.info(
-                "next_gen_drain_completed",
-                drained_batches_count=len(active_batches),
-            )
+                executor = OrderExecutor(
+                    rest_client=rest_client,
+                    state=state,
+                    db=repo,
+                )
+
+                rules = SymbolRulesRegistry()
+                try:
+                    info = await rest_client.fetch_exchange_info()
+                    rules.update_from_exchange_info(info)
+                except Exception:
+                    pass
+
+                # 3. 对每个活跃批次下达市价清扫单
+                drained_count = 0
+                for b in active_batches:
+                    remaining_qty = b.quantity - b.exiting_quantity
+                    sweep_qty = rules.round_quantity(b.symbol, remaining_qty)
+                    if sweep_qty > Decimal("0"):
+                        exit_order = state.create_exit_order(
+                            batch_id=b.batch_id,
+                            quantity=sweep_qty,
+                            price=None,
+                            order_type="MARKET",
+                        )
+                        try:
+                            await executor.submit_order(exit_order)
+                            if not exit_order.is_terminal:
+                                q_res = await rest_client.query_order(
+                                    symbol=b.symbol,
+                                    client_order_id=exit_order.client_order_id,
+                                )
+                                exec_qty = Decimal(
+                                    str(q_res.get("executedQty", sweep_qty))
+                                )
+                                avg_px = Decimal(str(q_res.get("avgPrice", "0")))
+                                await state.on_order_trade_update(
+                                    client_order_id=exit_order.client_order_id,
+                                    symbol=b.symbol,
+                                    position_side=exit_order.position_side,
+                                    side=exit_order.side,
+                                    order_status=OrderStatus.FILLED,
+                                    cum_filled_qty=exec_qty,
+                                    avg_price=avg_px,
+                                    last_filled_qty=exec_qty,
+                                    last_filled_price=avg_px,
+                                )
+                            drained_count += 1
+                        except Exception as e:
+                            log.error(
+                                "drain_batch_exit_failed",
+                                batch_id=b.batch_id,
+                                err=str(e),
+                            )
+
+                await executor.close()
+
+                # 4. 校验账户最终是否完全空仓 (严格基线复核)
+                acct_snap = await rest_client.fetch_account_information()
+                non_zero_positions = [
+                    p for p in acct_snap.positions if abs(p.position_amt) > Decimal("0")
+                ]
+                if non_zero_positions:
+                    log.error(
+                        "drain_finished_with_lingering_positions",
+                        positions=[
+                            f"{p.symbol}:{p.position_side}:{p.position_amt}"
+                            for p in non_zero_positions
+                        ],
+                    )
+                    raise RuntimeError(
+                        "Drain 完成后交易所仍存在未结持仓，请人工介入核查！"
+                    )
+
+                state.set_system_mode(SystemMode.STOPPED)
+                log.info(
+                    "next_gen_drain_completed",
+                    drained_batches_count=drained_count,
+                )
         finally:
             if engine:
                 await engine.dispose()
@@ -361,7 +476,9 @@ def status_command(
     ] = False,
 ) -> None:
     """Inspect active batches and recent orders from the execution database."""
-    repo, engine = _resolve_repository(database_url, dry_run=False)
+    repo, engine = _resolve_repository(
+        database_url, dry_run=False, environment=environment
+    )
 
     async def _fetcher() -> dict[str, Any]:
         try:

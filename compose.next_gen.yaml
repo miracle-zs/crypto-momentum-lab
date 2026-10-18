@@ -11,6 +11,7 @@ x-nextgen-account-app: &nextgen-account-app
   environment: &nextgen-account-environment
     CML_DATABASE_URL: postgresql+asyncpg://cml:${CML_POSTGRES_PASSWORD:?set CML_POSTGRES_PASSWORD}@postgres:5432/cml
     CML_EXECUTION_DATABASE_URL: ${CML_EXECUTION_DATABASE_URL:-}
+    CML_MARKET_STATE_HUB_URL: ${CML_MARKET_STATE_HUB_URL:-ws://market-data:8766}
     CML_LOCAL_HEALTH_DIR: /run/cml/health
     CML_CODE_COMMIT: ${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
   entrypoint: ["cml-next-gen"]
@@ -25,7 +26,7 @@ x-nextgen-account-depends: &nextgen-account-depends
 services:
   nextgen-strategy-primary:
     <<: *nextgen-account-app
-    profiles: ["nextgen", "live"]
+    profiles: ["nextgen"]
     container_name: cml-nextgen-strategy-primary
     environment:
       <<: *nextgen-account-environment
@@ -44,7 +45,7 @@ services:
 
   nextgen-strategy-account-2:
     <<: *nextgen-account-app
-    profiles: ["nextgen", "live"]
+    profiles: ["nextgen"]
     container_name: cml-nextgen-strategy-account-2
     environment:
       <<: *nextgen-account-environment
@@ -63,7 +64,7 @@ services:
 
   nextgen-strategy-account-3:
     <<: *nextgen-account-app
-    profiles: ["nextgen", "live"]
+    profiles: ["nextgen"]
     container_name: cml-nextgen-strategy-account-3
     environment:
       <<: *nextgen-account-environment
@@ -82,7 +83,7 @@ services:
 
   nextgen-strategy-account-4:
     <<: *nextgen-account-app
-    profiles: ["nextgen", "live"]
+    profiles: ["nextgen"]
     container_name: cml-nextgen-strategy-account-4
     environment:
       <<: *nextgen-account-environment

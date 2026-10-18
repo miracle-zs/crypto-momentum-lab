@@ -86,8 +86,17 @@ if ! flock -n 9; then
   exit 75
 fi
 
+trading_engine="${CML_TRADING_ENGINE:-legacy}"
+if [[ "$trading_engine" == "nextgen" ]]; then
+  compose_account_file="compose.next_gen.yaml"
+  compose_profile="nextgen"
+else
+  compose_account_file="compose.live.accounts.yaml"
+  compose_profile="live"
+fi
+
 compose=(docker compose --env-file .env.server -f compose.server.yaml \
-  -f compose.live.accounts.yaml --profile live)
+  -f "$compose_account_file" --profile "$compose_profile")
 git fetch --prune origin main
 previous_commit="$(git rev-parse HEAD)"
 target_commit="$(git rev-parse "$target_ref^{commit}")"
@@ -117,7 +126,7 @@ git worktree add --detach "$build_dir" "$target_commit"
 build_compose=(docker compose --project-directory "$build_dir" \
   --env-file "$remote_dir/.env.server" \
   -f "$build_dir/compose.server.yaml" \
-  -f "$build_dir/compose.live.accounts.yaml" --profile live)
+  -f "$build_dir/$compose_account_file" --profile "$compose_profile")
 target_image="crypto-momentum-lab-app:${target_commit}"
 if ! docker image inspect "$target_image" >/dev/null 2>&1; then
   CML_CODE_COMMIT="$target_commit" CML_DASHBOARD_IMAGE="$target_image" \
@@ -146,12 +155,21 @@ check_target_build() {
   fi
 }
 
-accounts=(
-  "primary:live-strategy"
-  "account-2:live-strategy-account-2"
-  "account-3:live-strategy-account-3"
-  "account-4:live-strategy-account-4"
-)
+if [[ "$trading_engine" == "nextgen" ]]; then
+  accounts=(
+    "primary:nextgen-strategy-primary"
+    "account-2:nextgen-strategy-account-2"
+    "account-3:nextgen-strategy-account-3"
+    "account-4:nextgen-strategy-account-4"
+  )
+else
+  accounts=(
+    "primary:live-strategy"
+    "account-2:live-strategy-account-2"
+    "account-3:live-strategy-account-3"
+    "account-4:live-strategy-account-4"
+  )
+fi
 flat_check_python=$(cat <<'PY'
 import asyncio, json, os, sys
 from crypto_momentum_lab.execution_account.binance.client import BinanceUsdMPrivateReadClient
@@ -233,7 +251,8 @@ fi
 
 services=()
 for service in dashboard market-data research-collector \
-  live-strategy live-strategy-account-2 live-strategy-account-3 live-strategy-account-4; do
+  live-strategy live-strategy-account-2 live-strategy-account-3 live-strategy-account-4 \
+  nextgen-strategy-primary nextgen-strategy-account-2 nextgen-strategy-account-3 nextgen-strategy-account-4; do
   if docker ps -q --filter label=com.docker.compose.project=crypto-momentum-lab \
     --filter "label=com.docker.compose.service=$service" | grep -q .; then
     services+=("$service")

@@ -40,6 +40,8 @@ class NextGenDaemon:
         exit_manager: ExitManager | None = None,
         symbols: list[str] | None = None,
         stop_event: asyncio.Event | None = None,
+        hub_url: str | None = None,
+        market_feed_connector: Any = None,
     ) -> None:
         self.environment = environment
         self.account_label = account_label
@@ -48,7 +50,6 @@ class NextGenDaemon:
         self.ws_client = ws_client or BinanceUserDataStream(
             rest_client=rest_client,
         )
-        self.market_data_provider = market_data_provider
         self.stop_event = stop_event or asyncio.Event()
 
         self.state = AccountState(
@@ -75,11 +76,48 @@ class NextGenDaemon:
             order_executor=self.order_executor,
             symbols=symbols,
         )
+        if market_data_provider is not None:
+            self.market_data_provider = market_data_provider
+        else:
+            from crypto_momentum_lab.next_gen.market_feed import MarketDataFeed
+
+            self.market_data_provider = MarketDataFeed(
+                symbols=self.strategy_engine.symbols,
+                on_bar=self.strategy_engine.on_bar,
+                hub_url=hub_url,
+                ws_connector=market_feed_connector,
+            )
 
     async def _wait_for_stop(self) -> None:
         """等待外部停止信号并平稳触发 TaskGroup 退出"""
         await self.stop_event.wait()
         log.info("stop_event_received_shutting_down", account=self.account_label)
+
+        # 1. 停机时撤销所有未完成挂单 (优先撤开仓单，防止停机时被撮合导致孤儿仓位)
+        try:
+            for order in list(self.state.orders.values()):
+                if not order.is_terminal:
+                    try:
+                        await self.rest_client.cancel_order(
+                            symbol=order.symbol,
+                            client_order_id=order.client_order_id,
+                        )
+                        log.info(
+                            "shutdown_cancelled_pending_order",
+                            order_id=order.client_order_id,
+                            symbol=order.symbol,
+                        )
+                    except Exception as e:
+                        log.warning(
+                            "shutdown_failed_to_cancel_order",
+                            order_id=order.client_order_id,
+                            err=str(e),
+                        )
+        except Exception as e:
+            log.warning("shutdown_cleanup_orders_error", err=str(e))
+
+        if self.market_data_provider and hasattr(self.market_data_provider, "close"):
+            await self.market_data_provider.close()
         await self.ws_client.close()
         await self.exit_manager.close()
         await self.order_executor.close()
@@ -106,7 +144,7 @@ class NextGenDaemon:
                 self.market_data_provider, "warmup"
             ):
                 await self.market_data_provider.warmup()
-            await self.strategy_engine.warmup_market_data()
+            await self.strategy_engine.warmup_market_data(rest_client=self.rest_client)
 
             # 阶段 3: 严格空仓基线检查 (存量非零持仓/挂单则 Fail-Fast 阻断)
             await assert_flat_baseline_or_abort(self.rest_client, self.state)
@@ -132,11 +170,21 @@ class NextGenDaemon:
                             stop_event=self.stop_event,
                         )
                     )
+                    if self.market_data_provider and hasattr(
+                        self.market_data_provider, "run"
+                    ):
+                        tg.create_task(
+                            self.market_data_provider.run(stop_event=self.stop_event)
+                        )
                     tg.create_task(self.strategy_engine.run(stop_event=self.stop_event))
                     tg.create_task(self.exit_manager.run(stop_event=self.stop_event))
                     tg.create_task(self._wait_for_stop())
             finally:
                 self.state.set_system_mode(SystemMode.STOPPED)
+                if self.market_data_provider and hasattr(
+                    self.market_data_provider, "close"
+                ):
+                    await self.market_data_provider.close()
                 await self.exit_manager.close()
                 await self.order_executor.close()
                 log.info(
@@ -158,6 +206,8 @@ async def run_nextgen_daemon(
     ws_client: BinanceUserDataStream | None = None,
     stop_event: asyncio.Event | None = None,
     keepalive_interval_sec: float = 1800.0,
+    hub_url: str | None = None,
+    market_feed_connector: Any = None,
 ) -> NextGenDaemon:
     """下一代交易守护进程便捷启动函数"""
     daemon = NextGenDaemon(
@@ -171,6 +221,8 @@ async def run_nextgen_daemon(
         exit_manager=exit_manager,
         symbols=symbols,
         stop_event=stop_event,
+        hub_url=hub_url,
+        market_feed_connector=market_feed_connector,
     )
     await daemon.run(keepalive_interval_sec=keepalive_interval_sec)
     return daemon

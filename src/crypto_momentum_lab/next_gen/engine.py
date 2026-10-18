@@ -147,11 +147,13 @@ class AccountState:
         has_in_doubt = any(
             o.status == OrderStatus.RECONCILING for o in self.orders.values()
         )
-        if not self.ws_connected or has_in_doubt or self.has_unrecoverable_fault:
+        if has_in_doubt or self.has_unrecoverable_fault:
             return False
-        if self.system_mode == SystemMode.RUNNING:
+        if self.is_draining:
             return True
-        if self.system_mode == SystemMode.DEGRADED and self.is_draining:
+        if not self.ws_connected:
+            return False
+        if self.system_mode in (SystemMode.RUNNING, SystemMode.DEGRADED):
             return True
         return False
 
