@@ -314,7 +314,7 @@ async def test_nextgen_daemon_orchestrates_strategy_and_exit_manager(
 
 
 @pytest.mark.asyncio
-async def test_nextgen_daemon_ensures_hedge_mode_and_leverage(
+async def test_nextgen_daemon_sets_hedge_mode_without_configuring_all_symbols(
     account_config,
     mock_rest_client: AsyncMock,
 ) -> None:
@@ -341,12 +341,10 @@ async def test_nextgen_daemon_ensures_hedge_mode_and_leverage(
     await daemon.run(keepalive_interval_sec=0.05)
 
     mock_rest_client.set_position_mode.assert_awaited_once_with(dual_side=True)
-    assert mock_rest_client.set_margin_type.await_count == 2
-    mock_rest_client.set_margin_type.assert_any_await("BTCUSDT", "CROSSED")
-    mock_rest_client.set_margin_type.assert_any_await("ETHUSDT", "CROSSED")
-    assert mock_rest_client.set_leverage.await_count == 2
-    mock_rest_client.set_leverage.assert_any_await("BTCUSDT", leverage=5)
-    mock_rest_client.set_leverage.assert_any_await("ETHUSDT", leverage=5)
+    # With no restored responsibility, symbol settings are deferred until the
+    # first actual entry; setting every tradable symbol breaks on -4028.
+    mock_rest_client.set_margin_type.assert_not_awaited()
+    mock_rest_client.set_leverage.assert_not_awaited()
 
 
 @pytest.mark.asyncio

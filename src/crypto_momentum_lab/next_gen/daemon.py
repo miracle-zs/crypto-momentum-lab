@@ -90,6 +90,8 @@ class NextGenDaemon:
             state=self.state,
             db=db,
             read_client=self.read_client,
+            entry_leverage=account_config.execution_inputs.entry_leverage,
+            margin_type=account_config.execution_inputs.margin_type,
         )
         rules = (
             strategy_engine.symbol_rules
@@ -322,8 +324,8 @@ class NextGenDaemon:
                         self.state.daily_realized_pnl = Decimal("0")
                         self.state.risk_day = cutoff.date()
                         self.state.daily_pnl_ready = False
-                        baseline = (
-                            await self.read_client.fetch_startup_realized_pnl(cutoff)
+                        baseline = await self.read_client.fetch_startup_realized_pnl(
+                            cutoff
                         )
                         self.state.daily_realized_pnl += baseline
                         self.state.risk_day = cutoff.date()
@@ -331,7 +333,20 @@ class NextGenDaemon:
                     await self.rest_client.set_position_mode(
                         dual_side=self.account_config.execution_inputs.hedge_mode,
                     )
-                    for symbol in self.strategy_engine.symbols:
+                    # Only configure symbols that already carry responsibility.
+                    # New entry symbols are configured lazily before their first
+                    # order; setting every tradable symbol fails on symbols with
+                    # a lower maximum leverage (-4028).
+                    active_symbols = {
+                        batch.symbol
+                        for batch in self.state.batches.values()
+                        if batch.quantity > 0
+                    } | {
+                        order.symbol
+                        for order in self.state.orders.values()
+                        if not order.is_terminal
+                    }
+                    for symbol in sorted(active_symbols):
                         await self.rest_client.set_margin_type(
                             symbol,
                             self.account_config.execution_inputs.margin_type,

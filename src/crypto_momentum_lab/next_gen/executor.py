@@ -29,11 +29,17 @@ class OrderExecutor:
         state: AccountState,
         db: TradingRepositoryProtocol,
         read_client: BinanceRestClient | None = None,
+        entry_leverage: int = 5,
+        margin_type: str = "CROSSED",
     ) -> None:
         self._rest = rest_client
         self._read = read_client or rest_client
         self._state = state
         self._db = db
+        self._entry_leverage = entry_leverage
+        self._margin_type = margin_type
+        self._configured_symbols: set[str] = set()
+        self._settings_failed_symbols: set[str] = set()
         self._watchdog_tasks: set[asyncio.Task[Any]] = set()
         self._inflight_submissions = 0
         self._submissions_idle = asyncio.Event()
@@ -49,6 +55,26 @@ class OrderExecutor:
             task.cancel()
         if self._watchdog_tasks:
             await asyncio.gather(*self._watchdog_tasks, return_exceptions=True)
+
+    async def _ensure_symbol_settings(self, symbol: str) -> None:
+        """Configure margin/leverage once per symbol, lazily before entry.
+
+        Setting these for every tradable symbol at startup fails on symbols
+        whose maximum leverage is below the strategy value (Binance -4028).
+        Configure only symbols that actually become entries; cache failures so
+        a permanently unsupported symbol does not hammer REST on every signal.
+        """
+        if symbol in self._configured_symbols:
+            return
+        if symbol in self._settings_failed_symbols:
+            raise RuntimeError(f"Symbol settings previously failed: {symbol}")
+        try:
+            await self._rest.set_margin_type(symbol, self._margin_type)
+            await self._rest.set_leverage(symbol, leverage=self._entry_leverage)
+        except Exception:
+            self._settings_failed_symbols.add(symbol)
+            raise
+        self._configured_symbols.add(symbol)
 
     async def cancel_and_confirm(self, order: Order, timeout_sec: float = 2.0) -> bool:
         """Cancel once and confirm the final cumulative fill before replacing it."""
@@ -255,6 +281,7 @@ class OrderExecutor:
 
         # 2. 发单安全门与名义价值上限校验
         if order.client_order_id.startswith("e_"):
+            await self._ensure_symbol_settings(order.symbol)
             if not self._state.can_submit_entry_order():
                 raise RuntimeError(
                     f"安全门阻断开仓单: {order.client_order_id}, "
