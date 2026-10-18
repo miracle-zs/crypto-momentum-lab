@@ -246,20 +246,20 @@ class NextGenDaemon:
                     self.state.has_unrecoverable_fault = True
                     self.state.set_system_mode(SystemMode.DEGRADED)
                     log.exception("risk_configuration_refresh_failed")
-                ready = (
+                healthy = (
                     self.state.system_mode == SystemMode.RUNNING
                     and self.state.can_submit_exit_order()
-                    and self.strategy_engine.is_ready
                     and self._candle_feed.connection_available
                 )
+                ready = healthy and self.strategy_engine.is_ready
                 try:
                     await self._publish_runtime_status(ready)
                 except Exception:
                     log.exception("runtime_status_publish_failed")
-                if not ready:
+                if not healthy:
                     account_health_file.unlink(missing_ok=True)  # noqa: ASYNC240
                     status_file.write_text("not_ready", encoding="utf-8")  # noqa: ASYNC240
-                if ready:
+                if healthy:
                     now_ts = str(int(time.time()))
                     try:
                         account_health_file.write_text(now_ts, encoding="utf-8")  # noqa: ASYNC240
