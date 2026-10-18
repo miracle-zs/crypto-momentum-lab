@@ -78,13 +78,13 @@ async def test_exit_manager_grace_timeout_cancels_limit_and_sweeps_market(exit_s
     # 2. Limit order was canceled after grace timeout
     mock_rest.cancel_order.assert_awaited_once_with(
         symbol="BTCUSDT",
-        client_order_id=f"fl_{batch_id}",
+        client_order_id=f"fl_{batch_id}_01",
     )
 
     # 3. Market sweep order was posted
     second_call = mock_rest.post_order.call_args_list[1].kwargs
     assert second_call["order_type"] == "MARKET"
-    assert second_call["client_order_id"] == f"fm_{batch_id}"
+    assert second_call["client_order_id"] == f"fm_{batch_id}_02"
 
 
 @pytest.mark.asyncio

@@ -132,12 +132,16 @@ class ExitManager:
         if not limit_order.is_terminal and cancel_succeeded:
             limit_order.apply_update(OrderStatus.CANCELED)
             self._state._release_active_order_lock(limit_order)
-            unfilled = max(Decimal("0"), limit_order.quantity - limit_order.filled_qty)
-            batch.release_exit_reservation(unfilled)
+            limit_order.release_batch_reservation(batch)
 
         # 6. 市价清扫剩余未结数量 (根据 WS 终态确认后的确切 batch.quantity)
         batch = self._state.batches.get(batch_id)
-        if batch and batch.quantity > Decimal("0") and limit_order.is_terminal:
+        if (
+            batch
+            and batch.quantity > Decimal("0")
+            and limit_order.is_terminal
+            and self._state.can_submit_exit_order()
+        ):
             market_order = self._state.create_exit_order(
                 batch_id=batch_id,
                 quantity=batch.quantity,

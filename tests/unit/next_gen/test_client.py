@@ -1,4 +1,5 @@
 import asyncio
+from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
@@ -160,6 +161,7 @@ async def test_user_data_stream_parse_order_trade_update():
         last_filled_qty=Decimal("0.400"),
         last_filled_price=Decimal("65000.00"),
         exchange_order_id=88888888,
+        trade_time=datetime.fromtimestamp(1700000000005 / 1000.0, tz=UTC),
     )
 
 

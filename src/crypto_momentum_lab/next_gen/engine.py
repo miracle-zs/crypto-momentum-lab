@@ -68,6 +68,8 @@ class AccountState:
         self.is_draining: bool = False
         self.ws_connected: bool = False
         self.has_unrecoverable_fault: bool = False
+        self.symbol_cap: Decimal = Decimal("1000000")
+        self.account_cap: Decimal = Decimal("2000000")
 
     @property
     def db(self) -> TradingRepositoryProtocol | None:
@@ -158,10 +160,17 @@ class AccountState:
         symbol: str,
         new_quantity: Decimal,
         current_price: Decimal,
-        symbol_cap: Decimal,
-        account_cap: Decimal,
+        symbol_cap: Decimal | None = None,
+        account_cap: Decimal | None = None,
+        latest_prices: dict[str, Decimal] | None = None,
+        exclude_order_id: str | None = None,
     ) -> bool:
         """账户维度与标的维度静态名义价值双上限校验 (纯内存计算，零外部调用)"""
+        s_cap = symbol_cap if symbol_cap is not None else self.symbol_cap
+        a_cap = account_cap if account_cap is not None else self.account_cap
+        prices = dict(latest_prices or {})
+        prices[symbol] = current_price
+
         # 1. 单标的名义价值校验:
         # (已持有批次数量 + 未结开仓单剩余量 + 新意图数量) * 现价 <= symbol_cap
         symbol_batch_qty = sum(
@@ -178,10 +187,8 @@ class AccountState:
                 for o in self.orders.values()
                 if o.symbol == symbol
                 and not o.is_terminal
-                and (
-                    (o.position_side == "LONG" and o.side == "BUY")
-                    or (o.position_side == "SHORT" and o.side == "SELL")
-                )
+                and o.client_order_id.startswith("e_")
+                and o.client_order_id != exclude_order_id
             ),
             Decimal("0"),
         )
@@ -189,29 +196,29 @@ class AccountState:
         projected_symbol_notional = (
             symbol_batch_qty + symbol_open_entry_qty + new_quantity
         ) * current_price
-        if projected_symbol_notional > symbol_cap:
+        if projected_symbol_notional > s_cap:
             return False
 
-        # 2. 全账户名义价值校验
+        # 2. 全账户名义价值校验 (仅包含持仓与未成交开仓单，严禁平仓单重复计入)
         total_account_notional = Decimal("0")
         for b in self.batches.values():
             if b.status != "CLOSED" and b.quantity > Decimal("0"):
-                p = current_price if b.symbol == symbol else b.entry_price
+                p = prices.get(b.symbol, b.entry_price)
                 total_account_notional += b.quantity * p
 
         for o in self.orders.values():
-            if not o.is_terminal:
+            if (
+                not o.is_terminal
+                and o.client_order_id.startswith("e_")
+                and o.client_order_id != exclude_order_id
+            ):
                 rem = o.quantity - o.filled_qty
                 if rem > Decimal("0"):
-                    p = (
-                        current_price
-                        if o.symbol == symbol
-                        else (o.price or Decimal("0"))
-                    )
+                    p = prices.get(o.symbol, o.price or current_price)
                     total_account_notional += rem * p
 
         total_account_notional += new_quantity * current_price
-        return total_account_notional <= account_cap
+        return total_account_notional <= a_cap
 
     def _release_active_order_lock(self, order: Order) -> None:
         """根据订单意图性质精确释放对应的锁"""
@@ -294,11 +301,13 @@ class AccountState:
             raise KeyError(f"未找到目标平仓批次: {batch_id}")
 
         batch.reserve_for_exit(quantity)
+        batch.exit_order_counter += 1
+        seq = batch.exit_order_counter
         if batch.exit_order_submitted_at is None:
             batch.exit_order_submitted_at = datetime.now(UTC)
 
         side = "SELL" if batch.position_side == "LONG" else "BUY"
-        client_order_id = generate_exit_order_id(batch_id, order_type)
+        client_order_id = generate_exit_order_id(batch_id, order_type, seq=seq)
 
         order = Order(
             environment=self.environment,
@@ -317,6 +326,23 @@ class AccountState:
         self.active_exit_orders[exit_key] = client_order_id
         return order
 
+    def rollback_unsubmitted_order(self, order: Order) -> None:
+        """预写库失败回滚：从 orders 移除未提交订单，释放锁，释放批次预留"""
+        self.orders.pop(order.client_order_id, None)
+        self._release_active_order_lock(order)
+        is_exit = (order.position_side == "LONG" and order.side == "SELL") or (
+            order.position_side == "SHORT" and order.side == "BUY"
+        )
+        if is_exit:
+            batch = self.batches.get(order.batch_id)
+            if batch:
+                order.release_batch_reservation(batch)
+        log.warning(
+            "order_unsubmitted_rolled_back",
+            order_id=order.client_order_id,
+            account=self.account_label,
+        )
+
     def mark_order_rejected(self, client_order_id: str, reason: str = "") -> None:
         """网关拒单清理：释放活跃锁，若为平仓单则释放 Lot 预留"""
         order = self.orders.get(client_order_id)
@@ -330,7 +356,7 @@ class AccountState:
         if is_exit:
             batch = self.batches.get(order.batch_id)
             if batch:
-                batch.release_exit_reservation(order.quantity)
+                order.release_batch_reservation(batch)
         log.warning("order_gateway_rejected_cleaned", id=client_order_id, reason=reason)
 
     async def watch_submission_timeout(
@@ -363,10 +389,11 @@ class AccountState:
         except Exception as e:
             log.warning("probe_order_failed", id=order.client_order_id, err=str(e))
 
-    def on_account_update(
+    async def on_account_update(
         self,
         balances: dict[str, Decimal],
         available_balance: Decimal | None = None,
+        positions: list[dict[str, Any]] | None = None,
     ) -> None:
         self.update_balances(balances, available_balance)
 
@@ -391,6 +418,7 @@ class AccountState:
         last_filled_qty: Decimal,
         last_filled_price: Decimal,
         exchange_order_id: int | None = None,
+        trade_time: datetime | None = None,
     ) -> None:
         """【单笔成交原子状态转移】：推进订单与批次 ->
         原地异步直调写透 DB (支持微退避重试)。
@@ -426,9 +454,7 @@ class AccountState:
                 and batch
                 and order.status in (OrderStatus.CANCELED, OrderStatus.REJECTED)
             ):
-                unfilled = max(Decimal("0"), order.quantity - order.filled_qty)
-                if unfilled > Decimal("0"):
-                    batch.release_exit_reservation(unfilled)
+                order.release_batch_reservation(batch)
 
         if not is_exit and batch is None and delta_qty > Decimal("0"):
             batch = PositionBatch(
@@ -439,7 +465,7 @@ class AccountState:
                 position_side=order.position_side,
                 quantity=delta_qty,
                 entry_price=last_filled_price,
-                entry_bar_time=datetime.now(UTC),
+                entry_bar_time=trade_time or datetime.now(UTC),
                 status="ACTIVE",
             )
             self.batches[order.batch_id] = batch

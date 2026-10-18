@@ -77,22 +77,30 @@ class InMemoryTradingRepository:
     async def async_save_order(self, order: Order) -> None:
         self._check_and_decrement_failure()
         key = (order.environment, order.account_label, order.client_order_id)
-        self.orders[key] = deepcopy(order)
+        existing = self.orders.get(key)
+        saved = deepcopy(order)
+        if existing and existing.is_terminal:
+            saved.status = existing.status
+            saved.filled_qty = max(existing.filled_qty, saved.filled_qty)
+        self.orders[key] = saved
 
     async def async_save_batch(self, batch: PositionBatch) -> None:
         self._check_and_decrement_failure()
         key = (batch.environment, batch.account_label, batch.batch_id)
-        self.batches[key] = deepcopy(batch)
+        existing = self.batches.get(key)
+        saved = deepcopy(batch)
+        if existing and existing.status == "CLOSED":
+            saved.status = "CLOSED"
+            saved.quantity = Decimal("0")
+        self.batches[key] = saved
 
     async def async_save_order_and_batch(
         self, order: Order, batch: PositionBatch | None
     ) -> None:
         self._check_and_decrement_failure()
-        order_key = (order.environment, order.account_label, order.client_order_id)
-        self.orders[order_key] = deepcopy(order)
+        await self.async_save_order(order)
         if batch is not None:
-            batch_key = (batch.environment, batch.account_label, batch.batch_id)
-            self.batches[batch_key] = deepcopy(batch)
+            await self.async_save_batch(batch)
 
     def get_order(
         self, environment: str, account_label: str, client_order_id: str
@@ -195,9 +203,19 @@ class PostgresTradingRepository:
             exchange_order_id = COALESCE(
                 EXCLUDED.exchange_order_id, live_orders.exchange_order_id
             ),
-            status = EXCLUDED.status,
-            filled_quantity = EXCLUDED.filled_quantity,
-            average_price = EXCLUDED.average_price,
+            status = CASE 
+                WHEN live_orders.status IN (
+                    'FILLED', 'CANCELED', 'REJECTED'
+                ) THEN live_orders.status
+                ELSE EXCLUDED.status
+            END,
+            filled_quantity = GREATEST(
+                live_orders.filled_quantity, EXCLUDED.filled_quantity
+            ),
+            average_price = CASE 
+                WHEN EXCLUDED.average_price > 0 THEN EXCLUDED.average_price 
+                ELSE live_orders.average_price 
+            END,
             updated_at = EXCLUDED.updated_at;
         """
         params = {
@@ -237,13 +255,19 @@ class PostgresTradingRepository:
         )
         ON CONFLICT (environment, account_label, batch_id)
         DO UPDATE SET
-            quantity = EXCLUDED.quantity,
+            quantity = CASE
+                WHEN live_position_batches.status = 'CLOSED' THEN 0
+                ELSE EXCLUDED.quantity
+            END,
             entry_price = EXCLUDED.entry_price,
             exit_order_submitted_at = COALESCE(
                 EXCLUDED.exit_order_submitted_at,
                 live_position_batches.exit_order_submitted_at
             ),
-            status = EXCLUDED.status,
+            status = CASE
+                WHEN live_position_batches.status = 'CLOSED' THEN 'CLOSED'
+                ELSE EXCLUDED.status
+            END,
             realized_pnl = EXCLUDED.realized_pnl,
             exiting_quantity = EXCLUDED.exiting_quantity,
             updated_at = EXCLUDED.updated_at;
@@ -292,9 +316,20 @@ class PostgresTradingRepository:
                         exchange_order_id = COALESCE(
                             EXCLUDED.exchange_order_id, live_orders.exchange_order_id
                         ),
-                        status = EXCLUDED.status,
-                        filled_quantity = EXCLUDED.filled_quantity,
-                        average_price = EXCLUDED.average_price,
+                        status = CASE 
+                            WHEN live_orders.status IN (
+                                'FILLED', 'CANCELED', 'REJECTED'
+                            ) THEN live_orders.status
+                            ELSE EXCLUDED.status
+                        END,
+                        filled_quantity = GREATEST(
+                            live_orders.filled_quantity,
+                            EXCLUDED.filled_quantity
+                        ),
+                        average_price = CASE 
+                            WHEN EXCLUDED.average_price > 0 THEN EXCLUDED.average_price 
+                            ELSE live_orders.average_price 
+                        END,
                         updated_at = EXCLUDED.updated_at;
                     """
                 ),
@@ -335,13 +370,20 @@ class PostgresTradingRepository:
                         )
                         ON CONFLICT (environment, account_label, batch_id)
                         DO UPDATE SET
-                            quantity = EXCLUDED.quantity,
+                            quantity = CASE
+                                WHEN live_position_batches.status = 'CLOSED' THEN 0
+                                ELSE EXCLUDED.quantity
+                            END,
                             entry_price = EXCLUDED.entry_price,
                             exit_order_submitted_at = COALESCE(
                                 EXCLUDED.exit_order_submitted_at,
                                 live_position_batches.exit_order_submitted_at
                             ),
-                            status = EXCLUDED.status,
+                            status = CASE
+                                WHEN live_position_batches.status = 'CLOSED'
+                                THEN 'CLOSED'
+                                ELSE EXCLUDED.status
+                            END,
                             realized_pnl = EXCLUDED.realized_pnl,
                             exiting_quantity = EXCLUDED.exiting_quantity,
                             updated_at = EXCLUDED.updated_at;

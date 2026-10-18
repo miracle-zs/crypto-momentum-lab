@@ -6,6 +6,7 @@ import hmac
 import json
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from urllib.parse import urlencode
@@ -98,23 +99,33 @@ class BinanceRestClient:
             ) from e
 
         if response.is_error:
-            # 5xx 服务端错误或网关超时：状态存疑，严禁标记为已拒单
-            if response.status_code >= 500:
+            # 1. 5xx 服务端错误、408 超时、429 限频：状态存疑或不可用，严禁标记为已拒单
+            if response.status_code >= 500 or response.status_code in (408, 429):
                 raise BinanceNetworkError(
                     status_code=response.status_code,
-                    message=f"Server returned {response.status_code}: {response.text}",
+                    message=f"HTTP status {response.status_code}: {response.text}",
                 )
 
-            # 4xx 业务错误：确定被交易所拒单
+            # 2. 尝试提取币安 JSON 错误码与错误信息
+            code = response.status_code
+            msg = response.text
             try:
                 err_data = response.json()
-                code = err_data.get("code", response.status_code)
-                msg = err_data.get("msg", response.text)
-                raise BinanceOrderRejectedError(code=code, message=msg)
-            except BinanceOrderRejectedError:
-                raise
+                code = int(err_data.get("code", response.status_code))
+                msg = str(err_data.get("msg", response.text))
             except Exception:
-                response.raise_for_status()
+                pass
+
+            # 3. 币安系统未知处理/超时错误码 (-1000, -1006, -1007)
+            # 这类错误发生时订单可能已被撮合引擎接收并成交，状态存疑，必须走看门狗查证
+            if code in (-1000, -1006, -1007):
+                raise BinanceNetworkError(
+                    status_code=response.status_code,
+                    message=f"Binance in-doubt error (code={code}): {msg}",
+                )
+
+            # 4. 明确的业务拒单 (如 -2010 余额不足, -2019 保证金不足, -1013 精度非法等)
+            raise BinanceOrderRejectedError(code=code, message=msg)
 
         return response.json()
 
@@ -271,7 +282,14 @@ class BinanceUserDataStream:
                 return
             mapped_status = status_mapping[status_str]
 
-            await on_order_trade_update(
+            tx_time_ms = o.get("T") or event.get("T")
+            trade_time = (
+                datetime.fromtimestamp(tx_time_ms / 1000.0, tz=UTC)
+                if tx_time_ms
+                else None
+            )
+
+            res = on_order_trade_update(
                 client_order_id=o.get("c", ""),
                 symbol=o.get("s", ""),
                 position_side=o.get("ps", "LONG"),
@@ -282,7 +300,10 @@ class BinanceUserDataStream:
                 last_filled_qty=Decimal(str(o.get("l", "0"))),
                 last_filled_price=Decimal(str(o.get("L", "0"))),
                 exchange_order_id=int(o.get("i", 0)) if o.get("i") else None,
+                trade_time=trade_time,
             )
+            if asyncio.iscoroutine(res):
+                await res
 
         elif event_type == "ACCOUNT_UPDATE":
             a = event.get("a", {})
@@ -292,7 +313,16 @@ class BinanceUserDataStream:
                 wb = Decimal(str(b.get("wb", "0")))
                 balances[asset] = wb
 
-            await on_account_update(balances=balances)
+            positions = a.get("P", [])
+            res = on_account_update(balances=balances, positions=positions)
+            if asyncio.iscoroutine(res):
+                await res
+
+        elif event_type == "listenKeyExpired":
+            log.warning("binance_listen_key_expired", event=event)
+            self.is_connected = False
+            if self.on_status_change:
+                self.on_status_change(False)
 
     async def connect(
         self,
@@ -357,6 +387,8 @@ class BinanceUserDataStream:
                         err=str(e),
                         payload=str(raw_msg)[:200],
                     )
+                    if self.on_status_change:
+                        self.on_status_change(False)
         except asyncio.CancelledError:
             pass
         except Exception as e:

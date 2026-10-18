@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -53,6 +54,7 @@ class PositionBatch:
     status: str = "ACTIVE"  # ACTIVE / EXITING / CLOSED
     exit_order_submitted_at: datetime | None = None
     order_counter: int = 0  # 批次内发单顺序计数器
+    exit_order_counter: int = 0  # 批次内平仓单顺序计数器 (保证每次平仓尝试 ID 唯一)
     realized_pnl: Decimal = Decimal("0")  # 批次关闭时的名义毛盈亏 (USDT)
     exiting_quantity: Decimal = Decimal(
         "0"
@@ -72,19 +74,16 @@ class PositionBatch:
         self.status = "EXITING"
         self.updated_at = datetime.now(UTC)
 
-    def release_exit_reservation(self, qty: Decimal) -> None:
-        """撤单或异常时释放平仓 Lot 预留"""
+    def release_exit_reservation(self, qty: Decimal) -> Decimal:
+        """撤单或异常时释放平仓 Lot 预留 (幂等防御，至多扣减至 0，返回实际释放量)"""
         if qty <= Decimal("0"):
-            return
-        if qty > self.exiting_quantity:
-            raise ValueError(
-                f"释放预留数量超过当前已预留量: 请求 {qty}, "
-                f"当前预留 {self.exiting_quantity}"
-            )
-        self.exiting_quantity -= qty
+            return Decimal("0")
+        actual_release = min(qty, self.exiting_quantity)
+        self.exiting_quantity -= actual_release
         if self.exiting_quantity == Decimal("0") and self.quantity > Decimal("0"):
             self.status = "ACTIVE"
         self.updated_at = datetime.now(UTC)
+        return actual_release
 
 
 @dataclass
@@ -107,6 +106,7 @@ class Order:
     avg_price: Decimal = Decimal("0")
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    lot_reservation_released: bool = False  # 跟踪是否已幂等释放过批次预留
 
     def __post_init__(self) -> None:
         if len(self.client_order_id) > 36:
@@ -123,6 +123,15 @@ class Order:
             OrderStatus.REJECTED,
         )
 
+    def release_batch_reservation(self, batch: PositionBatch) -> Decimal:
+        """幂等释放该订单对应的批次平仓预留 (保证单订单至多释放一次)"""
+        if self.lot_reservation_released:
+            return Decimal("0")
+        unfilled = max(Decimal("0"), self.quantity - self.filled_qty)
+        released = batch.release_exit_reservation(unfilled)
+        self.lot_reservation_released = True
+        return released
+
     def apply_update(
         self,
         new_status: OrderStatus,
@@ -138,14 +147,32 @@ class Order:
         if not self.is_terminal and STATUS_RANK[new_status] >= STATUS_RANK[self.status]:
             self.status = new_status
 
-        # 2. 累计成交量严格单调递增：即使已在终态，仍吸收迟到的更大成交量以防止漏计
+        # 2. 累计成交量严格单调递增：即使已在终态仍吸收，且严格不超过订单总量 quantity
         delta_qty = Decimal("0")
         if cum_filled_qty > self.filled_qty:
-            delta_qty = cum_filled_qty - self.filled_qty
-            self.filled_qty = cum_filled_qty
+            valid_cum = min(cum_filled_qty, self.quantity)
+            delta_qty = valid_cum - self.filled_qty
+            self.filled_qty = valid_cum
             self.avg_price = avg_price
         self.updated_at = datetime.now(UTC)
         return delta_qty
+
+
+def normalize_account_tag(account_label: str) -> str:
+    """归一化账户标签为严格 2 字符标识符，如 primary -> p1, account-2 -> a2"""
+    norm = account_label.lower().strip()
+    if norm in ("primary", "a1", "account-1", "account_1"):
+        return "p1"
+    if norm in ("account-2", "account_2", "a2"):
+        return "a2"
+    if norm in ("account-3", "account_3", "a3"):
+        return "a3"
+    if norm in ("account-4", "account_4", "a4"):
+        return "a4"
+    clean = re.sub(r"[^a-z0-9]", "", norm)
+    if len(clean) >= 2:
+        return f"{clean[0]}{clean[-1]}"
+    return (clean + "0")[:2]
 
 
 def generate_batch_id(
@@ -156,14 +183,14 @@ def generate_batch_id(
     salt: str | None = None,
     counter: int = 1,
 ) -> str:
-    """生成带多账户标签且严格控制在 <= 31 字符的 batch_id。
+    """生成带多账户标签且严格控制在 <= 28 字符的 batch_id。
 
     格式: {base_sym}_{side}_{ts}_{acc}_{salt}_{cnt}
-    始终保留随机盐与秒级时间戳，杜绝重启或并发时 ON CONFLICT 覆盖旧批次。
+    始终保留 12 位秒级时间戳 YYMMDDHHMMSS 与随机盐，杜绝同秒、同分、同日碰撞。
     """
     raw_base = symbol.removesuffix("USDT")
     side = "L" if position_side.upper() == "LONG" else "S"
-    acc = account_label[:3]
+    acc = normalize_account_tag(account_label)
     s = salt if salt is not None else secrets.token_hex(1)  # 2 hex chars
     cnt = f"b{counter}"
 
@@ -172,41 +199,47 @@ def generate_batch_id(
     else:
         ts = timestamp_str
 
-    # 动态裁剪 base_sym，确保总长度严格 <= 31，且绝对保留随机盐与时间戳
     fixed_len = len(side) + len(ts) + len(acc) + len(s) + len(cnt) + 5
-    max_base_len = 31 - fixed_len
-    base_sym = raw_base[: max(3, max_base_len)]
+    max_base_len = max(2, 28 - fixed_len)
+    base_sym = raw_base[:max_base_len]
 
     candidate = f"{base_sym}_{side}_{ts}_{acc}_{s}_{cnt}"
-    if len(candidate) > 31:
-        excess = len(candidate) - 31
-        if len(base_sym) - excess >= 3:
+    if len(candidate) > 28:
+        excess = len(candidate) - 28
+        if len(base_sym) - excess >= 2:
             base_sym = base_sym[:-excess]
             candidate = f"{base_sym}_{side}_{ts}_{acc}_{s}_{cnt}"
         else:
-            ts_short = ts[:-excess]
-            candidate = f"{base_sym}_{side}_{ts_short}_{acc}_{s}_{cnt}"
+            raise ValueError(
+                f"无法生成 <= 28 字符的 batch_id: {candidate} ({len(candidate)})"
+            )
 
-    assert len(candidate) <= 31, (
-        f"生成的 batch_id 超过 31 字符限制: {candidate} ({len(candidate)})"
-    )
     return candidate
 
 
 def generate_entry_order_id(batch_id: str, seq: int) -> str:
     """生成开仓 client_order_id (<= 36 字符): e_{batch_id}_{seq:02d}"""
     client_id = f"e_{batch_id}_{seq:02d}"
-    assert len(client_id) <= 36, (
-        f"开仓 client_order_id 超过 36 字符: {client_id} ({len(client_id)})"
-    )
+    if len(client_id) > 36:
+        raise ValueError(
+            f"开仓 client_order_id 超过 36 字符限制: {client_id} ({len(client_id)})"
+        )
     return client_id
 
 
-def generate_exit_order_id(batch_id: str, order_type: str = "LIMIT") -> str:
-    """生成平仓 client_order_id (<= 36 字符): fl_{batch_id} 或 fm_{batch_id}"""
-    prefix = "fl_" if order_type.upper() == "LIMIT" else "fm_"
-    client_id = f"{prefix}{batch_id}"
-    assert len(client_id) <= 36, (
-        f"平仓 client_order_id 超过 36 字符: {client_id} ({len(client_id)})"
-    )
+def generate_exit_order_id(
+    batch_id: str,
+    order_type: str = "LIMIT",
+    seq: int = 1,
+) -> str:
+    """生成平仓 client_order_id (<= 36 字符):
+    限价平仓: fl_{batch_id}_{seq:02d}
+    市价平仓: fm_{batch_id}_{seq:02d}
+    """
+    prefix = "fl" if order_type.upper() == "LIMIT" else "fm"
+    client_id = f"{prefix}_{batch_id}_{seq:02d}"
+    if len(client_id) > 36:
+        raise ValueError(
+            f"平仓 client_order_id 超过 36 字符限制: {client_id} ({len(client_id)})"
+        )
     return client_id

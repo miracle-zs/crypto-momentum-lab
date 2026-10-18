@@ -96,7 +96,7 @@ def test_create_exit_order_reserves_lot_and_acquires_exit_lock(
         order_type="LIMIT",
     )
 
-    assert exit_order.client_order_id == f"fl_{batch_id}"
+    assert exit_order.client_order_id == f"fl_{batch_id}_01"
     assert exit_order.side == "SELL"
     assert batch.exiting_quantity == Decimal("2.0")
     assert batch.status == "EXITING"

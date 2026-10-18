@@ -34,7 +34,7 @@ async def test_binance_rest_5xx_raises_binance_network_error() -> None:
     )
 
     client = BinanceRestClient(api_key="k", api_secret="s")
-    with pytest.raises(BinanceNetworkError, match="Server returned 502"):
+    with pytest.raises(BinanceNetworkError, match="502"):
         await client.post_order(
             symbol="BTCUSDT",
             side="BUY",
@@ -66,8 +66,11 @@ async def test_order_executor_network_error_keeps_order_in_doubt_and_locks_held(
     )
 
     executor = OrderExecutor(rest_client=mock_rest, state=state, db=repo)
-    with pytest.raises(BinanceNetworkError):
-        await executor.submit_order(order)
+    try:
+        with pytest.raises(BinanceNetworkError):
+            await executor.submit_order(order)
+    finally:
+        await executor.close()
 
     # 关键防重开验证：订单状态绝对不能是 REJECTED，开仓锁必须继续持有以防策略重复发单！
     assert order.status == OrderStatus.SUBMITTED
@@ -224,7 +227,7 @@ async def test_exit_manager_waits_for_ws_terminal_before_market_sweep() -> None:
     # 模拟在 cancel 发出后，WS 异步推来终态 CANCELED 并核算剩余
     async def simulate_ws_response():
         await asyncio.sleep(0.03)
-        limit_order = state.orders.get("fl_b_wait_ws")
+        limit_order = state.orders.get("fl_b_wait_ws_01")
         if limit_order:
             await state.on_order_trade_update(
                 client_order_id=limit_order.client_order_id,
@@ -240,14 +243,18 @@ async def test_exit_manager_waits_for_ws_terminal_before_market_sweep() -> None:
 
     asyncio.create_task(simulate_ws_response())
 
-    await exit_mgr.execute_batch_exit(
-        batch_id="b_wait_ws",
-        limit_price=Decimal("60500"),
-        grace_period_sec=0.01,
-    )
+    try:
+        await exit_mgr.execute_batch_exit(
+            batch_id="b_wait_ws",
+            limit_price=Decimal("60500"),
+            grace_period_sec=0.01,
+        )
+    finally:
+        await exit_mgr.close()
+        await executor.close()
 
     # 验证最终市价扫平单是基于 WS 吸收后的准确净剩余 0.6 发出的
-    market_order = state.orders.get("fm_b_wait_ws")
+    market_order = state.orders.get("fm_b_wait_ws_02")
     assert market_order is not None
     assert market_order.quantity == Decimal("0.6")
     assert market_order.order_type == "MARKET"
