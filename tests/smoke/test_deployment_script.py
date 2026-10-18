@@ -106,7 +106,7 @@ def test_deployment_maps_running_accounts_to_selected_engine() -> None:
     script = remote_script()
 
     assert 'running_services+=("$service")' in script
-    assert 'services+=("$target_service")' in script
+    assert 'services+=("${item#*:}")' in script
     assert '"${compose[@]}" stop --timeout 90 "${running_services[@]}"' in script
     assert '"${compose[@]}" up -d --force-recreate "${services[@]}"' in script
     assert "docker image prune" not in script

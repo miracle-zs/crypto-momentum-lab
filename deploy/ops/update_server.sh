@@ -282,18 +282,11 @@ for service in "${running_services[@]}"; do
     dashboard|market-data|research-collector) services+=("$service") ;;
   esac
 done
+# Always start the target engine's account services.  A controlled flatten
+# operator may have stopped the legacy services before this script runs; the
+# target must still be started in that case.
 for item in "${accounts[@]}"; do
-  account="${item%%:*}"
-  target_service="${item#*:}"
-  legacy_service="live-strategy-${account}"
-  [[ "$account" == primary ]] && legacy_service="live-strategy"
-  nextgen_service="nextgen-strategy-${account}"
-  for service in "${running_services[@]}"; do
-    if [[ "$service" == "$legacy_service" || "$service" == "$nextgen_service" ]]; then
-      services+=("$target_service")
-      break
-    fi
-  done
+  services+=("${item#*:}")
 done
 
 execution_account_containers=()
