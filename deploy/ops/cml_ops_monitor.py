@@ -182,7 +182,10 @@ _ALERT_IMPACTS = {
     "database_storage_growth": "数据库或重点表增长速度过快，可能在磁盘告警前耗尽剩余空间。",
     "database_storage_check_failed": "数据库大小观测失败，无法提前发现持续增长的表。",
     "container_unhealthy": "容器健康检查探针持续超时，服务可能处于假死或无法正常响应状态。",
-    "container_oom_killed": "对应服务已被系统内核强制终止，相关任务已中断。",
+    "container_oom_killed": (
+        "容器发生新的 OOM 杀进程事件，或 OOM 退出后仍未运行，"
+        "需检查服务恢复情况。"
+    ),
     "container_memory_high": "服务内存占用接近上限，继续增长可能触发 OOM 强杀。",
     "container_memory_growth": (
         "服务内存相对基线持续上升，需排查缓存泄漏与未释放连接。"
@@ -478,6 +481,8 @@ class ContainerSnapshot:
     # or by anything else -- is legitimately unhealthy and silent for a while,
     # so lifecycle alerts wait out a grace period before firing.
     started_at: datetime | None = None
+    running: bool = False
+    memory_events_oom_kill: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -493,6 +498,7 @@ class ContainerMemoryStats:
     peak_bytes: int | None = None
     swap_current_bytes: int | None = None
     events_max: int | None = None
+    events_oom_kill: int | None = None
     file_bytes: int | None = None
     shmem_bytes: int | None = None
     slab_bytes: int | None = None
@@ -1361,10 +1367,12 @@ def evaluate_container(
             Alert(
                 "container_oom_killed",
                 "critical",
-                f"Container {snapshot.service} was killed by the OOM controller",
+                f"Container {snapshot.service} experienced an OOM kill",
                 {
                     "service": snapshot.service,
                     "restart_count": snapshot.restart_count,
+                    "running": snapshot.running,
+                    "memory_events_oom_kill": snapshot.memory_events_oom_kill,
                 },
             )
         )
@@ -2575,7 +2583,7 @@ SELECT json_build_object(
         for snapshot in containers:
             alerts.extend(
                 evaluate_container(
-                    snapshot,
+                    replace(snapshot, oom_killed=self._current_oom(snapshot)),
                     rss_warning_fraction=rss_warning_fraction_for(
                         snapshot.service,
                         self._config.rss_warning_fraction,
@@ -3246,6 +3254,8 @@ SELECT json_build_object(
                     memory_file_dirty_bytes=memory.file_dirty_bytes,
                     memory_file_writeback_bytes=memory.file_writeback_bytes,
                     started_at=_parse_started_at(state.get("StartedAt")),
+                    running=bool(state.get("Running", False)),
+                    memory_events_oom_kill=memory.events_oom_kill,
                 )
             )
         return tuple(snapshots)
@@ -3299,6 +3309,7 @@ SELECT json_build_object(
             peak_bytes=cgroup.get("memory.peak"),
             swap_current_bytes=cgroup.get("memory.swap.current"),
             events_max=cgroup.get("memory.events.max"),
+            events_oom_kill=cgroup.get("memory.events.oom_kill"),
             file_bytes=cgroup.get("memory.stat.file"),
             shmem_bytes=cgroup.get("memory.stat.shmem"),
             slab_bytes=cgroup.get("memory.stat.slab"),
@@ -3326,8 +3337,8 @@ SELECT json_build_object(
                         "done; "
                         "if [ -r /sys/fs/cgroup/memory.events ]; then "
                         "while read -r key value _; do "
-                        'if [ "$key" = max ]; then '
-                        "printf 'memory.events.max=%s\\n' \"$value\"; "
+                        'if [ "$key" = max ] || [ "$key" = oom_kill ]; then '
+                        "printf 'memory.events.%s=%s\\n' \"$key\" \"$value\"; "
                         "fi; done < /sys/fs/cgroup/memory.events; fi; "
                         "if [ -r /sys/fs/cgroup/memory.stat ]; then "
                         "while read -r key value _; do "
@@ -3359,6 +3370,7 @@ SELECT json_build_object(
                     "memory.max",
                     "memory.swap.current",
                     "memory.events.max",
+                    "memory.events.oom_kill",
                     "memory.stat.anon",
                     "memory.stat.file",
                     "memory.stat.shmem",
@@ -4165,6 +4177,25 @@ LEFT JOIN (
                 }
             )
         self._state["position_spread"] = spread[:20]
+
+    def _current_oom(self, snapshot: ContainerSnapshot) -> bool:
+        """Separate a new cgroup kill from Docker's retained OOM flag."""
+        counters = self._state.setdefault("container_oom_counts", {})
+        current = snapshot.memory_events_oom_kill
+        previous = counters.get(snapshot.service)
+        increased = (
+            current is not None
+            and isinstance(previous, dict)
+            and previous.get("container_id") == snapshot.container_id
+            and isinstance(previous.get("count"), int)
+            and current > previous["count"]
+        )
+        if current is not None:
+            counters[snapshot.service] = {
+                "container_id": snapshot.container_id,
+                "count": current,
+            }
+        return increased or (snapshot.oom_killed and not snapshot.running)
 
     def _memory_pressure_alerts(
         self,
@@ -5965,7 +5996,10 @@ def _alert_conclusion(alert_name: str, details: Mapping[str, object]) -> str | N
     if base_name == "live_signal_divergence":
         return "同配置账户信号指纹不一致，**策略计算已失步**。"
     if base_name in ("container_oom_killed",):
-        return "容器超出内存限制配额，**已被系统内核强制终止**。"
+        return (
+            "容器发生新的 OOM 杀进程事件，或 OOM 退出后仍未运行，"
+            "**需要检查进程及任务是否恢复**。"
+        )
     if base_name in ("container_missing",):
         return "核心服务容器未运行或已异常退出，**相关功能已中断**。"
     if base_name in ("container_unhealthy",):
