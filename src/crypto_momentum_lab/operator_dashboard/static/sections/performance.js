@@ -105,9 +105,9 @@ export function renderPerformance(data) {
   const marketDelay = marketData.market_delay_ms != null
     ? `${Number(marketData.market_delay_ms).toFixed(0)} ms`
     : "—";
-  const marketSub = marketData.realtime_closure_delay_seconds != null
-    ? `闭桶水位 ${Number(marketData.realtime_closure_delay_seconds * 1000).toFixed(0)}ms`
-    : "行情接收中";
+  const marketSub = marketData.latency_source === "strategy_receive"
+    ? `收桶至策略接收 · 采样 ${dayTime(marketData.latency_observed_at)}`
+    : marketData.market_delay_ms != null ? "旧版链路采样" : "暂无当前接收样本";
   const marketTone = marketData.market_delay_ms != null && marketData.market_delay_ms < 1000
     ? "pos"
     : marketData.market_delay_ms != null && marketData.market_delay_ms < 3000

@@ -263,6 +263,19 @@ export function renderAccount(data) {
   const ordersTable = renderOrdersTable(openOrders, strategy);
   const fills = data.fills || [];
   const fillsTable = renderFillsTable(fills, strategy);
+  const history = data.data_source === "legacy_history";
+  const historyControl = data.legacy_history_available
+    ? `<div class="equity-range-switch" role="group" aria-label="账户记录来源">
+      <button type="button" data-account-view="current" aria-pressed="${!history}">当前账户</button>
+      <button type="button" data-account-view="legacy_history" aria-pressed="${history}">旧版本历史（只读）</button>
+    </div>`
+    : "";
+  if (history) {
+    return [data.status, `${historyControl}
+      <div class="detail-meta"><strong>旧版本历史（只读）</strong><span>最后记录 ${esc(dayTime(data.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</span><small>仅展示旧版权益与成交，不代表当前持仓或运行状态。</small><small data-refresh-state hidden></small></div>
+      ${equityChartBlock}
+      ${disclosure("旧版成交订单", "LEGACY ORDER HISTORY", fillsTable, `<strong class="num">${fills.length}</strong>`, { open: true, stateKey: "legacy-account-fills" })}`];
+  }
   const liveSignals = data.live_signals || [];
   const liveSignalContent = renderLiveSignalsContent(liveSignals);
 
@@ -271,7 +284,9 @@ export function renderAccount(data) {
     || hasUncertainStatus(normalized(reconciliation.status))
     || !data.observed_at;
 
-  const body = `<div class="detail-meta"><span>同步时间 <b class="num">${esc(dayTime(data.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</b></span><span>${esc(relToNow(data.observed_at))}</span><small class="muted" data-refresh-state hidden></small></div>
+  const retentionNote = data.account_config?.engine === "nextgen"
+    ? '<p class="muted">在线权益按 1 天热保留策略保存；更早数据请查询归档。曲线仅展示实际覆盖的时间。</p>' : "";
+  const body = `${historyControl}${retentionNote}<div class="detail-meta"><span>同步时间 <b class="num">${esc(dayTime(data.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</b></span><span>${esc(relToNow(data.observed_at))}</span><small class="muted" data-refresh-state hidden></small></div>
     ${hero}${stateGrid}${kpis}${equityChartBlock}
     ${disclosure("实盘策略信号", "LIVE SIGNALS · NON-BLOCKING OBSERVATION · LATEST 30", liveSignalContent,
       `<strong class="num">${liveSignals.length}</strong>`, { open: liveSignals.length > 0, stateKey: "live-strategy-signals" })}

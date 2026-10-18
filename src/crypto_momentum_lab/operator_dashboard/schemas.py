@@ -279,6 +279,8 @@ class PaperAccountHistoryResponse(DashboardSchema):
 
 
 class AccountOverviewResponse(DashboardSchema):
+    data_source: Literal["current", "legacy_history"] = "current"
+    legacy_history_available: bool = False
     status: OperationalStatus
     observed_at: datetime | None
     balances: list[dict[str, JsonValue]]
@@ -360,6 +362,8 @@ class MarketDataPerformanceResponse(DashboardSchema):
     status: OperationalStatus
     observed_at: datetime | None = None
     market_delay_ms: float | None = None
+    latency_source: str | None = None
+    latency_observed_at: datetime | None = None
     realtime_closure_delay_seconds: float | None = None
     missing_agg_trade_count: int = 0
     quality_events_count_1h: int = 0

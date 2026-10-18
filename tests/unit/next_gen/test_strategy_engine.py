@@ -94,7 +94,17 @@ async def strategy_setup(account_config):
 @pytest.mark.asyncio
 async def test_original_order_flow_signal_submits_configured_limit(strategy_setup):
     state, _, rest, _, strategy, last = strategy_setup
+    assert strategy.market_data_observation is None
     result = await strategy.on_market_state(last)
+    sample = strategy.market_data_observation
+    assert sample["bucket_end"] == last.bucket_end.isoformat()
+    assert sample["delay_ms"] == max(
+        0.0,
+        (
+            datetime.fromisoformat(sample["received_at"]) - last.bucket_end
+        ).total_seconds()
+        * 1000,
+    )
     assert len(result) == 1
     order = state.orders[result[0]]
     assert order.order_type == "LIMIT"

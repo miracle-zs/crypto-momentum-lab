@@ -1163,6 +1163,8 @@ test("performance renderer exposes decision SLO, checkpoint phase, and host metr
     market_data: {
       status: "READY",
       market_delay_ms: 45.0,
+      latency_source: "strategy_receive",
+      latency_observed_at: "2026-09-18T00:00:00Z",
       realtime_closure_delay_seconds: 0.4,
       last_bucket_end: "2026-09-18T00:00:00Z",
       dropped_batches_1h: 0,
@@ -1190,7 +1192,7 @@ test("performance renderer exposes decision SLO, checkpoint phase, and host metr
   assert.match(html, /决策链路最高 P95/);
   assert.match(html, /Checkpoint P95 耗时/);
   assert.match(html, /多账户 Checkpoint 物理时钟相位错峰/);
-  assert.match(html, /闭桶水位 400ms/);
+  assert.match(html, /收桶至策略接收 · 采样/);
   assert.match(html, /primary/);
   assert.match(html, /152.0 MiB/);
 });

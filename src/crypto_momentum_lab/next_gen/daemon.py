@@ -208,6 +208,7 @@ class NextGenDaemon:
                 "halt_active": self.state.entry_halted,
                 "entry_gate_open": ready and self.state.can_submit_entry_order(),
                 "exit_gate_open": self.state.can_submit_exit_order(),
+                "market_data": self.strategy_engine.market_data_observation,
                 "balances": {
                     asset: str(value)
                     for asset, value in self.state.wallet_balances.items()

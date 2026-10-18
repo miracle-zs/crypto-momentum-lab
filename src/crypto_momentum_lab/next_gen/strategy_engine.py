@@ -41,6 +41,7 @@ class MomentumStrategyEngine:
         self._explicit_symbols = symbols is not None
         self.symbol_rules = symbol_rules
         self.market_connected = False
+        self.market_data_observation: dict[str, Any] | None = None
         self.latest_prices = state.latest_prices
         self._last_state_at: dict[str, datetime] = {}
         inputs = account_config.strategy_inputs
@@ -117,6 +118,14 @@ class MomentumStrategyEngine:
         previous = self._last_state_at.get(symbol)
         if previous is not None and market_state.bucket_end <= previous:
             return []
+        received_at = datetime.now(UTC)
+        self.market_data_observation = {
+            "bucket_end": market_state.bucket_end.isoformat(),
+            "received_at": received_at.isoformat(),
+            "delay_ms": max(
+                0.0, (received_at - market_state.bucket_end).total_seconds() * 1000
+            ),
+        }
         if not market_state.data_complete:
             self.runtime.reset_symbol(symbol)
             self._last_state_at[symbol] = market_state.bucket_end

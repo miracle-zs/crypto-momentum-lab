@@ -23,6 +23,7 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
     LiveAccountMetricsResponse,
     LiveAccountsResponse,
     LiveAccountSummaryResponse,
+    MarketDataPerformanceResponse,
     RiskExecutionResponse,
     StreamReadinessDetailResponse,
     SystemReadinessResponse,
@@ -111,6 +112,27 @@ class NextGenDashboardQueries:
         accounts = [(await self._status(label))[0] for label in self._accounts]
         return LiveAccountsResponse(
             status=live_account_fleet_status(accounts), accounts=accounts
+        )
+
+    async def market_performance(self) -> MarketDataPerformanceResponse:
+        samples = []
+        for label in self._accounts:
+            _, row = await self._status(label)
+            if row is None or not row.details.get("market_data"):
+                continue
+            sample = row.details["market_data"]
+            received_at = datetime.fromisoformat(sample["received_at"])
+            if 0 <= (self._clock() - received_at).total_seconds() <= 120:
+                samples.append((received_at, sample))
+        if not samples:
+            return MarketDataPerformanceResponse(status=OperationalStatus.NO_DATA)
+        received_at, sample = max(samples, key=lambda item: item[0])
+        return MarketDataPerformanceResponse(
+            status=OperationalStatus.READY,
+            observed_at=datetime.fromisoformat(sample["bucket_end"]),
+            market_delay_ms=round(float(sample["delay_ms"]), 1),
+            latency_source="strategy_receive",
+            latency_observed_at=received_at,
         )
 
     async def readiness(self, liveness: dict[str, str]) -> SystemReadinessResponse:
@@ -346,6 +368,7 @@ class NextGenDashboardQueries:
         start, end, interval, points = await self._equity_points(label, equity_range)
         return AccountOverviewResponse(
             status=summary.status,
+            legacy_history_available=True,
             observed_at=summary.observed_at,
             environment="live",
             account_label=label,

@@ -247,6 +247,7 @@ class DashboardQueries:
             session_factory,
             clock=self._clock,
         )
+        self._legacy_account_queries = self._account_queries
         self._performance_queries = PerformanceQueries(
             session_factory,
             clock=self._clock,
@@ -316,7 +317,13 @@ class DashboardQueries:
         self,
         window: str = "24h",
     ) -> SystemPerformanceResponse:
-        return await self._performance_queries.performance(window)
+        result = await self._performance_queries.performance(window)
+        if self._nextgen_queries is not None:
+            market = await self._nextgen_queries.market_performance()
+            market.missing_agg_trade_count = result.market_data.missing_agg_trade_count
+            market.quality_events_count_1h = result.market_data.quality_events_count_1h
+            result.market_data = market
+        return result
 
     async def research_collector(self) -> ResearchCollectorResponse:
         return await self._overview_queries.research_collector()
@@ -344,7 +351,20 @@ class DashboardQueries:
                 for service in overview.services
                 if not service.name.startswith("execution-account")
                 and service.name != "live-rollout"
+                and service.name != "strategy-runner"
             ]
+            observed = [a.runtime_observed_at for a in fleet.accounts]
+            runner = _overview_queries.service(
+                "strategy-runner",
+                self._clock(),
+                min(observed) if observed and all(observed) else None,
+                180,
+            )
+            runner.details = {
+                "engine": "nextgen",
+                "accounts": {a.account_label: a.readiness for a in fleet.accounts},
+            }
+            overview.services.insert(1, runner)
         return overview
 
     async def universe(self) -> UniverseStatusResponse:
@@ -394,6 +414,22 @@ class DashboardQueries:
             account_label=account_label,
             environment=environment,
         )
+
+    async def account_history(
+        self, equity_range: str = "24h", account_label: str | None = None
+    ) -> AccountOverviewResponse:
+        result = await self._legacy_account_queries.account(
+            equity_range=equity_range, account_label=account_label, environment="live"
+        )
+        result.data_source = "legacy_history"
+        result.legacy_history_available = True
+        result.positions = []
+        result.open_orders = []
+        result.balances = []
+        result.live_signals = []
+        result.reconciliation = {}
+        result.summary = {}
+        return result
 
     async def risk_execution(self) -> RiskExecutionResponse:
         return await self._risk_execution_queries.risk_execution()

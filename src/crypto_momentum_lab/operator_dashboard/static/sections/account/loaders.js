@@ -157,10 +157,28 @@ export async function loadLiveAccountDetail(
   accountLabel,
   requestJson,
   equityRange = "24h",
-  { forceFetch = false } = {},
+  { forceFetch = false, view = null } = {},
 ) {
   const slot = root.querySelector(sel.liveAccountDetail());
   if (!slot) return;
+  const selectedView = view || (slot.dataset.accountLabel === accountLabel
+    ? slot.dataset.requestedView : null) || "current";
+  slot.dataset.requestedView = selectedView;
+  const wireDetailControls = (content) => {
+    wireAccountEquityRanges(content, (nextRange) => loadLiveAccountDetail(
+      state, root, accountLabel, requestJson, nextRange, { view: selectedView },
+    ));
+    content.querySelectorAll("[data-account-view]").forEach((button) => {
+      if (button.dataset.accountViewWired === "true") return;
+      button.dataset.accountViewWired = "true";
+      button.addEventListener("click", () => {
+        if (button.getAttribute("aria-pressed") === "true") return;
+        void loadLiveAccountDetail(state, root, accountLabel, requestJson, selectedAccountDetailRange(slot), {
+          forceFetch: true, view: button.dataset.accountView,
+        });
+      });
+    });
+  };
   const contentSlot = detailContentSlot(slot);
   const selectedCard = [...root.querySelectorAll(sel.accountCards())]
     .find((button) => button.dataset.liveAccountLabel === accountLabel);
@@ -183,7 +201,7 @@ export async function loadLiveAccountDetail(
     !isSameAccount && hasLastGood ? `正在读取 ${accountLabel} 快照；保留上次内容` : "",
   );
 
-  if (!forceFetch && (accountData?.summary || accountData?.balances)) {
+  if (!forceFetch && selectedView === "current" && (accountData?.summary || accountData?.balances)) {
     const [status, html] = renderAccount({ ...accountData, equity_range: equityRange });
     if (isSameAccount) patchChildrenFromHtml(contentSlot, html);
     else replaceChildrenFromHtml(contentSlot, html);
@@ -192,7 +210,7 @@ export async function loadLiveAccountDetail(
     slot.dataset.renderedRange = equityRange;
     slot.dataset.requestedRange = equityRange;
     setLiveAccountDetailHeader(slot, accountLabel, accountData);
-    wireAccountEquityRanges(contentSlot, (nextRange) => loadLiveAccountDetail(state, root, accountLabel, requestJson, nextRange));
+    wireDetailControls(contentSlot);
     refreshEcharts(contentSlot);
     slot.removeAttribute("aria-busy");
     return;
@@ -205,13 +223,14 @@ export async function loadLiveAccountDetail(
   }
   slot.setAttribute("aria-busy", "true");
   try {
-    const fetchKey = `${accountLabel}:${equityRange}`;
+    const fetchKey = `${accountLabel}:${equityRange}:${selectedView}`;
     let detailPromise = liveAccountDetailInFlight.get(fetchKey);
     if (!detailPromise) {
       const query = new URLSearchParams({
         account_label: accountLabel,
         equity_range: equityRange,
       });
+      if (selectedView !== "current") query.set("view", selectedView);
       detailPromise = Promise.resolve(requestJson(`api/account?${query.toString()}`))
         .finally(() => {
           liveAccountDetailInFlight.delete(fetchKey);
@@ -230,7 +249,7 @@ export async function loadLiveAccountDetail(
     slot.dataset.requestedRange = equityRange;
     rememberRenderedPayload(slot, detail);
     setLiveAccountDetailHeader(slot, accountLabel, detail);
-    wireAccountEquityRanges(contentSlot, (nextRange) => loadLiveAccountDetail(state, root, accountLabel, requestJson, nextRange));
+    wireDetailControls(contentSlot);
     refreshEcharts(contentSlot);
   } catch (error) {
     if (requestId !== state.liveAccountDetailRequest || !slot.isConnected) return;

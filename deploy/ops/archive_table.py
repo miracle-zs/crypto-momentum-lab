@@ -163,16 +163,17 @@ def compute_range_fingerprint(
 ) -> str:
     """Stream an order-independent content digest of rows in [start, end).
 
-    PostgreSQL must never sort and aggregate an entire retention range merely
-    to prove its archive.  It emits one canonical JSON row at a time; this
-    process retains only a small multiset accumulator.
+    COPY streams rows through psql without buffering the complete PGresult.
+    Decode CSV quoting before hashing the same canonical JSON lines used by
+    the archive verifier.
     """
-    sql = (
+    select_sql = (
         "SELECT row_to_json(t)::text "
         f'FROM "{table}" t '
         f"WHERE \"{column}\" >= '{start}+00' AND \"{column}\" < '{end}+00'"
         + retention_row_predicate(table, alias="t")
     )
+    sql = f"COPY ({select_sql}) TO STDOUT WITH (FORMAT csv)"
     process = subprocess.Popen(  # noqa: S603 - argv and SQL are built here
         [*_psql(prefix, container, user, database), "-At", "-c", sql],
         stdout=subprocess.PIPE,
@@ -180,13 +181,23 @@ def compute_range_fingerprint(
     )
     assert process.stdout is not None
     digest = StreamingContentDigest()
-    for row in process.stdout:
-        digest.update(row)
+    csv.field_size_limit(_DECISION_ARCHIVE_CSV_FIELD_LIMIT)
+    try:
+        with io.TextIOWrapper(process.stdout, encoding="utf-8", newline="") as stream:
+            for row in csv.reader(stream):
+                if len(row) != 1:
+                    raise ValueError("Fingerprint COPY must return one JSON column")
+                digest.update(row[0].encode("utf-8") + b"\n")
+    except Exception:
+        process.kill()
+        process.wait()
+        raise
     stderr = process.stderr.read() if process.stderr else b""
     process.wait()
     if process.returncode != 0:
         raise SystemExit(
-            f"fingerprint failed: {stderr.decode(errors='replace').strip()}"
+            f"fingerprint failed (exit={process.returncode}): "
+            f"{stderr.decode(errors='replace').strip()}"
         )
     return digest.hexdigest()
 
@@ -230,7 +241,8 @@ def export_range(
                 "(SELECT jsonb_array_elements_text("
                 "decision_traces.evaluated_revision_ids)) "
                 "ORDER BY revision_id) r) AS archived_market_refs, "
-                "(SELECT coalesce(jsonb_object_agg(state_digest,state_payload),'{}'::jsonb) "
+                "(SELECT coalesce(jsonb_object_agg("
+                "state_digest,state_payload),'{}'::jsonb) "
                 "FROM decision_policy_evidence WHERE state_digest IN "
                 "(decision_traces.trace_payload->'policy_state_refs'->>'prior', "
                 "decision_traces.trace_payload->'policy_state_refs'->>'next')) "

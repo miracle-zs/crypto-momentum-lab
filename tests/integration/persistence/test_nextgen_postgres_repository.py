@@ -473,6 +473,11 @@ async def test_dashboard_reads_nextgen_state_and_never_invents_margin(postgres_r
                 "ws_connected": True,
                 "balances": {"USDT": "1000"},
                 "unrealized_pnl": "5",
+                "market_data": {
+                    "bucket_end": now.isoformat(),
+                    "received_at": now.isoformat(),
+                    "delay_ms": 443.1,
+                },
             },
         )
         account = await queries.account(account_label=label)
@@ -507,6 +512,26 @@ async def test_dashboard_reads_nextgen_state_and_never_invents_margin(postgres_r
             response = await client.get("/api/readiness")
             assert response.status_code == 200, response.text
             assert response.json()["tradeability"]["entry_gate_open"] is True
+            response = await client.get("/api/overview")
+            runner = next(
+                row
+                for row in response.json()["services"]
+                if row["name"] == "strategy-runner"
+            )
+            assert runner["status"] == "FRESH"
+            assert runner["details"]["engine"] == "nextgen"
+            response = await client.get("/api/performance")
+            assert response.json()["market_data"]["market_delay_ms"] == 443.1
+            assert (
+                response.json()["market_data"]["latency_source"] == "strategy_receive"
+            )
+            response = await client.get(
+                "/api/account",
+                params={"account_label": label, "view": "legacy_history"},
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["data_source"] == "legacy_history"
+            assert response.json()["positions"] == []
         stale = NextGenDashboardQueries(
             async_sessionmaker(postgres_repo._engine),
             (config,),
@@ -515,5 +540,6 @@ async def test_dashboard_reads_nextgen_state_and_never_invents_margin(postgres_r
         assert (await stale.live_accounts()).accounts[
             0
         ].status is OperationalStatus.STALE
+        assert (await stale.market_performance()).market_delay_ms is None
     finally:
         await cleanup()

@@ -63,6 +63,19 @@ const populatedAccount = {
   equity_sample_interval_seconds: 360,
 };
 
+test("account history is explicit and never presents old exposure as current", () => {
+  const [, current] = renderAccount({ ...populatedAccount, legacy_history_available: true });
+  assert.match(current, /data-account-view="legacy_history"/);
+  const [, history] = renderAccount({
+    ...populatedAccount, data_source: "legacy_history", legacy_history_available: true,
+  });
+  assert.match(history, /旧版本历史（只读）/);
+  assert.match(history, /order-123456789/);
+  assert.match(history, /data-account-view="current"/);
+  assert.doesNotMatch(history, /data-state-key="account-positions"/);
+  assert.doesNotMatch(history, /data-state-key="account-open-orders"/);
+});
+
 test("account v2 keeps populated evidence behind stable disclosures", () => {
   const [status, html] = renderAccount(populatedAccount);
 
