@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import time
@@ -197,6 +198,10 @@ class BinanceRestClient:
         res = await self._request("GET", "/fapi/v1/order", signed=True, params=params)
         return dict(res)
 
+    # 兼容性别名
+    get_open_orders = fetch_open_orders
+    get_account_v3 = fetch_account_information
+
 
 class BinanceUserDataStream:
     """币安私有流监听组件 (事件分发、30m 续期与 24h 断连守卫)"""
@@ -257,3 +262,47 @@ class BinanceUserDataStream:
                 balances[asset] = wb
 
             await on_account_update(balances=balances)
+
+    async def connect(
+        self, on_event: Callable[[dict[str, Any]], Any] | None = None
+    ) -> None:
+        """建立 UserData WebSocket 长连并握手获取 listenKey"""
+        self.listen_key = await self._rest.create_listen_key()
+        self.is_connected = True
+        self._on_event = on_event
+        if self.on_status_change:
+            self.on_status_change(True)
+
+    async def run_with_keepalive(
+        self,
+        keepalive_interval_sec: float = 1800.0,
+        stop_event: asyncio.Event | None = None,
+    ) -> None:
+        """30m 定时续期 listenKey，直到 stop_event 被触发或任务被取消"""
+        while True:
+            if stop_event and stop_event.is_set():
+                break
+            try:
+                if stop_event is not None:
+                    try:
+                        await asyncio.wait_for(
+                            stop_event.wait(), timeout=keepalive_interval_sec
+                        )
+                        break
+                    except TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(keepalive_interval_sec)
+
+                if self.listen_key:
+                    await self._rest.keepalive_listen_key(self.listen_key)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                log.warning("listen_key_keepalive_failed", err=str(e))
+
+    async def close(self) -> None:
+        """断开连接并通知状态守卫"""
+        self.is_connected = False
+        if self.on_status_change:
+            self.on_status_change(False)

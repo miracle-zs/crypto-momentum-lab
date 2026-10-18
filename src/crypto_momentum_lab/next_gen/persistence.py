@@ -20,6 +20,11 @@ def compute_advisory_lock_key(environment: str, account_label: str) -> str:
 class TradingRepositoryProtocol(Protocol):
     """下一代极简单仓储协议"""
 
+    @asynccontextmanager
+    def acquire_dedicated_advisory_lock(
+        self, lock_key: str
+    ) -> AsyncIterator[None]: ...
+
     async def async_save_order(self, order: Order) -> None: ...
     async def async_save_batch(self, batch: PositionBatch) -> None: ...
     async def async_save_order_and_batch(
@@ -34,6 +39,21 @@ class InMemoryTradingRepository:
         self.orders: dict[tuple[str, str, str], Order] = {}
         self.batches: dict[tuple[str, str, str], PositionBatch] = {}
         self._fail_writes_remaining: int = 0
+        self._held_locks: set[str] = set()
+
+    @asynccontextmanager
+    async def acquire_dedicated_advisory_lock(
+        self, lock_key: str
+    ) -> AsyncIterator[None]:
+        if lock_key in self._held_locks:
+            raise RuntimeError(
+                f"获取会话咨询锁失败: [{lock_key}] 已被另一进程持有！"
+            )
+        self._held_locks.add(lock_key)
+        try:
+            yield
+        finally:
+            self._held_locks.discard(lock_key)
 
     def fail_next_n_writes(self, count: int) -> None:
         """设置接下来 N 次写入抛出模拟数据库异常"""

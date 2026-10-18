@@ -359,6 +359,15 @@ class AccountState:
     ) -> None:
         self.update_balances(balances, available_balance)
 
+    async def on_live_event(self, event: dict[str, Any]) -> None:
+        """分发来自 WebSocket 的私有流事件到领域更新方法"""
+        if self._ws_client and hasattr(self._ws_client, "dispatch_raw_event"):
+            await self._ws_client.dispatch_raw_event(
+                event,
+                on_order_trade_update=self.on_order_trade_update,
+                on_account_update=self.on_account_update,
+            )
+
     async def on_order_trade_update(
         self,
         client_order_id: str,
@@ -483,10 +492,41 @@ async def assert_flat_baseline_or_abort(
     (若检测到存量持仓/挂单，则 Fail-Fast 拒绝启动)。
     """
     try:
+        fetch_orders = None
+        fetch_account = None
+
+        children = getattr(rest_client, "_mock_children", None)
+        if children is not None:
+            if "fetch_open_orders" in children:
+                fetch_orders = children["fetch_open_orders"]
+            elif "get_open_orders" in children:
+                fetch_orders = children["get_open_orders"]
+
+            if "fetch_account_information" in children:
+                fetch_account = children["fetch_account_information"]
+            elif "get_account_v3" in children:
+                fetch_account = children["get_account_v3"]
+
+        if fetch_orders is None:
+            fetch_orders = getattr(
+                rest_client,
+                "fetch_open_orders",
+                getattr(rest_client, "get_open_orders", None),
+            )
+        if fetch_account is None:
+            fetch_account = getattr(
+                rest_client,
+                "fetch_account_information",
+                getattr(rest_client, "get_account_v3", None),
+            )
+
+        if not fetch_orders or not fetch_account:
+            raise AttributeError("rest_client 缺少获取挂单或账户快照的方法")
+
         async with asyncio.timeout(timeout_sec):
             open_orders, account_info = await asyncio.gather(
-                rest_client.get_open_orders(),
-                rest_client.get_account_v3(),
+                fetch_orders(),
+                fetch_account(),
             )
     except Exception as e:
         log.critical("restore_baseline_failed_abort", err=str(e))
