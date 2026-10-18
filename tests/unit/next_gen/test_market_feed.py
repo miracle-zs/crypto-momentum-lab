@@ -11,7 +11,7 @@ from crypto_momentum_lab.next_gen.strategy_engine import Bar15s
 
 
 @pytest.mark.asyncio
-async def test_market_feed_binance_stream_dispatch() -> None:
+async def test_market_feed_rejects_1m_kline_stream() -> None:
     received_bars: list[Bar15s] = []
 
     feed = MarketDataFeed(
@@ -41,14 +41,8 @@ async def test_market_feed_binance_stream_dispatch() -> None:
 
     await feed._dispatch_message(sample_binance_msg)
 
-    assert len(received_bars) == 1
-    bar = received_bars[0]
-    assert bar.symbol == "BTCUSDT"
-    assert bar.open_price == Decimal("68000.10")
-    assert bar.close_price == Decimal("68100.50")
-    assert bar.high_price == Decimal("68150.00")
-    assert bar.low_price == Decimal("67980.00")
-    assert bar.volume == Decimal("12.345")
+    # 1m kline must NOT be accepted as 15s bar!
+    assert len(received_bars) == 0
 
 
 @pytest.mark.asyncio
@@ -64,12 +58,12 @@ async def test_market_feed_hub_dispatch() -> None:
         "states": [
             {
                 "symbol": "ETHUSDT",
-                "timestamp": 1729252800000,
-                "open": "2600.00",
-                "high": "2620.00",
-                "low": "2595.00",
-                "close": "2615.50",
-                "volume": "100.5",
+                "bucket_end": 1729252800000,
+                "open_price": "2600.00",
+                "high_price": "2620.00",
+                "low_price": "2595.00",
+                "close_price": "2615.50",
+                "trade_notional": "100.5",
             }
         ]
     }
@@ -79,7 +73,11 @@ async def test_market_feed_hub_dispatch() -> None:
     assert len(received_bars) == 1
     bar = received_bars[0]
     assert bar.symbol == "ETHUSDT"
+    assert bar.open_price == Decimal("2600.00")
+    assert bar.high_price == Decimal("2620.00")
+    assert bar.low_price == Decimal("2595.00")
     assert bar.close_price == Decimal("2615.50")
+    assert bar.volume == Decimal("100.5")
 
 
 @pytest.mark.asyncio
@@ -92,17 +90,17 @@ async def test_market_feed_run_with_mock_connector() -> None:
             self.messages = [
                 json.dumps(
                     {
-                        "data": {
-                            "k": {
-                                "s": "BTCUSDT",
-                                "T": 1729252800000,
-                                "o": "65000",
-                                "h": "65100",
-                                "l": "64900",
-                                "c": "65050",
-                                "v": "5",
+                        "states": [
+                            {
+                                "symbol": "BTCUSDT",
+                                "bucket_end": 1729252800000,
+                                "open_price": "65000",
+                                "high_price": "65100",
+                                "low_price": "64900",
+                                "close_price": "65050",
+                                "volume": "5",
                             }
-                        }
+                        ]
                     }
                 )
             ]
