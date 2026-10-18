@@ -98,7 +98,8 @@ def test_all_four_accounts_are_checked_even_if_a_strategy_is_stopped() -> None:
         'query=(docker exec "$container" python -c "$flat_check_python" "$account")'
         in script
     )
-    assert "run --rm --no-deps --entrypoint python" in script
+    assert "run -T --rm" in script
+    assert "--no-deps --entrypoint python" in script
     assert 'for item in "${accounts[@]}"; do' in script
 
 

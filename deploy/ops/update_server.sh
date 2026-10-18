@@ -231,10 +231,10 @@ while :; do
       # A one-off probe needs the target image, which may still be building in
       # the background.  Wait once here; live-container probes keep overlapping.
       finish_target_build
-      query=(env CML_CODE_COMMIT="$target_commit" "${compose[@]}" run --rm \
+      query=(env CML_CODE_COMMIT="$target_commit" "${compose[@]}" run -T --rm \
         --no-deps --entrypoint python "$service" -c "$flat_check_python" "$account")
     fi
-    if output="$("${query[@]}" 2>&1)"; then
+    if output="$("${query[@]}" 2>&1 < /dev/null)"; then
       echo "$output"
     else
       status=$?
