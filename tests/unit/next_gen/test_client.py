@@ -292,7 +292,7 @@ def test_get_binance_urls() -> None:
     rest_live, ws_live, pub_live = get_binance_urls("live")
     assert rest_live == "https://fapi.binance.com"
     assert ws_live == "wss://fstream.binance.com/private/ws"
-    assert pub_live == "wss://fstream.binance.com/ws"
+    assert pub_live == "wss://fstream.binance.com/market/ws"
 
     rest_test, ws_test, pub_test = get_binance_urls("testnet")
     assert rest_test == "https://testnet.binancefuture.com"

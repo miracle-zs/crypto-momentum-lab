@@ -53,7 +53,7 @@ def get_binance_urls(environment: str = "live") -> tuple[str, str, str]:
     return (
         "https://fapi.binance.com",
         "wss://fstream.binance.com/private/ws",
-        "wss://fstream.binance.com/ws",
+        "wss://fstream.binance.com/market/ws",
     )
 
 
