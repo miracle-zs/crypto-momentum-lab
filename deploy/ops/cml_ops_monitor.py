@@ -3029,7 +3029,13 @@ SELECT json_build_object(
                         },
                     )
                 )
-        if not self._config.auto_restart_stale_live_services:
+        # NextGen readiness can be false while public data is rewarming and
+        # private-stream exits remain healthy. A host probe cannot authorize
+        # an account restart, especially while it holds a position.
+        if (
+            self._config.trading_engine == "nextgen"
+            or not self._config.auto_restart_stale_live_services
+        ):
             return tuple(alerts)
 
         if restart_attempts >= self._config.live_restart_max_attempts:
