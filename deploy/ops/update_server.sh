@@ -129,6 +129,13 @@ cleanup_build_worktree() {
 }
 trap cleanup_build_worktree EXIT
 git worktree add --detach "$build_dir" "$target_commit"
+# The target may add an engine-specific Compose overlay (for example
+# compose.next_gen.yaml).  Fast-forward the checkout before the flat check so
+# every Compose invocation sees the target service definitions.  The running
+# containers keep their current images until the explicit stop below.
+if [[ "$target_commit" != "$previous_commit" ]]; then
+  git merge --ff-only "$target_commit"
+fi
 build_compose=(docker compose --project-directory "$build_dir" \
   --env-file "$remote_dir/.env.server" \
   -f "$build_dir/compose.server.yaml" \
@@ -221,8 +228,10 @@ while :; do
     if [[ -n "$container" ]]; then
       query=(docker exec "$container" python -c "$flat_check_python" "$account")
     else
-      query=("${compose[@]}" run --rm --no-deps --entrypoint python \
-        "$service" -c "$flat_check_python" "$account")
+      # The target image may not be tagged in .env.server yet; force the
+      # freshly built target image for this one-off read-only check.
+      query=(env CML_CODE_COMMIT="$target_commit" "${compose[@]}" run --rm \
+        --no-deps --entrypoint python "$service" -c "$flat_check_python" "$account")
     fi
     if output="$("${query[@]}" 2>&1)"; then
       echo "$output"

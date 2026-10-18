@@ -31,10 +31,10 @@ def test_normal_deployment_checks_live_accounts_before_stopping_services() -> No
     start_services = script.index('"${compose[@]}" up -d --force-recreate')
 
     assert (
-        build
+        update_code
+        < build
         < account_check
         < stop_services
-        < update_code
         < start_database
         < start_services
     )
