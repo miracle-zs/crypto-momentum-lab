@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 import time
 from collections.abc import Callable
 from decimal import Decimal
@@ -11,6 +12,7 @@ from urllib.parse import urlencode
 
 import httpx
 import structlog
+import websockets
 
 from crypto_momentum_lab.next_gen.engine import AccountSnapshot, PositionSnapshot
 from crypto_momentum_lab.next_gen.models import OrderStatus
@@ -204,19 +206,23 @@ class BinanceRestClient:
 
 
 class BinanceUserDataStream:
-    """币安私有流监听组件 (事件分发、30m 续期与 24h 断连守卫)"""
+    """币安私有流监听组件 (物理网络长连、事件反序列化分发、30m 续期与断连守卫)"""
 
     def __init__(
         self,
         rest_client: BinanceRestClient,
-        ws_base_url: str = "wss://fstream.binance.com/private/ws",
+        ws_base_url: str = "wss://fstream.binance.com/ws",
         on_status_change: Callable[[bool], None] | None = None,
+        ws_connector: Any = None,
     ) -> None:
         self._rest = rest_client
         self._ws_base_url = ws_base_url.rstrip("/")
         self.on_status_change = on_status_change
+        self._ws_connector = ws_connector
         self.listen_key: str | None = None
         self.is_connected: bool = False
+        self._ws: Any = None
+        self._on_event: Callable[[dict[str, Any]], Any] | None = None
 
     async def dispatch_raw_event(
         self,
@@ -264,14 +270,76 @@ class BinanceUserDataStream:
             await on_account_update(balances=balances)
 
     async def connect(
-        self, on_event: Callable[[dict[str, Any]], Any] | None = None
+        self,
+        on_event: Callable[[dict[str, Any]], Any] | None = None,
+        connect_network: bool = True,
     ) -> None:
         """建立 UserData WebSocket 长连并握手获取 listenKey"""
         self.listen_key = await self._rest.create_listen_key()
-        self.is_connected = True
         self._on_event = on_event
+
+        if connect_network and self._ws_connector is not False:
+            ws_url = f"{self._ws_base_url}/{self.listen_key}"
+            try:
+                if self._ws_connector is not None:
+                    self._ws = await self._ws_connector(ws_url)
+                elif not self.listen_key.startswith("fake_"):
+                    self._ws = await websockets.connect(
+                        ws_url,
+                        ping_interval=20,
+                        ping_timeout=20,
+                        close_timeout=10,
+                    )
+            except Exception as e:
+                log.error("ws_connect_failed", url=ws_url, err=str(e))
+                self.is_connected = False
+                if self.on_status_change:
+                    self.on_status_change(False)
+                raise ConnectionError(f"WebSocket 物理连接失败: {e}") from e
+
+        self.is_connected = True
         if self.on_status_change:
             self.on_status_change(True)
+
+    async def run_stream(
+        self,
+        stop_event: asyncio.Event | None = None,
+    ) -> None:
+        """私有流接收循环：读取原始文本帧，反序列化后调用 dispatch_raw_event"""
+        if self._ws is None:
+            if stop_event is not None:
+                await stop_event.wait()
+            return
+
+        try:
+            async for raw_msg in self._ws:
+                if stop_event and stop_event.is_set():
+                    break
+                try:
+                    text_msg = (
+                        raw_msg.decode("utf-8")
+                        if isinstance(raw_msg, bytes)
+                        else str(raw_msg)
+                    )
+                    data = json.loads(text_msg)
+                    if self._on_event:
+                        res = self._on_event(data)
+                        if asyncio.iscoroutine(res):
+                            await res
+                except Exception as e:
+                    log.error(
+                        "ws_event_dispatch_error",
+                        err=str(e),
+                        payload=str(raw_msg)[:200],
+                    )
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            log.warning("ws_connection_lost", err=str(e))
+        finally:
+            self.is_connected = False
+            if self.on_status_change:
+                self.on_status_change(False)
 
     async def run_with_keepalive(
         self,
@@ -304,5 +372,11 @@ class BinanceUserDataStream:
     async def close(self) -> None:
         """断开连接并通知状态守卫"""
         self.is_connected = False
+        if self._ws is not None:
+            try:
+                await self._ws.close()
+            except Exception as e:
+                log.warning("ws_close_error", err=str(e))
+            self._ws = None
         if self.on_status_change:
             self.on_status_change(False)

@@ -1,3 +1,4 @@
+import asyncio
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
@@ -199,3 +200,76 @@ async def test_user_data_stream_parse_account_update():
     balances = mock_account_handler.await_args.kwargs["balances"]
     assert balances["USDT"] == Decimal("12500.50")
     assert balances["BNB"] == Decimal("10.00")
+
+
+@pytest.mark.asyncio
+async def test_user_data_stream_physical_connect_and_stream_messages():
+    mock_rest = AsyncMock()
+    mock_rest.create_listen_key.return_value = "fake_listen_key"
+
+    class FakeWebSocket:
+        def __init__(self) -> None:
+            self.closed = False
+            self.messages = [
+                '{"e": "ORDER_TRADE_UPDATE", "E": 1000}',
+                '{"e": "ACCOUNT_UPDATE", "E": 2000}',
+            ]
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not self.messages:
+                raise StopAsyncIteration
+            return self.messages.pop(0)
+
+        async def close(self) -> None:
+            self.closed = True
+
+    fake_ws = FakeWebSocket()
+    mock_connector = AsyncMock(return_value=fake_ws)
+    status_changes = []
+
+    stream = BinanceUserDataStream(
+        rest_client=mock_rest,
+        on_status_change=status_changes.append,
+        ws_connector=mock_connector,
+    )
+
+    received_events = []
+    await stream.connect(on_event=received_events.append)
+    assert stream.is_connected is True
+    assert status_changes == [True]
+    mock_connector.assert_awaited_once_with("wss://fstream.binance.com/ws/fake_listen_key")
+
+    stop_event = asyncio.Event()
+    await stream.run_stream(stop_event=stop_event)
+
+    assert len(received_events) == 2
+    assert received_events[0]["e"] == "ORDER_TRADE_UPDATE"
+    assert received_events[1]["e"] == "ACCOUNT_UPDATE"
+
+    await stream.close()
+    assert fake_ws.closed is True
+    assert stream.is_connected is False
+
+
+@pytest.mark.asyncio
+async def test_user_data_stream_connect_network_failure_triggers_degraded():
+    mock_rest = AsyncMock()
+    mock_rest.create_listen_key.return_value = "fake_listen_key"
+
+    mock_connector = AsyncMock(side_effect=ConnectionRefusedError("Connection refused"))
+    status_changes = []
+
+    stream = BinanceUserDataStream(
+        rest_client=mock_rest,
+        on_status_change=status_changes.append,
+        ws_connector=mock_connector,
+    )
+
+    with pytest.raises(ConnectionError, match="WebSocket 物理连接失败"):
+        await stream.connect()
+
+    assert stream.is_connected is False
+    assert status_changes == [False]
