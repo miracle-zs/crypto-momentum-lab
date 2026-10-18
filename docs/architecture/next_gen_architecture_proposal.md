@@ -1,6 +1,6 @@
 # Next-Gen 极简现代异步架构设计蓝图 (Clean-Slate Proposal)
 > **设计版本**: 2026.10-NextGen-Proposal-v2-Streamlined  
-> **设计基准**: Git 仓库真实源码（Alembic 迁移 `20261018_0067_next_gen_execution_tables` 已合并，Schema Version 5，包含生产发单安全门、错误分类、WS 撤单成交核对与 Compose 部署定义）  
+> **设计基准**: Git 仓库真实源码（Alembic 迁移 `20261018_0067_next_gen_execution_tables` 已合并，Schema Version 4，包含生产发单安全门、错误分类、WS 撤单成交核对与 Compose 部署定义）  
 > **架构定位**: 现代 Python 3.12+ 结构化异步、内存权威、低认知负荷的中低频量化交易执行引擎  
 > **多账户部署现状**: 线上 4 账户（`primary`、`account-2`、`account-3`、`account-4`）共用同一个 PostgreSQL 数据库实例（[`compose.live.accounts.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.live.accounts.yaml) / [`compose.next_gen.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.next_gen.yaml)）  
 
@@ -1021,7 +1021,7 @@ flowchart TD
 ### 附录 A：数据库平迁与旧表归档实施指南（Database Migration Runbook）
 
 > [!NOTE] **实施状态说明（Implementation Status）**
-> Alembic 迁移版本链已正式合并 [`20261018_0067_next_gen_execution_tables.py`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/alembic/versions/20261018_0067_next_gen_execution_tables.py)，包含全新两张表结构定义（`live_position_batches`、`live_orders`）与历史表归档逻辑。对应的 SQLAlchemy 2.0 ORM 模型与仓储层已在 [`next_gen_models.py`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/persistence/postgres/next_gen_models.py) 和 [`PostgresTradingRepository`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/next_gen/persistence.py) 中全部实现并通过集成测试验证。上线时通过 [`compose.next_gen.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.next_gen.yaml) 即可启动。
+> Alembic 迁移版本链已正式合并 [`20261018_0067_next_gen_execution_tables.py`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/alembic/versions/20261018_0067_next_gen_execution_tables.py)，创建了全新的两张 Next-Gen 执行表（`live_position_batches`、`live_orders`），与原有表并存保持兼容。对应的 SQLAlchemy 2.0 ORM 模型与仓储层已在 [`db_models.py`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/next_gen/db_models.py) 和 [`PostgresTradingRepository`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/next_gen/persistence.py) 中全部实现并通过集成测试验证。上线时通过独立 Profile [`compose.next_gen.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.next_gen.yaml)（`--profile nextgen`）即可启动，与 legacy 服务（`--profile live`）完全隔离。
 
 针对当前 10 张执行/决策持久化表，系统采取**一次性干净停机平迁移（Flat-State Clean Cutover）**：
 

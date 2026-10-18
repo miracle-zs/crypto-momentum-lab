@@ -492,6 +492,14 @@ class AccountState:
                     + (delta_qty * last_filled_price)
                 ) / total_qty
                 batch.quantity = total_qty
+                if batch.status == "CLOSED":
+                    log.warning(
+                        "late_entry_fill_on_closed_batch_reopening",
+                        batch_id=batch.batch_id,
+                        delta_qty=str(delta_qty),
+                    )
+                    batch.status = "ACTIVE"
+                    batch.entry_bar_time = trade_time or datetime.now(UTC)
             batch.updated_at = datetime.now(UTC)
 
         # 异步直调持久化 2 张表 (支持 1 次微退避重试)

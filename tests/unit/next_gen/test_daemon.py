@@ -236,3 +236,72 @@ async def test_nextgen_daemon_orchestrates_strategy_and_exit_manager(
     mock_strategy.warmup_market_data.assert_awaited_once()
     mock_exit_mgr.close.assert_awaited()
     assert daemon.state.system_mode == SystemMode.STOPPED
+
+
+@pytest.mark.asyncio
+async def test_nextgen_daemon_ensures_hedge_mode_and_leverage(
+    mock_rest_client: AsyncMock,
+) -> None:
+    repo = InMemoryTradingRepository()
+    stop_event = asyncio.Event()
+
+    daemon = NextGenDaemon(
+        environment="live",
+        account_label="a1",
+        db=repo,
+        rest_client=mock_rest_client,
+        symbols=["BTCUSDT", "ETHUSDT"],
+        stop_event=stop_event,
+    )
+
+    async def stop_daemon_soon() -> None:
+        await asyncio.sleep(0.02)
+        stop_event.set()
+
+    asyncio.create_task(stop_daemon_soon())
+    await daemon.run(keepalive_interval_sec=0.05)
+
+    mock_rest_client.set_position_mode.assert_awaited_once_with(dual_side=True)
+    assert mock_rest_client.set_leverage.await_count == 2
+    mock_rest_client.set_leverage.assert_any_await("BTCUSDT", leverage=5)
+    mock_rest_client.set_leverage.assert_any_await("ETHUSDT", leverage=5)
+
+
+@pytest.mark.asyncio
+async def test_nextgen_daemon_health_heartbeat(
+    mock_rest_client: AsyncMock,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    health_dir = tmp_path / "health"
+    monkeypatch.setenv("CML_LOCAL_HEALTH_DIR", str(health_dir))
+
+    repo = InMemoryTradingRepository()
+    stop_event = asyncio.Event()
+
+    daemon = NextGenDaemon(
+        environment="live",
+        account_label="a1",
+        db=repo,
+        rest_client=mock_rest_client,
+        stop_event=stop_event,
+    )
+
+    heartbeat_checked = asyncio.Event()
+
+    async def check_heartbeat_and_stop() -> None:
+        for _ in range(50):
+            await asyncio.sleep(0.02)
+            account_health_file = health_dir / "nextgen-a1.ok"
+            if account_health_file.exists():
+                heartbeat_checked.set()
+                break
+        stop_event.set()
+
+    asyncio.create_task(check_heartbeat_and_stop())
+    await daemon.run(keepalive_interval_sec=0.05)
+
+    assert heartbeat_checked.is_set()
+    # After shutdown, health files should be unlinked
+    account_health_file = health_dir / "nextgen-a1.ok"
+    assert not account_health_file.exists()

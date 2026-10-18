@@ -248,3 +248,56 @@ def test_notional_cap_check(account_state: AccountState):
         symbol_cap=Decimal("150000"),
         account_cap=Decimal("95000"),
     )
+
+
+@pytest.mark.asyncio
+async def test_late_entry_fill_reopens_closed_batch(account_state: AccountState):
+    batch_id = generate_batch_id(
+        symbol="BTCUSDT",
+        position_side="LONG",
+        account_label="a1",
+        timestamp_str="261018120000",
+        salt="9f",
+        counter=1,
+    )
+    # 1. Start with an existing batch that was completely exited and marked CLOSED
+    closed_batch = PositionBatch(
+        environment="live",
+        account_label="a1",
+        batch_id=batch_id,
+        symbol="BTCUSDT",
+        position_side="LONG",
+        quantity=Decimal("0.0"),
+        entry_price=Decimal("65000"),
+        entry_bar_time=datetime.now(UTC),
+        status="CLOSED",
+    )
+    account_state.batches[batch_id] = closed_batch
+
+    # Create an entry order for this batch
+    entry_order = account_state.create_entry_order(
+        symbol="BTCUSDT",
+        position_side="LONG",
+        quantity=Decimal("0.5"),
+        price=Decimal("65000"),
+        batch_id=batch_id,
+    )
+
+    # 2. A late fill arrives from Binance WS on this entry order
+    await account_state.on_order_trade_update(
+        client_order_id=entry_order.client_order_id,
+        symbol="BTCUSDT",
+        position_side="LONG",
+        side="BUY",
+        order_status=OrderStatus.FILLED,
+        cum_filled_qty=Decimal("0.5"),
+        avg_price=Decimal("65000"),
+        last_filled_qty=Decimal("0.5"),
+        last_filled_price=Decimal("65000"),
+    )
+
+    # 3. Assert the closed batch was reopened to ACTIVE with non-zero quantity
+    batch = account_state.batches[batch_id]
+    assert batch.status == "ACTIVE"
+    assert batch.quantity == Decimal("0.5")
+    assert batch.entry_price == Decimal("65000")

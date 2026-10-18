@@ -47,6 +47,7 @@ class MomentumStrategyEngine:
         symbol_cap: Decimal = Decimal("1000.0"),
         account_cap: Decimal = Decimal("5000.0"),
         eval_interval_sec: float = 15.0,
+        entry_ttl_sec: float = 60.0,
     ) -> None:
         self.state = state
         self.order_executor = order_executor
@@ -60,6 +61,7 @@ class MomentumStrategyEngine:
         self.symbol_cap = symbol_cap
         self.account_cap = account_cap
         self.eval_interval_sec = eval_interval_sec
+        self.entry_ttl_sec = entry_ttl_sec
 
         # 内存中维护各标的历史 15s Bar 环形缓冲区
         self.bar_buffers: dict[str, list[Bar15s]] = defaultdict(list)
@@ -80,8 +82,12 @@ class MomentumStrategyEngine:
         for b in bars:
             self.on_bar(b)
 
-    async def warmup_market_data(self, rest_client: Any = None) -> None:
-        """阶段 2 策略行情预热：优先通过 REST API 拉取 exchangeInfo 和历史 K 线"""
+    async def warmup_market_data(
+        self,
+        rest_client: Any = None,
+        db: Any = None,
+    ) -> None:
+        """阶段 2 策略行情预热：优先从本地 PG 数据库拉取，不足则通过 REST 补齐"""
         if rest_client is not None:
             try:
                 if hasattr(rest_client, "fetch_exchange_info"):
@@ -91,32 +97,64 @@ class MomentumStrategyEngine:
             except Exception as e:
                 log.warning("failed_to_fetch_exchange_info_for_rules", err=str(e))
 
+        # 1. 尝试从本地 PostgreSQL 读取 15s Bar 历史
+        if db is not None and hasattr(db, "async_get_historical_15s_bars"):
+            try:
+                db_bars = await db.async_get_historical_15s_bars(
+                    environment=self.state.environment,
+                    symbols=self.symbols,
+                    limit=self.min_warmup_bars,
+                )
+                for sym, rows in db_bars.items():
+                    for r in rows:
+                        bar = Bar15s(
+                            symbol=sym,
+                            close_time=r["bucket_end"],
+                            open_price=Decimal(
+                                str(r.get("open_price") or r["close_price"])
+                            ),
+                            high_price=Decimal(
+                                str(r.get("high_price") or r["close_price"])
+                            ),
+                            low_price=Decimal(
+                                str(r.get("low_price") or r["close_price"])
+                            ),
+                            close_price=Decimal(str(r["close_price"])),
+                            volume=Decimal(str(r.get("trade_notional") or 0)),
+                        )
+                        self.on_bar(bar)
+                log.info("warmed_up_bars_from_database")
+            except Exception as e:
+                log.warning("failed_to_warmup_from_database", err=str(e))
+
+        # 2. 如果数据量仍不足 min_warmup_bars，通过 Binance REST K线兜底补齐
+        if rest_client is not None and hasattr(rest_client, "fetch_klines"):
             for sym in self.symbols:
-                if len(self.bar_buffers.get(sym, [])) < self.min_warmup_bars:
+                needed = self.min_warmup_bars - len(self.bar_buffers.get(sym, []))
+                if needed > 0:
                     try:
-                        if hasattr(rest_client, "fetch_klines"):
-                            klines = await rest_client.fetch_klines(
+                        klines = await rest_client.fetch_klines(
+                            symbol=sym,
+                            interval="1m",
+                            limit=needed,
+                        )
+                        for k in klines:
+                            close_time = datetime.fromtimestamp(k[6] / 1000.0, tz=UTC)
+                            bar = Bar15s(
                                 symbol=sym,
-                                interval="1m",
-                                limit=self.min_warmup_bars,
+                                close_time=close_time,
+                                open_price=Decimal(str(k[1])),
+                                high_price=Decimal(str(k[2])),
+                                low_price=Decimal(str(k[3])),
+                                close_price=Decimal(str(k[4])),
+                                volume=Decimal(str(k[5])),
                             )
-                            for k in klines:
-                                close_time = datetime.fromtimestamp(
-                                    k[6] / 1000.0, tz=UTC
-                                )
-                                bar = Bar15s(
-                                    symbol=sym,
-                                    close_time=close_time,
-                                    open_price=Decimal(str(k[1])),
-                                    high_price=Decimal(str(k[2])),
-                                    low_price=Decimal(str(k[3])),
-                                    close_price=Decimal(str(k[4])),
-                                    volume=Decimal(str(k[5])),
-                                )
-                                self.on_bar(bar)
+                            self.on_bar(bar)
                     except Exception as e:
                         log.warning(
-                            "failed_to_fetch_historical_klines", symbol=sym, err=str(e)
+                            "failed_to_fetch_historical_klines",
+                            symbol=sym,
+                            err=str(e),
                         )
 
         for sym in self.symbols:
@@ -168,10 +206,21 @@ class MomentumStrategyEngine:
 
         # 2. 依次评估选出的最优标的
         for sym, mom, price in top_candidates:
-            # 检查当前标的是否已有活跃开仓挂单
+            # 检查当前标的是否已有活跃开仓挂单或活跃持仓批次 (单标的单批次排他)
             entry_key = (self.state.account_label, sym, "LONG")
             if entry_key in self.state.active_entry_orders:
                 log.debug("skip_entry_already_has_active_order", symbol=sym)
+                continue
+
+            has_active_batch = any(
+                b.symbol == sym
+                and b.position_side == "LONG"
+                and b.status in ("ACTIVE", "EXITING")
+                and b.quantity > Decimal("0")
+                for b in self.state.batches.values()
+            )
+            if has_active_batch:
+                log.debug("skip_entry_already_has_active_batch", symbol=sym)
                 continue
 
             # 计算拟开仓数量与对齐精度规则
@@ -239,6 +288,36 @@ class MomentumStrategyEngine:
 
         return submitted_order_ids
 
+    async def cancel_stale_entry_orders(self) -> None:
+        """扫描并撤销超出 TTL 的未结开仓限价单，防止永久占用标的与迟到成交"""
+        now = datetime.now(UTC)
+        for order in list(self.state.orders.values()):
+            if not order.is_terminal:
+                is_entry = (order.position_side == "LONG" and order.side == "BUY") or (
+                    order.position_side == "SHORT" and order.side == "SELL"
+                )
+                if is_entry:
+                    age_sec = (now - order.created_at).total_seconds()
+                    if age_sec >= self.entry_ttl_sec:
+                        log.info(
+                            "entry_order_ttl_expired_cancelling",
+                            order_id=order.client_order_id,
+                            symbol=order.symbol,
+                            age_sec=age_sec,
+                        )
+                        try:
+                            if hasattr(self.order_executor.rest_client, "cancel_order"):
+                                await self.order_executor.rest_client.cancel_order(
+                                    symbol=order.symbol,
+                                    client_order_id=order.client_order_id,
+                                )
+                        except Exception as e:
+                            log.warning(
+                                "failed_to_cancel_stale_entry_order",
+                                order_id=order.client_order_id,
+                                err=str(e),
+                            )
+
     async def run(self, stop_event: asyncio.Event | None = None) -> None:
         """15s 周期评估主协程 (由 TaskGroup 结构化调度)"""
         log.info("momentum_strategy_engine_started", symbols=self.symbols)
@@ -257,6 +336,7 @@ class MomentumStrategyEngine:
                 else:
                     await asyncio.sleep(self.eval_interval_sec)
 
+                await self.cancel_stale_entry_orders()
                 await self.evaluate_and_generate_orders()
             except asyncio.CancelledError:
                 break

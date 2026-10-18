@@ -76,10 +76,15 @@ class BinanceRestClient:
         self._client = http_client or httpx.AsyncClient(timeout=10.0)
 
     def sign_params(
-        self, params: dict[str, Any], timestamp: int | None = None
+        self,
+        params: dict[str, Any],
+        timestamp: int | None = None,
+        recv_window: int = 5000,
     ) -> dict[str, Any]:
-        """为请求参数附加毫秒时间戳与 HMAC-SHA256 签名"""
+        """为请求参数附加毫秒时间戳、recvWindow 与 HMAC-SHA256 签名"""
         signed_params = dict(params)
+        if "recvWindow" not in signed_params:
+            signed_params["recvWindow"] = recv_window
         ts = timestamp if timestamp is not None else int(time.time() * 1000)
         signed_params["timestamp"] = ts
         query_string = urlencode(signed_params)
@@ -286,6 +291,44 @@ class BinanceRestClient:
         """GET /fapi/v1/exchangeInfo - 获取交易所元数据与交易对过滤器"""
         res = await self._request("GET", "/fapi/v1/exchangeInfo", signed=False)
         return dict(res)
+
+    async def get_position_mode(self) -> bool:
+        """GET /fapi/v1/positionSide/dual - 查询持仓模式 (True 为双向持仓 Hedge Mode)"""
+        res = await self._request("GET", "/fapi/v1/positionSide/dual", signed=True)
+        return bool(res.get("dualSidePosition", False))
+
+    async def set_position_mode(self, dual_side: bool = True) -> None:
+        """POST /fapi/v1/positionSide/dual - 设置持仓模式为双向持仓"""
+        try:
+            await self._request(
+                "POST",
+                "/fapi/v1/positionSide/dual",
+                signed=True,
+                params={"dualSidePosition": "true" if dual_side else "false"},
+            )
+        except BinanceOrderRejectedError as e:
+            if e.code == -4059:
+                return
+            raise
+
+    async def set_leverage(self, symbol: str, leverage: int = 5) -> dict[str, Any]:
+        """POST /fapi/v1/leverage - 设置杠杆倍数"""
+        try:
+            res = await self._request(
+                "POST",
+                "/fapi/v1/leverage",
+                signed=True,
+                params={"symbol": symbol.upper(), "leverage": leverage},
+            )
+            return dict(res)
+        except Exception as e:
+            log.warning(
+                "failed_to_set_leverage",
+                symbol=symbol,
+                leverage=leverage,
+                err=str(e),
+            )
+            return {}
 
     # 兼容性别名
     get_open_orders = fetch_open_orders

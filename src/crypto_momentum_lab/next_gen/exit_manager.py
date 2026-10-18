@@ -14,7 +14,7 @@ from crypto_momentum_lab.next_gen.client import (
 )
 from crypto_momentum_lab.next_gen.engine import AccountState
 from crypto_momentum_lab.next_gen.executor import OrderExecutor
-from crypto_momentum_lab.next_gen.models import Order, OrderStatus
+from crypto_momentum_lab.next_gen.models import Order, OrderStatus, SystemMode
 from crypto_momentum_lab.next_gen.symbol_rules import SymbolRulesRegistry
 
 log = structlog.get_logger("exit_manager")
@@ -82,6 +82,30 @@ class ExitManager:
         batch = self._state.batches.get(batch_id)
         if not batch or batch.quantity <= Decimal("0"):
             return
+
+        # 0. 先确保撤销本批次所有尚未成交的开仓挂单，防止边平仓边被撮合成交
+        for order in list(self._state.orders.values()):
+            if order.batch_id == batch_id and not order.is_terminal:
+                is_entry = (order.position_side == "LONG" and order.side == "BUY") or (
+                    order.position_side == "SHORT" and order.side == "SELL"
+                )
+                if is_entry:
+                    try:
+                        await self._rest.cancel_order(
+                            symbol=order.symbol,
+                            client_order_id=order.client_order_id,
+                        )
+                        log.info(
+                            "cancelled_unfilled_entry_order_before_exit",
+                            order_id=order.client_order_id,
+                            batch_id=batch_id,
+                        )
+                    except Exception as e:
+                        log.warning(
+                            "failed_to_cancel_unfilled_entry_order_before_exit",
+                            order_id=order.client_order_id,
+                            err=str(e),
+                        )
 
         # 1. 提交限价退出单 (按标的规则对齐价格与数量)
         rounded_limit_price = self.symbol_rules.round_price(batch.symbol, limit_price)
@@ -209,11 +233,19 @@ class ExitManager:
                 )
 
         # 6. 市价清扫剩余未结数量 (根据 WS/REST 真实终态确认后的确切 batch.quantity)
+        if not limit_order.is_terminal:
+            log.critical(
+                "limit_exit_order_not_terminal_refusing_market_sweep",
+                order_id=limit_order.client_order_id,
+                status=limit_order.status.name,
+            )
+            self._state.set_system_mode(SystemMode.DEGRADED)
+            return
+
         batch = self._state.batches.get(batch_id)
         if (
             batch
             and batch.quantity > Decimal("0")
-            and limit_order.is_terminal
             and self._state.can_submit_exit_order()
         ):
             sweep_qty = self.symbol_rules.round_quantity(batch.symbol, batch.quantity)

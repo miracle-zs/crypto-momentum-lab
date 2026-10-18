@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import time
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -122,13 +125,51 @@ class NextGenDaemon:
         await self.exit_manager.close()
         await self.order_executor.close()
 
+    async def _run_health_heartbeat(
+        self, stop_event: asyncio.Event, interval_sec: float = 15.0
+    ) -> None:
+        """周期性向容器共享健康目录写入心跳文件，支持本地健康监控检测"""
+        health_dir_env = os.environ.get("CML_LOCAL_HEALTH_DIR", "/run/cml/health")
+        health_dir = Path(health_dir_env)
+        account_health_file = health_dir / f"nextgen-{self.account_label}.ok"
+        status_file = health_dir / "status"
+        database_file = health_dir / "database"
+
+        try:
+            health_dir.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240
+        except Exception as e:
+            log.warning("failed_to_create_health_dir", path=str(health_dir), err=str(e))
+
+        try:
+            while not stop_event.is_set():
+                if self.state.system_mode == SystemMode.RUNNING:
+                    now_ts = str(int(time.time()))
+                    try:
+                        account_health_file.write_text(now_ts, encoding="utf-8")  # noqa: ASYNC240
+                        status_file.write_text("ready", encoding="utf-8")  # noqa: ASYNC240
+                        database_file.write_text(now_ts, encoding="utf-8")  # noqa: ASYNC240
+                    except Exception as e:
+                        log.warning("failed_to_write_healthcheck_file", err=str(e))
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=interval_sec)
+                    break
+                except TimeoutError:
+                    pass
+        finally:
+            for f in (account_health_file, status_file):
+                try:
+                    if f.exists():  # noqa: ASYNC240
+                        f.unlink(missing_ok=True)  # noqa: ASYNC240
+                except Exception:
+                    pass
+
     async def run(self, keepalive_interval_sec: float = 1800.0) -> None:
         """端到端生命周期执行入口：
         1. 获取 PostgreSQL 会话级 Advisory Lock (防多进程开仓互斥)；
-        2. 行情与策略预热；
-        3. 严格空仓基线检查 (assert_flat_baseline_or_abort)；
+        2. 行情与策略预热 (支持本地数据库 15s Bar 与 REST K线双重兜底)；
+        3. 验证/设置 Hedge Mode 与 5x 杠杆，严格空仓基线检查；
         4. 建立 WebSocket 长连并握手；
-        5. 启动 TaskGroup 结构化并发协程 (WS 流、Keepalive、策略计算、退出评估)；
+        5. 启动 TaskGroup 结构化并发协程；
         6. 退出后释放资源并设置 STOPPED 状态。
         """
         lock_key = compute_advisory_lock_key(self.environment, self.account_label)
@@ -144,9 +185,28 @@ class NextGenDaemon:
                 self.market_data_provider, "warmup"
             ):
                 await self.market_data_provider.warmup()
-            await self.strategy_engine.warmup_market_data(rest_client=self.rest_client)
+            await self.strategy_engine.warmup_market_data(
+                rest_client=self.rest_client, db=self.db
+            )
 
-            # 阶段 3: 严格空仓基线检查 (存量非零持仓/挂单则 Fail-Fast 阻断)
+            # 阶段 3: 验证/设置持仓模式与杠杆倍数，严格空仓基线检查
+            try:
+                if hasattr(self.rest_client, "set_position_mode"):
+                    await self.rest_client.set_position_mode(dual_side=True)
+                    log.info(
+                        "position_mode_ensured_dual_side",
+                        account=self.account_label,
+                    )
+            except Exception as e:
+                log.warning("failed_to_ensure_dual_side_position_mode", err=str(e))
+
+            for sym in self.strategy_engine.symbols:
+                try:
+                    if hasattr(self.rest_client, "set_leverage"):
+                        await self.rest_client.set_leverage(sym, leverage=5)
+                except Exception as e:
+                    log.warning("failed_to_set_symbol_leverage", symbol=sym, err=str(e))
+
             await assert_flat_baseline_or_abort(self.rest_client, self.state)
 
             # 阶段 4: WebSocket 私有流连接与握手
@@ -178,6 +238,9 @@ class NextGenDaemon:
                         )
                     tg.create_task(self.strategy_engine.run(stop_event=self.stop_event))
                     tg.create_task(self.exit_manager.run(stop_event=self.stop_event))
+                    tg.create_task(
+                        self._run_health_heartbeat(stop_event=self.stop_event)
+                    )
                     tg.create_task(self._wait_for_stop())
             finally:
                 self.state.set_system_mode(SystemMode.STOPPED)

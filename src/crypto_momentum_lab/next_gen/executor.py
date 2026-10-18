@@ -31,6 +31,10 @@ class OrderExecutor:
         self._db = db
         self._watchdog_tasks: set[asyncio.Task[Any]] = set()
 
+    @property
+    def rest_client(self) -> BinanceRestClient:
+        return self._rest
+
     async def close(self) -> None:
         """取消所有正在运行的延时看门狗任务"""
         for task in list(self._watchdog_tasks):

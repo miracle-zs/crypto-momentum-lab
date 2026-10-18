@@ -167,3 +167,13 @@ async def test_db_failure_exhausted_enters_degraded():
     assert state.system_mode == SystemMode.DEGRADED
     assert state.has_unrecoverable_fault
     assert not state.can_submit_entry_order()
+
+
+@pytest.mark.asyncio
+async def test_async_get_historical_15s_bars():
+    repo = InMemoryTradingRepository()
+    bars = await repo.async_get_historical_15s_bars("live", ["BTCUSDT", "ETHUSDT"])
+    assert "BTCUSDT" in bars
+    assert "ETHUSDT" in bars
+    assert bars["BTCUSDT"] == []
+    assert bars["ETHUSDT"] == []

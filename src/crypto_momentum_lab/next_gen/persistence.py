@@ -42,6 +42,9 @@ class TradingRepositoryProtocol(Protocol):
     async def async_get_recent_orders(
         self, environment: str, account_label: str, limit: int = 50
     ) -> list[Order]: ...
+    async def async_get_historical_15s_bars(
+        self, environment: str, symbols: list[str], limit: int = 140
+    ) -> dict[str, list[dict[str, Any]]]: ...
 
 
 class InMemoryTradingRepository:
@@ -143,6 +146,11 @@ class InMemoryTradingRepository:
         ]
         orders.sort(key=lambda o: o.created_at, reverse=True)
         return orders[:limit]
+
+    async def async_get_historical_15s_bars(
+        self, environment: str, symbols: list[str], limit: int = 140
+    ) -> dict[str, list[dict[str, Any]]]:
+        return {sym: [] for sym in symbols}
 
 
 class PostgresTradingRepository:
@@ -551,3 +559,33 @@ class PostgresTradingRepository:
                 )
                 for r in rows
             ]
+
+    async def async_get_historical_15s_bars(
+        self, environment: str, symbols: list[str], limit: int = 140
+    ) -> dict[str, list[dict[str, Any]]]:
+        """从 runtime_market_states_15s 查询历史 15s Bar 用于策略预热"""
+        result: dict[str, list[dict[str, Any]]] = {sym: [] for sym in symbols}
+        sql = """
+        SELECT symbol, bucket_end, open_price, high_price, low_price,
+               close_price, trade_notional
+        FROM runtime_market_states_15s
+        WHERE environment = :env AND symbol = :sym
+        ORDER BY bucket_end DESC
+        LIMIT :limit;
+        """
+        async with self._engine.connect() as conn:
+            for sym in symbols:
+                try:
+                    res = await conn.execute(
+                        text(sql), {"env": environment, "sym": sym, "limit": limit}
+                    )
+                    rows = list(res.mappings().all())
+                    rows.reverse()
+                    result[sym] = [dict(r) for r in rows]
+                except Exception as e:
+                    log.warning(
+                        "failed_to_query_historical_15s_bars",
+                        symbol=sym,
+                        err=str(e),
+                    )
+        return result

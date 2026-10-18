@@ -158,3 +158,119 @@ async def test_strategy_loop_lifecycle_with_stop_event(strategy_setup):
         await engine.run(stop_event=stop_event)
     finally:
         await executor.close()
+
+
+@pytest.mark.asyncio
+async def test_strategy_entry_ttl_cancellation(strategy_setup):
+    state, executor, engine, mock_rest = strategy_setup
+    try:
+        # Create an entry order that is 70 seconds old (exceeding entry_ttl_sec = 60s)
+        order = state.create_entry_order(
+            symbol="BTCUSDT",
+            position_side="LONG",
+            quantity=Decimal("0.1"),
+            price=Decimal("60000"),
+            batch_id="b_btc_01",
+        )
+        order.created_at = datetime.now(UTC) - timedelta(seconds=70)
+        assert not order.is_terminal
+
+        # Run cancel_stale_entry_orders
+        await engine.cancel_stale_entry_orders()
+        mock_rest.cancel_order.assert_awaited_once_with(
+            symbol="BTCUSDT",
+            client_order_id=order.client_order_id,
+        )
+    finally:
+        await executor.close()
+
+
+@pytest.mark.asyncio
+async def test_strategy_skip_entry_if_symbol_has_active_batch(strategy_setup):
+    state, executor, engine, mock_rest = strategy_setup
+    try:
+        from crypto_momentum_lab.next_gen.models import PositionBatch
+
+        # Add an active batch for BTCUSDT
+        active_batch = PositionBatch(
+            environment="live",
+            account_label="a1",
+            batch_id="b_btc_existing",
+            symbol="BTCUSDT",
+            position_side="LONG",
+            quantity=Decimal("0.5"),
+            entry_price=Decimal("60000"),
+            entry_bar_time=datetime.now(UTC),
+            status="ACTIVE",
+        )
+        state.batches[active_batch.batch_id] = active_batch
+
+        # Feed strong positive momentum for BTCUSDT
+        btc_bars = generate_bars(
+            "BTCUSDT", Decimal("50000"), Decimal("55000"), count=15
+        )
+        engine.feed_bars(btc_bars)
+
+        # BTCUSDT should be skipped because of active batch concurrency guard
+        submitted = await engine.evaluate_and_generate_orders()
+        assert len(submitted) == 0
+        mock_rest.post_order.assert_not_awaited()
+    finally:
+        await executor.close()
+
+
+@pytest.mark.asyncio
+async def test_strategy_dual_warmup_from_db_and_rest(strategy_setup):
+    _, executor, engine, mock_rest = strategy_setup
+    try:
+        engine.min_warmup_bars = 4
+        mock_db = AsyncMock()
+        mock_db.async_get_historical_15s_bars.return_value = {
+            "BTCUSDT": [
+                {
+                    "bucket_end": datetime.now(UTC) - timedelta(seconds=30),
+                    "open_price": 50000,
+                    "high_price": 50100,
+                    "low_price": 49900,
+                    "close_price": 50050,
+                    "trade_notional": 1000,
+                },
+                {
+                    "bucket_end": datetime.now(UTC) - timedelta(seconds=15),
+                    "open_price": 50050,
+                    "high_price": 50200,
+                    "low_price": 50000,
+                    "close_price": 50150,
+                    "trade_notional": 1200,
+                },
+            ],
+            "ETHUSDT": [],
+        }
+
+        # mock_rest supplements remaining 2 bars for BTCUSDT and 4 for ETHUSDT
+        mock_rest.fetch_klines.return_value = [
+            [
+                1000,
+                "50150",
+                "50300",
+                "50100",
+                "50250",
+                "10",
+                int((datetime.now(UTC).timestamp() + 15) * 1000),
+            ],
+            [
+                2000,
+                "50250",
+                "50400",
+                "50200",
+                "50350",
+                "12",
+                int((datetime.now(UTC).timestamp() + 30) * 1000),
+            ],
+        ]
+
+        await engine.warmup_market_data(rest_client=mock_rest, db=mock_db)
+        mock_db.async_get_historical_15s_bars.assert_awaited_once()
+        assert len(engine.bar_buffers["BTCUSDT"]) >= 4
+    finally:
+        await executor.close()

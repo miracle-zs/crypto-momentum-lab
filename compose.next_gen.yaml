@@ -1,10 +1,16 @@
-name: crypto-momentum-lab-nextgen
+name: crypto-momentum-lab
 
 x-default-logging: &default-logging
   driver: json-file
   options:
     max-size: "20m"
     max-file: "10"
+
+x-nextgen-account-depends: &nextgen-account-depends
+  postgres:
+    condition: service_healthy
+  migrate:
+    condition: service_completed_successfully
 
 x-nextgen-account-app: &nextgen-account-app
   image: crypto-momentum-lab-app:${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
@@ -18,10 +24,14 @@ x-nextgen-account-app: &nextgen-account-app
   restart: unless-stopped
   stop_grace_period: 90s
   logging: *default-logging
-
-x-nextgen-account-depends: &nextgen-account-depends
-  migrate:
-    condition: service_completed_successfully
+  depends_on: *nextgen-account-depends
+  healthcheck:
+    test: ["CMD", "/usr/local/bin/cml-local-healthcheck", "180"]
+    interval: 30s
+    start_interval: 5s
+    timeout: 10s
+    retries: 3
+    start_period: 2m
 
 services:
   nextgen-strategy-primary:
@@ -30,6 +40,7 @@ services:
     container_name: cml-nextgen-strategy-primary
     environment:
       <<: *nextgen-account-environment
+      CML_ACCOUNT_LABEL: primary
       BINANCE_TRADE_API_KEY: ${BINANCE_TRADE_API_KEY_PRIMARY:-${BINANCE_TRADE_API_KEY:?set BINANCE_TRADE_API_KEY}}
       BINANCE_TRADE_API_SECRET: ${BINANCE_TRADE_API_SECRET_PRIMARY:-${BINANCE_TRADE_API_SECRET:?set BINANCE_TRADE_API_SECRET}}
     command:
@@ -49,6 +60,7 @@ services:
     container_name: cml-nextgen-strategy-account-2
     environment:
       <<: *nextgen-account-environment
+      CML_ACCOUNT_LABEL: account-2
       BINANCE_TRADE_API_KEY: ${BINANCE_TRADE_API_KEY_ACCOUNT_2:?set BINANCE_TRADE_API_KEY_ACCOUNT_2}
       BINANCE_TRADE_API_SECRET: ${BINANCE_TRADE_API_SECRET_ACCOUNT_2:?set BINANCE_TRADE_API_SECRET_ACCOUNT_2}
     command:
@@ -68,6 +80,7 @@ services:
     container_name: cml-nextgen-strategy-account-3
     environment:
       <<: *nextgen-account-environment
+      CML_ACCOUNT_LABEL: account-3
       BINANCE_TRADE_API_KEY: ${BINANCE_TRADE_API_KEY_ACCOUNT_3:?set BINANCE_TRADE_API_KEY_ACCOUNT_3}
       BINANCE_TRADE_API_SECRET: ${BINANCE_TRADE_API_SECRET_ACCOUNT_3:?set BINANCE_TRADE_API_SECRET_ACCOUNT_3}
     command:
@@ -87,6 +100,7 @@ services:
     container_name: cml-nextgen-strategy-account-4
     environment:
       <<: *nextgen-account-environment
+      CML_ACCOUNT_LABEL: account-4
       BINANCE_TRADE_API_KEY: ${BINANCE_TRADE_API_KEY_ACCOUNT_4:?set BINANCE_TRADE_API_KEY_ACCOUNT_4}
       BINANCE_TRADE_API_SECRET: ${BINANCE_TRADE_API_SECRET_ACCOUNT_4:?set BINANCE_TRADE_API_SECRET_ACCOUNT_4}
     command:
