@@ -87,7 +87,7 @@ class MomentumStrategyEngine:
         rest_client: Any = None,
         db: Any = None,
     ) -> None:
-        """阶段 2 策略行情预热：优先从本地 PG 数据库拉取，不足则通过 REST 补齐"""
+        """阶段 2 策略预热：从 PG 事实表拉取历史 15s Bar，不采用 1m 冒充 15s"""
         if rest_client is not None:
             try:
                 if hasattr(rest_client, "fetch_exchange_info"):
@@ -97,7 +97,7 @@ class MomentumStrategyEngine:
             except Exception as e:
                 log.warning("failed_to_fetch_exchange_info_for_rules", err=str(e))
 
-        # 1. 尝试从本地 PostgreSQL 读取 15s Bar 历史
+        # 尝试从本地 PostgreSQL 读取真实 15s Bar 历史
         if db is not None and hasattr(db, "async_get_historical_15s_bars"):
             try:
                 db_bars = await db.async_get_historical_15s_bars(
@@ -127,41 +127,11 @@ class MomentumStrategyEngine:
             except Exception as e:
                 log.warning("failed_to_warmup_from_database", err=str(e))
 
-        # 2. 如果数据量仍不足 min_warmup_bars，通过 Binance REST K线兜底补齐
-        if rest_client is not None and hasattr(rest_client, "fetch_klines"):
-            for sym in self.symbols:
-                needed = self.min_warmup_bars - len(self.bar_buffers.get(sym, []))
-                if needed > 0:
-                    try:
-                        klines = await rest_client.fetch_klines(
-                            symbol=sym,
-                            interval="1m",
-                            limit=needed,
-                        )
-                        for k in klines:
-                            close_time = datetime.fromtimestamp(k[6] / 1000.0, tz=UTC)
-                            bar = Bar15s(
-                                symbol=sym,
-                                close_time=close_time,
-                                open_price=Decimal(str(k[1])),
-                                high_price=Decimal(str(k[2])),
-                                low_price=Decimal(str(k[3])),
-                                close_price=Decimal(str(k[4])),
-                                volume=Decimal(str(k[5])),
-                            )
-                            self.on_bar(bar)
-                    except Exception as e:
-                        log.warning(
-                            "failed_to_fetch_historical_klines",
-                            symbol=sym,
-                            err=str(e),
-                        )
-
         for sym in self.symbols:
             count = len(self.bar_buffers.get(sym, []))
             if count < self.min_warmup_bars:
                 log.warning(
-                    "strategy_warmup_depth_insufficient",
+                    "strategy_warmup_depth_insufficient_waiting_for_stream",
                     symbol=sym,
                     current=count,
                     required=self.min_warmup_bars,

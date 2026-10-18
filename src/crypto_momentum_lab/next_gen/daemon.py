@@ -84,10 +84,15 @@ class NextGenDaemon:
         else:
             from crypto_momentum_lab.next_gen.market_feed import MarketDataFeed
 
+            resolved_hub = (
+                hub_url
+                or os.environ.get("CML_MARKET_STATE_HUB_URL")
+                or "ws://market-data:8766"
+            )
             self.market_data_provider = MarketDataFeed(
                 symbols=self.strategy_engine.symbols,
                 on_bar=self.strategy_engine.on_bar,
-                hub_url=hub_url,
+                hub_url=resolved_hub,
                 ws_connector=market_feed_connector,
             )
 

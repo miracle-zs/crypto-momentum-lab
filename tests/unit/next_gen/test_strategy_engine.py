@@ -220,7 +220,9 @@ async def test_strategy_skip_entry_if_symbol_has_active_batch(strategy_setup):
 
 
 @pytest.mark.asyncio
-async def test_strategy_dual_warmup_from_db_and_rest(strategy_setup):
+async def test_strategy_warmup_from_db_without_false_kline_fallback(
+    strategy_setup,
+):
     _, executor, engine, mock_rest = strategy_setup
     try:
         engine.min_warmup_bars = 4
@@ -247,30 +249,10 @@ async def test_strategy_dual_warmup_from_db_and_rest(strategy_setup):
             "ETHUSDT": [],
         }
 
-        # mock_rest supplements remaining 2 bars for BTCUSDT and 4 for ETHUSDT
-        mock_rest.fetch_klines.return_value = [
-            [
-                1000,
-                "50150",
-                "50300",
-                "50100",
-                "50250",
-                "10",
-                int((datetime.now(UTC).timestamp() + 15) * 1000),
-            ],
-            [
-                2000,
-                "50250",
-                "50400",
-                "50200",
-                "50350",
-                "12",
-                int((datetime.now(UTC).timestamp() + 30) * 1000),
-            ],
-        ]
-
         await engine.warmup_market_data(rest_client=mock_rest, db=mock_db)
         mock_db.async_get_historical_15s_bars.assert_awaited_once()
-        assert len(engine.bar_buffers["BTCUSDT"]) >= 4
+        # Verify fetch_klines was NOT invoked to falsely fabricate 15s bars
+        mock_rest.fetch_klines.assert_not_awaited()
+        assert len(engine.bar_buffers["BTCUSDT"]) == 2
     finally:
         await executor.close()

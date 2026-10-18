@@ -18,8 +18,8 @@ async def test_cold_start_flat_admission_success():
     mock_rest = AsyncMock()
 
     # Empty orders and flat positions
-    mock_rest.get_open_orders.return_value = []
-    mock_rest.get_account_v3.return_value = AccountSnapshot(
+    mock_rest.fetch_open_orders.return_value = []
+    mock_rest.fetch_account_information.return_value = AccountSnapshot(
         wallet_balances={"USDT": Decimal("10000.50"), "BNB": Decimal("2.0")},
         available_balance=Decimal("9500.25"),
         positions=[
@@ -52,8 +52,8 @@ async def test_cold_start_fails_closed_when_open_orders_exist():
     mock_db = AsyncMock()
     mock_rest = AsyncMock()
 
-    mock_rest.get_open_orders.return_value = [{"orderId": 12345, "symbol": "BTCUSDT"}]
-    mock_rest.get_account_v3.return_value = AccountSnapshot(
+    mock_rest.fetch_open_orders.return_value = [{"orderId": 12345, "symbol": "BTCUSDT"}]
+    mock_rest.fetch_account_information.return_value = AccountSnapshot(
         wallet_balances={"USDT": Decimal("10000")},
         available_balance=Decimal("10000"),
         positions=[],
@@ -75,8 +75,8 @@ async def test_cold_start_fails_closed_when_non_zero_positions_exist():
     mock_db = AsyncMock()
     mock_rest = AsyncMock()
 
-    mock_rest.get_open_orders.return_value = []
-    mock_rest.get_account_v3.return_value = AccountSnapshot(
+    mock_rest.fetch_open_orders.return_value = []
+    mock_rest.fetch_account_information.return_value = AccountSnapshot(
         wallet_balances={"USDT": Decimal("10000")},
         available_balance=Decimal("10000"),
         positions=[
@@ -102,8 +102,8 @@ async def test_cold_start_network_failure_raises():
     mock_db = AsyncMock()
     mock_rest = AsyncMock()
 
-    mock_rest.get_open_orders.side_effect = TimeoutError("REST timeout 5.0s")
-    mock_rest.get_account_v3.return_value = AccountSnapshot(
+    mock_rest.fetch_open_orders.side_effect = TimeoutError("REST timeout 5.0s")
+    mock_rest.fetch_account_information.return_value = AccountSnapshot(
         wallet_balances={"USDT": Decimal("10000")},
         available_balance=Decimal("10000"),
         positions=[],

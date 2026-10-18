@@ -381,13 +381,54 @@ class AccountState:
                 asyncio.create_task(self.probe_order_status(order))
 
     async def probe_order_status(self, order: Order) -> None:
-        """只读诊断探针：离线查询交易所，仅记录日志，绝不向内存回写订单状态！"""
+        """诊断探针：离线查询交易所，超时由 REST 补齐终态与成交批次。"""
         try:
             res = await self._rest_client.query_order(
                 symbol=order.symbol,
                 client_order_id=order.client_order_id,
             )
             log.info("probe_order_result", id=order.client_order_id, result=str(res))
+            if isinstance(res, dict) and "status" in res:
+                raw_status = str(res["status"]).upper()
+                status_mapping = {
+                    "NEW": OrderStatus.OPEN,
+                    "PARTIALLY_FILLED": OrderStatus.PARTIALLY_FILLED,
+                    "FILLED": OrderStatus.FILLED,
+                    "CANCELED": OrderStatus.CANCELED,
+                    "EXPIRED": OrderStatus.CANCELED,
+                    "REJECTED": OrderStatus.REJECTED,
+                }
+                mapped_status = status_mapping.get(raw_status)
+                if mapped_status in (
+                    OrderStatus.FILLED,
+                    OrderStatus.CANCELED,
+                    OrderStatus.REJECTED,
+                ):
+
+                    def _parse_dec(val: Any) -> Decimal:
+                        if isinstance(val, (int, float, str, Decimal)):
+                            try:
+                                return Decimal(str(val))
+                            except Exception:
+                                return Decimal("0")
+                        return Decimal("0")
+
+                    executed_qty = _parse_dec(res.get("executedQty"))
+                    avg_price = _parse_dec(res.get("avgPrice"))
+                    delta_qty = max(Decimal("0"), executed_qty - order.filled_qty)
+                    await self.on_order_trade_update(
+                        client_order_id=order.client_order_id,
+                        symbol=order.symbol,
+                        position_side=order.position_side,
+                        side=order.side,
+                        order_status=mapped_status,
+                        cum_filled_qty=executed_qty,
+                        avg_price=avg_price,
+                        last_filled_qty=delta_qty,
+                        last_filled_price=avg_price
+                        if avg_price > Decimal("0")
+                        else (order.price or Decimal("0")),
+                    )
         except Exception as e:
             log.warning("probe_order_failed", id=order.client_order_id, err=str(e))
 
@@ -539,33 +580,16 @@ async def assert_flat_baseline_or_abort(
     (若检测到存量持仓/挂单，则 Fail-Fast 拒绝启动)。
     """
     try:
-        fetch_orders = None
-        fetch_account = None
-
-        children = getattr(rest_client, "_mock_children", None)
-        if children is not None:
-            if "fetch_open_orders" in children:
-                fetch_orders = children["fetch_open_orders"]
-            elif "get_open_orders" in children:
-                fetch_orders = children["get_open_orders"]
-
-            if "fetch_account_information" in children:
-                fetch_account = children["fetch_account_information"]
-            elif "get_account_v3" in children:
-                fetch_account = children["get_account_v3"]
-
-        if fetch_orders is None:
-            fetch_orders = getattr(
-                rest_client,
-                "fetch_open_orders",
-                getattr(rest_client, "get_open_orders", None),
-            )
-        if fetch_account is None:
-            fetch_account = getattr(
-                rest_client,
-                "fetch_account_information",
-                getattr(rest_client, "get_account_v3", None),
-            )
+        fetch_orders = getattr(
+            rest_client,
+            "fetch_open_orders",
+            getattr(rest_client, "get_open_orders", None),
+        )
+        fetch_account = getattr(
+            rest_client,
+            "fetch_account_information",
+            getattr(rest_client, "get_account_v3", None),
+        )
 
         if not fetch_orders or not fetch_account:
             raise AttributeError("rest_client 缺少获取挂单或账户快照的方法")

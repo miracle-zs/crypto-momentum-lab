@@ -167,11 +167,8 @@ class ExitManager:
                     symbol=limit_order.symbol,
                     client_order_id=limit_order.client_order_id,
                 )
-                if isinstance(order_info, dict):
-                    raw_status = order_info.get("status")
-                    binance_status = (
-                        str(raw_status) if isinstance(raw_status, str) else "CANCELED"
-                    )
+                if isinstance(order_info, dict) and "status" in order_info:
+                    binance_status = str(order_info["status"]).upper()
 
                     def _parse_dec(val: Any) -> Decimal:
                         if isinstance(val, (int, float, str, Decimal)):
@@ -191,14 +188,8 @@ class ExitManager:
                         "EXPIRED": OrderStatus.CANCELED,
                         "REJECTED": OrderStatus.REJECTED,
                     }
-                    mapped_status = status_mapping.get(
-                        binance_status, OrderStatus.CANCELED
-                    )
-                    if mapped_status in (
-                        OrderStatus.CANCELED,
-                        OrderStatus.FILLED,
-                        OrderStatus.REJECTED,
-                    ):
+                    mapped_status = status_mapping.get(binance_status)
+                    if mapped_status is not None:
                         delta_qty = max(
                             Decimal("0"), executed_qty - limit_order.filled_qty
                         )
@@ -211,19 +202,21 @@ class ExitManager:
                             cum_filled_qty=executed_qty,
                             avg_price=avg_price,
                             last_filled_qty=delta_qty,
-                            last_filled_price=avg_price,
+                            last_filled_price=avg_price
+                            if avg_price > Decimal("0")
+                            else (limit_order.price or Decimal("0")),
+                        )
+                    else:
+                        log.warning(
+                            "exit_manager_unknown_order_status_from_rest",
+                            order_id=limit_order.client_order_id,
+                            raw_status=binance_status,
                         )
                 else:
-                    await self._state.on_order_trade_update(
-                        client_order_id=limit_order.client_order_id,
-                        symbol=limit_order.symbol,
-                        position_side=limit_order.position_side,
-                        side=limit_order.side,
-                        order_status=OrderStatus.CANCELED,
-                        cum_filled_qty=limit_order.filled_qty,
-                        avg_price=limit_order.avg_price,
-                        last_filled_qty=Decimal("0"),
-                        last_filled_price=limit_order.avg_price,
+                    log.warning(
+                        "exit_manager_query_order_invalid_payload",
+                        order_id=limit_order.client_order_id,
+                        payload=order_info,
                     )
             except Exception as e:
                 log.warning(

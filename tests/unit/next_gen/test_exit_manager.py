@@ -247,3 +247,72 @@ async def test_exit_manager_refuses_market_sweep_if_cancel_unconfirmed(exit_setu
     # System must fail-closed into DEGRADED to protect from oversell/reversal
     assert state.system_mode == SystemMode.DEGRADED
     await exit_mgr.close()
+
+
+@pytest.mark.asyncio
+async def test_exit_manager_refuses_market_sweep_on_unknown_status(exit_setup):
+    state, repo, mock_rest, exit_mgr = exit_setup
+    mock_rest.post_order.return_value = {"orderId": 444}
+    mock_rest.cancel_order.return_value = {"orderId": 444, "status": "UNKNOWN_ERROR"}
+    mock_rest.query_order.return_value = {
+        "status": "SOME_WEIRD_STATE",
+        "executedQty": "0",
+    }
+
+    batch_id = generate_batch_id("BTCUSDT", "LONG", "a1", counter=12)
+    batch = PositionBatch(
+        environment="live",
+        account_label="a1",
+        batch_id=batch_id,
+        symbol="BTCUSDT",
+        position_side="LONG",
+        quantity=Decimal("1.0"),
+        entry_price=Decimal("65000"),
+        entry_bar_time=datetime.now(UTC),
+        status="ACTIVE",
+    )
+    state.batches[batch_id] = batch
+
+    await exit_mgr.execute_batch_exit(
+        batch_id=batch_id,
+        limit_price=Decimal("66000"),
+        grace_period_sec=0.01,
+    )
+
+    # Must NOT assume CANCELED! Market sweep must be refused!
+    assert mock_rest.post_order.call_count == 1
+    assert state.system_mode == SystemMode.DEGRADED
+    await exit_mgr.close()
+
+
+@pytest.mark.asyncio
+async def test_exit_manager_refuses_market_sweep_on_invalid_payload(exit_setup):
+    state, repo, mock_rest, exit_mgr = exit_setup
+    mock_rest.post_order.return_value = {"orderId": 555}
+    mock_rest.cancel_order.return_value = {"orderId": 555, "status": "NEW"}
+    mock_rest.query_order.return_value = None  # Non-dict payload
+
+    batch_id = generate_batch_id("BTCUSDT", "LONG", "a1", counter=13)
+    batch = PositionBatch(
+        environment="live",
+        account_label="a1",
+        batch_id=batch_id,
+        symbol="BTCUSDT",
+        position_side="LONG",
+        quantity=Decimal("1.0"),
+        entry_price=Decimal("65000"),
+        entry_bar_time=datetime.now(UTC),
+        status="ACTIVE",
+    )
+    state.batches[batch_id] = batch
+
+    await exit_mgr.execute_batch_exit(
+        batch_id=batch_id,
+        limit_price=Decimal("66000"),
+        grace_period_sec=0.01,
+    )
+
+    # Must NOT assume CANCELED!
+    assert mock_rest.post_order.call_count == 1
+    assert state.system_mode == SystemMode.DEGRADED
+    await exit_mgr.close()
