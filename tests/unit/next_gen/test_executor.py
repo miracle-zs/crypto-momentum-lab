@@ -131,3 +131,22 @@ async def test_entry_caches_symbol_setting_failure(test_setup):
         await executor._ensure_symbol_settings("BTCUSDT")
 
     assert mock_rest.set_leverage.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_symbol_preparation_failure_releases_unsent_entry(test_setup):
+    state, repo, mock_rest, executor = test_setup
+    mock_rest.set_leverage.side_effect = BinanceOrderRejectedError(
+        code=-4028, message="Leverage 5 is not valid"
+    )
+    order = state.create_entry_order(
+        "BTCUSDT", "LONG", Decimal("0.01"), Decimal("65000"), "batch-settings"
+    )
+
+    with pytest.raises(BinanceOrderRejectedError):
+        await executor.submit_order(order)
+
+    mock_rest.post_order.assert_not_awaited()
+    assert order.client_order_id not in state.orders
+    assert ("a1", "BTCUSDT", "LONG") not in state.active_entry_orders
+    assert repo.get_order("live", "a1", order.client_order_id) is None

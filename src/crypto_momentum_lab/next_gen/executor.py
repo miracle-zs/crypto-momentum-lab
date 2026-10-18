@@ -258,6 +258,11 @@ class OrderExecutor:
         self._submissions_idle.clear()
         try:
             return await self._submit_order(order)
+        except Exception:
+            # Preparation or a safety gate failed before any order was sent.
+            if order.status == OrderStatus.PENDING:
+                self._state.rollback_unsubmitted_order(order)
+            raise
         finally:
             self._inflight_submissions -= 1
             if self._inflight_submissions == 0:
@@ -281,7 +286,6 @@ class OrderExecutor:
 
         # 2. 发单安全门与名义价值上限校验
         if order.client_order_id.startswith("e_"):
-            await self._ensure_symbol_settings(order.symbol)
             if not self._state.can_submit_entry_order():
                 raise RuntimeError(
                     f"安全门阻断开仓单: {order.client_order_id}, "
@@ -298,6 +302,11 @@ class OrderExecutor:
                 raise RuntimeError(
                     f"名义价值上限阻断开仓单: {order.client_order_id}, "
                     f"symbol={order.symbol}"
+                )
+            await self._ensure_symbol_settings(order.symbol)
+            if not self._state.can_submit_entry_order():
+                raise RuntimeError(
+                    "Symbol preparation completed after entry gate closed"
                 )
         else:
             if not self._state.can_submit_exit_order():

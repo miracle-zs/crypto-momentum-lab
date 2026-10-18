@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 from crypto_momentum_lab.apps.next_gen.cli import (
     _resolve_credentials,
+    _resolve_read_credentials,
     _resolve_repository,
     _run_with_signal_handlers,
     app,
@@ -93,7 +94,11 @@ def test_cli_status_json() -> None:
 
 
 def test_cli_status_human_readable() -> None:
-    result = runner.invoke(app, ["status", "-e", "testnet", "-a", "a1"])
+    with patch(
+        "crypto_momentum_lab.apps.next_gen.cli._resolve_repository",
+        return_value=(InMemoryTradingRepository(), None),
+    ):
+        result = runner.invoke(app, ["status", "-e", "testnet", "-a", "a1"])
     assert result.exit_code == 0
     assert "Next-Gen Status [testnet:a1]" in result.output
     assert "Active Batches: 0" in result.output
@@ -241,6 +246,10 @@ def test_cli_testnet_routes_both_clients_to_testnet() -> None:
     daemon = AsyncMock()
     with (
         patch(
+            "crypto_momentum_lab.apps.next_gen.cli._resolve_repository",
+            return_value=(InMemoryTradingRepository(), None),
+        ),
+        patch(
             "crypto_momentum_lab.apps.next_gen.cli._resolve_credentials",
             return_value=("key", "secret"),
         ),
@@ -265,6 +274,10 @@ def test_cli_keeps_read_and_trade_clients_separate() -> None:
     daemon = AsyncMock()
     with (
         patch(
+            "crypto_momentum_lab.apps.next_gen.cli._resolve_repository",
+            return_value=(InMemoryTradingRepository(), None),
+        ),
+        patch(
             "crypto_momentum_lab.apps.next_gen.cli._resolve_credentials",
             return_value=("trade_key", "trade_secret"),
         ),
@@ -285,30 +298,51 @@ def test_cli_keeps_read_and_trade_clients_separate() -> None:
         assert daemon.await_args.kwargs["ws_client"]._rest is read_client
 
 
-def test_resolve_credentials_fallbacks() -> None:
-    # 1. 显式参数优先
-    k, s = _resolve_credentials("my_key", "my_secret")
-    assert k == "my_key"
-    assert s == "my_secret"
+def test_credentials_are_explicit_and_role_scoped(monkeypatch):
+    assert _resolve_credentials("my_key", "my_secret") == ("my_key", "my_secret")
+    monkeypatch.setenv("BINANCE_TRADE_API_KEY", "trade-key")
+    monkeypatch.setenv("BINANCE_TRADE_API_SECRET", "trade-secret")
+    monkeypatch.setenv("BINANCE_READ_API_KEY", "read-key")
+    monkeypatch.setenv("BINANCE_READ_API_SECRET", "read-secret")
+    assert _resolve_credentials() == ("trade-key", "trade-secret")
+    assert _resolve_read_credentials() == ("read-key", "read-secret")
+    with pytest.raises(ValueError, match="required together"):
+        _resolve_credentials("only-key")
 
-    # 2. dry_run 兜底
-    k, s = _resolve_credentials(dry_run=True)
-    assert k == "mock_api_key"
-    assert s == "mock_api_secret"
 
-    # 3. 缺失抛出异常
-    with (
-        patch.dict("os.environ", {}, clear=True),
-        pytest.raises(ValueError, match="Binance API credentials missing"),
+def test_generic_credentials_do_not_replace_missing_trade_role():
+    with patch.dict(
+        "os.environ",
+        {"BINANCE_API_KEY": "generic-key", "BINANCE_API_SECRET": "generic-secret"},
+        clear=True,
     ):
-        _resolve_credentials(dry_run=False)
+        with pytest.raises(ValueError, match="trade credential"):
+            _resolve_credentials()
+        with pytest.raises(ValueError, match="read credential"):
+            _resolve_read_credentials()
 
 
-def test_resolve_repository() -> None:
-    # dry_run 返回 InMemory
-    repo, engine = _resolve_repository(dry_run=True)
-    assert isinstance(repo, InMemoryTradingRepository)
-    assert engine is None
+@pytest.mark.parametrize("role", ["TRADE", "READ"])
+def test_partial_account_credentials_do_not_use_default_account(role):
+    with patch.dict(
+        "os.environ",
+        {
+            f"BINANCE_{role}_API_KEY": "default-key",
+            f"BINANCE_{role}_API_SECRET": "default-secret",
+            f"BINANCE_{role}_API_KEY_ACCOUNT_2": "account-key",
+        },
+        clear=True,
+    ):
+        resolve = _resolve_credentials if role == "TRADE" else _resolve_read_credentials
+        with pytest.raises(ValueError, match=f"BINANCE_{role}_API_SECRET_ACCOUNT_2"):
+            resolve(account_label="account-2")
+
+
+@pytest.mark.parametrize("environment", ["live", "testnet"])
+def test_repository_requires_explicit_database(environment):
+    with patch.dict("os.environ", {}, clear=True):
+        with pytest.raises(ValueError, match="严禁退回内存仓储"):
+            _resolve_repository(environment=environment)
 
 
 @pytest.mark.asyncio

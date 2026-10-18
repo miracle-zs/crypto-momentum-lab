@@ -14,7 +14,6 @@ import typer
 
 from crypto_momentum_lab.config import (
     BinanceCredentialRole,
-    CredentialResolutionError,
     resolve_database_url,
     resolve_role_credentials,
 )
@@ -28,7 +27,6 @@ from crypto_momentum_lab.next_gen.engine import AccountState
 from crypto_momentum_lab.next_gen.executor import OrderExecutor
 from crypto_momentum_lab.next_gen.models import SystemMode
 from crypto_momentum_lab.next_gen.persistence import (
-    InMemoryTradingRepository,
     PostgresTradingRepository,
     TradingRepositoryProtocol,
     compute_advisory_lock_key,
@@ -55,108 +53,50 @@ def _resolve_db_url(database_url: str | None) -> str | None:
     )
 
 
+def _resolve_account_credentials(
+    role: BinanceCredentialRole, account_label: str
+) -> tuple[str, str]:
+    normalized = account_label.replace("-", "_").upper()
+    prefix = f"BINANCE_{role.value.upper()}"
+    key_env = f"{prefix}_API_KEY_{normalized}"
+    secret_env = f"{prefix}_API_SECRET_{normalized}"
+    if key_env in os.environ or secret_env in os.environ:
+        resolved = resolve_role_credentials(
+            role, api_key_env=key_env, api_secret_env=secret_env
+        )
+    else:
+        resolved = resolve_role_credentials(role)
+    return resolved.api_key, resolved.api_secret
+
+
 def _resolve_credentials(
     api_key: str | None = None,
     api_secret: str | None = None,
     account_label: str = "a1",
-    dry_run: bool = False,
 ) -> tuple[str, str]:
-    """Resolve Binance API credentials securely."""
-    if api_key and api_secret:
+    """Use an explicit pair or the configured trade role; reject partial pairs."""
+    if api_key is not None or api_secret is not None:
+        if not api_key or not api_secret:
+            raise ValueError("API key and secret are required together")
         return api_key, api_secret
-
-    # Check account-specific env variables first (e.g. BINANCE_TRADE_API_KEY_ACCOUNT_2)
-    normalized = account_label.replace("-", "_").upper()
-    acct_key_env = f"BINANCE_TRADE_API_KEY_{normalized}"
-    acct_secret_env = f"BINANCE_TRADE_API_SECRET_{normalized}"
-    if acct_key_env in os.environ and acct_secret_env in os.environ:
-        try:
-            resolved = resolve_role_credentials(
-                BinanceCredentialRole.TRADE,
-                api_key_env=acct_key_env,
-                api_secret_env=acct_secret_env,
-            )
-            return resolved.api_key, resolved.api_secret
-        except (CredentialResolutionError, ValueError):
-            pass
-
-    try:
-        resolved = resolve_role_credentials(BinanceCredentialRole.TRADE)
-        return resolved.api_key, resolved.api_secret
-    except (CredentialResolutionError, ValueError):
-        pass
-
-    env_key = os.environ.get("BINANCE_API_KEY")
-    env_secret = os.environ.get("BINANCE_API_SECRET")
-    if env_key and env_secret:
-        return env_key, env_secret
-
-    if dry_run:
-        log.warning("using_mock_credentials_for_dry_run")
-        return "mock_api_key", "mock_api_secret"
-
-    raise ValueError(
-        "Binance API credentials missing. Provide --api-key and --api-secret "
-        "or set BINANCE_TRADE_API_KEY/BINANCE_TRADE_API_SECRET or "
-        "BINANCE_API_KEY/BINANCE_API_SECRET."
-    )
+    return _resolve_account_credentials(BinanceCredentialRole.TRADE, account_label)
 
 
-def _resolve_read_credentials(
-    account_label: str = "a1",
-    dry_run: bool = False,
-) -> tuple[str, str]:
-    """Resolve the read-only credential role used for baseline and private stream."""
-    normalized = account_label.replace("-", "_").upper()
-    acct_key_env = f"BINANCE_READ_API_KEY_{normalized}"
-    acct_secret_env = f"BINANCE_READ_API_SECRET_{normalized}"
-    if acct_key_env in os.environ and acct_secret_env in os.environ:
-        try:
-            resolved = resolve_role_credentials(
-                BinanceCredentialRole.READ,
-                api_key_env=acct_key_env,
-                api_secret_env=acct_secret_env,
-            )
-            return resolved.api_key, resolved.api_secret
-        except (CredentialResolutionError, ValueError):
-            pass
-
-    try:
-        resolved = resolve_role_credentials(BinanceCredentialRole.READ)
-        return resolved.api_key, resolved.api_secret
-    except (CredentialResolutionError, ValueError):
-        pass
-
-    if dry_run:
-        log.warning("using_mock_read_credentials_for_dry_run")
-        return "mock_read_api_key", "mock_read_api_secret"
-
-    raise ValueError(
-        "Binance read-only credentials missing. Set "
-        "BINANCE_READ_API_KEY/BINANCE_READ_API_SECRET (or the account-specific "
-        "BINANCE_READ_API_KEY_<ACCOUNT> pair)."
-    )
+def _resolve_read_credentials(account_label: str = "a1") -> tuple[str, str]:
+    return _resolve_account_credentials(BinanceCredentialRole.READ, account_label)
 
 
 def _resolve_repository(
     database_url: str | None = None,
-    dry_run: bool = False,
     environment: str = "live",
 ) -> tuple[TradingRepositoryProtocol, Any]:
-    """Resolve TradingRepository (Postgres or InMemory). Fail-closed in live."""
+    """Both exchange environments require persistent execution storage."""
     resolved_url = _resolve_db_url(database_url)
-    if dry_run:
-        return InMemoryTradingRepository(), None
-
     if not resolved_url:
-        if environment == "live":
-            raise ValueError(
-                "生产实盘环境 (live) 必须配置 "
-                "CML_DATABASE_URL / CML_EXECUTION_DATABASE_URL，严禁退回内存仓储！"
-            )
-        log.warning("no_database_url_configured_falling_back_to_in_memory_repository")
-        return InMemoryTradingRepository(), None
-
+        raise ValueError(
+            f"{environment} 必须配置 CML_DATABASE_URL / "
+            "CML_EXECUTION_DATABASE_URL，严禁退回内存仓储！"
+        )
     engine = create_execution_database_engine(resolved_url)
     return PostgresTradingRepository(engine), engine
 
@@ -235,7 +175,7 @@ def run_command(
         bool,
         typer.Option(
             "--dry-run",
-            help="Validate configuration without connecting to the exchange",
+            help="Validate account manifest without connecting to exchange or database",
         ),
     ] = False,
     runtime_manifest: Annotated[
@@ -251,20 +191,6 @@ def run_command(
 ) -> None:
     """Launch Next-Gen continuous trading daemon."""
     account_config = load_live_runtime_manifest(runtime_manifest).account(account_label)
-    key, secret = _resolve_credentials(
-        account_label=account_label,
-        api_key=api_key,
-        api_secret=api_secret,
-        dry_run=dry_run,
-    )
-    read_key, read_secret = _resolve_read_credentials(
-        account_label=account_label,
-        dry_run=dry_run,
-    )
-    repo, engine = _resolve_repository(
-        database_url, dry_run=dry_run, environment=environment
-    )
-
     symbol_list = (
         [s.strip().upper() for s in symbols.split(",") if s.strip()]
         if symbols
@@ -281,12 +207,22 @@ def run_command(
 
     if dry_run:
         log.info(
-            "next_gen_configuration_validated",
+            "next_gen_manifest_validated",
             environment=environment,
             account=account_label,
             symbols=symbol_list,
         )
         return
+
+    key, secret = _resolve_credentials(
+        account_label=account_label,
+        api_key=api_key,
+        api_secret=api_secret,
+    )
+    read_key, read_secret = _resolve_read_credentials(
+        account_label=account_label,
+    )
+    repo, engine = _resolve_repository(database_url, environment=environment)
 
     trade_client = BinanceRestClient(
         api_key=key, api_secret=secret, environment=environment
@@ -315,7 +251,6 @@ def run_command(
                 stop_event=stop_event,
                 keepalive_interval_sec=keepalive_interval,
                 hub_url=hub_url,
-                market_feed_connector=False if dry_run else None,
                 market_environment=market_environment,
             )
         finally:
@@ -355,20 +290,6 @@ def drain_command(
     ] = False,
 ) -> None:
     """Liquidate all active batches cleanly, verify 100% flat, and halt trading."""
-    key, secret = _resolve_credentials(
-        account_label=account_label,
-        api_key=api_key,
-        api_secret=api_secret,
-        dry_run=dry_run,
-    )
-    read_key, read_secret = _resolve_read_credentials(
-        account_label=account_label,
-        dry_run=dry_run,
-    )
-    repo, engine = _resolve_repository(
-        database_url, dry_run=dry_run, environment=environment
-    )
-
     log.info(
         "next_gen_drain_initiated",
         environment=environment,
@@ -384,6 +305,16 @@ def drain_command(
         )
         return
 
+    key, secret = _resolve_credentials(
+        account_label=account_label,
+        api_key=api_key,
+        api_secret=api_secret,
+    )
+    read_key, read_secret = _resolve_read_credentials(
+        account_label=account_label,
+    )
+    repo, engine = _resolve_repository(database_url, environment=environment)
+
     trade_client = BinanceRestClient(
         api_key=key, api_secret=secret, environment=environment
     )
@@ -397,9 +328,7 @@ def drain_command(
         )
         state.is_draining = True
         state.set_system_mode(SystemMode.DRAINING)
-        executor = OrderExecutor(
-            trade_client, state, repo, read_client=read_client
-        )
+        executor = OrderExecutor(trade_client, state, repo, read_client=read_client)
         ws_client = BinanceUserDataStream(read_client, environment=environment)
         ws_client.on_status_change = state.on_ws_status_change
         state.attach_ws_client(ws_client)
@@ -408,9 +337,7 @@ def drain_command(
             lock_key = compute_advisory_lock_key(environment, account_label)
             async with repo.acquire_dedicated_advisory_lock(lock_key):
                 rules = SymbolRulesRegistry()
-                rules.update_from_exchange_info(
-                    await read_client.fetch_exchange_info()
-                )
+                rules.update_from_exchange_info(await read_client.fetch_exchange_info())
                 await executor.load_active_state()
                 # This is the drain process startup baseline, before any command.
                 snapshot = await read_client.fetch_account_information()
@@ -476,9 +403,7 @@ def status_command(
     ] = False,
 ) -> None:
     """Inspect active batches and recent orders from the execution database."""
-    repo, engine = _resolve_repository(
-        database_url, dry_run=False, environment=environment
-    )
+    repo, engine = _resolve_repository(database_url, environment=environment)
 
     async def _fetcher() -> dict[str, Any]:
         try:
