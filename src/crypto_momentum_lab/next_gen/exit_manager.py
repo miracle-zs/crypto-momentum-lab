@@ -122,6 +122,18 @@ class ExitManager:
 
         await self._complete_limit_exit(limit_order, grace_sec)
 
+    def _scheduled_flatten_due(self, now: datetime) -> bool:
+        schedule = self._state.scheduled_risk_window
+        return self._state.scheduled_flatten_pending or (
+            schedule is not None
+            and schedule.phase(now)
+            in {
+                ScheduledRiskWindowPhase.FLATTENING,
+                ScheduledRiskWindowPhase.DEADLINE,
+                ScheduledRiskWindowPhase.VERIFYING,
+            }
+        )
+
     async def _complete_limit_exit(self, limit_order: Order, grace_sec: float) -> None:
         batch_id = limit_order.batch_id
         batch = self._state.batches[batch_id]
@@ -136,11 +148,7 @@ class ExitManager:
             flatten_at = datetime.combine(
                 local_now.date(), schedule.flatten_start_at, tzinfo=schedule.zone
             )
-            if self._state.scheduled_flatten_pending or schedule.phase(now) in {
-                ScheduledRiskWindowPhase.FLATTENING,
-                ScheduledRiskWindowPhase.DEADLINE,
-                ScheduledRiskWindowPhase.VERIFYING,
-            }:
+            if self._scheduled_flatten_due(now):
                 remaining = 0.0
             elif local_now < flatten_at:
                 remaining = min(remaining, (flatten_at - local_now).total_seconds())
@@ -183,16 +191,7 @@ class ExitManager:
             return []
 
         eval_now = now or datetime.now(UTC)
-        schedule = self._state.scheduled_risk_window
-        scheduled_flatten = self._state.scheduled_flatten_pending or (
-            schedule is not None
-            and schedule.phase(eval_now)
-            in {
-                ScheduledRiskWindowPhase.FLATTENING,
-                ScheduledRiskWindowPhase.DEADLINE,
-                ScheduledRiskWindowPhase.VERIFYING,
-            }
-        )
+        scheduled_flatten = self._scheduled_flatten_due(eval_now)
         scheduled_batch_ids: list[str] = []
         prices = current_prices or {}
 
@@ -369,7 +368,7 @@ class ExitManager:
                 self.execute_batch_exit(
                     batch.batch_id,
                     previous.price,
-                    immediate=expired,
+                    immediate=expired or self._scheduled_flatten_due(datetime.now(UTC)),
                 )
             )
             self._active_exit_tasks[batch.batch_id] = task
