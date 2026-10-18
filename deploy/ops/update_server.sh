@@ -228,8 +228,9 @@ while :; do
     if [[ -n "$container" ]]; then
       query=(docker exec "$container" python -c "$flat_check_python" "$account")
     else
-      # The target image may not be tagged in .env.server yet; force the
-      # freshly built target image for this one-off read-only check.
+      # A one-off probe needs the target image, which may still be building in
+      # the background.  Wait once here; live-container probes keep overlapping.
+      finish_target_build
       query=(env CML_CODE_COMMIT="$target_commit" "${compose[@]}" run --rm \
         --no-deps --entrypoint python "$service" -c "$flat_check_python" "$account")
     fi
