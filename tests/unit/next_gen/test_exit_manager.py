@@ -1,4 +1,5 @@
-from datetime import UTC, datetime
+import asyncio
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
@@ -84,3 +85,78 @@ async def test_exit_manager_grace_timeout_cancels_limit_and_sweeps_market(exit_s
     second_call = mock_rest.post_order.call_args_list[1].kwargs
     assert second_call["order_type"] == "MARKET"
     assert second_call["client_order_id"] == f"fm_{batch_id}"
+
+
+@pytest.mark.asyncio
+async def test_exit_manager_evaluate_holding_expired(exit_setup):
+    state, repo, mock_rest, exit_mgr = exit_setup
+    mock_rest.post_order.return_value = {"orderId": 111}
+    mock_rest.cancel_order.return_value = {"orderId": 111, "status": "CANCELED"}
+
+    batch_id = generate_batch_id("BTCUSDT", "LONG", "a1", counter=1)
+    # 1000s ago -> exceeds 900s holding
+    old_time = datetime.now(UTC) - timedelta(seconds=1000)
+    batch = PositionBatch(
+        environment="live",
+        account_label="a1",
+        batch_id=batch_id,
+        symbol="BTCUSDT",
+        position_side="LONG",
+        quantity=Decimal("1.0"),
+        entry_price=Decimal("65000"),
+        entry_bar_time=old_time,
+        status="ACTIVE",
+    )
+    state.batches[batch_id] = batch
+
+    scheduled = exit_mgr.evaluate_active_batches()
+    assert scheduled == [batch_id]
+
+    # Clean up background tasks
+    await exit_mgr.close()
+
+
+@pytest.mark.asyncio
+async def test_exit_manager_evaluate_drain_triggers_immediately(exit_setup):
+    state, repo, mock_rest, exit_mgr = exit_setup
+    mock_rest.post_order.return_value = {"orderId": 222}
+
+    batch_id = generate_batch_id("BTCUSDT", "LONG", "a1", counter=2)
+    # Just created 5s ago
+    batch = PositionBatch(
+        environment="live",
+        account_label="a1",
+        batch_id=batch_id,
+        symbol="BTCUSDT",
+        position_side="LONG",
+        quantity=Decimal("1.0"),
+        entry_price=Decimal("65000"),
+        entry_bar_time=datetime.now(UTC),
+        status="ACTIVE",
+    )
+    state.batches[batch_id] = batch
+
+    # Not draining -> not scheduled
+    assert exit_mgr.evaluate_active_batches() == []
+
+    # Admin Drains account
+    state.is_draining = True
+    scheduled = exit_mgr.evaluate_active_batches()
+    assert scheduled == [batch_id]
+
+    await exit_mgr.close()
+
+
+@pytest.mark.asyncio
+async def test_exit_manager_run_loop_lifecycle(exit_setup):
+    state, repo, mock_rest, exit_mgr = exit_setup
+    stop_event = asyncio.Event()
+
+    async def stop_soon():
+        await asyncio.sleep(0.02)
+        stop_event.set()
+
+    asyncio.create_task(stop_soon())
+    await exit_mgr.run(stop_event=stop_event)
+    await exit_mgr.close()
+
