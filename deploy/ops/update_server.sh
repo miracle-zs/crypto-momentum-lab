@@ -335,8 +335,9 @@ fi
 for item in "${accounts[@]}"; do
   account="${item%%:*}"
   service="${item#*:}"
-  if ! "${compose[@]}" run --rm --no-deps --entrypoint python \
-      "$service" -c "$flat_check_python" "$account"; then
+  if ! env CML_CODE_COMMIT="$target_commit" "${compose[@]}" run -T --rm \
+      --no-deps --entrypoint python "$service" -c "$flat_check_python" "$account" \
+      < /dev/null; then
     echo "Deployment stopped: account=$account is not proven flat after shutdown" >&2
     exit 1
   fi
