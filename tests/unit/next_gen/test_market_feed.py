@@ -9,8 +9,32 @@ import pytest
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.state_codec import market_state_to_payload
+from crypto_momentum_lab.next_gen.client import BinanceOrderRejectedError
 from crypto_momentum_lab.next_gen.market_feed import MarketDataFeed
 from tests.unit.persistence.postgres.test_runtime_state_repository import fixture_state
+
+
+@pytest.mark.asyncio
+async def test_rejected_order_does_not_discard_remaining_market_states():
+    seen = []
+
+    async def consume(state):
+        seen.append(state.symbol)
+        if state.symbol == "BTCUSDT":
+            raise BinanceOrderRejectedError(-2019, "Margin is insufficient.")
+
+    feed = MarketDataFeed(symbols=["BTCUSDT", "ETHUSDT"], on_market_state=consume)
+    await feed._dispatch_message(
+        {
+            "states": [
+                market_state_to_payload(fixture_state("BTCUSDT", 0)),
+                market_state_to_payload(
+                    replace(fixture_state("BTCUSDT", 0), symbol="ETHUSDT")
+                ),
+            ]
+        }
+    )
+    assert seen == ["BTCUSDT", "ETHUSDT"]
 
 
 @pytest.mark.asyncio

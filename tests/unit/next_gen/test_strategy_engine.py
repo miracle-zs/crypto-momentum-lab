@@ -93,7 +93,7 @@ async def strategy_setup(account_config):
 
 @pytest.mark.asyncio
 async def test_original_order_flow_signal_submits_configured_limit(strategy_setup):
-    state, _, rest, _, strategy, last = strategy_setup
+    state, repository, rest, _, strategy, last = strategy_setup
     assert strategy.market_data_observation is None
     result = await strategy.on_market_state(last)
     sample = strategy.market_data_observation
@@ -112,7 +112,24 @@ async def test_original_order_flow_signal_submits_configured_limit(strategy_setu
     assert order.quantity == Decimal("0.980")
     assert strategy.account_config.strategy_inputs.entry_limit_ttl_seconds == 900
     rest.post_order.assert_awaited_once()
+    assert repository.entry_signals
+    assert repository.entry_signals[0]["symbol"] == "BTCUSDT"
+    assert repository.entry_signals[0]["features"]
     assert await strategy.on_market_state(last) == []
+
+
+@pytest.mark.asyncio
+async def test_signal_observation_failure_does_not_change_submitted_order(
+    strategy_setup,
+):
+    state, repository, rest, _, strategy, last = strategy_setup
+    repository.async_save_entry_signal = AsyncMock(
+        side_effect=RuntimeError("write failed")
+    )
+    result = await strategy.on_market_state(last)
+    assert len(result) == 1
+    rest.post_order.assert_awaited_once()
+    assert state.orders[result[0]].status is OrderStatus.SUBMITTED
 
 
 @pytest.mark.asyncio

@@ -459,12 +459,36 @@ async def test_dashboard_reads_nextgen_state_and_never_invents_margin(postgres_r
     await cleanup()
     try:
         await postgres_repo.async_save_order_and_batch(order, batch)
+        await postgres_repo.async_save_entry_signal(
+            "live",
+            label,
+            now,
+            {"signal_id": "dashboard-signal", "symbol": "BTCUSDT", "side": "long"},
+        )
+        await postgres_repo.async_save_order(
+            Order(
+                "live",
+                label,
+                "fm_dashboard_batch_01",
+                batch.batch_id,
+                "BTCUSDT",
+                "SELL",
+                "LONG",
+                "MARKET",
+                Decimal("0.1"),
+                None,
+                status=OrderStatus.FILLED,
+                filled_qty=Decimal("0.1"),
+                avg_price=Decimal("105"),
+            )
+        )
         await postgres_repo.async_save_runtime_status(
             "live",
             label,
             now,
             {
                 "halt_active": False,
+                "started_at": (now - timedelta(minutes=5)).isoformat(),
                 "mode": "RUNNING",
                 "ready": True,
                 "strategy_name": "orderflow_impulse",
@@ -487,6 +511,12 @@ async def test_dashboard_reads_nextgen_state_and_never_invents_margin(postgres_r
         assert account.open_orders[0]["client_order_id"] == order.client_order_id
         assert account.balances[0]["wallet_balance"] == "1000"
         assert account.balances[0]["available_balance"] is None
+        assert account.summary["usdt_wallet_balance"] == "1000"
+        assert account.summary["total_unrealized_pnl"] == "5"
+        assert account.summary["recent_trade_count"] == 1
+        assert account.summary["gross_position_notional"] is None
+        assert account.live_signals[0]["signal_id"] == "dashboard-signal"
+        assert account.fills[0]["is_exit"] is True
         metrics = await queries.live_account_metrics()
         point = metrics.accounts[0].metrics_curve[-1]
         assert Decimal(point.equity) == Decimal("1005")
@@ -520,6 +550,10 @@ async def test_dashboard_reads_nextgen_state_and_never_invents_margin(postgres_r
             )
             assert runner["status"] == "FRESH"
             assert runner["details"]["engine"] == "nextgen"
+            assert runner["details"]["status"] == "READY"
+            assert datetime.fromisoformat(
+                runner["details"]["started_at"]
+            ) == now - timedelta(minutes=5)
             response = await client.get("/api/performance")
             assert response.json()["market_data"]["market_delay_ms"] == 443.1
             assert (

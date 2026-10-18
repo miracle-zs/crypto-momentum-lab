@@ -79,7 +79,7 @@ function renderAccountKpiGrid(summary) {
     ${tile("USDT 可用余额", money(summary.usdt_available_balance), `交易所快照 · ${summary.available_balance_observed_at ? esc(fullDateTime(summary.available_balance_observed_at)) : "时间未知"}`)}
     ${tile("总未实现盈亏", signedMoney(summary.total_unrealized_pnl), `${summary.position_count || 0} 个交易所持仓`, pnlClass(summary.total_unrealized_pnl))}
     ${tile("持仓名义价值", money(summary.gross_position_notional), "当前交易所总暴露")}
-    ${tile("挂单 / 最近成交", `${summary.open_order_count ?? 0} / ${summary.recent_trade_count ?? summary.recent_fill_count ?? 0}`, "当前挂单 / 最近 20 笔订单")}
+    ${tile("挂单 / 最近成交", `${summary.open_order_count ?? 0} / ${summary.recent_trade_count ?? summary.recent_fill_count ?? 0}`, "当前挂单 / 最近成交订单")}
   </div>`;
 }
 
@@ -159,7 +159,7 @@ function renderOrdersTable(openOrders, strategy) {
     { label: "类型 / 价格", value: (row) => `${row.order_type || "—"} / ${price(row.price)}`, align: "right" },
     { label: "数量", value: (row) => `${num(row.executed_quantity, 4)} / ${num(row.original_quantity, 4)}`, align: "right" },
     { label: "状态", value: (row) => pill(row.status), html: true },
-    { label: "只减仓", value: (row) => row.reduce_only ? "是" : "否", cls: "muted" },
+    { label: "开 / 平仓", value: (row) => (row.is_exit ?? row.reduce_only) ? "平仓" : "开仓", cls: "muted" },
     { label: "更新时间", value: (row) => dayTime(row.observed_at), align: "right", cls: "muted" },
   ], openOrders, {
     emptyText: "无挂单",
@@ -181,7 +181,7 @@ function renderFillsTable(fills, strategy) {
     { label: "成交片数", value: (row) => `${row.fill_count || 1} 片`, align: "right", cls: "muted" },
     { label: "已实现盈亏", value: (row) => signedMoney(row.realized_pnl), align: "right", cls: (row) => pnlClass(row.realized_pnl) },
     { label: "手续费", value: (row) => `${num(row.fee, 4)} ${row.fee_asset || ""}`, align: "right" },
-    { label: "平仓原因", value: (row) => row.reduce_only ? (row.close_reason || "原因未记录") : "开仓", cls: "muted" },
+    { label: "平仓原因", value: (row) => (row.is_exit ?? row.reduce_only) ? (row.close_reason || "退出原因未记录") : "开仓", cls: "muted" },
   ], fills, {
     emptyText: "尚无成交记录",
     tall: true,
@@ -288,7 +288,7 @@ export function renderAccount(data) {
     ? '<p class="muted">在线权益按 1 天热保留策略保存；更早数据请查询归档。曲线仅展示实际覆盖的时间。</p>' : "";
   const body = `${historyControl}${retentionNote}<div class="detail-meta"><span>同步时间 <b class="num">${esc(dayTime(data.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</b></span><span>${esc(relToNow(data.observed_at))}</span><small class="muted" data-refresh-state hidden></small></div>
     ${hero}${stateGrid}${kpis}${equityChartBlock}
-    ${disclosure("实盘策略信号", "LIVE SIGNALS · NON-BLOCKING OBSERVATION · LATEST 30", liveSignalContent,
+    ${disclosure("实盘策略信号", "LIVE SIGNALS · LATEST 30", liveSignalContent,
       `<strong class="num">${liveSignals.length}</strong>`, { open: liveSignals.length > 0, stateKey: "live-strategy-signals" })}
     ${disclosure("账户配置与对账", "EXECUTION CHANNEL / RECONCILIATION", accountFacts, "", { open: accountNeedsReview, stateKey: "account-reconciliation" })}
     ${disclosure("USDT 资产余额", "USDT BALANCE · ACCOUNT COLLATERAL", balancesTable, `<strong class="num">${usdtBalances.length}</strong>`, { open: usdtBalances.length > 0, stateKey: "account-balances" })}

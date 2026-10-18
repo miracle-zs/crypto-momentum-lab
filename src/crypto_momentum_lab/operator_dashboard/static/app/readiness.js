@@ -81,8 +81,8 @@ export function globalReadinessModel(now = Date.now()) {
         : mismatch != null && mismatch > 0
           ? `${mismatch} 差异`
           : accountSnapshots.length > 1
-            ? "READY"
-            : String(account.reconciliation?.status || "READY").toUpperCase();
+            ? (accountSnapshots.every((snapshot) => snapshot.reconciliation?.status === "ready") ? "READY" : "未接入")
+            : String(account.reconciliation?.status || "未接入").toUpperCase();
   }
 
   const hasRisk = Boolean(risk);
@@ -126,7 +126,9 @@ export function globalReadinessModel(now = Date.now()) {
     detail = `${staleSafetySections} 个关键分区刷新失败 · 尚未确认安全`;
   } else if (liveMode === "LIVE") {
     detail = "实盘链路运行中 · 关键读数正常";
-
+  } else if (liveMode === "DEGRADED") {
+    status = "DEGRADED";
+    detail = "账户运行降级 · 查看账户状态";
   } else {
     detail = "无实盘会话 · 只读安全";
   }

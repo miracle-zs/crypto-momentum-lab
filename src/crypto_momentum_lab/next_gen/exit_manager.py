@@ -18,7 +18,7 @@ from crypto_momentum_lab.domain.strategy.position_exit import (
 from crypto_momentum_lab.next_gen.client import BinanceRestClient
 from crypto_momentum_lab.next_gen.engine import AccountState
 from crypto_momentum_lab.next_gen.executor import OrderExecutor
-from crypto_momentum_lab.next_gen.models import Order, SystemMode
+from crypto_momentum_lab.next_gen.models import Order, OrderStatus, SystemMode
 from crypto_momentum_lab.next_gen.symbol_rules import SymbolRulesRegistry
 
 log = structlog.get_logger("exit_manager")
@@ -243,6 +243,46 @@ class ExitManager:
             )
             self._active_exit_tasks[order.batch_id] = task
             task.add_done_callback(partial(self._exit_task_done, order.batch_id))
+
+        # Graceful shutdown cancels exchange orders, but not the batch's exit
+        # decision. Resume that responsibility with its original deadline.
+        for batch in self._state.batches.values():
+            if batch.quantity <= 0 or batch.exit_order_submitted_at is None:
+                continue
+            if (
+                batch.batch_id in self._active_exit_tasks
+                or (self._state.account_label, batch.batch_id)
+                in self._state.active_exit_orders
+            ):
+                continue
+            previous = max(
+                (
+                    order
+                    for order in self._state.orders.values()
+                    if order.batch_id == batch.batch_id
+                    and order.client_order_id.startswith(("fl_", "fm_"))
+                ),
+                key=lambda order: order.created_at,
+                default=None,
+            )
+            if (
+                previous is None
+                or previous.status is not OrderStatus.CANCELED
+                or previous.price is None
+            ):
+                continue
+            expired = (
+                datetime.now(UTC) - batch.exit_order_submitted_at
+            ).total_seconds() >= self.grace_period_sec
+            task = asyncio.create_task(
+                self.execute_batch_exit(
+                    batch.batch_id,
+                    previous.price,
+                    immediate=expired,
+                )
+            )
+            self._active_exit_tasks[batch.batch_id] = task
+            task.add_done_callback(partial(self._exit_task_done, batch.batch_id))
 
     async def run(
         self,

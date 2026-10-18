@@ -16,7 +16,7 @@ import {
   setLiveService,
 } from "./section-state.js";
 import { markSectionError, renderGlobalReadiness, updateGlobalState } from "./readiness.js";
-import { renderLiveRuntime } from "./runtime-badge.js";
+import { liveModeForService, renderLiveRuntime } from "./runtime-badge.js";
 
 function fetchTimeoutSignal(timeoutMs) {
   if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
@@ -61,21 +61,9 @@ export function createPoller({ renderers, onAfterRender }) {
   const strategyHooks = renderers.__strategyHooks || null;
 
   function updateGlobalMode(data) {
-    const live = data.services?.find((service) => (
-      service.name === "live-rollout"
-      || service.name === "strategy-runner"
-    ));
-    const halted = (data.active_halt_count || 0) > 0;
-    const nextGenRunning = live?.name === "strategy-runner"
-      && live?.details?.engine === "nextgen"
-      && live?.status === "FRESH";
-    const mode = halted
-      ? "HALTED"
-      : live?.status === "LIVE" || nextGenRunning
-        ? "LIVE"
-        : live?.status === "HALTED"
-          ? "HALTED"
-          : "UNKNOWN";
+    const live = data.services?.find((service) => service.name === "live-rollout")
+      || data.services?.find((service) => service.name === "strategy-runner" && service.details?.engine === "nextgen");
+    const mode = liveModeForService(live, data.active_halt_count);
     setLiveService(live || null);
     if (getLiveMode() === "LIVE" && mode !== "LIVE") {
       ["risk", "account"].forEach((id) => expireSectionReading(id));

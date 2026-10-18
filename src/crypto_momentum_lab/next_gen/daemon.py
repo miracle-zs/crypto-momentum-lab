@@ -56,6 +56,7 @@ class NextGenDaemon:
         market_environment: str = "research",
     ) -> None:
         self.account_config = account_config
+        self.started_at = datetime.now(UTC)
         self.environment = environment
         self.market_environment = market_environment
         self.account_label = account_label
@@ -200,6 +201,7 @@ class NextGenDaemon:
                 "account_label": self.account_label,
                 "environment": self.environment,
                 "session_id": self.account_config.session_id,
+                "started_at": self.started_at.isoformat(),
                 "strategy_name": self.account_config.strategy,
                 "config_hash": self.account_config.strategy_config_hash,
                 "mode": self.state.system_mode.name,

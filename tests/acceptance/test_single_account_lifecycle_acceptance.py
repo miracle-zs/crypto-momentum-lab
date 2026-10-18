@@ -1139,6 +1139,7 @@ async def test_real_assembled_lifecycle_with_fake_ws_exchange(
 
         # Wire normal consumer reading from source and dispatching to coordinator
         consumer_stopping = asyncio.Event()
+        entry_account_processed = asyncio.Event()
 
         async def _consumer_loop() -> None:
             try:
@@ -1154,6 +1155,8 @@ async def test_real_assembled_lifecycle_with_fake_ws_exchange(
                             evidence_id=event.event_id,
                             hedge_mode=False,
                         )
+                    if event.event_type == "ACCOUNT_UPDATE":
+                        entry_account_processed.set()
                     if (
                         event.event_type == "ORDER_TRADE_UPDATE"
                         and event.client_order_id == exit_client_order_id
@@ -1285,6 +1288,9 @@ async def test_real_assembled_lifecycle_with_fake_ws_exchange(
             },
         }
         await ws.send(json.dumps(account_msg))
+        # A fill can create the batch before the following account frame is
+        # committed. Wait for both facts before capturing an exit view token.
+        await asyncio.wait_for(entry_account_processed.wait(), timeout=5)
 
         # Verification through normal consumer chain (no direct book.observe!)
         view = None

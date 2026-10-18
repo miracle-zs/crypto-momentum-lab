@@ -87,6 +87,7 @@ class LiveAccountSummaryResponse(DashboardSchema):
     strategy_state: str | None = None
     runtime_tradeability: TradeabilityDetailResponse | None = None
     runtime_observed_at: datetime | None = None
+    runtime_started_at: datetime | None = None
     # Observation-queue backpressure published with the runtime readiness
     # snapshot: depth, high watermark, overflow count, oldest pending age.
     runtime_order_observation: dict[str, JsonValue] | None = None

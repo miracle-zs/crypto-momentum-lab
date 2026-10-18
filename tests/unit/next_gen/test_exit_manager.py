@@ -54,6 +54,53 @@ async def exit_setup():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("expired", [False, True])
+async def test_restart_resumes_exit_cancelled_during_shutdown(exit_setup, expired):
+    state, repo, rest, manager = exit_setup
+    original_deadline_start = datetime.now(UTC) - timedelta(
+        seconds=7201 if expired else 100
+    )
+    batch = PositionBatch(
+        "live",
+        "a1",
+        "restored",
+        "BTCUSDT",
+        "LONG",
+        Decimal("1"),
+        Decimal("65000"),
+        original_deadline_start,
+        exit_order_submitted_at=original_deadline_start,
+    )
+    state.batches[batch.batch_id] = batch
+    order = state.create_exit_order(batch.batch_id, Decimal("1"), Decimal("66000"))
+    await state.on_order_trade_update(
+        order.client_order_id,
+        order.symbol,
+        order.position_side,
+        order.side,
+        OrderStatus.CANCELED,
+        Decimal("0"),
+        Decimal("0"),
+        Decimal("0"),
+        Decimal("0"),
+    )
+    await manager._executor.load_active_state()
+    assert state.active_exit_orders == {}
+    rest.post_order.return_value = {"orderId": 222}
+    if not expired:
+        manager._complete_limit_exit = AsyncMock()
+    manager.resume_active_exits()
+    await asyncio.gather(*manager._active_exit_tasks.values())
+    rest.post_order.assert_awaited_once()
+    assert rest.post_order.call_args.kwargs["order_type"] == (
+        "MARKET" if expired else "LIMIT"
+    )
+    assert (
+        state.batches[batch.batch_id].exit_order_submitted_at == original_deadline_start
+    )
+
+
+@pytest.mark.asyncio
 async def test_exit_manager_grace_timeout_cancels_limit_and_sweeps_market(exit_setup):
     state, repo, mock_rest, exit_mgr = exit_setup
     mock_rest.post_order.return_value = {"orderId": 111, "clientOrderId": "fl_BTC_b1"}

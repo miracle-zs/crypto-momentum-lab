@@ -95,6 +95,7 @@ class NextGenDashboardQueries:
             strategy_name=payload["strategy_name"],
             strategy_state=payload["mode"],
             runtime_observed_at=row.occurred_at,
+            runtime_started_at=payload.get("started_at"),
             runtime_tradeability=TradeabilityDetailResponse(
                 mode=payload["mode"],
                 entry_gate_open=fresh and payload["entry_gate_open"],
@@ -320,6 +321,17 @@ class NextGenDashboardQueries:
                     )
                 )
             ).all()
+            signals = (
+                await session.scalars(
+                    select(StrategyRuntimeEventRow)
+                    .where(
+                        StrategyRuntimeEventRow.run_id == f"nextgen:live:{label}",
+                        StrategyRuntimeEventRow.event_type == "nextgen_entry_signal",
+                    )
+                    .order_by(StrategyRuntimeEventRow.occurred_at.desc())
+                    .limit(30)
+                )
+            ).all()
         price_by_symbol = {
             row.symbol: row.mark_price for row in marks if row.mark_price is not None
         }
@@ -393,9 +405,27 @@ class NextGenDashboardQueries:
                 for row in orders
                 if row.filled_quantity > 0
             ],
+            live_signals=[row.details for row in signals],
             summary={
                 "position_count": len(batches),
                 "open_order_count": len(open_orders),
+                "recent_trade_count": sum(row.filled_quantity > 0 for row in orders),
+                "usdt_wallet_balance": None
+                if payload is None
+                else payload["balances"].get("USDT"),
+                "total_unrealized_pnl": None
+                if payload is None
+                else payload["unrealized_pnl"],
+                "gross_position_notional": (
+                    str(
+                        sum(
+                            (abs(Decimal(p["notional"])) for p in positions),
+                            Decimal("0"),
+                        )
+                    )
+                    if all(p["notional"] is not None for p in positions)
+                    else None
+                ),
             },
             available_accounts=(await self.live_accounts()).accounts,
             equity_range=cast(EquityRange, equity_range),
@@ -417,6 +447,8 @@ class NextGenDashboardQueries:
             "batch_id": row.batch_id,
             "side": row.side,
             "position_side": row.position_side,
+            "is_exit": (row.position_side == "LONG" and row.side == "SELL")
+            or (row.position_side == "SHORT" and row.side == "BUY"),
             "order_type": row.order_type,
             "status": row.status,
             "price": None if row.price is None else str(row.price),

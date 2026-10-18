@@ -9,6 +9,15 @@ import { getLiveMode, getLiveService } from "./section-state.js";
 
 let lastRuntimeAnnouncement = "";
 
+export function liveModeForService(service, activeHaltCount) {
+  if (activeHaltCount > 0 || service?.status === "HALTED" || service?.details?.status === "HALTED") return "HALTED";
+  if (service?.details?.engine === "nextgen") {
+    if (service.status !== "FRESH") return "UNKNOWN";
+    return service.details.status === "READY" ? "LIVE" : "DEGRADED";
+  }
+  return service?.status === "LIVE" ? "LIVE" : "UNKNOWN";
+}
+
 export function renderLiveRuntime() {
   const stamp = document.getElementById("global-mode");
   const heartbeat = document.getElementById("last-cycle");
@@ -27,7 +36,8 @@ export function renderLiveRuntime() {
       : "运行时间未知";
   } else if (mode === "HALTED") {
     duration = "已停止";
-
+  } else if (mode === "DEGRADED") {
+    duration = "账户运行降级";
   }
   stamp.className = `mode-badge runtime-line ${statusClass(mode)}`;
   stamp.setAttribute("aria-label", `执行模式：${mode} · ${duration}`);

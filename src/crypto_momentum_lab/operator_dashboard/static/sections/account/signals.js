@@ -91,7 +91,7 @@ function liveSignalMeta(signals) {
     return `<p class="live-signal-note">实盘信号记录尚未到达，或当前账户还没有可展示的信号。</p>`;
   }
   return `<div class="live-signal-note">
-    <span>异步观测，不阻塞下单链路</span>
+    <span>策略信号观测</span>
     <span>策略 <b>${esc(newest.strategy_name || "—")}</b> · ${esc(newest.strategy_version || "—")}</span>
     <span>配置 <b class="num" title="${esc(newest.config_hash || "—")}">${esc(shortHash(newest.config_hash))}</b></span>
     <span>代码 <b class="num" title="${esc(newest.code_commit || "—")}">${esc(shortHash(newest.code_commit))}</b></span>

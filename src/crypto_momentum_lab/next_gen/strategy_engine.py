@@ -7,7 +7,12 @@ from typing import Any
 import structlog
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
-from crypto_momentum_lab.domain.strategy import EntryType, RunMode, StrategyRunIdentity
+from crypto_momentum_lab.domain.strategy import (
+    EntryType,
+    RunMode,
+    StrategyDecision,
+    StrategyRunIdentity,
+)
 from crypto_momentum_lab.domain.strategy.entry_candidate import prepare_entry_candidate
 from crypto_momentum_lab.live_rollout.runtime_config import _live_strategy_config
 from crypto_momentum_lab.live_rollout.runtime_manifest import LiveRuntimeAccount
@@ -144,6 +149,43 @@ class MomentumStrategyEngine:
         age = (now - market_state.bucket_end).total_seconds()
         if not self.market_connected or age < -5 or age > 45:
             return []
+        try:
+            return await self._submit_candidates(decision, market_state, now)
+        finally:
+            # Observations follow submission; their failure must not change trading.
+            for signal in decision.signals:
+                recorded_at = datetime.now(UTC)
+                try:
+                    await self.state.db.async_save_entry_signal(
+                        self.state.environment,
+                        self.state.account_label,
+                        recorded_at,
+                        {
+                            "signal_id": signal.signal_id,
+                            "signal_kind": "strategy_signal",
+                            "strategy_name": signal.strategy_name,
+                            "strategy_version": signal.strategy_version,
+                            "config_hash": signal.config_hash,
+                            "code_commit": self.account_config.image_commit,
+                            "symbol": signal.symbol,
+                            "side": signal.side.value,
+                            "detected_at": signal.detected_at.isoformat(),
+                            "source_state_at": signal.source_state_at.isoformat(),
+                            "recorded_at": recorded_at.isoformat(),
+                            "reason": signal.reason,
+                            "features": signal.features,
+                            "reference_prices": signal.reference_prices,
+                        },
+                    )
+                except Exception:
+                    log.exception(
+                        "entry_signal_record_failed", signal_id=signal.signal_id
+                    )
+
+    async def _submit_candidates(
+        self, decision: StrategyDecision, market_state: MarketState15s, now: datetime
+    ) -> list[str]:
+        symbol = market_state.symbol
         submitted = []
         repository = self.state.db
         if repository is None:

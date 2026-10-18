@@ -11,6 +11,7 @@ import websockets
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.state_codec import market_state_from_payload
+from crypto_momentum_lab.next_gen.client import BinanceOrderRejectedError
 
 log = structlog.get_logger("market_feed")
 
@@ -148,12 +149,24 @@ class MarketDataFeed:
         if "states" not in data:
             return
         for payload in data["states"]:
-            market_state = market_state_from_payload(payload)
-            if market_state.symbol not in self.symbols:
-                continue
-            result = self.on_market_state(market_state)
-            if asyncio.iscoroutine(result):
-                await result
+            try:
+                market_state = market_state_from_payload(payload)
+                if market_state.symbol not in self.symbols:
+                    continue
+                result = self.on_market_state(market_state)
+                if asyncio.iscoroutine(result):
+                    await result
+            except BinanceOrderRejectedError as error:
+                log.warning(
+                    "entry_order_rejected",
+                    symbol=market_state.symbol,
+                    code=error.code,
+                    reason=error.message,
+                )
+            except Exception:
+                log.exception(
+                    "market_state_processing_failed", symbol=payload.get("symbol")
+                )
 
     async def close(self) -> None:
         """关闭底层连接"""

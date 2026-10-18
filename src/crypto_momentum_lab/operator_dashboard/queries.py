@@ -362,6 +362,13 @@ class DashboardQueries:
             )
             runner.details = {
                 "engine": "nextgen",
+                "status": fleet.status.value,
+                "started_at": (
+                    max(a.runtime_started_at for a in fleet.accounts).isoformat()
+                    if fleet.accounts
+                    and all(a.runtime_started_at for a in fleet.accounts)
+                    else None
+                ),
                 "accounts": {a.account_label: a.readiness for a in fleet.accounts},
             }
             overview.services.insert(1, runner)
