@@ -215,6 +215,12 @@ class ParquetWindowSink:
             if selected is None:
                 continue
             row = _state_row(state, selected, collection_batch)
+            if state.is_backfill:
+                # Promotion warmup reconstructs trades only, not canonical
+                # quotes/liquidations. Also exclude pending pre-fix journal
+                # records when they are recovered after a collector restart.
+                dropped_keys.add((*_row_key(row), state_payload_digest(row)))
+                continue
             path = self._window_path(state.bucket_start, state.environment)
             rows = self._buffers.get(path)
             if rows is None:

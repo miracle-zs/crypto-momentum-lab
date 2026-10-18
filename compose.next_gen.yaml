@@ -11,6 +11,8 @@ x-nextgen-account-depends: &nextgen-account-depends
     condition: service_healthy
   migrate:
     condition: service_completed_successfully
+  market-data:
+    condition: service_healthy
 
 x-nextgen-account-app: &nextgen-account-app
   image: crypto-momentum-lab-app:${CML_CODE_COMMIT:?set CML_CODE_COMMIT}

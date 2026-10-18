@@ -557,7 +557,8 @@ async def _insert_revision_refs_batch(
     values: list[dict[str, object]],
 ) -> None:
     await session.execute(
-        insert(MarketRevisionRefRow).values(values).on_conflict_do_nothing()
+        insert(MarketRevisionRefRow.__table__).on_conflict_do_nothing(),
+        values,
     )
 
 
@@ -566,14 +567,14 @@ async def _insert_batch_idempotent(
     values: list[dict[str, object]],
 ) -> None:
     inserted_rows = await session.execute(
-        insert(RuntimeMarketState15sRow)
-        .values(values)
+        insert(RuntimeMarketState15sRow.__table__)
         .on_conflict_do_nothing()
         .returning(
             RuntimeMarketState15sRow.environment,
             RuntimeMarketState15sRow.symbol,
             RuntimeMarketState15sRow.bucket_start,
-        )
+        ),
+        values,
     )
     inserted_keys: set[_RuntimeStateKey] = {
         cast(_RuntimeStateKey, tuple(row)) for row in inserted_rows.all()

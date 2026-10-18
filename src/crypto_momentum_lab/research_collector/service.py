@@ -453,7 +453,7 @@ class ResearchStateCollector:
         selected_states = tuple(
             state
             for state in collection_batch.states
-            if state.symbol in selection.by_symbol
+            if state.symbol in selection.by_symbol and not state.is_backfill
         )
 
         # Check queue backpressure before accepting batch into journal
@@ -962,7 +962,11 @@ class ResearchStateCollector:
         source_kind: SourceKind,
     ) -> None:
         buckets = sorted(
-            {require_utc(state.bucket_start, "bucket_start") for state in states}
+            {
+                require_utc(state.bucket_start, "bucket_start")
+                for state in states
+                if not state.is_backfill
+            }
         )
         previous = self._last_received_bucket
         for bucket in buckets:
