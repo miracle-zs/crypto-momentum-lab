@@ -77,7 +77,9 @@ async def test_nextgen_daemon_lifecycle_happy_path(mock_rest_client: AsyncMock) 
 
 
 @pytest.mark.asyncio
-async def test_nextgen_daemon_fails_fast_on_non_flat_baseline(mock_rest_client: AsyncMock) -> None:
+async def test_nextgen_daemon_fails_fast_on_non_flat_baseline(
+    mock_rest_client: AsyncMock,
+) -> None:
     repo = InMemoryTradingRepository()
     # 注入存量挂单
     mock_rest_client.fetch_open_orders.return_value = [{"orderId": 9999}]
@@ -101,7 +103,9 @@ async def test_nextgen_daemon_fails_fast_on_non_flat_baseline(mock_rest_client: 
 
 
 @pytest.mark.asyncio
-async def test_nextgen_daemon_mutual_exclusion_advisory_lock(mock_rest_client: AsyncMock) -> None:
+async def test_nextgen_daemon_mutual_exclusion_advisory_lock(
+    mock_rest_client: AsyncMock,
+) -> None:
     repo = InMemoryTradingRepository()
     repo._held_locks.add("live:a1")  # 模拟另一实例已持有锁
 
@@ -119,7 +123,9 @@ async def test_nextgen_daemon_mutual_exclusion_advisory_lock(mock_rest_client: A
 
 
 @pytest.mark.asyncio
-async def test_nextgen_daemon_warmup_called_if_provider_present(mock_rest_client: AsyncMock) -> None:
+async def test_nextgen_daemon_warmup_called_if_provider_present(
+    mock_rest_client: AsyncMock,
+) -> None:
     repo = InMemoryTradingRepository()
     stop_event = asyncio.Event()
     mock_market_provider = AsyncMock()
@@ -155,7 +161,9 @@ async def test_nextgen_daemon_warmup_called_if_provider_present(mock_rest_client
 
 
 @pytest.mark.asyncio
-async def test_run_nextgen_daemon_convenience_function(mock_rest_client: AsyncMock) -> None:
+async def test_run_nextgen_daemon_convenience_function(
+    mock_rest_client: AsyncMock,
+) -> None:
     repo = InMemoryTradingRepository()
     stop_event = asyncio.Event()
 
@@ -179,7 +187,9 @@ async def test_run_nextgen_daemon_convenience_function(mock_rest_client: AsyncMo
 
 
 @pytest.mark.asyncio
-async def test_nextgen_daemon_orchestrates_strategy_and_exit_manager(mock_rest_client: AsyncMock) -> None:
+async def test_nextgen_daemon_orchestrates_strategy_and_exit_manager(
+    mock_rest_client: AsyncMock,
+) -> None:
     repo = InMemoryTradingRepository()
     stop_event = asyncio.Event()
 

@@ -41,6 +41,7 @@ cml-research-collector = "crypto_momentum_lab.apps.research_collector.main:app"
 cml-live-rollout = "crypto_momentum_lab.apps.live_rollout.main:app"
 cml-operator-dashboard = "crypto_momentum_lab.apps.operator_dashboard.main:main"
 cml-archive-market-revisions = "crypto_momentum_lab.tools.archive_market_revision_payloads:main"
+cml-next-gen = "crypto_momentum_lab.apps.next_gen.cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/crypto_momentum_lab"]

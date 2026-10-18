@@ -3,11 +3,13 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from copy import deepcopy
+from decimal import Decimal
 from typing import Any, Protocol
 
 import structlog
+from sqlalchemy import text
 
-from crypto_momentum_lab.next_gen.models import Order, PositionBatch
+from crypto_momentum_lab.next_gen.models import Order, OrderStatus, PositionBatch
 
 log = structlog.get_logger("next_gen_persistence")
 
@@ -30,6 +32,18 @@ class TradingRepositoryProtocol(Protocol):
     async def async_save_order_and_batch(
         self, order: Order, batch: PositionBatch | None
     ) -> None: ...
+    async def async_get_batch(
+        self, environment: str, account_label: str, batch_id: str
+    ) -> PositionBatch | None: ...
+    async def async_get_active_batches(
+        self, environment: str, account_label: str
+    ) -> list[PositionBatch]: ...
+    async def async_get_order(
+        self, environment: str, account_label: str, client_order_id: str
+    ) -> Order | None: ...
+    async def async_get_recent_orders(
+        self, environment: str, account_label: str, limit: int = 50
+    ) -> list[Order]: ...
 
 
 class InMemoryTradingRepository:
@@ -94,6 +108,38 @@ class InMemoryTradingRepository:
     ) -> PositionBatch | None:
         return self.batches.get((environment, account_label, batch_id))
 
+    async def async_get_order(
+        self, environment: str, account_label: str, client_order_id: str
+    ) -> Order | None:
+        return self.get_order(environment, account_label, client_order_id)
+
+    async def async_get_batch(
+        self, environment: str, account_label: str, batch_id: str
+    ) -> PositionBatch | None:
+        return self.get_batch(environment, account_label, batch_id)
+
+    async def async_get_active_batches(
+        self, environment: str, account_label: str
+    ) -> list[PositionBatch]:
+        return [
+            b
+            for (env, acc, _), b in self.batches.items()
+            if env == environment
+            and acc == account_label
+            and b.status in ("ACTIVE", "EXITING")
+        ]
+
+    async def async_get_recent_orders(
+        self, environment: str, account_label: str, limit: int = 50
+    ) -> list[Order]:
+        orders = [
+            o
+            for (env, acc, _), o in self.orders.items()
+            if env == environment and acc == account_label
+        ]
+        orders.sort(key=lambda o: o.created_at, reverse=True)
+        return orders[:limit]
+
 
 class PostgresTradingRepository:
     """基于单一轻量 AsyncEngine 的直写仓储实现
@@ -111,7 +157,7 @@ class PostgresTradingRepository:
         async with self._engine.connect() as conn:
             # 执行 SELECT pg_try_advisory_lock(hashtext(:lock_key))
             res = await conn.execute(
-                "SELECT pg_try_advisory_lock(hashtext(:key)) AS acquired",
+                text("SELECT pg_try_advisory_lock(hashtext(:key)) AS acquired"),
                 {"key": lock_key},
             )
             row = res.mappings().first()
@@ -127,7 +173,7 @@ class PostgresTradingRepository:
             finally:
                 try:
                     await conn.execute(
-                        "SELECT pg_advisory_unlock(hashtext(:key))",
+                        text("SELECT pg_advisory_unlock(hashtext(:key))"),
                         {"key": lock_key},
                     )
                     log.info("advisory_lock_released", key=lock_key)
@@ -177,7 +223,7 @@ class PostgresTradingRepository:
             "updated_at": order.updated_at,
         }
         async with self._engine.begin() as conn:
-            await conn.execute(sql, params)
+            await conn.execute(text(sql), params)
 
     async def async_save_batch(self, batch: PositionBatch) -> None:
         """批次更新落库 (INSERT ... ON CONFLICT DO UPDATE)"""
@@ -222,7 +268,7 @@ class PostgresTradingRepository:
             "updated_at": batch.updated_at,
         }
         async with self._engine.begin() as conn:
-            await conn.execute(sql, params)
+            await conn.execute(text(sql), params)
 
     async def async_save_order_and_batch(
         self, order: Order, batch: PositionBatch | None
@@ -231,28 +277,31 @@ class PostgresTradingRepository:
         async with self._engine.begin() as conn:
             # 1. 保存订单
             await conn.execute(
-                """
-                INSERT INTO live_orders (
-                    environment, account_label, client_order_id, exchange_order_id,
-                    batch_id, symbol, side, position_side, order_type,
-                    quantity, price, status, filled_quantity, average_price,
-                    created_at, updated_at
-                ) VALUES (
-                    :environment, :account_label, :client_order_id, :exchange_order_id,
-                    :batch_id, :symbol, :side, :position_side, :order_type,
-                    :quantity, :price, :status, :filled_quantity, :average_price,
-                    :created_at, :updated_at
-                )
-                ON CONFLICT (environment, account_label, client_order_id)
-                DO UPDATE SET
-                    exchange_order_id = COALESCE(
-                        EXCLUDED.exchange_order_id, live_orders.exchange_order_id
-                    ),
-                    status = EXCLUDED.status,
-                    filled_quantity = EXCLUDED.filled_quantity,
-                    average_price = EXCLUDED.average_price,
-                    updated_at = EXCLUDED.updated_at;
-                """,
+                text(
+                    """
+                    INSERT INTO live_orders (
+                        environment, account_label, client_order_id, exchange_order_id,
+                        batch_id, symbol, side, position_side, order_type,
+                        quantity, price, status, filled_quantity, average_price,
+                        created_at, updated_at
+                    ) VALUES (
+                        :environment, :account_label,
+                        :client_order_id, :exchange_order_id,
+                        :batch_id, :symbol, :side, :position_side, :order_type,
+                        :quantity, :price, :status, :filled_quantity, :average_price,
+                        :created_at, :updated_at
+                    )
+                    ON CONFLICT (environment, account_label, client_order_id)
+                    DO UPDATE SET
+                        exchange_order_id = COALESCE(
+                            EXCLUDED.exchange_order_id, live_orders.exchange_order_id
+                        ),
+                        status = EXCLUDED.status,
+                        filled_quantity = EXCLUDED.filled_quantity,
+                        average_price = EXCLUDED.average_price,
+                        updated_at = EXCLUDED.updated_at;
+                    """
+                ),
                 {
                     "environment": order.environment,
                     "account_label": order.account_label,
@@ -275,31 +324,33 @@ class PostgresTradingRepository:
             # 2. 保存批次 (若存在)
             if batch is not None:
                 await conn.execute(
-                    """
-                    INSERT INTO live_position_batches (
-                        environment, account_label, batch_id, symbol,
-                        position_side, quantity, entry_price, entry_bar_time,
-                        exit_order_submitted_at, status, realized_pnl,
-                        exiting_quantity, updated_at
-                    ) VALUES (
-                        :environment, :account_label, :batch_id, :symbol,
-                        :position_side, :quantity, :entry_price, :entry_bar_time,
-                        :exit_order_submitted_at, :status, :realized_pnl,
-                        :exiting_quantity, :updated_at
-                    )
-                    ON CONFLICT (environment, account_label, batch_id)
-                    DO UPDATE SET
-                        quantity = EXCLUDED.quantity,
-                        entry_price = EXCLUDED.entry_price,
-                        exit_order_submitted_at = COALESCE(
-                            EXCLUDED.exit_order_submitted_at,
-                            live_position_batches.exit_order_submitted_at
-                        ),
-                        status = EXCLUDED.status,
-                        realized_pnl = EXCLUDED.realized_pnl,
-                        exiting_quantity = EXCLUDED.exiting_quantity,
-                        updated_at = EXCLUDED.updated_at;
-                    """,
+                    text(
+                        """
+                        INSERT INTO live_position_batches (
+                            environment, account_label, batch_id, symbol,
+                            position_side, quantity, entry_price, entry_bar_time,
+                            exit_order_submitted_at, status, realized_pnl,
+                            exiting_quantity, updated_at
+                        ) VALUES (
+                            :environment, :account_label, :batch_id, :symbol,
+                            :position_side, :quantity, :entry_price, :entry_bar_time,
+                            :exit_order_submitted_at, :status, :realized_pnl,
+                            :exiting_quantity, :updated_at
+                        )
+                        ON CONFLICT (environment, account_label, batch_id)
+                        DO UPDATE SET
+                            quantity = EXCLUDED.quantity,
+                            entry_price = EXCLUDED.entry_price,
+                            exit_order_submitted_at = COALESCE(
+                                EXCLUDED.exit_order_submitted_at,
+                                live_position_batches.exit_order_submitted_at
+                            ),
+                            status = EXCLUDED.status,
+                            realized_pnl = EXCLUDED.realized_pnl,
+                            exiting_quantity = EXCLUDED.exiting_quantity,
+                            updated_at = EXCLUDED.updated_at;
+                        """
+                    ),
                     {
                         "environment": batch.environment,
                         "account_label": batch.account_label,
@@ -316,3 +367,149 @@ class PostgresTradingRepository:
                         "updated_at": batch.updated_at,
                     },
                 )
+
+    async def async_get_batch(
+        self, environment: str, account_label: str, batch_id: str
+    ) -> PositionBatch | None:
+        sql = """
+        SELECT environment, account_label, batch_id, symbol, position_side,
+               quantity, entry_price, entry_bar_time, exit_order_submitted_at,
+               status, realized_pnl, exiting_quantity, updated_at
+        FROM live_position_batches
+        WHERE environment = :env AND account_label = :acc AND batch_id = :bid;
+        """
+        async with self._engine.connect() as conn:
+            res = await conn.execute(
+                text(sql),
+                {"env": environment, "acc": account_label, "bid": batch_id},
+            )
+            row = res.mappings().first()
+            if not row:
+                return None
+            return PositionBatch(
+                environment=row["environment"],
+                account_label=row["account_label"],
+                batch_id=row["batch_id"],
+                symbol=row["symbol"],
+                position_side=row["position_side"],
+                quantity=Decimal(str(row["quantity"])),
+                entry_price=Decimal(str(row["entry_price"])),
+                entry_bar_time=row["entry_bar_time"],
+                exit_order_submitted_at=row["exit_order_submitted_at"],
+                status=row["status"],
+                realized_pnl=Decimal(str(row["realized_pnl"])),
+                exiting_quantity=Decimal(str(row["exiting_quantity"])),
+                updated_at=row["updated_at"],
+            )
+
+    async def async_get_active_batches(
+        self, environment: str, account_label: str
+    ) -> list[PositionBatch]:
+        sql = """
+        SELECT environment, account_label, batch_id, symbol, position_side,
+               quantity, entry_price, entry_bar_time, exit_order_submitted_at,
+               status, realized_pnl, exiting_quantity, updated_at
+        FROM live_position_batches
+        WHERE environment = :env AND account_label = :acc
+          AND status IN ('ACTIVE', 'EXITING')
+        ORDER BY entry_bar_time ASC;
+        """
+        async with self._engine.connect() as conn:
+            res = await conn.execute(
+                text(sql), {"env": environment, "acc": account_label}
+            )
+            rows = res.mappings().all()
+            return [
+                PositionBatch(
+                    environment=r["environment"],
+                    account_label=r["account_label"],
+                    batch_id=r["batch_id"],
+                    symbol=r["symbol"],
+                    position_side=r["position_side"],
+                    quantity=Decimal(str(r["quantity"])),
+                    entry_price=Decimal(str(r["entry_price"])),
+                    entry_bar_time=r["entry_bar_time"],
+                    exit_order_submitted_at=r["exit_order_submitted_at"],
+                    status=r["status"],
+                    realized_pnl=Decimal(str(r["realized_pnl"])),
+                    exiting_quantity=Decimal(str(r["exiting_quantity"])),
+                    updated_at=r["updated_at"],
+                )
+                for r in rows
+            ]
+
+    async def async_get_order(
+        self, environment: str, account_label: str, client_order_id: str
+    ) -> Order | None:
+        sql = """
+        SELECT environment, account_label, client_order_id, exchange_order_id,
+               batch_id, symbol, side, position_side, order_type, quantity, price,
+               status, filled_quantity, average_price, created_at, updated_at
+        FROM live_orders
+        WHERE environment = :env AND account_label = :acc AND client_order_id = :cid;
+        """
+        async with self._engine.connect() as conn:
+            res = await conn.execute(
+                text(sql),
+                {"env": environment, "acc": account_label, "cid": client_order_id},
+            )
+            row = res.mappings().first()
+            if not row:
+                return None
+            return Order(
+                environment=row["environment"],
+                account_label=row["account_label"],
+                client_order_id=row["client_order_id"],
+                batch_id=row["batch_id"],
+                symbol=row["symbol"],
+                side=row["side"],
+                position_side=row["position_side"],
+                order_type=row["order_type"],
+                quantity=Decimal(str(row["quantity"])),
+                price=Decimal(str(row["price"])) if row["price"] is not None else None,
+                status=OrderStatus[row["status"]],
+                exchange_order_id=row["exchange_order_id"],
+                filled_qty=Decimal(str(row["filled_quantity"])),
+                avg_price=Decimal(str(row["average_price"])),
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+
+    async def async_get_recent_orders(
+        self, environment: str, account_label: str, limit: int = 50
+    ) -> list[Order]:
+        sql = """
+        SELECT environment, account_label, client_order_id, exchange_order_id,
+               batch_id, symbol, side, position_side, order_type, quantity, price,
+               status, filled_quantity, average_price, created_at, updated_at
+        FROM live_orders
+        WHERE environment = :env AND account_label = :acc
+        ORDER BY created_at DESC
+        LIMIT :limit;
+        """
+        async with self._engine.connect() as conn:
+            res = await conn.execute(
+                text(sql), {"env": environment, "acc": account_label, "limit": limit}
+            )
+            rows = res.mappings().all()
+            return [
+                Order(
+                    environment=r["environment"],
+                    account_label=r["account_label"],
+                    client_order_id=r["client_order_id"],
+                    batch_id=r["batch_id"],
+                    symbol=r["symbol"],
+                    side=r["side"],
+                    position_side=r["position_side"],
+                    order_type=r["order_type"],
+                    quantity=Decimal(str(r["quantity"])),
+                    price=Decimal(str(r["price"])) if r["price"] is not None else None,
+                    status=OrderStatus[r["status"]],
+                    exchange_order_id=r["exchange_order_id"],
+                    filled_qty=Decimal(str(r["filled_quantity"])),
+                    avg_price=Decimal(str(r["average_price"])),
+                    created_at=r["created_at"],
+                    updated_at=r["updated_at"],
+                )
+                for r in rows
+            ]
