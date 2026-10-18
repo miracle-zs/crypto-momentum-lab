@@ -267,7 +267,6 @@ if command -v systemctl >/dev/null 2>&1; then
 fi
 
 running_services=()
-services=()
 for service in dashboard market-data research-collector \
   live-strategy live-strategy-account-2 live-strategy-account-3 live-strategy-account-4 \
   nextgen-strategy-primary nextgen-strategy-account-2 nextgen-strategy-account-3 nextgen-strategy-account-4; do
@@ -277,14 +276,10 @@ for service in dashboard market-data research-collector \
   fi
 done
 
-for service in "${running_services[@]}"; do
-  case "$service" in
-    dashboard|market-data|research-collector) services+=("$service") ;;
-  esac
-done
-# Always start the target engine's account services.  A controlled flatten
-# operator may have stopped the legacy services before this script runs; the
-# target must still be started in that case.
+# Start the base application services even after a previous deployment attempt
+# stopped them, and always start the selected engine's account services.  A
+# controlled flatten may have stopped the legacy strategies beforehand.
+services=(dashboard market-data research-collector)
 for item in "${accounts[@]}"; do
   services+=("${item#*:}")
 done
