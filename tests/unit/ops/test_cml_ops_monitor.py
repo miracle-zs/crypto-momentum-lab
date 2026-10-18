@@ -1834,6 +1834,7 @@ def test_build_config_discovers_live_accounts_from_compose_files(
     assert config.services == (
         "postgres",
         "market-data",
+        "research-collector",
         "live-strategy",
         "live-strategy-account-2",
         "live-strategy-account-4",

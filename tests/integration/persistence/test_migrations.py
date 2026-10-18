@@ -93,3 +93,7 @@ def test_initial_migration_creates_universe_tables(database_url: str) -> None:
             "first_seen_at",
         } <= columns
         assert "ix_execution_trade_identities_order" in indexes
+
+    if revision >= "20261018_0067":
+        assert {"live_position_batches", "live_orders"} <= table_names
+
