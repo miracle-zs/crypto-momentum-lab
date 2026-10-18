@@ -20,6 +20,7 @@ from crypto_momentum_lab.next_gen.persistence import (
     TradingRepositoryProtocol,
     compute_advisory_lock_key,
 )
+from crypto_momentum_lab.next_gen.strategy_engine import MomentumStrategyEngine
 
 log = structlog.get_logger("next_gen_daemon")
 
@@ -35,6 +36,9 @@ class NextGenDaemon:
         rest_client: BinanceRestClient,
         ws_client: BinanceUserDataStream | None = None,
         market_data_provider: Any = None,
+        strategy_engine: MomentumStrategyEngine | None = None,
+        exit_manager: ExitManager | None = None,
+        symbols: list[str] | None = None,
         stop_event: asyncio.Event | None = None,
     ) -> None:
         self.environment = environment
@@ -61,10 +65,15 @@ class NextGenDaemon:
             state=self.state,
             db=db,
         )
-        self.exit_manager = ExitManager(
+        self.exit_manager = exit_manager or ExitManager(
             rest_client=rest_client,
             state=self.state,
             executor=self.order_executor,
+        )
+        self.strategy_engine = strategy_engine or MomentumStrategyEngine(
+            state=self.state,
+            order_executor=self.order_executor,
+            symbols=symbols,
         )
 
     async def _wait_for_stop(self) -> None:
@@ -72,15 +81,16 @@ class NextGenDaemon:
         await self.stop_event.wait()
         log.info("stop_event_received_shutting_down", account=self.account_label)
         await self.ws_client.close()
+        await self.exit_manager.close()
         await self.order_executor.close()
 
     async def run(self, keepalive_interval_sec: float = 1800.0) -> None:
         """端到端生命周期执行入口：
         1. 获取 PostgreSQL 会话级 Advisory Lock (防多进程开仓互斥)；
-        2. 行情预热；
+        2. 行情与策略预热；
         3. 严格空仓基线检查 (assert_flat_baseline_or_abort)；
         4. 建立 WebSocket 长连并握手；
-        5. 启动 TaskGroup 结构化并发协程；
+        5. 启动 TaskGroup 结构化并发协程 (WS 流、Keepalive、策略计算、退出评估)；
         6. 退出后释放资源并设置 STOPPED 状态。
         """
         lock_key = compute_advisory_lock_key(
@@ -98,6 +108,7 @@ class NextGenDaemon:
                 self.market_data_provider, "warmup"
             ):
                 await self.market_data_provider.warmup()
+            await self.strategy_engine.warmup_market_data()
 
             # 阶段 3: 严格空仓基线检查 (存量非零持仓/挂单则 Fail-Fast 阻断)
             await assert_flat_baseline_or_abort(self.rest_client, self.state)
@@ -115,14 +126,24 @@ class NextGenDaemon:
                 # 阶段 5: 结构化并发协同 (asyncio.TaskGroup)
                 async with asyncio.TaskGroup() as tg:
                     tg.create_task(
+                        self.ws_client.run_stream(stop_event=self.stop_event)
+                    )
+                    tg.create_task(
                         self.ws_client.run_with_keepalive(
                             keepalive_interval_sec=keepalive_interval_sec,
                             stop_event=self.stop_event,
                         )
                     )
+                    tg.create_task(
+                        self.strategy_engine.run(stop_event=self.stop_event)
+                    )
+                    tg.create_task(
+                        self.exit_manager.run(stop_event=self.stop_event)
+                    )
                     tg.create_task(self._wait_for_stop())
             finally:
                 self.state.set_system_mode(SystemMode.STOPPED)
+                await self.exit_manager.close()
                 await self.order_executor.close()
                 log.info(
                     "daemon_stopped",
@@ -137,6 +158,9 @@ async def run_nextgen_daemon(
     db: TradingRepositoryProtocol,
     rest_client: BinanceRestClient,
     market_data_provider: Any = None,
+    strategy_engine: MomentumStrategyEngine | None = None,
+    exit_manager: ExitManager | None = None,
+    symbols: list[str] | None = None,
     ws_client: BinanceUserDataStream | None = None,
     stop_event: asyncio.Event | None = None,
     keepalive_interval_sec: float = 1800.0,
@@ -149,6 +173,9 @@ async def run_nextgen_daemon(
         rest_client=rest_client,
         ws_client=ws_client,
         market_data_provider=market_data_provider,
+        strategy_engine=strategy_engine,
+        exit_manager=exit_manager,
+        symbols=symbols,
         stop_event=stop_event,
     )
     await daemon.run(keepalive_interval_sec=keepalive_interval_sec)
