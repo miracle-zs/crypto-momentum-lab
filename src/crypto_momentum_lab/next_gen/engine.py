@@ -1,8 +1,13 @@
+from __future__ import annotations
+
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from crypto_momentum_lab.next_gen.persistence import TradingRepositoryProtocol
 
 import structlog
 
@@ -39,12 +44,12 @@ class AccountState:
         self,
         environment: str,
         account_label: str,
-        db: Any,
+        db: TradingRepositoryProtocol | None = None,
         rest_client: Any = None,
     ) -> None:
         self.environment = environment
         self.account_label = account_label
-        self._db = db
+        self._db: TradingRepositoryProtocol | None = db
         self._rest_client = rest_client
         self._ws_client: Any = None
 
@@ -63,6 +68,10 @@ class AccountState:
         self.is_draining: bool = False
         self.ws_connected: bool = False
         self.has_unrecoverable_fault: bool = False
+
+    @property
+    def db(self) -> TradingRepositoryProtocol | None:
+        return self._db
 
     def attach_ws_client(self, ws_client: Any) -> None:
         self._ws_client = ws_client
@@ -385,13 +394,21 @@ class AccountState:
             exchange_order_id=exchange_order_id,
         )
 
-        if order.is_terminal:
-            self._release_active_order_lock(order)
-
         batch = self.batches.get(order.batch_id)
         is_exit = (order.position_side == "LONG" and order.side == "SELL") or (
             order.position_side == "SHORT" and order.side == "BUY"
         )
+
+        if order.is_terminal:
+            self._release_active_order_lock(order)
+            if (
+                is_exit
+                and batch
+                and order.status in (OrderStatus.CANCELED, OrderStatus.REJECTED)
+            ):
+                unfilled = max(Decimal("0"), order.quantity - order.filled_qty)
+                if unfilled > Decimal("0"):
+                    batch.release_exit_reservation(unfilled)
 
         if not is_exit and batch is None and delta_qty > Decimal("0"):
             batch = PositionBatch(
