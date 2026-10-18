@@ -15,6 +15,9 @@ from crypto_momentum_lab.domain.strategy.position_exit import (
     PositionExitPolicy,
     position_exit_reason,
 )
+from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
+    ScheduledRiskWindowPhase,
+)
 from crypto_momentum_lab.next_gen.client import BinanceRestClient
 from crypto_momentum_lab.next_gen.engine import AccountState
 from crypto_momentum_lab.next_gen.executor import OrderExecutor
@@ -47,6 +50,7 @@ class ExitManager:
         self.grace_profit_pct = grace_profit_pct
         self.eval_interval_sec = eval_interval_sec
         self._active_exit_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._last_schedule_observation: tuple[str, str] | None = None
 
         if executor is not None:
             self._executor = executor
@@ -58,7 +62,7 @@ class ExitManager:
     async def execute_batch_exit(
         self,
         batch_id: str,
-        limit_price: Decimal,
+        limit_price: Decimal | None,
         grace_period_sec: float | None = None,
         immediate: bool = False,
     ) -> None:
@@ -91,11 +95,19 @@ class ExitManager:
             return
 
         # 1. 提交限价退出单 (按标的规则对齐价格与数量)
-        rounded_limit_price = self.symbol_rules.round_price(batch.symbol, limit_price)
+        rounded_limit_price = None
+        if not immediate:
+            if limit_price is None:
+                raise ValueError("LIMIT exit requires a price")
+            rounded_limit_price = self.symbol_rules.round_price(
+                batch.symbol, limit_price
+            )
         rounded_exit_qty = self.symbol_rules.round_quantity(
             batch.symbol, batch.quantity
         )
-        if rounded_exit_qty <= Decimal("0") or rounded_limit_price <= Decimal("0"):
+        if rounded_exit_qty <= 0 or (
+            rounded_limit_price is not None and rounded_limit_price <= 0
+        ):
             return
 
         limit_order = self._state.create_exit_order(
@@ -116,7 +128,23 @@ class ExitManager:
         # Keep the original persisted deadline across process restarts.
         submitted_at = batch.exit_order_submitted_at or datetime.now(UTC)
         elapsed = (datetime.now(UTC) - submitted_at).total_seconds()
-        await asyncio.sleep(max(0, grace_sec - elapsed))
+        remaining = max(0.0, grace_sec - elapsed)
+        schedule = self._state.scheduled_risk_window
+        if schedule is not None:
+            now = datetime.now(UTC)
+            local_now = schedule.localize(now)
+            flatten_at = datetime.combine(
+                local_now.date(), schedule.flatten_start_at, tzinfo=schedule.zone
+            )
+            if self._state.scheduled_flatten_pending or schedule.phase(now) in {
+                ScheduledRiskWindowPhase.FLATTENING,
+                ScheduledRiskWindowPhase.DEADLINE,
+                ScheduledRiskWindowPhase.VERIFYING,
+            }:
+                remaining = 0.0
+            elif local_now < flatten_at:
+                remaining = min(remaining, (flatten_at - local_now).total_seconds())
+        await asyncio.sleep(remaining)
 
         # 3. 检查批次是否仍有敞口
         current_batch = self._state.batches.get(batch_id)
@@ -155,6 +183,16 @@ class ExitManager:
             return []
 
         eval_now = now or datetime.now(UTC)
+        schedule = self._state.scheduled_risk_window
+        scheduled_flatten = self._state.scheduled_flatten_pending or (
+            schedule is not None
+            and schedule.phase(eval_now)
+            in {
+                ScheduledRiskWindowPhase.FLATTENING,
+                ScheduledRiskWindowPhase.DEADLINE,
+                ScheduledRiskWindowPhase.VERIFYING,
+            }
+        )
         scheduled_batch_ids: list[str] = []
         prices = current_prices or {}
 
@@ -174,7 +212,10 @@ class ExitManager:
             exit_reason = ""
 
             # 规则 1: 管理员下发受控排空 (Drain)
-            if self._state.is_draining:
+            if scheduled_flatten:
+                should_exit = True
+                exit_reason = "scheduled_risk_window"
+            elif self._state.is_draining:
                 should_exit = True
                 exit_reason = "drain_active"
             else:
@@ -192,22 +233,29 @@ class ExitManager:
                     exit_reason = reason
 
             if should_exit:
-                if batch.symbol not in prices:
+                forced = scheduled_flatten or self._state.is_draining
+                if not forced and batch.symbol not in prices:
                     continue
-                reference_price = prices[batch.symbol]
                 direction = (
                     Decimal("1") if batch.position_side == "LONG" else Decimal("-1")
                 )
                 gross_return = (
-                    direction
-                    * (reference_price - batch.entry_price)
-                    / batch.entry_price
+                    (
+                        direction
+                        * (prices[batch.symbol] - batch.entry_price)
+                        / batch.entry_price
+                    )
+                    if not forced
+                    else None
                 )
                 immediate = (
-                    self._state.is_draining
+                    forced
                     or self.grace_period_sec == 0
                     or self.grace_profit_pct == 0
-                    or gross_return >= self.decision_profit_pct
+                    or (
+                        gross_return is not None
+                        and gross_return >= self.decision_profit_pct
+                    )
                 )
                 limit_price = batch.entry_price * (
                     1 + direction * self.grace_profit_pct
@@ -231,6 +279,49 @@ class ExitManager:
                 scheduled_batch_ids.append(batch.batch_id)
 
         return scheduled_batch_ids
+
+    async def _process_scheduled_window(self, now: datetime) -> None:
+        schedule = self._state.scheduled_risk_window
+        if schedule is None:
+            return
+        phase = schedule.phase(now)
+        if phase in {
+            ScheduledRiskWindowPhase.FLATTENING,
+            ScheduledRiskWindowPhase.DEADLINE,
+            ScheduledRiskWindowPhase.VERIFYING,
+        }:
+            self._state.scheduled_flatten_pending = True
+        if self._state.scheduled_entry_blocked(now):
+            await self._executor.wait_for_submissions()
+            for order in list(self._state.orders.values()):
+                is_entry = (order.position_side == "LONG" and order.side == "BUY") or (
+                    order.position_side == "SHORT" and order.side == "SELL"
+                )
+                if is_entry and not order.is_terminal:
+                    if not await self._executor.cancel_and_confirm(order):
+                        return
+            if not any(batch.quantity > 0 for batch in self._state.batches.values()):
+                self._state.scheduled_flatten_pending = False
+        observation = (schedule.localize(now).date().isoformat(), phase.value)
+        if observation != self._last_schedule_observation:
+            self._last_schedule_observation = observation
+            report = (
+                log.error
+                if phase
+                in {
+                    ScheduledRiskWindowPhase.VERIFYING,
+                    ScheduledRiskWindowPhase.REOPENED,
+                }
+                and self._state.scheduled_flatten_pending
+                else log.info
+            )
+            report(
+                "scheduled_risk_window_status",
+                account=self._state.account_label,
+                phase=phase.value,
+                entry_blocked=self._state.scheduled_entry_blocked(now),
+                flatten_pending=self._state.scheduled_flatten_pending,
+            )
 
     def resume_active_exits(self) -> None:
         for order in self._state.orders.values():
@@ -307,6 +398,7 @@ class ExitManager:
                 else:
                     await asyncio.sleep(self.eval_interval_sec)
 
+                await self._process_scheduled_window(datetime.now(UTC))
                 prices: dict[str, Decimal] = {}
                 if price_provider is not None:
                     for batch in self._state.batches.values():

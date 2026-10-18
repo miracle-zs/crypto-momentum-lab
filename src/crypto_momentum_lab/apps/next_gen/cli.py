@@ -5,7 +5,6 @@ import json
 import os
 import signal
 from collections.abc import Awaitable, Callable
-from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -327,7 +326,6 @@ def drain_command(
             environment, account_label, db=repo, rest_client=read_client
         )
         state.is_draining = True
-        state.set_system_mode(SystemMode.DRAINING)
         executor = OrderExecutor(trade_client, state, repo, read_client=read_client)
         ws_client = BinanceUserDataStream(read_client, environment=environment)
         ws_client.on_status_change = state.on_ws_status_change
@@ -339,27 +337,12 @@ def drain_command(
                 rules = SymbolRulesRegistry()
                 rules.update_from_exchange_info(await read_client.fetch_exchange_info())
                 await executor.load_active_state()
-                # This is the drain process startup baseline, before any command.
-                snapshot = await read_client.fetch_account_information()
-                open_orders = await read_client.fetch_open_orders()
-                expected: dict[tuple[str, str], Decimal] = {}
-                for batch in state.batches.values():
-                    if batch.quantity > 0:
-                        key = (batch.symbol, batch.position_side)
-                        expected[key] = expected.get(key, 0) + batch.quantity
-                actual = {
-                    (p.symbol, p.position_side): abs(p.position_amt)
-                    for p in snapshot.positions
-                    if p.position_amt != 0
-                }
-                if actual != expected or any(
-                    o["clientOrderId"] not in state.orders for o in open_orders
-                ):
-                    raise RuntimeError(
-                        "Drain startup baseline differs from stored state"
-                    )
                 await ws_client.connect(on_event=state.on_live_event)
                 stream_task = asyncio.create_task(ws_client.run_stream())
+                # Reuse normal startup recovery for previously submitted exits;
+                # never send a replacement before recovering their outcome.
+                await executor.restore_startup_state()
+                state.set_system_mode(SystemMode.DRAINING)
                 drained_count = await executor.drain(rules)
                 state.set_system_mode(SystemMode.STOPPED)
                 log.info(

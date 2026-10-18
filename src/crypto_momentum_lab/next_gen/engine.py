@@ -12,6 +12,9 @@ if TYPE_CHECKING:
 import structlog
 
 from crypto_momentum_lab.domain.risk.models import RiskConfigSnapshot
+from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
+    ScheduledRiskWindowConfig,
+)
 from crypto_momentum_lab.next_gen.models import (
     Order,
     OrderStatus,
@@ -68,6 +71,8 @@ class AccountState:
         self.system_mode: SystemMode = SystemMode.BOOTING
         self.is_draining: bool = False
         self.entry_halted = False
+        self.scheduled_risk_window: ScheduledRiskWindowConfig | None = None
+        self.scheduled_flatten_pending = False
         self.ws_connected: bool = False
         self.has_unrecoverable_fault: bool = False
         self.private_stream_gap = False
@@ -161,6 +166,7 @@ class AccountState:
             or self.is_draining
             or self.risk_config is None
             or self.entry_halted
+            or self.scheduled_entry_blocked()
         ):
             return False
         has_in_doubt = any(
@@ -171,6 +177,14 @@ class AccountState:
             and not self.has_unrecoverable_fault
             and not has_in_doubt
             and not self.private_stream_gap
+        )
+
+    def scheduled_entry_blocked(self, now: datetime | None = None) -> bool:
+        return self.scheduled_flatten_pending or (
+            self.scheduled_risk_window is not None
+            and not self.scheduled_risk_window.is_entry_allowed(
+                now or datetime.now(UTC)
+            )
         )
 
     def can_submit_exit_order(self) -> bool:
@@ -414,12 +428,16 @@ class AccountState:
             self.set_system_mode(SystemMode.DEGRADED)
 
     async def wait_for_terminal(self, order: Order, timeout_sec: float) -> None:
-        event = self._terminal_waiters.setdefault(
-            order.client_order_id, asyncio.Event()
-        )
+        # An in-memory terminal status can precede the transaction commit.
+        # Wait for the private-event handler before observing completion.
+        async with self._update_lock:
+            if order.is_terminal:
+                return
+            event = self._terminal_waiters.setdefault(
+                order.client_order_id, asyncio.Event()
+            )
         try:
-            if not order.is_terminal:
-                await asyncio.wait_for(event.wait(), timeout_sec)
+            await asyncio.wait_for(event.wait(), timeout_sec)
         except TimeoutError:
             pass
         finally:
@@ -536,9 +554,6 @@ class AccountState:
         )
 
         if order.is_terminal:
-            waiter = self._terminal_waiters.get(order.client_order_id)
-            if waiter is not None:
-                waiter.set()
             self._release_active_order_lock(order)
             if (
                 is_exit
@@ -620,3 +635,7 @@ class AccountState:
                 self.set_system_mode(SystemMode.DEGRADED)
 
         self.recheck_system_mode()
+        if order.is_terminal and not self.has_unrecoverable_fault:
+            waiter = self._terminal_waiters.get(order.client_order_id)
+            if waiter is not None:
+                waiter.set()

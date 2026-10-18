@@ -15,6 +15,9 @@ from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     ClosedCandle15mFeedConfig,
 )
 from crypto_momentum_lab.live_rollout.runtime_manifest import LiveRuntimeAccount
+from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
+    ScheduledRiskWindowConfig,
+)
 from crypto_momentum_lab.next_gen.client import (
     BinanceRestClient,
     BinanceUserDataStream,
@@ -83,6 +86,7 @@ class NextGenDaemon:
             db=db,
             rest_client=self.read_client,
         )
+        self.state.scheduled_risk_window = ScheduledRiskWindowConfig.from_environment()
         self.ws_client.on_status_change = self._on_ws_status_change
         self.state.attach_ws_client(self.ws_client)
 
@@ -209,6 +213,7 @@ class NextGenDaemon:
                 "ws_connected": self.state.ws_connected,
                 "halt_active": self.state.entry_halted,
                 "entry_gate_open": ready and self.state.can_submit_entry_order(),
+                "scheduled_entry_blocked": self.state.scheduled_entry_blocked(),
                 "exit_gate_open": self.state.can_submit_exit_order(),
                 "market_data": self.strategy_engine.market_data_observation,
                 "balances": {

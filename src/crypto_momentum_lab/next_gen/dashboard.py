@@ -101,6 +101,8 @@ class NextGenDashboardQueries:
                 entry_gate_open=fresh and payload["entry_gate_open"],
                 entry_gate_reason="ready"
                 if fresh and payload["entry_gate_open"]
+                else "scheduled_risk_window"
+                if fresh and payload.get("scheduled_entry_blocked") is True
                 else "runtime_not_ready",
                 exit_gate_open=fresh and payload["exit_gate_open"],
                 exit_gate_reason="ready"
@@ -139,6 +141,21 @@ class NextGenDashboardQueries:
     async def readiness(self, liveness: dict[str, str]) -> SystemReadinessResponse:
         fleet = await self.live_accounts()
         ready = fleet.status is OperationalStatus.READY
+        can_enter = (
+            ready
+            and bool(fleet.accounts)
+            and all(
+                account.runtime_tradeability is not None
+                and account.runtime_tradeability.entry_gate_open
+                for account in fleet.accounts
+            )
+        )
+        scheduled_block = any(
+            account.runtime_tradeability is not None
+            and account.runtime_tradeability.entry_gate_reason
+            == "scheduled_risk_window"
+            for account in fleet.accounts
+        )
         can_exit = bool(fleet.accounts) and all(
             account.runtime_tradeability is not None
             and account.runtime_tradeability.exit_gate_open
@@ -150,8 +167,12 @@ class NextGenDashboardQueries:
             liveness=liveness,
             tradeability=TradeabilityDetailResponse(
                 mode="RUNNING" if ready else "DEGRADED",
-                entry_gate_open=ready,
-                entry_gate_reason="ready" if ready else "account_runtime_not_ready",
+                entry_gate_open=can_enter,
+                entry_gate_reason="ready"
+                if can_enter
+                else "scheduled_risk_window"
+                if scheduled_block
+                else "account_runtime_not_ready",
                 exit_gate_open=can_exit,
                 exit_gate_reason="ready" if can_exit else "account_runtime_not_ready",
             ),
