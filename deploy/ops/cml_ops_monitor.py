@@ -3332,21 +3332,21 @@ SELECT json_build_object(
                         "for name in memory.current memory.peak "
                         "memory.max memory.swap.current; do "
                         'if [ -r "/sys/fs/cgroup/$name" ]; then '
-                        "printf '%s=%s\\n' \"$name\" "
+                        "printf '%s=%s\n' \"$name\" "
                         '"$(cat "/sys/fs/cgroup/$name")"; fi; '
                         "done; "
                         "if [ -r /sys/fs/cgroup/memory.events ]; then "
                         "while read -r key value _; do "
                         'if [ "$key" = max ] || [ "$key" = oom_kill ]; then '
-                        "printf 'memory.events.%s=%s\\n' \"$key\" \"$value\"; "
+                        "printf 'memory.events.%s=%s\n' \"$key\" \"$value\"; "
                         "fi; done < /sys/fs/cgroup/memory.events; fi; "
                         "if [ -r /sys/fs/cgroup/memory.stat ]; then "
                         "while read -r key value _; do "
                         'case "$key" in '
                         "anon|file|shmem|slab|file_dirty|file_writeback) "
-                        'printf \'memory.stat.%s=%s\\n\' "$key" "$value"; '
+                        'printf \'memory.stat.%s=%s\n\' "$key" "$value"; '
                         ";; esac; "
-                        "fi; done < /sys/fs/cgroup/memory.stat; fi"
+                        "done < /sys/fs/cgroup/memory.stat; fi"
                     ),
                 ],
                 timeout_seconds=self._config.command_timeout_seconds,
