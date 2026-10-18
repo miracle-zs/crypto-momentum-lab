@@ -44,6 +44,10 @@ from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models impo
 from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
     ExecutionTradeIdentityRow as ExecutionTradeIdentityRow,
 )
+from crypto_momentum_lab.next_gen.db_models import (
+    LiveOrderRow as LiveOrderRow,
+    LivePositionBatchRow as LivePositionBatchRow,
+)
 
 
 class ContractMetadataRow(Base):
