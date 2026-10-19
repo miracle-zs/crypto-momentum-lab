@@ -936,3 +936,7 @@ NextGen Compose 补齐与现有研究采集器一致的 market-data healthy 启�
 现场同时暴露 drain 终态等待缺陷：订单内存终态会先于批次数量与双表事务完成，旧等待器过早唤醒，短命 drain 随后取消私有流，导致账户3/4的最后成交未写完。修正为持有既有更新锁检查终态，并在批次归账、持久化完成后唤醒等待器。drain 启动改为复用既有 restore_startup_state：先恢复已提交订单结果，再校对持仓/挂单基线，避免存疑退出直接被重发；不增加运行态 REST 查证。
 
 定时规则在现有退出循环执行，复用原时间配置：开仓安全门按墙钟阻断07:45–09:00；先等在途提交再撤开仓单，窗口中按批次市价清仓；已存在的宽限限价退出在清仓开始时提前结束等待，撤单确认后扫剩余量。07:58在私有流事实基础上报告是否仍有残余，不另加 REST 轮询；09:00有未完成清仓责任时继续停入场。09:00之后首次启动不会追补当天已经过去的窗口。看板账户/账户组的开仓门按实际子账户门汇总，并显示 scheduled_risk_window 原因；健康与开仓准入仍分离。源码 Ruff、语法编译及 diff 检查通过，未运行测试套件；此段代码尚待空仓发布及现场确认。
+
+最终现场结果（08:02 CST）：新 drain 启动恢复逐账户核实之前的市价退出，四账户均 drained_batches_count=0，未再提交订单；数据库四笔退出均 FILLED、filled_quantity=1874，对应批次均 CLOSED、quantity=0。随后按已满足的空仓发布条件，仅更新四账户及看板为 `1fdd2de2a1b507bdc2153257cfe01699121edebd`，行情和研究采集继续运行 `d3c0881b`，PostgreSQL未重启、迁移保持0067。服务器.env.server默认代码/看板版本已保存为1fdd2de2；所有容器healthy。四账户实际日志均出现 scheduled_risk_window_status：phase=verifying、entry_blocked=True、flatten_pending=False；readiness接口四账户READY、entry_gate_open=false且原因scheduled_risk_window、exit_gate_open=true。活动批次剩余持仓数0，未终态订单数0。09:00尚未到达，不能记为已经现场验证恢复开仓；下一天07:45由新定时入口自动触发的实盘清仓也尚未覆盖。
+
+“空仓后更新账户健康检查”临时heartbeat任务已完成并保持PAUSED，提示词注明实际发布版本，避免再次执行旧dad85e09计划。所有临时维护窗口已撤销；主机监控当前唯一活动告警是retention_timer_failed，下一次既有定时任务为08:20:03。没有reset-failed掩盖旧失败，没有手工执行归档删除。归档故障范围的只导出验证已成功，不等于整条定时清理及其ExecStartPost已成功。当前修复的验证仅包含静态检查、真实现场恢复/接口/日志和只读归档验证，没有新增或运行测试套件。
