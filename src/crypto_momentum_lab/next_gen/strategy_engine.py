@@ -299,9 +299,8 @@ class MomentumStrategyEngine:
                 symbol, execution.target_notional / price
             )
             price = self.symbol_rules.round_price(symbol, price)
-            reference_price = market_state.mark_price or market_state.effective_price
             valid, reason = self.symbol_rules.validate_order(
-                symbol, quantity, price, reference_price=reference_price
+                symbol, quantity, price
             )
             if not valid:
                 result["rejection_reason"] = reason
@@ -309,9 +308,6 @@ class MomentumStrategyEngine:
                     "entry_rejected_by_symbol_rules",
                     symbol=symbol,
                     reason=reason,
-                    reference_price=None
-                    if reference_price is None
-                    else str(reference_price),
                 )
                 continue
             if not self.state.check_notional_limits(

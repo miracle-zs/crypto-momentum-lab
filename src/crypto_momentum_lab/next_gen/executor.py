@@ -71,7 +71,9 @@ class OrderExecutor:
         try:
             await self._rest.set_margin_type(symbol, self._margin_type)
             await self._rest.set_leverage(symbol, leverage=self._entry_leverage)
-        except Exception:
+        except BinanceOrderRejectedError:
+            # Permanent exchange rejection for this symbol (for example -4028).
+            # Cache it; a transient network/429 failure must be retried.
             self._settings_failed_symbols.add(symbol)
             raise
         self._configured_symbols.add(symbol)

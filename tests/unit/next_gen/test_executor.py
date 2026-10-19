@@ -3,7 +3,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from crypto_momentum_lab.next_gen.client import BinanceOrderRejectedError
+from crypto_momentum_lab.next_gen.client import (
+    BinanceNetworkError,
+    BinanceOrderRejectedError,
+)
 from crypto_momentum_lab.next_gen.engine import AccountState
 from crypto_momentum_lab.next_gen.executor import OrderExecutor
 from crypto_momentum_lab.next_gen.models import (
@@ -150,3 +153,19 @@ async def test_symbol_preparation_failure_releases_unsent_entry(test_setup):
     assert order.client_order_id not in state.orders
     assert ("a1", "BTCUSDT", "LONG") not in state.active_entry_orders
     assert repo.get_order("live", "a1", order.client_order_id) is None
+
+
+@pytest.mark.asyncio
+async def test_transient_symbol_setting_failure_is_retried(test_setup):
+    state, repo, mock_rest, executor = test_setup
+    mock_rest.set_leverage.side_effect = BinanceNetworkError(
+        status_code=429, message="rate limited"
+    )
+
+    with pytest.raises(BinanceNetworkError):
+        await executor._ensure_symbol_settings("BTCUSDT")
+    with pytest.raises(BinanceNetworkError):
+        await executor._ensure_symbol_settings("BTCUSDT")
+
+    assert mock_rest.set_leverage.await_count == 2
+    assert "BTCUSDT" not in executor._settings_failed_symbols

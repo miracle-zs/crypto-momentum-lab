@@ -54,6 +54,8 @@ class ExitManager:
         self.eval_interval_sec = eval_interval_sec
         self._active_exit_tasks: dict[str, asyncio.Task[Any]] = {}
         self._rejected_exit_until: dict[str, datetime] = {}
+        # Only unfinished exit decisions; consumed by the existing evaluation loop.
+        self._pending_exits: dict[str, tuple[Decimal | None, float, bool]] = {}
         self._last_schedule_observation: tuple[str, str] | None = None
 
         if executor is not None:
@@ -82,6 +84,16 @@ class ExitManager:
         )
         batch = self._state.batches.get(batch_id)
         if not batch or batch.quantity <= Decimal("0"):
+            self._pending_exits.pop(batch_id, None)
+            return
+        self._pending_exits.setdefault(batch_id, (limit_price, grace_sec, immediate))
+        if batch.exit_order_submitted_at is not None:
+            expired = (
+                datetime.now(UTC) - batch.exit_order_submitted_at
+            ).total_seconds() >= grace_sec
+            immediate = immediate or expired
+        immediate = immediate or self._scheduled_flatten_due(datetime.now(UTC))
+        if not self._state.can_submit_exit_order():
             return
 
         # 0. 先确保撤销本批次所有尚未成交的开仓挂单，防止边平仓边被撮合成交
@@ -120,67 +132,47 @@ class ExitManager:
             price=None if immediate else rounded_limit_price,
             order_type="MARKET" if immediate else "LIMIT",
         )
-        try:
-            await self._executor.submit_order(limit_order)
-        except RuntimeError as error:
-            log.warning(
-                "exit_order_blocked_by_gate",
-                batch_id=batch_id,
-                symbol=batch.symbol,
-                immediate=immediate,
-                reason=str(error),
-            )
-            return
-        except BinanceOrderRejectedError as error:
-            log.warning(
-                "exit_order_rejected",
-                batch_id=batch_id,
-                symbol=batch.symbol,
-                immediate=immediate,
-                code=error.code,
-                reason=error.message,
-            )
-            self._rejected_exit_until[batch_id] = datetime.now(UTC) + timedelta(
-                seconds=30
-            )
-            if immediate:
-                return
-            # A rejected limit (for example a stale PERCENT_PRICE band) must
-            # not leave the position unmanaged: try a market sweep once.
-            batch = self._state.batches.get(batch_id)
-            if batch is None or batch.quantity <= 0:
-                return
-            sweep_qty = self.symbol_rules.round_quantity(batch.symbol, batch.quantity)
-            if sweep_qty <= 0:
-                return
-            market_order = self._state.create_exit_order(
-                batch_id=batch_id,
-                quantity=sweep_qty,
-                price=None,
-                order_type="MARKET",
-            )
-            try:
-                await self._executor.submit_order(market_order)
-            except BinanceOrderRejectedError as sweep_error:
-                log.warning(
-                    "exit_market_sweep_rejected",
-                    batch_id=batch_id,
-                    symbol=batch.symbol,
-                    code=sweep_error.code,
-                    reason=sweep_error.message,
-                )
-            except RuntimeError as block_error:
-                log.warning(
-                    "exit_market_sweep_blocked_by_gate",
-                    batch_id=batch_id,
-                    symbol=batch.symbol,
-                    reason=str(block_error),
-                )
+        if not await self._submit_exit_order(limit_order):
             return
         if immediate:
             return
 
         await self._complete_limit_exit(limit_order, grace_sec)
+
+    async def _submit_exit_order(self, order: Order) -> bool:
+        try:
+            await self._executor.submit_order(order)
+        except BinanceOrderRejectedError as error:
+            self._rejected_exit_until[order.batch_id] = datetime.now(UTC) + timedelta(
+                seconds=30
+            )
+            log.warning(
+                "exit_order_rejected",
+                batch_id=order.batch_id,
+                symbol=order.symbol,
+                order_type=order.order_type,
+                code=error.code,
+                reason=error.message,
+            )
+            # The rejection is already stored by the executor. Keep the original
+            # batch deadline too, so restart does not create a new grace period.
+            if self._state.db is not None:
+                await self._state.db.async_save_batch(
+                    self._state.batches[order.batch_id]
+                )
+            return False
+        except RuntimeError as error:
+            # A closed gate is temporary. Other RuntimeErrors are real faults.
+            if self._state.can_submit_exit_order():
+                raise
+            log.warning(
+                "exit_order_blocked_by_gate",
+                batch_id=order.batch_id,
+                symbol=order.symbol,
+                reason=str(error),
+            )
+            return False
+        return True
 
     def _scheduled_flatten_due(self, now: datetime) -> bool:
         schedule = self._state.scheduled_risk_window
@@ -197,6 +189,7 @@ class ExitManager:
     async def _complete_limit_exit(self, limit_order: Order, grace_sec: float) -> None:
         batch_id = limit_order.batch_id
         batch = self._state.batches[batch_id]
+        self._pending_exits.setdefault(batch_id, (limit_order.price, grace_sec, False))
         # Keep the original persisted deadline across process restarts.
         submitted_at = batch.exit_order_submitted_at or datetime.now(UTC)
         elapsed = (datetime.now(UTC) - submitted_at).total_seconds()
@@ -238,7 +231,7 @@ class ExitManager:
                     price=None,
                     order_type="MARKET",
                 )
-                await self._executor.submit_order(market_order)
+                await self._submit_exit_order(market_order)
 
     def evaluate_active_batches(
         self,
@@ -257,6 +250,8 @@ class ExitManager:
 
         for batch in list(self._state.batches.values()):
             if batch.status == "CLOSED" or batch.quantity <= Decimal("0"):
+                self._pending_exits.pop(batch.batch_id, None)
+                self._rejected_exit_until.pop(batch.batch_id, None)
                 continue
 
             reject_until = self._rejected_exit_until.get(batch.batch_id)
@@ -270,6 +265,7 @@ class ExitManager:
                 # 批次已存在活跃平仓挂单，不重复调度
                 continue
 
+            pending_exit = self._pending_exits.get(batch.batch_id)
             should_exit = False
             exit_reason = ""
 
@@ -280,6 +276,9 @@ class ExitManager:
             elif self._state.is_draining:
                 should_exit = True
                 exit_reason = "drain_active"
+            elif pending_exit is not None:
+                should_exit = True
+                exit_reason = "resume_exit"
             else:
                 # Only a formal, fully closed 15m candle can trigger normal exit.
                 reason = position_exit_reason(
@@ -296,7 +295,7 @@ class ExitManager:
 
             if should_exit:
                 forced = scheduled_flatten or self._state.is_draining
-                if not forced and batch.symbol not in prices:
+                if not forced and pending_exit is None and batch.symbol not in prices:
                     continue
                 direction = (
                     Decimal("1") if batch.position_side == "LONG" else Decimal("-1")
@@ -307,7 +306,7 @@ class ExitManager:
                         * (prices[batch.symbol] - batch.entry_price)
                         / batch.entry_price
                     )
-                    if not forced
+                    if not forced and pending_exit is None
                     else None
                 )
                 immediate = (
@@ -322,6 +321,15 @@ class ExitManager:
                 limit_price = batch.entry_price * (
                     1 + direction * self.grace_profit_pct
                 )
+                grace_sec = self.grace_period_sec
+                if pending_exit is not None:
+                    limit_price, grace_sec, original_immediate = pending_exit
+                    expired = (
+                        batch.exit_order_submitted_at is not None
+                        and (eval_now - batch.exit_order_submitted_at).total_seconds()
+                        >= grace_sec
+                    )
+                    immediate = forced or original_immediate or expired
                 log.info(
                     "scheduling_batch_exit",
                     batch_id=batch.batch_id,
@@ -333,6 +341,7 @@ class ExitManager:
                     self.execute_batch_exit(
                         batch_id=batch.batch_id,
                         limit_price=limit_price,
+                        grace_period_sec=grace_sec,
                         immediate=immediate,
                     )
                 )
@@ -420,8 +429,9 @@ class ExitManager:
             )
             if (
                 previous is None
-                or previous.status is not OrderStatus.CANCELED
-                or previous.price is None
+                or previous.status not in (
+                    OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.FILLED
+                )
             ):
                 continue
             expired = (
@@ -431,7 +441,11 @@ class ExitManager:
                 self.execute_batch_exit(
                     batch.batch_id,
                     previous.price,
-                    immediate=expired or self._scheduled_flatten_due(datetime.now(UTC)),
+                    immediate=(
+                        previous.order_type == "MARKET"
+                        or expired
+                        or self._scheduled_flatten_due(datetime.now(UTC))
+                    ),
                 )
             )
             self._active_exit_tasks[batch.batch_id] = task

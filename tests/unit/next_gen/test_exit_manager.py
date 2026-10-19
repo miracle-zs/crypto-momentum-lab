@@ -476,13 +476,14 @@ async def test_candle_exit_uses_configured_profit_targets(
     execute.assert_awaited_once_with(
         batch_id=batch.batch_id,
         limit_price=Decimal("100.8800"),
+        grace_period_sec=manager.grace_period_sec,
         immediate=immediate,
     )
     await manager.close()
 
 
 @pytest.mark.asyncio
-async def test_exit_business_rejection_falls_back_to_market_without_degrade(
+async def test_exit_business_rejection_keeps_limit_decision_without_degrade(
     exit_setup,
 ):
     state, repo, rest, manager = exit_setup
@@ -512,7 +513,8 @@ async def test_exit_business_rejection_falls_back_to_market_without_degrade(
 
     assert state.has_unrecoverable_fault is False
     assert state.system_mode == SystemMode.RUNNING
-    assert rest.post_order.await_count == 2
+    assert rest.post_order.await_count == 1
     assert rest.post_order.await_args_list[0].kwargs["order_type"] == "LIMIT"
-    assert rest.post_order.await_args_list[1].kwargs["order_type"] == "MARKET"
+    assert batch.batch_id in manager._pending_exits
+    assert batch.batch_id in manager._rejected_exit_until
     assert state.batches[batch.batch_id].quantity == Decimal("1")
