@@ -15,6 +15,8 @@ x-nextgen-account-depends: &nextgen-account-depends
     condition: service_healthy
 
 x-nextgen-account-app: &nextgen-account-app
+  mem_limit: 192m
+  memswap_limit: 384m
   image: crypto-momentum-lab-app:${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
   environment: &nextgen-account-environment
     CML_DATABASE_URL: postgresql+asyncpg://cml:${CML_POSTGRES_PASSWORD:?set CML_POSTGRES_PASSWORD}@postgres:5432/cml
