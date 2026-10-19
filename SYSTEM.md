@@ -951,3 +951,5 @@ NextGen Compose 补齐与现有研究采集器一致的 market-data healthy 启�
 本轮仅执行Ruff、Python语法编译、前端构建和diff检查，未新增或运行测试套件。部署现场与自然信号完整字段样本待后续记录。
 
 现场发布e0ad990f完成，标准脚本耗时150秒；停机前后四账户交易所仓位/挂单均为空，7个应用服务同版且healthy，PostgreSQL未重启。4账户成交额缓存实际接收74个标的；08:14:45自然APRUSDT空信号记录成交额123539946.18 USDT、涨幅榜第3、scheduled_risk_window拒绝，前端实际显示全部三列，未发送订单。浏览器确认顶部定时停开仓至09:00、性能“未接入/不适用”。复核再清理账户详情顶部旧live-strategy/execution-account名称与“交易所配置已同步”错误文案；这项仅看板静态资源后续定向发布，不重启交易账户。
+
+08:17 CST看板文案修正e7867581已定向发布，仅重建dashboard，四账户/行情/采集继续运行e0ad990f。看板资源dashboard-e2a066af66798f23.js已实际返回，全部容器healthy；readiness=READY，开仓门scheduled_risk_window关闭、退出门开放。API再次确认APRUSDT自然信号三列完整，订单累计记录trade_at=null并明确order_updated_at。维护窗口已撤销，未改定时归档或手动清理数据。
