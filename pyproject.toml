@@ -26,6 +26,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+history = ["duckdb>=1.1,<2", "pytz>=2024.1"]
 dev = [
   "mypy>=1.14,<2",
   "pytest>=8.3,<9",

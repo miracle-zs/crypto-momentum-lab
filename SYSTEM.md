@@ -1025,3 +1025,19 @@ primary的GTCUSDT于10:31:30开仓；交易所11:00–11:15阴线应触发退出
 用户要求先补新版成交精度，再统一新旧历史，最后调整研究脚本。本地修改在账户WS的ORDER_TRADE_UPDATE中，仅对x=TRADE保存原始订单事件，读取交易所t/i/T/L/l/n/N/rp并复用AccountFillEvent和account_fill_events；唯一键为environment/account_label/symbol/trade_id，重复事件不重复插入。写入发生于累计订单状态推进之前，即使累计数量已接受过，也保存独立成交明细；订单与持仓更新规则保持，不以逐笔记录再次累计持仓。不增加表、迁移、服务或REST轮询。缺失必填成交字段不以零补齐。Ruff、三个源文件mypy、AST及diff检查通过，未新增或运行测试套件。尚未提交、部署或执行历史补录；历史补录需覆盖新版启用以来各账户有成交订单所属标的，按交易所成交身份去重，仅补历史表，不修改当前订单和持仓。
 
 本轮后续已提交推送d2612c13并按空仓准入部署，发布耗时192秒，停机前后四账户均零仓、零挂单；8个常驻容器healthy，数据库未重启。一次性userTrades补录仅针对live_orders中有成交且有交易所订单ID的订单：primary 29单/72笔，account-2 29单/52笔，account-3 39单/71笔，account-4 37单/92笔，共134单、287笔，均为新插入。逐标的起始时间取该账户对应订单最早created_at，分页完整性检查通过；写入前逐单核对数量，写入后SQL核对四账户quantity_mismatches均0。仅补account_fill_events，不修改当前订单、批次或余额；复用原始历史解析器的成交元数据。历史查询为一次性补录，不增加运行时REST轮询。新WS写入尚待自然成交样本确认；未新增或运行测试套件。
+
+### 新旧历史统一分析入口（2026-10-19）
+
+按用户确认的顺序，先整理历史再调整研究脚本。新增离线工具scripts/analysis_history.py，使用本地可选history依赖（DuckDB/pytz及项目已有PyArrow），输出data/analysis_history/history.duckdb；不修改实盘表、保留策略或服务配置。统一视图包括fills、orders、signals、balances、runtime_events、position_batches、logs，并保留16类原表的raw_*视图及history_sources来源清单。金额/数量使用DECIMAL(38,18)，时间使用UTC TIMESTAMPTZ；原始JSON、CSV和日志保留，缺失字段为NULL。旧订单账户由同run_id的真实成交归属唯一映射，本轮4个旧run均有唯一账户，不按名称猜测；新版订单直接使用原账户字段。旧余额采用exchange_snapshot，新版为local_mark_projection，不把两种估值口径抹平；旧持仓快照也不伪装成新版持仓批次。
+
+同步先将Docker当前可读取的日志保存为服务器持久gzip快照（/var/lib/crypto-momentum-lab/history-logs），再复制到本地并生成Parquet索引；主机监控、容器事件和归档任务journal也保留原始JSON。后续容器日志按上次until增量读取，已停止且没有新日志的容器跳过；日志查询按记录身份去重。本轮日志原始规范化行数与去重后行数一致。数据库逐表只读导出，归档在热表导出之后发现并同步，压缩文件逐一核对manifest SHA-256，CSV和JSONL两种既有格式均已纳入。原表主键消除热表与归档重叠，热表优先；运行事件按event_id和标准化occurred_at去重。逐表导出并非跨表同一时刻的事务快照，未伪造缺失时段或已轮转删除的日志。
+
+本轮实际整理16类热表、173份已校验归档、16个容器日志流及主机journal，总占用约1.4GiB，数据库本身以视图引用保留文件。本地查询预算2GiB/1线程，与生产容器限制无关。实际查询：成交26078条（primary 12409/account-2 4539/account-3 4461/account-4 4669），累计/合成标记均未出现且持仓方向均可读取；旧订单17015、新订单181，未归属账户0；旧信号65989、新信号185；运行事件7062892条（2026-08-22至本次导出）；可用日志2143014条（2026-10-02至本次保存），原始规范化行数相同。余额记录旧868733条、新14927条，保留独立估值来源。上述统计仅代表本次捕获的数据，不代表之后自动持续同步。
+
+维护入口：
+```bash
+rtk proxy .venv/bin/python scripts/analysis_history.py --host root@43.167.191.253
+rtk proxy .venv/bin/python scripts/analysis_history.py --build-only
+rtk proxy .venv/bin/python scripts/analysis_history.py --query "SELECT engine,count(*) FROM orders GROUP BY engine"
+```
+SSH使用已配置的密钥或--control-path指定的已登录会话，不在脚本中存密码。--build-only只重建本地视图；--query以只读方式打开本地库，不访问交易所。热表每轮重新导出、归档校验后复用、日志增量保存；未新增定时任务，研究脚本后续再接此入口。Ruff、语法及diff检查通过，已对真实数据执行上述查询核对，未新增或运行测试套件。
