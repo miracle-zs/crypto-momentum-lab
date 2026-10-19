@@ -9,13 +9,16 @@ Usage: update_server.sh <server-host|local> [git-ref]
 Deploys the selected commit to the server. Checks all four exchange accounts
 and waits until none have positions or open orders, then stops the running
 application services, updates the checkout, runs Compose migrations, and starts
-the same services again.
+the same services again. With CML_DEPLOY_SCOPE=dashboard, builds and replaces
+only the dashboard, without waiting for flat accounts or running migrations.
 
 Environment:
   CML_SERVER_USER  SSH user (default: root)
   CML_REMOTE_DIR   server checkout (default: /opt/crypto-momentum-lab)
   CML_SSH_PASSWORD optional sshpass password; SSH keys are preferred
   CML_TRADING_ENGINE legacy or nextgen; persisted on the server
+  CML_DEPLOY_SCOPE full (default) or dashboard (no migration/account restart)
+  CML_FLAT_WAIT_SECONDS maximum flat wait (default: 1800; 0 checks once)
 USAGE
 }
 
@@ -58,13 +61,23 @@ else
   runner=("${ssh_command[@]}" "${ssh_options[@]}" "${server_user}@${server_host}" bash -s --)
 fi
 
+deploy_scope="${CML_DEPLOY_SCOPE:-full}"
+flat_wait_seconds="${CML_FLAT_WAIT_SECONDS:-1800}"
+case "$deploy_scope" in full|dashboard) ;; *) echo "Invalid CML_DEPLOY_SCOPE" >&2; exit 64 ;; esac
+if [[ ! "$flat_wait_seconds" =~ ^[0-9]+$ || ${#flat_wait_seconds} -gt 8 ]]; then
+  echo "CML_FLAT_WAIT_SECONDS must be a nonnegative integer (at most 8 digits)" >&2
+  exit 64
+fi
+flat_wait_seconds=$((10#$flat_wait_seconds))
 client_started_at="$(date +%s)"
-if "${runner[@]}" "$remote_dir" "$target_ref" "${CML_TRADING_ENGINE:-}" <<'REMOTE_SCRIPT'; then
+if "${runner[@]}" "$remote_dir" "$target_ref" "${CML_TRADING_ENGINE:-}" "$deploy_scope" "$flat_wait_seconds" <<'REMOTE_SCRIPT'; then
 set -Eeuo pipefail
 
 remote_dir="$1"
 target_ref="$2"
 requested_engine="$3"
+deploy_scope="$4"
+flat_wait_seconds="$5"
 cd "$remote_dir"
 
 if [[ ! -f .env.server ]]; then
@@ -110,6 +123,27 @@ if [[ "$target_commit" != "$previous_commit" ]] && \
   [[ "$(git merge-base "$previous_commit" "$target_commit")" != "$previous_commit" ]]; then
   echo "Refusing deployment: target must fast-forward main" >&2
   exit 1
+fi
+
+set_env_value() {
+  local key="$1" value="$2"
+  if grep -q "^${key}=" .env.server; then
+    sed -i "s#^${key}=.*#${key}=${value}#" .env.server
+  else
+    printf '\n%s=%s\n' "$key" "$value" >> .env.server
+  fi
+}
+
+if [[ "$deploy_scope" == dashboard ]]; then
+  if [[ -n "$requested_engine" ]]; then
+    echo "Dashboard-only deployment cannot switch trading engine" >&2
+    exit 64
+  fi
+  current_code="$(sed -n 's/^CML_CODE_COMMIT=//p' .env.server | tail -n 1)"
+  if [[ -z "$current_code" ]] || ! git diff --quiet "$current_code" "$target_commit" -- alembic alembic.ini; then
+    echo "Dashboard-only deployment requires unchanged database migrations; use full deployment" >&2
+    exit 1
+  fi
 fi
 
 # Build the target image in the background while checking whether all accounts
@@ -169,6 +203,26 @@ check_target_build() {
   fi
 }
 
+if [[ "$deploy_scope" == dashboard ]]; then
+  finish_target_build
+  # Explicit service plus --no-deps avoids migrations and all trading services.
+  CML_DASHBOARD_IMAGE="$target_image" "${compose[@]}" up -d --no-deps \
+    --force-recreate --wait --wait-timeout 180 dashboard
+  container="$("${compose[@]}" ps -q dashboard)"
+  image="$(docker inspect -f '{{.Config.Image}}' "$container")"
+  if [[ "$image" != "$target_image" ]]; then
+    echo "Dashboard deployment failed: unexpected image=$image" >&2
+    exit 1
+  fi
+  curl --fail --silent --show-error --max-time 10 \
+    http://127.0.0.1:8765/api/health >/dev/null
+  set_env_value CML_DASHBOARD_IMAGE "$target_image"
+  chmod 600 .env.server
+  echo "deployed_commit=$target_commit scope=dashboard"
+  "${compose[@]}" ps dashboard
+  exit 0
+fi
+
 if [[ "$trading_engine" == "nextgen" ]]; then
   accounts=(
     "primary:nextgen-strategy-primary"
@@ -217,6 +271,7 @@ raise SystemExit(asyncio.run(main()))
 PY
 )
 
+flat_deadline=$(( $(date +%s) + flat_wait_seconds ))
 while :; do
   check_target_build
   all_flat=1
@@ -250,8 +305,15 @@ while :; do
   if (( all_flat == 1 )); then
     break
   fi
+  if (( $(date +%s) >= flat_deadline )); then
+    echo "Deployment stopped: accounts not proven flat within ${flat_wait_seconds}s; no application services stopped" >&2
+    exit 1
+  fi
   echo "Waiting for every account to have no positions or open orders; retrying in 30 seconds."
-  sleep 30
+  remaining=$(( flat_deadline - $(date +%s) ))
+  if (( remaining > 0 )); then
+    sleep "$(( remaining < 30 ? remaining : 30 ))"
+  fi
 done
 finish_target_build
 
@@ -341,14 +403,6 @@ done
 if [[ "$target_commit" != "$previous_commit" ]]; then
   git merge --ff-only "$target_commit"
 fi
-set_env_value() {
-  local key="$1" value="$2"
-  if grep -q "^${key}=" .env.server; then
-    sed -i "s#^${key}=.*#${key}=${value}#" .env.server
-  else
-    printf '\n%s=%s\n' "$key" "$value" >> .env.server
-  fi
-}
 set_env_value CML_TRADING_ENGINE "$trading_engine"
 set_env_value CML_CODE_COMMIT "$target_commit"
 set_env_value CML_DASHBOARD_IMAGE "crypto-momentum-lab-app:${target_commit}"
