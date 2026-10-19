@@ -684,16 +684,12 @@ def create_dashboard_app(
     async def account(
         equity_range: Literal["24h", "7d", "30d", "1y"] = "24h",
         account_label: OptionalAccountLabelQuery = None,
-        view: Literal["current", "legacy_history"] = "current",
+        view: Literal["current"] = "current",
     ) -> AccountOverviewResponse:
         try:
             cache_key = f"account:{account_label or 'latest'}:{equity_range}:{view}"
 
             async def load_account() -> AccountOverviewResponse:
-                if view == "legacy_history":
-                    return await query_service().account_history(
-                        equity_range, account_label=account_label
-                    )
                 if account_label is None:
                     return await query_service().account(equity_range)
                 return await query_service().account(

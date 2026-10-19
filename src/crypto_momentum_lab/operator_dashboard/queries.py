@@ -247,7 +247,6 @@ class DashboardQueries:
             session_factory,
             clock=self._clock,
         )
-        self._legacy_account_queries = self._account_queries
         self._performance_queries = PerformanceQueries(
             session_factory,
             clock=self._clock,
@@ -434,22 +433,6 @@ class DashboardQueries:
             account_label=account_label,
             environment=environment,
         )
-
-    async def account_history(
-        self, equity_range: str = "24h", account_label: str | None = None
-    ) -> AccountOverviewResponse:
-        result = await self._legacy_account_queries.account(
-            equity_range=equity_range, account_label=account_label, environment="live"
-        )
-        result.data_source = "legacy_history"
-        result.legacy_history_available = True
-        result.positions = []
-        result.open_orders = []
-        result.balances = []
-        result.live_signals = []
-        result.reconciliation = {}
-        result.summary = {}
-        return result
 
     async def risk_execution(self) -> RiskExecutionResponse:
         return await self._risk_execution_queries.risk_execution()

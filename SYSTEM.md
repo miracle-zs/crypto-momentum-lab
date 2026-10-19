@@ -1041,3 +1041,7 @@ rtk proxy .venv/bin/python scripts/analysis_history.py --build-only
 rtk proxy .venv/bin/python scripts/analysis_history.py --query "SELECT engine,count(*) FROM orders GROUP BY engine"
 ```
 SSH使用已配置的密钥或--control-path指定的已登录会话，不在脚本中存密码。--build-only只重建本地视图；--query以只读方式打开本地库，不访问交易所。热表每轮重新导出、归档校验后复用、日志增量保存；未新增定时任务，研究脚本后续再接此入口。Ruff、语法及diff检查通过，已对真实数据执行上述查询核对，未新增或运行测试套件。
+
+### 停用前端旧历史入口（2026-10-19）
+
+用户确认前端仅展示当前账户，历史研究在本地，并授权提交部署。本轮移除账户详情的新旧历史切换、旧历史渲染及轮询分支；移除account_history查询方法和legacy_history_available响应字段。/api/account只接受view=current，旧view=legacy_history请求明确返回422，不把旧请求悄悄改成当前数据。重新生成dashboard-f8ed6238e4fe71cd.js，移除旧构建产物。删除仅覆盖已退役切换功能的现有前端用例，调整现有API用例的预期，未新增或运行测试套件。Ruff、AST、前端构建和diff检查通过；queries.py仍有本轮修改之前已存在的类型检查问题。将使用dashboard独立发布模式，仅更换看板实例。历史物理合并脚本的未完成本地修改不纳入本次提交。

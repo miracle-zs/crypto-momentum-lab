@@ -37,7 +37,6 @@ const requests = [];
 
 function accountSnapshot(range, snapshotVersion) {
   return {
-    legacy_history_available: true,
     account_label: "primary",
     environment: "live",
     status: "READY",
@@ -457,16 +456,6 @@ await run("real DOM: same-root rapid render keeps the last version and releases 
 await run("real DOM: same-frame height changes in two roots keep the reading anchor stable", exerciseMultiRootAnchor);
 await run("real DOM: newer user focus wins over a queued same-root restore", exerciseFocusRace);
 
-await run("real DOM: history selection survives polling and returns to current", async () => {
-  const root = document.querySelector("#scenario");
-  root.querySelector('[data-account-view="legacy_history"]').click();
-  await waitFor(() => root.querySelector('[data-state-key="legacy-account-fills"]'), "legacy history did not load");
-  assert(!root.querySelector('[data-state-key="account-positions"]'), "legacy exposure appeared as current");
-  await updateLiveAccountsDynamic(root, { status: "READY", accounts: root.__liveAccountData });
-  assert(root.querySelector('[data-state-key="legacy-account-fills"]'), "poll reverted history to current");
-  assert(requests.at(-2)?.includes("view=legacy_history") || requests.at(-1)?.includes("view=legacy_history"), "history poll omitted view");
-  root.querySelector('[data-account-view="current"]').click();
-  await waitFor(() => root.querySelector('[data-state-key="account-positions"]'), "current view did not return");
-});
+
 
 document.documentElement.dataset.browserTestsComplete = "true";

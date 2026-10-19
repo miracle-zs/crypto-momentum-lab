@@ -401,7 +401,6 @@ class NextGenDashboardQueries:
         start, end, interval, points = await self._equity_points(label, equity_range)
         return AccountOverviewResponse(
             status=summary.status,
-            legacy_history_available=True,
             observed_at=summary.observed_at,
             environment="live",
             account_label=label,

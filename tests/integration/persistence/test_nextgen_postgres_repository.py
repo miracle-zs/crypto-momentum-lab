@@ -563,9 +563,7 @@ async def test_dashboard_reads_nextgen_state_and_never_invents_margin(postgres_r
                 "/api/account",
                 params={"account_label": label, "view": "legacy_history"},
             )
-            assert response.status_code == 200, response.text
-            assert response.json()["data_source"] == "legacy_history"
-            assert response.json()["positions"] == []
+            assert response.status_code == 422, response.text
         stale = NextGenDashboardQueries(
             async_sessionmaker(postgres_repo._engine),
             (config,),

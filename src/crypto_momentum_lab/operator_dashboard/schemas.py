@@ -280,8 +280,7 @@ class PaperAccountHistoryResponse(DashboardSchema):
 
 
 class AccountOverviewResponse(DashboardSchema):
-    data_source: Literal["current", "legacy_history"] = "current"
-    legacy_history_available: bool = False
+    data_source: Literal["current"] = "current"
     status: OperationalStatus
     observed_at: datetime | None
     balances: list[dict[str, JsonValue]]
