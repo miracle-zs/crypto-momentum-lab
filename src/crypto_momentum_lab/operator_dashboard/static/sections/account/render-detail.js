@@ -182,7 +182,7 @@ function renderFillsTable(fills, strategy) {
     { label: "数量", value: (row) => num(row.quantity, 4), align: "right" },
     { label: "成交片数", value: (row) => row.aggregation === "order" ? "订单累计" : (row.fill_count == null ? "—" : `${row.fill_count} 片`), align: "right", cls: "muted" },
     { label: "已实现盈亏", value: (row) => signedMoney(row.realized_pnl), align: "right", cls: (row) => pnlClass(row.realized_pnl) },
-    { label: "手续费", value: (row) => `${num(row.fee, 4)} ${row.fee_asset || ""}`, align: "right" },
+    { label: "手续费", value: (row) => row.fees ? Object.entries(row.fees).map(([asset, amount]) => `${num(amount, 4)} ${asset}`).join(" / ") : `${num(row.fee, 4)} ${row.fee_asset || ""}`, align: "right" },
     { label: "平仓原因", value: (row) => (row.is_exit ?? row.reduce_only) ? (row.close_reason || "退出原因未记录") : "开仓", cls: "muted" },
   ], fills, {
     emptyText: "尚无成交记录",

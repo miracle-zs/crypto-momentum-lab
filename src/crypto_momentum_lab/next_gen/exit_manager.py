@@ -71,6 +71,7 @@ class ExitManager:
         limit_price: Decimal | None,
         grace_period_sec: float | None = None,
         immediate: bool = False,
+        exit_reason: str | None = None,
     ) -> None:
         """执行单个批次平仓退出：
         1. 发送限价平仓单 (LIMIT fl_{batch_id})；
@@ -86,6 +87,13 @@ class ExitManager:
         if not batch or batch.quantity <= Decimal("0"):
             self._pending_exits.pop(batch_id, None)
             return
+        if exit_reason is not None and exit_reason != "resume_exit":
+            await self._executor.record_exit_decision(
+                batch_id,
+                batch.symbol,
+                exit_reason,
+                datetime.now(UTC),
+            )
         self._pending_exits.setdefault(batch_id, (limit_price, grace_sec, immediate))
         if batch.exit_order_submitted_at is not None:
             expired = (
@@ -318,7 +326,7 @@ class ExitManager:
                         and gross_return >= self.decision_profit_pct
                     )
                 )
-                limit_price = batch.entry_price * (
+                limit_price: Decimal | None = batch.entry_price * (
                     1 + direction * self.grace_profit_pct
                 )
                 grace_sec = self.grace_period_sec
@@ -343,6 +351,7 @@ class ExitManager:
                         limit_price=limit_price,
                         grace_period_sec=grace_sec,
                         immediate=immediate,
+                        exit_reason=exit_reason,
                     )
                 )
                 self._active_exit_tasks[batch.batch_id] = task
@@ -427,11 +436,10 @@ class ExitManager:
                 key=lambda order: order.created_at,
                 default=None,
             )
-            if (
-                previous is None
-                or previous.status not in (
-                    OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.FILLED
-                )
+            if previous is None or previous.status not in (
+                OrderStatus.CANCELED,
+                OrderStatus.REJECTED,
+                OrderStatus.FILLED,
             ):
                 continue
             expired = (

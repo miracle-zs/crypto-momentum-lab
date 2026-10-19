@@ -75,6 +75,14 @@ class TradingRepositoryProtocol(Protocol):
         observed_at: datetime,
         payload: dict[str, Any],
     ) -> None: ...
+    async def async_save_exit_decision(
+        self,
+        environment: str,
+        account_label: str,
+        observed_at: datetime,
+        payload: dict[str, Any],
+    ) -> None: ...
+
     async def async_has_active_halt(
         self, environment: str, account_label: str
     ) -> bool: ...
@@ -114,6 +122,7 @@ class InMemoryTradingRepository:
         self.entry_symbols: frozenset[str] = frozenset()
         self.runtime_observations: list[dict[str, Any]] = []
         self.entry_signals: list[dict[str, Any]] = []
+        self.exit_decisions: list[dict[str, Any]] = []
         self.halted_accounts: set[tuple[str, str]] = set()
 
     async def async_save_fill(self, fill: AccountFillEvent) -> None:
@@ -229,6 +238,16 @@ class InMemoryTradingRepository:
     ) -> None:
         self._check_and_decrement_failure()
         self.entry_signals.append(deepcopy(payload))
+
+    async def async_save_exit_decision(
+        self,
+        environment: str,
+        account_label: str,
+        observed_at: datetime,
+        payload: dict[str, Any],
+    ) -> None:
+        self._check_and_decrement_failure()
+        self.exit_decisions.append(deepcopy(payload))
 
     async def async_has_active_halt(self, environment: str, account_label: str) -> bool:
         return (environment, account_label) in self.halted_accounts
@@ -774,6 +793,26 @@ class PostgresTradingRepository:
                     event_id=str(uuid4()),
                     run_id=f"nextgen:{environment}:{account_label}",
                     event_type="nextgen_entry_signal",
+                    occurred_at=observed_at,
+                    symbol=payload["symbol"],
+                    bucket_start=None,
+                    details=payload,
+                )
+            )
+
+    async def async_save_exit_decision(
+        self,
+        environment: str,
+        account_label: str,
+        observed_at: datetime,
+        payload: dict[str, Any],
+    ) -> None:
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                insert(StrategyRuntimeEventRow).values(
+                    event_id=str(uuid4()),
+                    run_id=f"nextgen:{environment}:{account_label}",
+                    event_type="nextgen_exit_decision",
                     occurred_at=observed_at,
                     symbol=payload["symbol"],
                     bucket_start=None,

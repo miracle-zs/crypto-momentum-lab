@@ -45,6 +45,20 @@ class OrderExecutor:
         self._submissions_idle = asyncio.Event()
         self._submissions_idle.set()
 
+    async def record_exit_decision(
+        self,
+        batch_id: str,
+        symbol: str,
+        reason: str,
+        observed_at: datetime,
+    ) -> None:
+        await self._db.async_save_exit_decision(
+            self._state.environment,
+            self._state.account_label,
+            observed_at,
+            {"batch_id": batch_id, "symbol": symbol, "reason": reason},
+        )
+
     @property
     def rest_client(self) -> BinanceRestClient:
         return self._rest

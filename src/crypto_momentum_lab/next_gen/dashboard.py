@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal, cast
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.live_rollout.runtime_manifest import LiveRuntimeAccount
@@ -31,6 +31,7 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
 )
 from crypto_momentum_lab.operator_dashboard.status import OperationalStatus
 from crypto_momentum_lab.persistence.postgres.models import (
+    AccountFillEventRow,
     RiskHaltRow,
     RuntimeMarketState15sRow,
     StrategyRuntimeEventRow,
@@ -311,6 +312,59 @@ class NextGenDashboardQueries:
                     .limit(200)
                 )
             ).all()
+            order_keys = [
+                (row.symbol, str(row.exchange_order_id))
+                for row in orders
+                if row.exchange_order_id is not None
+            ]
+            fill_totals = (
+                (
+                    await session.execute(
+                        select(
+                            AccountFillEventRow.symbol,
+                            AccountFillEventRow.order_id,
+                            AccountFillEventRow.fee_asset,
+                            func.count().label("fill_count"),
+                            func.sum(AccountFillEventRow.quantity).label("quantity"),
+                            func.sum(
+                                AccountFillEventRow.price * AccountFillEventRow.quantity
+                            ).label("notional"),
+                            func.sum(AccountFillEventRow.fee).label("fee"),
+                            func.sum(AccountFillEventRow.realized_pnl).label(
+                                "realized_pnl"
+                            ),
+                            func.max(AccountFillEventRow.trade_at).label("trade_at"),
+                        )
+                        .where(
+                            AccountFillEventRow.environment == "live",
+                            AccountFillEventRow.account_label == label,
+                            tuple_(
+                                AccountFillEventRow.symbol, AccountFillEventRow.order_id
+                            ).in_(order_keys),
+                        )
+                        .group_by(
+                            AccountFillEventRow.symbol,
+                            AccountFillEventRow.order_id,
+                            AccountFillEventRow.fee_asset,
+                        )
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            exit_events = (
+                await session.scalars(
+                    select(StrategyRuntimeEventRow)
+                    .where(
+                        StrategyRuntimeEventRow.run_id == f"nextgen:live:{label}",
+                        StrategyRuntimeEventRow.event_type == "nextgen_exit_decision",
+                        StrategyRuntimeEventRow.details["batch_id"].astext.in_(
+                            {row.batch_id for row in orders}
+                        ),
+                    )
+                    .order_by(StrategyRuntimeEventRow.occurred_at)
+                )
+            ).all()
             # The live order list must not depend on the history-page limit.
             open_orders = (
                 await session.scalars(
@@ -353,6 +407,59 @@ class NextGenDashboardQueries:
                     .limit(30)
                 )
             ).all()
+        fills_by_order: dict[tuple[str, str], list[Any]] = {}
+        for fill in fill_totals:
+            fills_by_order.setdefault((fill["symbol"], fill["order_id"]), []).append(
+                fill
+            )
+        exit_reasons = {
+            row.details["batch_id"]: row.details["reason"] for row in exit_events
+        }
+        trade_rows: list[dict[str, Any]] = []
+        for order in orders:
+            if order.filled_quantity <= 0:
+                continue
+            detail = fills_by_order.get(
+                (order.symbol, str(order.exchange_order_id)), []
+            )
+            quantity = sum((item["quantity"] for item in detail), Decimal("0"))
+            complete = bool(detail) and quantity == order.filled_quantity
+            trade_rows.append(
+                {
+                    **self._order(order),
+                    "strategy_name": config.strategy,
+                    "close_reason": exit_reasons.get(order.batch_id),
+                    "quantity": str(order.filled_quantity),
+                    "price": str(
+                        sum((item["notional"] for item in detail), Decimal("0"))
+                        / quantity
+                    )
+                    if complete
+                    else str(order.average_price),
+                    "trade_at": max(item["trade_at"] for item in detail).isoformat()
+                    if complete
+                    else None,
+                    "order_updated_at": order.updated_at.isoformat(),
+                    "aggregation": "fills" if complete else "order",
+                    "fill_count": sum(item["fill_count"] for item in detail)
+                    if complete
+                    else None,
+                    "fee": str(detail[0]["fee"])
+                    if complete and len(detail) == 1
+                    else None,
+                    "fee_asset": detail[0]["fee_asset"]
+                    if complete and len(detail) == 1
+                    else None,
+                    "fees": {item["fee_asset"]: str(item["fee"]) for item in detail}
+                    if complete
+                    else None,
+                    "realized_pnl": str(
+                        sum((item["realized_pnl"] for item in detail), Decimal("0"))
+                    )
+                    if complete
+                    else None,
+                }
+            )
         price_by_symbol = {
             row.symbol: row.mark_price for row in marks if row.mark_price is not None
         }
@@ -411,21 +518,11 @@ class NextGenDashboardQueries:
             },
             balances=balances,
             positions=positions,
-            open_orders=[self._order(row) for row in open_orders],
-            fills=[
-                {
-                    **self._order(row),
-                    "quantity": str(row.filled_quantity),
-                    "price": str(row.average_price),
-                    "trade_at": None,
-                    "order_updated_at": row.updated_at.isoformat(),
-                    "aggregation": "order",
-                    "fee": None,
-                    "realized_pnl": None,
-                }
-                for row in orders
-                if row.filled_quantity > 0
+            open_orders=[
+                {**self._order(row), "strategy_name": config.strategy}
+                for row in open_orders
             ],
+            fills=trade_rows,
             live_signals=cast(Any, [row.details for row in signals]),
             summary={
                 "position_count": len(batches),
