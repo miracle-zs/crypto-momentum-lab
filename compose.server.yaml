@@ -184,6 +184,8 @@ services:
       retries: 2
       start_period: 15m
     stop_grace_period: 60s
+    # Prefer latency-sensitive ingestion when cold-data maintenance uses CPU.
+    cpu_shares: 2048
     mem_limit: 640m
 
   research-collector:
