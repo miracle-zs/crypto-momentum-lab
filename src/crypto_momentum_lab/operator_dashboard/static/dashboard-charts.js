@@ -573,8 +573,13 @@ export function liveAccountMetricModel(
   const anchoredWindow = Number.isFinite(dailyAnchor)
     && (!Number.isFinite(requestedEnd) || dailyAnchor <= requestedEnd);
   const chartStart = anchoredWindow ? dailyAnchor : requestedStart;
+  const equityMetric = [
+    "equity", "equity_change_ratio", "drawdown", "drawdown_ratio",
+  ].includes(metricKey);
   const maps = normalizedAccounts.map((account) => (
-    liveAccountMetricBucketMap(account, metricKey, intervalSeconds, chartStart)
+    liveAccountMetricBucketMap(
+      account, equityMetric ? "equity" : metricKey, intervalSeconds, chartStart,
+    )
   ));
   const buckets = [...new Set(maps.flatMap((map) => [...map.keys()]))]
     .sort((left, right) => left - right)
@@ -590,18 +595,27 @@ export function liveAccountMetricModel(
   if (buckets.length < 2 || valueCount < 2) return null;
   const series = normalizedAccounts.map((account, index) => {
     const values = buckets.map((bucket) => maps[index].get(bucket) ?? null);
-    const baseline = metricKey === "equity"
-      ? values.find((value) => value != null)
-      : null;
+    // Derive all equity metrics after selecting the displayed window.
+    // The API ratios and peaks may include points before the daily anchor.
+    const baseline = equityMetric ? values.find((value) => value != null) : null;
+    let peak = null;
+    const metricValues = equityMetric ? values.map((value) => {
+      if (value == null || baseline == null) return null;
+      peak = peak == null ? value : Math.max(peak, value);
+      switch (metricKey) {
+        case "equity": return value - baseline;
+        case "equity_change_ratio":
+          return baseline === 0 ? null : (value - baseline) / baseline;
+        case "drawdown": return value - peak;
+        case "drawdown_ratio":
+          return peak === 0 ? null : (value - peak) / peak;
+      }
+    }) : values;
     return {
       account,
       label: account.account_label || `账户 ${index + 1}`,
       color: LIVE_ACCOUNT_METRIC_COLORS[index % LIVE_ACCOUNT_METRIC_COLORS.length],
-      values: metricKey === "equity"
-        ? values.map((value) => (
-          value == null || baseline == null ? null : value - baseline
-        ))
-        : values,
+      values: metricValues,
       isLive: true,
     };
   });
