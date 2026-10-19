@@ -1045,3 +1045,5 @@ SSH使用已配置的密钥或--control-path指定的已登录会话，不在脚
 ### 停用前端旧历史入口（2026-10-19）
 
 用户确认前端仅展示当前账户，历史研究在本地，并授权提交部署。本轮移除账户详情的新旧历史切换、旧历史渲染及轮询分支；移除account_history查询方法和legacy_history_available响应字段。/api/account只接受view=current，旧view=legacy_history请求明确返回422，不把旧请求悄悄改成当前数据。重新生成dashboard-f8ed6238e4fe71cd.js，移除旧构建产物。删除仅覆盖已退役切换功能的现有前端用例，调整现有API用例的预期，未新增或运行测试套件。Ruff、AST、前端构建和diff检查通过；queries.py仍有本轮修改之前已存在的类型检查问题。将使用dashboard独立发布模式，仅更换看板实例。历史物理合并脚本的未完成本地修改不纳入本次提交。
+
+本轮发布结果：df99d36e已提交推送并完成dashboard独立部署，耗时101秒。与发布前容器身份逐项比较，仅dashboard更换；其余7个实例（包括四账户）ID及启动时间保持，8个业务容器均healthy。四账户/api/account均HTTP 200、READY、data_source=current，响应不再包含legacy_history_available；旧view=legacy_history实测HTTP 422。根页面实际引用static/assets/dashboard-f8ed6238e4fe71cd.js，资源HTTP 200且不再含旧历史切换逻辑。数据库和交易账户未重启，交易镜像继续d2612c13；历史物理合并脚本仍为单独未提交修改。
