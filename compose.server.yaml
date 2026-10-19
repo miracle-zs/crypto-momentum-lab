@@ -402,6 +402,8 @@ services:
 
   decision-evidence-maintenance:
     <<: *app
+    # Housekeeping fixes can be released without restarting trading accounts.
+    image: ${CML_MAINTENANCE_IMAGE:-crypto-momentum-lab-app:${CML_CODE_COMMIT:?set CML_CODE_COMMIT}}
     profiles: ["maintenance"]
     cap_drop: ["ALL"]
     security_opt: ["no-new-privileges:true"]

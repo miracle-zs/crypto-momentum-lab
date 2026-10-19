@@ -85,10 +85,15 @@ async def collect_batch(session, batch_size: int, retention_days: int = 7) -> in
     """Lock orphan candidates before rechecking references in a fresh snapshot."""
     await session.execute(text("SET LOCAL lock_timeout='5s'"))
     await session.execute(text("SET LOCAL statement_timeout='30s'"))
-    orphan = """NOT EXISTS (SELECT 1 FROM decision_traces t
-        WHERE t.trace_payload ? 'policy_state_refs' AND
-          (t.trace_payload->'policy_state_refs'->>'prior'=decision_policy_evidence.state_digest
-           OR t.trace_payload->'policy_state_refs'->>'next'=decision_policy_evidence.state_digest))"""
+    # Separate bounded probes use the existing prior/next expression indexes.
+    # OFFSET 0 prevents an anti-join over materialized, wide trace payloads.
+    orphan = " AND ".join(
+        "NOT EXISTS (SELECT 1 FROM decision_traces t "
+        "WHERE t.trace_payload ? 'policy_state_refs' AND "
+        f"t.trace_payload->'policy_state_refs'->>'{key}'="
+        "decision_policy_evidence.state_digest OFFSET 0)"
+        for key in ("prior", "next")
+    )
     rows = (
         (
             await session.execute(
