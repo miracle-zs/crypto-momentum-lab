@@ -148,6 +148,14 @@ async def test_entry_batch_merges_until_first_exit(strategy_setup, exit_started)
         exit_order_submitted_at=datetime.now(UTC) if exit_started else None,
     )
     state.batches[batch.batch_id] = batch
+    previous = state.create_entry_order(
+        batch.symbol, batch.position_side, batch.quantity, batch.entry_price,
+        batch.batch_id,
+    )
+    previous.status = OrderStatus.FILLED
+    previous.filled_qty = batch.quantity
+    previous.avg_price = batch.entry_price
+    state.active_entry_orders.clear()
     result = await strategy.on_market_state(last)
     assert len(result) == 1
     assert (state.orders[result[0]].batch_id == batch.batch_id) is not exit_started

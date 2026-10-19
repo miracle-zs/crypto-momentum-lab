@@ -315,23 +315,44 @@ class MomentumStrategyEngine:
             ):
                 result["rejection_reason"] = "notional_limit"
                 continue
+            # Count entry orders in batches still admitting entries, not batches.
+            # A batch that has started exiting no longer consumes this allowance.
             batches = [
                 b
                 for b in self.state.batches.values()
                 if b.symbol == symbol
-                and b.position_side == side
                 and b.status != "CLOSED"
                 and b.quantity > 0
+                and b.exit_order_submitted_at is None
             ]
             limit = execution.max_concurrency_per_symbol
-            latest = max(batches, key=lambda b: b.entry_bar_time, default=None)
-            if latest is not None and latest.exit_order_submitted_at is None:
-                batch_id = latest.batch_id
-            else:
-                if limit is not None and len(batches) >= limit:
-                    result["rejection_reason"] = "batch_limit"
+            if limit is not None:
+                batch_ids = {b.batch_id for b in batches}
+                entries = [
+                    order
+                    for order in self.state.orders.values()
+                    if order.symbol == symbol
+                    and order.client_order_id.startswith("e_")
+                    and (
+                        (order.batch_id in batch_ids and order.filled_qty > 0)
+                        or not order.is_terminal
+                    )
+                ]
+                if not batch_ids.issubset({order.batch_id for order in entries}):
+                    result["rejection_reason"] = "entry_concurrency_unproven"
                     continue
-                batch_id = generate_batch_id(symbol, side, self.state.account_label)
+                if len(entries) >= limit:
+                    result["rejection_reason"] = "max_concurrency_per_symbol_exceeded"
+                    continue
+            latest = max(
+                (b for b in batches if b.position_side == side),
+                key=lambda b: b.entry_bar_time,
+                default=None,
+            )
+            batch_id = (
+                latest.batch_id if latest is not None
+                else generate_batch_id(symbol, side, self.state.account_label)
+            )
             order = self.state.create_entry_order(
                 symbol, side, quantity, price, batch_id, order_type="LIMIT"
             )
