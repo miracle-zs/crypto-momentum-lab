@@ -88,7 +88,7 @@ function liveSignalRanking(row) {
 }
 
 function liveSignalVolume(row) {
-  if (row.quote_volume_24h == null) return "当时无成交额快照";
+  if (row.quote_volume_24h == null) return Object.hasOwn(row, "quote_volume_24h") ? "当时无可用快照" : "当时未记录";
   const asset = row.quote_volume_24h_quote_asset || "USDT";
   return `${money(row.quote_volume_24h)} ${asset}`;
 }

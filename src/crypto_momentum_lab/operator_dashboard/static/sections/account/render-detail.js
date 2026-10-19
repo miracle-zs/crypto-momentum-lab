@@ -35,7 +35,9 @@ import {
 import { renderLiveSignalsContent } from "./signals.js";
 
 function renderAccountHero(data, syncStatus, freshnessSeconds) {
-  const accountHeroDescription = syncStatus === "ready" && freshnessSeconds != null && freshnessSeconds <= 120
+  const accountHeroDescription = data.account_config?.engine === "nextgen"
+    ? `NextGen 账户进程 · 私有 WebSocket 更新 · ${syncStatus === "ready" ? "策略就绪" : "策略状态待确认"}`
+    : syncStatus === "ready" && freshnessSeconds != null && freshnessSeconds <= 120
     ? "只读同步正常 · 实盘订单由 live-strategy 执行管控"
     : syncStatus === "ready" && freshnessSeconds != null
       ? "只读同步数据延迟 · 实盘订单由 live-strategy 执行管控，请检查同步服务"
@@ -209,22 +211,23 @@ export function renderAccount(data) {
     degraded: "降级",
   }[String(value || "").toLowerCase()] || value || "—");
   const mismatchCount = asNumber(reconciliation.mismatch_count);
+  const nextgen = config.engine === "nextgen";
   const syncStatus = normalized(data.status);
   const syncState = syncStatus === "ready"
-    ? { className: "status-READY", label: "同步正常", detail: "execution-account · 只读同步" }
+    ? { className: "status-READY", label: "同步正常", detail: nextgen ? "NextGen · 私有 WebSocket" : "execution-account · 只读同步" }
     : syncStatus === "halted"
-      ? { className: "status-HALTED", label: "同步已停止", detail: "execution-account · 需要检查" }
-      : { className: "status-UNKNOWN", label: "等待同步", detail: "execution-account · 暂无可靠状态" };
+      ? { className: "status-HALTED", label: "同步已停止", detail: nextgen ? "NextGen · 需要检查" : "execution-account · 需要检查" }
+      : { className: "status-UNKNOWN", label: "等待同步", detail: nextgen ? "NextGen · 暂无可靠状态" : "execution-account · 暂无可靠状态" };
   const configState = {
     className: Object.keys(config).length > 0 ? "status-READY" : "status-UNKNOWN",
-    label: Object.keys(config).length > 0 ? "已同步" : "等待同步",
-    detail: "Binance V3 账户配置快照",
+    label: nextgen ? "本地策略配置" : Object.keys(config).length > 0 ? "已同步" : "等待同步",
+    detail: nextgen ? "交易所账户配置未接入" : "Binance V3 账户配置快照",
   };
   const reconciliationState = mismatchCount != null && mismatchCount > 0
     ? { className: "status-ATTENTION", label: `${mismatchCount} 项差异`, detail: "余额、持仓或订单快照需要核对" }
     : normalized(reconciliation.status) === "ready"
       ? { className: "status-READY", label: "对账一致", detail: "快照已完成 · 0 项差异" }
-      : { className: "status-UNKNOWN", label: reconciliationLabel(reconciliation.status), detail: "等待本次对账结果" };
+      : { className: "status-UNKNOWN", label: nextgen && !reconciliation.status ? "未接入" : reconciliationLabel(reconciliation.status), detail: nextgen && !reconciliation.status ? "未接入对账证据" : "等待本次对账结果" };
   const observedAtMs = new Date(data.observed_at || "").getTime();
   const freshnessSeconds = Number.isFinite(observedAtMs)
     ? Math.max(0, (Date.now() - observedAtMs) / 1000)
@@ -236,7 +239,7 @@ export function renderAccount(data) {
       : { className: "status-STALE", label: "数据过期", detail: `${relToNow(data.observed_at)} · 请检查同步服务` };
   const executionState = {
     className: "status-SHADOW",
-    label: "live-strategy",
+    label: nextgen ? "NextGen 账户进程" : "live-strategy",
     detail: "实盘下单通道 · 状态见全局实盘状态与风控",
   };
   const strategy = (value) => value

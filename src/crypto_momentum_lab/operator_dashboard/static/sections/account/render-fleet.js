@@ -98,7 +98,7 @@ export function liveAccountSummary(accounts, overallStatus) {
   const reviewCount = accounts.length - readyCount - haltedCount;
   const financialSnapshots = accounts.some((account) => account.summary);
   const tiles = [
-    tile("实盘账户", `${accounts.length} 个`, "execution-account 独立状态"),
+    tile("实盘账户", `${accounts.length} 个`, "独立账户状态"),
     tile("正常账户", `${readyCount} 个`, "可继续观察"),
     tile("停止账户", `${haltedCount} 个`, "需要检查"),
     tile("待确认", `${reviewCount} 个`, "缺少可靠状态"),
