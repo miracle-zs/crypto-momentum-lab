@@ -170,7 +170,9 @@ class NextGenDaemon:
             await feed.start()
             async for event in feed:
                 self.exit_manager.evaluate_active_batches(
-                    now=event.received_at,
+                    # A final exchange candle is closed even if the host clock
+                    # reports receipt just before its nominal end.
+                    now=event.candle.candle_end,
                     current_prices={event.candle.symbol: event.candle.close_price},
                     closed_candle=event.candle,
                 )
