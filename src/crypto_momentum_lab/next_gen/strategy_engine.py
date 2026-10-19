@@ -16,6 +16,7 @@ from crypto_momentum_lab.domain.strategy import (
 from crypto_momentum_lab.domain.strategy.entry_candidate import prepare_entry_candidate
 from crypto_momentum_lab.live_rollout.runtime_config import _live_strategy_config
 from crypto_momentum_lab.live_rollout.runtime_manifest import LiveRuntimeAccount
+from crypto_momentum_lab.live_rollout.volume import QuoteVolume24hProvider
 from crypto_momentum_lab.next_gen.engine import AccountState
 from crypto_momentum_lab.next_gen.executor import OrderExecutor
 from crypto_momentum_lab.next_gen.models import generate_batch_id
@@ -45,6 +46,7 @@ class MomentumStrategyEngine:
         self.symbols = list(symbols) if symbols is not None else []
         self._explicit_symbols = symbols is not None
         self.symbol_rules = symbol_rules
+        self.quote_volume_provider: QuoteVolume24hProvider | None = None
         self.market_connected = False
         self.market_data_observation: dict[str, Any] | None = None
         self.latest_prices = state.latest_prices
@@ -149,13 +151,39 @@ class MomentumStrategyEngine:
         age = (now - market_state.bucket_end).total_seconds()
         if not self.market_connected or age < -5 or age > 45:
             return []
+        filter_context: dict[str, Any] = {
+            "entry_enabled": self.state.can_submit_entry_order(),
+            "entry_long_only": self.account_config.execution_inputs.entry_long_only,
+            "candidate_filter_results": {},
+            "gate_reasons": [],
+        }
         try:
-            return await self._submit_candidates(decision, market_state, now)
+            return await self._submit_candidates(
+                decision, market_state, now, filter_context=filter_context
+            )
         finally:
             # Observations follow submission; their failure must not change trading.
             for signal in decision.signals:
                 recorded_at = datetime.now(UTC)
                 try:
+                    context = dict(filter_context)
+                    context["candidate_filter_results"] = {
+                        key: value
+                        for key, value in filter_context[
+                            "candidate_filter_results"
+                        ].items()
+                        if value["signal_id"] == signal.signal_id
+                    }
+                    context["universe"] = await self.state.db.async_get_signal_universe(
+                        market_state.bucket_end, signal.symbol
+                    )
+                    volume = (
+                        None
+                        if self.quote_volume_provider is None
+                        else self.quote_volume_provider.snapshot(
+                            signal.symbol, as_of=now
+                        )
+                    )
                     await self.state.db.async_save_entry_signal(
                         self.state.environment,
                         self.state.account_label,
@@ -173,6 +201,16 @@ class MomentumStrategyEngine:
                             "source_state_at": signal.source_state_at.isoformat(),
                             "recorded_at": recorded_at.isoformat(),
                             "reason": signal.reason,
+                            "filter_context": context,
+                            "quote_volume_24h": None
+                            if volume is None
+                            else str(volume.quote_volume),
+                            "quote_volume_24h_quote_asset": None
+                            if volume is None
+                            else volume.quote_asset,
+                            "quote_volume_24h_source_at": None
+                            if volume is None
+                            else volume.source_at.isoformat(),
                             "features": signal.features,
                             "reference_prices": signal.reference_prices,
                         },
@@ -183,7 +221,12 @@ class MomentumStrategyEngine:
                     )
 
     async def _submit_candidates(
-        self, decision: StrategyDecision, market_state: MarketState15s, now: datetime
+        self,
+        decision: StrategyDecision,
+        market_state: MarketState15s,
+        now: datetime,
+        *,
+        filter_context: dict[str, Any],
     ) -> list[str]:
         symbol = market_state.symbol
         submitted = []
@@ -191,14 +234,31 @@ class MomentumStrategyEngine:
         if repository is None:
             raise RuntimeError("Strategy execution requires a durable repository")
         for raw_candidate in decision.candidates:
+            result: dict[str, Any] = {
+                "passed": False,
+                "rejection_reason": "submission_failed",
+            }
+            result["signal_id"] = raw_candidate.signal_id
+            filter_context["candidate_filter_results"][raw_candidate.candidate_id] = (
+                result
+            )
             self.state.entry_halted = await repository.async_has_active_halt(
                 self.state.environment,
                 self.state.account_label,
             )
             if not self.state.can_submit_entry_order():
+                reason = (
+                    "scheduled_risk_window"
+                    if self.state.scheduled_entry_blocked()
+                    else "entry_gate_closed"
+                )
+                result["rejection_reason"] = reason
+                filter_context["entry_enabled"] = False
+                filter_context["gate_reasons"].append(reason)
                 break
             execution = self.account_config.execution_inputs
             if execution.entry_long_only and raw_candidate.side.value != "long":
+                result["rejection_reason"] = "long_only"
                 continue
             candidate = prepare_entry_candidate(
                 raw_candidate,
@@ -212,10 +272,12 @@ class MomentumStrategyEngine:
                 self.account_config.strategy_inputs.entry_positive_gainer_top_count,
             )
             if symbol not in eligible:
+                result["rejection_reason"] = "outside_positive_gainer_top"
                 continue
             side = candidate.side.value.upper()
             key = (self.state.account_label, symbol, side)
             if key in self.state.active_entry_orders:
+                result["rejection_reason"] = "active_entry_order"
                 continue
             price = candidate.limit_price
             if price is None or price <= 0:
@@ -226,6 +288,7 @@ class MomentumStrategyEngine:
             price = self.symbol_rules.round_price(symbol, price)
             valid, reason = self.symbol_rules.validate_order(symbol, quantity, price)
             if not valid:
+                result["rejection_reason"] = reason
                 log.warning(
                     "entry_rejected_by_symbol_rules", symbol=symbol, reason=reason
                 )
@@ -233,6 +296,7 @@ class MomentumStrategyEngine:
             if not self.state.check_notional_limits(
                 symbol, quantity, price, latest_prices=self.latest_prices
             ):
+                result["rejection_reason"] = "notional_limit"
                 continue
             batches = [
                 b
@@ -248,6 +312,7 @@ class MomentumStrategyEngine:
                 batch_id = latest.batch_id
             else:
                 if limit is not None and len(batches) >= limit:
+                    result["rejection_reason"] = "batch_limit"
                     continue
                 batch_id = generate_batch_id(symbol, side, self.state.account_label)
             order = self.state.create_entry_order(
@@ -255,6 +320,7 @@ class MomentumStrategyEngine:
             )
             await self.order_executor.submit_order(order)
             submitted.append(order.client_order_id)
+            result.update(passed=True, rejection_reason=None)
         return submitted
 
     async def cancel_stale_entry_orders(self) -> None:

@@ -18,6 +18,8 @@ from crypto_momentum_lab.live_rollout.runtime_manifest import LiveRuntimeAccount
 from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
     ScheduledRiskWindowConfig,
 )
+from crypto_momentum_lab.live_rollout.volume import WebSocketQuoteVolumeProvider
+from crypto_momentum_lab.market_data.quote_hub import WebSocketMarketQuoteVolumeSource
 from crypto_momentum_lab.next_gen.client import (
     BinanceRestClient,
     BinanceUserDataStream,
@@ -120,6 +122,16 @@ class NextGenDaemon:
             account_config=account_config,
             market_environment=self.market_environment,
         )
+        self._volume_cache = WebSocketQuoteVolumeProvider(
+            WebSocketMarketQuoteVolumeSource(
+                url=os.environ.get(
+                    "CML_MARKET_QUOTE_VOLUME_HUB_URL", "ws://market-data:8768"
+                ),
+                environment=market_environment,
+                consumer_id=f"nextgen-volume:{environment}:{account_label}",
+            )
+        )
+        self.strategy_engine.quote_volume_provider = self._volume_cache
         if market_data_provider is not None:
             self.market_data_provider = market_data_provider
         else:
@@ -216,6 +228,7 @@ class NextGenDaemon:
                 "scheduled_entry_blocked": self.state.scheduled_entry_blocked(),
                 "exit_gate_open": self.state.can_submit_exit_order(),
                 "market_data": self.strategy_engine.market_data_observation,
+                "quote_volume": self._volume_cache.metrics_snapshot(),
                 "balances": {
                     asset: str(value)
                     for asset, value in self.state.wallet_balances.items()
@@ -317,6 +330,7 @@ class NextGenDaemon:
                     self.account_label,
                 )
                 await self.order_executor.load_active_state()
+                await self._volume_cache.start()
                 async with asyncio.TaskGroup() as tg:
                     await self.ws_client.connect(on_event=self.state.on_live_event)
                     tg.create_task(
@@ -398,6 +412,7 @@ class NextGenDaemon:
                     tg.create_task(self._wait_for_stop())
             finally:
                 self._private_stop.set()
+                await self._volume_cache.stop()
                 await self.market_data_provider.close()
                 await self.ws_client.close()
                 await self.exit_manager.close()

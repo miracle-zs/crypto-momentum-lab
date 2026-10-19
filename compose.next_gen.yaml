@@ -19,6 +19,7 @@ x-nextgen-account-app: &nextgen-account-app
   environment: &nextgen-account-environment
     CML_DATABASE_URL: postgresql+asyncpg://cml:${CML_POSTGRES_PASSWORD:?set CML_POSTGRES_PASSWORD}@postgres:5432/cml
     CML_EXECUTION_DATABASE_URL: ${CML_EXECUTION_DATABASE_URL:-}
+    CML_MARKET_QUOTE_VOLUME_HUB_URL: ${CML_MARKET_QUOTE_VOLUME_HUB_URL:-ws://market-data:8768}
     CML_MARKET_STATE_HUB_URL: ${CML_MARKET_STATE_HUB_URL:-ws://market-data:8766}
     CML_MARKET_STATE_ENVIRONMENT: ${CML_MARKET_STATE_ENVIRONMENT:-research}
     CML_LOCAL_HEALTH_DIR: /run/cml/health

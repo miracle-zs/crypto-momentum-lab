@@ -319,6 +319,7 @@ class DashboardQueries:
     ) -> SystemPerformanceResponse:
         result = await self._performance_queries.performance(window)
         if self._nextgen_queries is not None:
+            result.execution_engine = "nextgen"
             market = await self._nextgen_queries.market_performance()
             market.missing_agg_trade_count = result.market_data.missing_agg_trade_count
             market.quality_events_count_1h = result.market_data.quality_events_count_1h
@@ -370,6 +371,18 @@ class DashboardQueries:
                     else None
                 ),
                 "accounts": {a.account_label: a.readiness for a in fleet.accounts},
+                "entry_gate_open": all(
+                    a.runtime_tradeability and a.runtime_tradeability.entry_gate_open
+                    for a in fleet.accounts
+                ),
+                "entry_gate_reasons": sorted(
+                    {
+                        a.runtime_tradeability.entry_gate_reason
+                        for a in fleet.accounts
+                        if a.runtime_tradeability
+                        and not a.runtime_tradeability.entry_gate_open
+                    }
+                ),
             }
             overview.services.insert(1, runner)
         return overview

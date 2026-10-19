@@ -387,6 +387,7 @@ class HostResourcesResponse(DashboardSchema):
 
 
 class SystemPerformanceResponse(DashboardSchema):
+    execution_engine: str = "legacy"
     status: OperationalStatus
     generated_at: datetime
     decision_slo: DecisionSLOResponse

@@ -39,6 +39,10 @@ export function renderLiveRuntime() {
   } else if (mode === "DEGRADED") {
     duration = "账户运行降级";
   }
+  if (mode === "LIVE" && latestLiveService?.details?.entry_gate_open === false) {
+    const scheduled = latestLiveService.details.entry_gate_reasons?.includes("scheduled_risk_window");
+    duration += scheduled ? " · 定时停开仓至 09:00 · 退出正常" : " · 开仓暂停";
+  }
   stamp.className = `mode-badge runtime-line ${statusClass(mode)}`;
   stamp.setAttribute("aria-label", `执行模式：${mode} · ${duration}`);
   if (modeValue) modeValue.textContent = mode;

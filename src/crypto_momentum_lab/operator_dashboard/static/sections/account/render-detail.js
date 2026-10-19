@@ -106,8 +106,8 @@ function renderAccountEquityBlock(data, accountEquity, selectedEquityRange, acco
 
 function renderAccountFacts(config, reconciliation, mismatchCount, modeLabel, reconciliationLabel) {
   return `<div class="account-facts">
-    <div><span>实盘下单通道</span><b class="pos">live-strategy</b></div>
-    <div><span>同步服务模式</span><b class="muted">只读同步 · 不下单</b></div>
+    <div><span>实盘下单通道</span><b class="pos">${config.engine === "nextgen" ? "NextGen 账户进程" : "live-strategy"}</b></div>
+    <div><span>同步服务模式</span><b class="muted">${config.engine === "nextgen" ? "账户私有 WebSocket" : "只读同步 · 不下单"}</b></div>
     <div><span>持仓模式</span><b>${esc(modeLabel(config.hedge_mode, "Hedge · 双向", "One-way · 单向"))}</b></div>
     <div><span>保证金模式</span><b>${esc(modeLabel(config.multi_assets_mode, "Multi-Assets · 多资产", "Single-Asset · 单资产"))}</b></div>
     <div><span>手续费等级</span><b>${esc(config.fee_tier == null ? "—" : `VIP ${config.fee_tier}`)}</b></div>
@@ -116,7 +116,7 @@ function renderAccountFacts(config, reconciliation, mismatchCount, modeLabel, re
     <div><span>对账快照 资产 / 持仓</span><b>${esc(`${reconciliation.balance_count ?? "—"} / ${reconciliation.position_count ?? "—"}`)}</b></div>
     <div><span>对账快照 挂单 / 成交</span><b>${esc(`${reconciliation.open_order_count ?? "—"} / ${reconciliation.fill_count ?? "—"}`)}</b></div>
   </div>
-  <div class="account-facts-note"><b>怎么读</b>：<code>只读同步</code>不会下单；实盘订单由 <code>live-strategy</code> 与风控闸门共同决定。<code>对账一致 / 0 项</code>表示本次快照未发现差异。</div>`;
+  <div class="account-facts-note">${config.engine === "nextgen" ? "正常运行由私有 WebSocket 更新账户；未接入的字段不代表零值，对账未接入不代表已核验一致。" : "<b>怎么读</b>：<code>只读同步</code>不会下单；实盘订单由 <code>live-strategy</code> 与风控闸门共同决定。<code>对账一致 / 0 项</code>表示本次快照未发现差异。"}</div>`;
 }
 
 function renderBalancesTable(usdtBalances) {
@@ -171,14 +171,14 @@ function renderOrdersTable(openOrders, strategy) {
 
 function renderFillsTable(fills, strategy) {
   return dataTable([
-    { label: "时间", value: (row) => dayTime(row.trade_at), align: "right", cls: "muted" },
+    { label: "成交 / 订单更新时间", value: (row) => row.aggregation === "order" ? `${dayTime(row.order_updated_at)}（订单更新）` : dayTime(row.trade_at), align: "right", cls: "muted" },
     { label: "币种", key: "symbol", cls: "sym" },
     { label: "订单", value: (row) => shortHash(row.order_id), cls: "num cut" },
     { label: "策略", value: (row) => strategy(row.strategy_name), html: true },
     { label: "方向", key: "side", cls: (row) => row.side === "BUY" ? "pos" : "neg" },
     { label: "均价", value: (row) => price(row.price), align: "right" },
     { label: "数量", value: (row) => num(row.quantity, 4), align: "right" },
-    { label: "成交片数", value: (row) => `${row.fill_count || 1} 片`, align: "right", cls: "muted" },
+    { label: "成交片数", value: (row) => row.aggregation === "order" ? "订单累计" : (row.fill_count == null ? "—" : `${row.fill_count} 片`), align: "right", cls: "muted" },
     { label: "已实现盈亏", value: (row) => signedMoney(row.realized_pnl), align: "right", cls: (row) => pnlClass(row.realized_pnl) },
     { label: "手续费", value: (row) => `${num(row.fee, 4)} ${row.fee_asset || ""}`, align: "right" },
     { label: "平仓原因", value: (row) => (row.is_exit ?? row.reduce_only) ? (row.close_reason || "退出原因未记录") : "开仓", cls: "muted" },

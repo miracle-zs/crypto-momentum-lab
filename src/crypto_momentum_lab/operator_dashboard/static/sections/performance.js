@@ -84,16 +84,17 @@ const DECISION_PIPELINE_STAGES = new Set([
 export function renderPerformance(data) {
   const status = normalizedStatus(data?.status || "UNKNOWN") || "UNKNOWN";
 
+  const nextgen = data?.execution_engine === "nextgen";
   const decisionSlo = data?.decision_slo || {};
   const persistence = data?.persistence || {};
   const marketData = data?.market_data || {};
   const hostResources = data?.host_resources || {};
 
   // 1. Top KPI Tiles
-  const p95Checkpoint = persistence.p95_total_ms != null
+  const p95Checkpoint = nextgen ? "不适用" : persistence.p95_total_ms != null
     ? `${Number(persistence.p95_total_ms).toFixed(1)} ms`
     : "—";
-  const checkpointSub = persistence.sample_count
+  const checkpointSub = nextgen ? "当前引擎不使用旧版 Checkpoint" : persistence.sample_count
     ? `${num(persistence.sample_count, 0)} 次样本 · 4账户错峰`
     : "暂无落盘样本";
   const checkpointTone = persistence.p95_total_ms != null && persistence.p95_total_ms < 250
@@ -139,10 +140,10 @@ export function renderPerformance(data) {
   }
   const decisionP95Text = maxDecisionP95 != null
     ? `${maxDecisionP95.toFixed(1)} ms`
-    : (decisionSlo.persisted_event_count ? "达标" : "无新交易");
+    : (nextgen ? "未接入" : (decisionSlo.persisted_event_count ? "达标" : "无新交易"));
   const decisionSub = maxDecisionP95 != null
     ? `核心决策与报单链路 · 窗口 ${decisionSlo.window || "6h"}`
-    : `${num(decisionSlo.persisted_event_count || 0, 0)} 事件 · 窗口 ${decisionSlo.window || "6h"}`;
+    : nextgen ? "尚未采集新版链路耗时" : `${num(decisionSlo.persisted_event_count || 0, 0)} 事件 · 窗口 ${decisionSlo.window || "6h"}`;
   const decisionTone = maxDecisionP95 != null
     ? (maxDecisionP95 < 500 ? "pos" : maxDecisionP95 < 1500 ? "warn" : "neg")
     : "neut";
@@ -271,8 +272,8 @@ export function renderPerformance(data) {
 
   const body = `
     ${kpis}
-    ${staggerSection}
-    <div class="block-split" style="margin-top: 14px;">
+    ${nextgen ? "" : staggerSection}
+    ${nextgen ? `<p class="muted">新版尚未接入决策耗时统计；旧版 Checkpoint 面板不适用于当前引擎。</p>` : `<div class="block-split" style="margin-top: 14px;">
       <div class="block">
         ${blockTitle("交易决策链路 SLO 细分", "DECISION & EXECUTION TIMINGS", `<strong class="num">${sloRows.length} 阶段</strong>`)}
         ${sloTable}
@@ -282,6 +283,7 @@ export function renderPerformance(data) {
         ${ckptTable}
       </div>
     </div>
+    `}
     <div class="block" style="margin-top: 14px;">
       ${blockTitle("系统基础设施稳态", "HOST & DATABASE RESOURCES")}
       <div class="performance-meter-grid">

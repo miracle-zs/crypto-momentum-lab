@@ -85,6 +85,10 @@ class TradingRepositoryProtocol(Protocol):
     async def async_get_historical_market_states(
         self, environment: str, symbols: list[str], limit: int
     ) -> list[MarketState15s]: ...
+    async def async_get_signal_universe(
+        self, observed_at: datetime, symbol: str
+    ) -> dict[str, Any] | None: ...
+
     async def async_get_entry_symbols(
         self, observed_at: datetime, top_count: int
     ) -> frozenset[str]: ...
@@ -238,6 +242,11 @@ class InMemoryTradingRepository:
             )
             result.extend(rows[-limit:])
         return result
+
+    async def async_get_signal_universe(
+        self, observed_at: datetime, symbol: str
+    ) -> dict[str, Any] | None:
+        return None
 
     async def async_get_entry_symbols(
         self, observed_at: datetime, top_count: int
@@ -815,6 +824,34 @@ class PostgresTradingRepository:
                 ).all()
                 result.extend(market_state_from_row(row) for row in reversed(rows))
         return result
+
+    async def async_get_signal_universe(
+        self, observed_at: datetime, symbol: str
+    ) -> dict[str, Any] | None:
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text("""
+                    SELECT e.symbol, e.gainer_rank, e.loser_rank,
+                           s.observed_at AS snapshot_at
+                    FROM universe_entries e
+                    JOIN universe_snapshots s USING (snapshot_id)
+                    WHERE e.symbol = :symbol AND e.snapshot_id = (
+                        SELECT snapshot_id FROM universe_snapshots
+                        WHERE activated = TRUE AND observed_at <= :observed_at
+                        ORDER BY observed_at DESC LIMIT 1
+                    )
+                """),
+                {"symbol": symbol, "observed_at": observed_at},
+            )
+            row = result.mappings().first()
+            if row is None:
+                return None
+            return {
+                "symbol": row["symbol"],
+                "gainer_rank": row["gainer_rank"],
+                "loser_rank": row["loser_rank"],
+                "snapshot_at": row["snapshot_at"].isoformat(),
+            }
 
     async def async_get_entry_symbols(
         self, observed_at: datetime, top_count: int

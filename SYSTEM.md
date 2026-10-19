@@ -940,3 +940,12 @@ NextGen Compose 补齐与现有研究采集器一致的 market-data healthy 启�
 最终现场结果（08:02 CST）：新 drain 启动恢复逐账户核实之前的市价退出，四账户均 drained_batches_count=0，未再提交订单；数据库四笔退出均 FILLED、filled_quantity=1874，对应批次均 CLOSED、quantity=0。随后按已满足的空仓发布条件，仅更新四账户及看板为 `1fdd2de2a1b507bdc2153257cfe01699121edebd`，行情和研究采集继续运行 `d3c0881b`，PostgreSQL未重启、迁移保持0067。服务器.env.server默认代码/看板版本已保存为1fdd2de2；所有容器healthy。四账户实际日志均出现 scheduled_risk_window_status：phase=verifying、entry_blocked=True、flatten_pending=False；readiness接口四账户READY、entry_gate_open=false且原因scheduled_risk_window、exit_gate_open=true。活动批次剩余持仓数0，未终态订单数0。09:00尚未到达，不能记为已经现场验证恢复开仓；下一天07:45由新定时入口自动触发的实盘清仓也尚未覆盖。
 
 “空仓后更新账户健康检查”临时heartbeat任务已完成并保持PAUSED，提示词注明实际发布版本，避免再次执行旧dad85e09计划。所有临时维护窗口已撤销；主机监控当前唯一活动告警是retention_timer_failed，下一次既有定时任务为08:20:03。没有reset-failed掩盖旧失败，没有手工执行归档删除。归档故障范围的只导出验证已成功，不等于整条定时清理及其ExecStartPost已成功。当前修复的验证仅包含静态检查、真实现场恢复/接口/日志和只读归档验证，没有新增或运行测试套件。
+
+
+### 新版看板信号上下文与展示修正（2026-10-19）
+
+用户授权修复、提交、推送及部署。NextGen 原先只记录信号主体，未接共享24H成交额、信号时榜单和实际候选过滤结果；本轮复用已有 market quote volume Hub/缓存，不新增账户 REST 轮询。信号记录保存可用于当时的成交额快照、截至信号桶结束已生效的榜单和实际候选通过/拒绝原因；观察写入在提交之后，失败只记日志，不改变交易裁决。旧信号不以当前数据回填历史缺失字段，页面明确显示当时未记录或无快照。
+
+概览将实际账户开仓门原因传给顶部，定时窗口显示停开仓至09:00；未接入的新决策耗时明确标识，隐藏不适用的旧错峰Checkpoint面板。订单累计成交列表没有真实成交时间证据，不再把可被启动恢复更新的updated_at当作trade_at，改为明确显示订单更新时间；成交片数不再默认伪装成1片。账户事实说明改为NextGen实际私有WS模式。其余缺少事实的保证金、手续费与认证绩效不造零、不扩展REST查询。
+
+本轮仅执行Ruff、Python语法编译、前端构建和diff检查，未新增或运行测试套件。部署现场与自然信号完整字段样本待后续记录。

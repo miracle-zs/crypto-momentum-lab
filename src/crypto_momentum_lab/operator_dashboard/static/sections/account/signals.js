@@ -24,6 +24,17 @@ function liveSignalKindCell(row) {
   return `<span class="live-signal-kind ${kind.className}">${esc(kind.label)}</span>`;
 }
 
+const GATE_LABELS = {
+  scheduled_risk_window: "定时停开仓",
+  entry_gate_closed: "开仓门关闭",
+  long_only: "仅允许做多",
+  outside_positive_gainer_top: "不在正涨幅入场榜范围",
+  active_entry_order: "已有同方向开仓挂单",
+  notional_limit: "超过风险额度",
+  batch_limit: "达到持仓批次上限",
+  submission_failed: "提交未完成",
+};
+
 function liveSignalFilterSummary(row) {
   const context = row.filter_context || {};
   const parts = [];
@@ -37,15 +48,19 @@ function liveSignalFilterSummary(row) {
     parts.push("只减仓退出");
   }
   if (Array.isArray(context.gate_reasons)) {
-    parts.push(...context.gate_reasons.filter(Boolean).map((value) => `门控：${value}`));
+    parts.push(...context.gate_reasons.filter(Boolean).map((value) => `门控：${GATE_LABELS[value] || value}`));
   }
   const candidateResults = context.candidate_filter_results;
   if (candidateResults && typeof candidateResults === "object") {
     Object.values(candidateResults)
       .filter((result) => result && result.passed === false && result.rejection_reason)
-      .forEach((result) => parts.push(`拒绝：${result.rejection_reason}`));
+      .forEach((result) => parts.push(`拒绝：${GATE_LABELS[result.rejection_reason] || result.rejection_reason}`));
   }
-  if (!parts.length) return "—";
+  if (candidateResults && Object.values(candidateResults).some((result) => result?.passed === true)) {
+    parts.push("已通过过滤并提交订单");
+  }
+  if (row.filter_context && candidateResults && !Object.keys(candidateResults).length) parts.push("未生成开仓候选");
+  if (!parts.length) return "当时未记录";
   return `<div class="live-signal-filters">${parts
     .map((part) => `<span class="live-signal-filter">${esc(part)}</span>`)
     .join("")}</div>`;
@@ -54,7 +69,7 @@ function liveSignalFilterSummary(row) {
 function liveSignalRanking(row) {
   const universe = row.filter_context?.universe;
   if (!universe || typeof universe !== "object" || !universe.symbol) {
-    return "—";
+    return "当时未记录";
   }
   const badges = [];
   const rankBadge = (rank, label, className) => {
@@ -73,7 +88,7 @@ function liveSignalRanking(row) {
 }
 
 function liveSignalVolume(row) {
-  if (row.quote_volume_24h == null) return "—";
+  if (row.quote_volume_24h == null) return "当时无成交额快照";
   const asset = row.quote_volume_24h_quote_asset || "USDT";
   return `${money(row.quote_volume_24h)} ${asset}`;
 }
