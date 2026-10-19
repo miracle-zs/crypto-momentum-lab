@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from copy import deepcopy
+from dataclasses import asdict
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Protocol
@@ -10,12 +11,15 @@ from uuid import uuid4
 
 import structlog
 from sqlalchemy import insert, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from crypto_momentum_lab.domain.account.models import AccountFillEvent
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk.models import RiskConfigSnapshot
 from crypto_momentum_lab.next_gen.models import Order, OrderStatus, PositionBatch
 from crypto_momentum_lab.persistence.postgres.models import (
+    AccountFillEventRow,
     RiskConfigSnapshotRow,
     RiskHaltRow,
     RuntimeMarketState15sRow,
@@ -38,6 +42,8 @@ class TradingRepositoryProtocol(Protocol):
 
     @asynccontextmanager
     def acquire_dedicated_advisory_lock(self, lock_key: str) -> AsyncIterator[None]: ...
+
+    async def async_save_fill(self, fill: AccountFillEvent) -> None: ...
 
     async def async_save_order(self, order: Order) -> None: ...
     async def async_save_batch(self, batch: PositionBatch) -> None: ...
@@ -98,6 +104,7 @@ class InMemoryTradingRepository:
     """测试与内存模拟专用的仓储实现，支持模拟数据库瞬态异常与重试校验"""
 
     def __init__(self) -> None:
+        self.fills: dict[tuple[str, str, str, str], AccountFillEvent] = {}
         self.orders: dict[tuple[str, str, str], Order] = {}
         self.batches: dict[tuple[str, str, str], PositionBatch] = {}
         self._fail_writes_remaining: int = 0
@@ -108,6 +115,10 @@ class InMemoryTradingRepository:
         self.runtime_observations: list[dict[str, Any]] = []
         self.entry_signals: list[dict[str, Any]] = []
         self.halted_accounts: set[tuple[str, str]] = set()
+
+    async def async_save_fill(self, fill: AccountFillEvent) -> None:
+        key = (fill.environment, fill.account_label, fill.symbol, fill.trade_id)
+        self.fills.setdefault(key, deepcopy(fill))
 
     @asynccontextmanager
     async def acquire_dedicated_advisory_lock(
@@ -464,6 +475,14 @@ class PostgresTradingRepository:
         }
         async with self._engine.begin() as conn:
             await conn.execute(text(sql), params)
+
+    async def async_save_fill(self, fill: AccountFillEvent) -> None:
+        statement = pg_insert(AccountFillEventRow).values(**asdict(fill))
+        statement = statement.on_conflict_do_nothing(
+            index_elements=["environment", "account_label", "symbol", "trade_id"]
+        )
+        async with self._engine.begin() as conn:
+            await conn.execute(statement)
 
     async def async_save_order_and_batch(
         self, order: Order, batch: PositionBatch | None

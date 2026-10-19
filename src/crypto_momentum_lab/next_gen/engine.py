@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
 import structlog
 
+from crypto_momentum_lab.domain.account.models import AccountFillEvent
 from crypto_momentum_lab.domain.risk.models import RiskConfigSnapshot
 from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
     ScheduledRiskWindowConfig,
@@ -474,8 +475,29 @@ class AccountState:
         exchange_order_id: int | None = None,
         trade_time: datetime | None = None,
         exchange_realized_pnl: Decimal | None = None,
+        trade_payload: dict[str, Any] | None = None,
     ) -> None:
         async with self._update_lock:
+            if trade_payload is not None and self._db is not None:
+                await self._db.async_save_fill(
+                    AccountFillEvent(
+                        environment=self.environment,
+                        account_label=self.account_label,
+                        symbol=trade_payload["s"],
+                        trade_id=str(trade_payload["t"]),
+                        order_id=str(trade_payload["i"]),
+                        side=trade_payload["S"],
+                        price=Decimal(str(trade_payload["L"])),
+                        quantity=Decimal(str(trade_payload["l"])),
+                        realized_pnl=Decimal(str(trade_payload["rp"])),
+                        fee=Decimal(str(trade_payload["n"])),
+                        fee_asset=trade_payload["N"],
+                        trade_at=datetime.fromtimestamp(
+                            trade_payload["T"] / 1000, tz=UTC
+                        ),
+                        raw_payload=trade_payload,
+                    )
+                )
             await self._apply_order_trade_update(
                 client_order_id,
                 symbol,

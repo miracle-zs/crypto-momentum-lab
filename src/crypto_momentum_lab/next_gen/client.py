@@ -462,6 +462,7 @@ class BinanceUserDataStream:
                 exchange_order_id=int(o.get("i", 0)) if o.get("i") else None,
                 trade_time=trade_time,
                 exchange_realized_pnl=Decimal(str(o["rp"])) if "rp" in o else None,
+                trade_payload=dict(o) if o.get("x") == "TRADE" else None,
             )
             if asyncio.iscoroutine(res):
                 await res
