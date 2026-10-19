@@ -123,7 +123,7 @@ class NextGenDashboardQueries:
             _, row = await self._status(label)
             if row is None or not row.details.get("market_data"):
                 continue
-            sample = row.details["market_data"]
+            sample = cast(dict[str, Any], row.details["market_data"])
             received_at = datetime.fromisoformat(sample["received_at"])
             if 0 <= (self._clock() - received_at).total_seconds() <= 120:
                 samples.append((received_at, sample))
@@ -427,7 +427,7 @@ class NextGenDashboardQueries:
                 for row in orders
                 if row.filled_quantity > 0
             ],
-            live_signals=[row.details for row in signals],
+            live_signals=cast(Any, [row.details for row in signals]),
             summary={
                 "position_count": len(batches),
                 "open_order_count": len(open_orders),

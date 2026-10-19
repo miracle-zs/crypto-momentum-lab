@@ -55,7 +55,8 @@ def test_non_flat_or_unreadable_accounts_wait_and_retry() -> None:
     assert "return 4" in script
     assert "if (( status != 3 && status != 4 )); then" in script
     assert "all_flat=0" in script
-    assert "sleep 30" in script
+    assert "flat_deadline" in script
+    assert 'sleep "$(( remaining < 30 ? remaining : 30 ))"' in script
 
 
 def test_execution_account_containers_stop_in_parallel_with_app_services() -> None:
@@ -140,8 +141,11 @@ def test_deployment_has_one_normal_entrypoint(argument: str) -> None:
 def test_engine_selection_is_forwarded_and_persisted():
     full_script = DEPLOY_SCRIPT.read_text()
     script = remote_script()
-    assert '"${CML_TRADING_ENGINE:-}" <<' in full_script
+    assert 'CML_DEPLOY_SCOPE' in full_script
+    assert 'CML_FLAT_WAIT_SECONDS' in full_script
     assert 'requested_engine="$3"' in script
+    assert 'deploy_scope="$4"' in script
+    assert 'flat_wait_seconds="$5"' in script
     assert 'set_env_value CML_TRADING_ENGINE "$trading_engine"' in script
     assert "-f compose.live.accounts.yaml -f compose.next_gen.yaml" in script
     assert script.index("Deployment stopped: account=$account") > script.index(
@@ -232,7 +236,16 @@ elif name == "systemctl": sys.exit(1)
         ),
     )
     result = subprocess.run(
-        ["bash", "-s", "--", str(checkout), "origin/main", engine],
+        [
+            "bash",
+            "-s",
+            "--",
+            str(checkout),
+            "origin/main",
+            engine,
+            "full",
+            "1800",
+        ],
         input=remote_script(),
         text=True,
         capture_output=True,

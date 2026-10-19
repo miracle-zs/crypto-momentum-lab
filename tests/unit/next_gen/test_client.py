@@ -376,3 +376,36 @@ async def test_set_margin_type_propagates_other_rejections(
         )
         with pytest.raises(BinanceOrderRejectedError):
             await rest_client.set_margin_type("BTCUSDT", "CROSSED")
+
+
+@pytest.mark.asyncio
+async def test_get_rate_limit_retries_and_then_succeeds(rest_client: BinanceRestClient):
+    import httpx
+
+    rate_limited = httpx.Response(
+        429,
+        headers={"Retry-After": "0.01"},
+        request=httpx.Request("GET", "https://fapi.binance.com/fapi/v1/ping"),
+    )
+    success = httpx.Response(
+        200,
+        json={"ok": True},
+        request=httpx.Request("GET", "https://fapi.binance.com/fapi/v1/ping"),
+    )
+    with (
+        patch.object(
+            rest_client._client,
+            "request",
+            new_callable=AsyncMock,
+            side_effect=[rate_limited, success],
+        ) as request,
+        patch(
+            "crypto_momentum_lab.next_gen.client.asyncio.sleep",
+            new_callable=AsyncMock,
+        ) as sleep,
+    ):
+        result = await rest_client._request("GET", "/fapi/v1/ping")
+
+    assert result == {"ok": True}
+    assert request.await_count == 2
+    sleep.assert_awaited_once()

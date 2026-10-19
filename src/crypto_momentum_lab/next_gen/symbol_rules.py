@@ -16,6 +16,8 @@ class SymbolFilter:
     step_size: Decimal
     min_qty: Decimal
     min_notional: Decimal
+    price_multiplier_up: Decimal = Decimal("0")
+    price_multiplier_down: Decimal = Decimal("0")
 
 
 class SymbolRulesRegistry:
@@ -46,12 +48,25 @@ class SymbolRulesRegistry:
                     symbol=row.get("symbol"),
                 )
                 continue
+            percent = filters.get("PERCENT_PRICE")
+            multiplier_up = (
+                Decimal(percent.get("multiplierUp", "0"))
+                if percent is not None
+                else Decimal("0")
+            )
+            multiplier_down = (
+                Decimal(percent.get("multiplierDown", "0"))
+                if percent is not None
+                else Decimal("0")
+            )
             rule = SymbolFilter(
                 symbol=row["symbol"],
                 tick_size=Decimal(price["tickSize"]),
                 step_size=Decimal(lot["stepSize"]),
                 min_qty=Decimal(lot["minQty"]),
                 min_notional=Decimal(notional["notional"]),
+                price_multiplier_up=multiplier_up,
+                price_multiplier_down=multiplier_down,
             )
             values = (rule.tick_size, rule.step_size, rule.min_qty, rule.min_notional)
             if any(not value.is_finite() or value <= 0 for value in values):
@@ -85,10 +100,34 @@ class SymbolRulesRegistry:
         rounded = (units * tick).normalize()
         return Decimal(f"{rounded:f}")
 
+    def price_allowed(
+        self, symbol: str, price: Decimal, reference_price: Decimal | None
+    ) -> bool:
+        """Check Binance PERCENT_PRICE against a mark/reference price.
+
+        A missing filter or reference is permissive; the exchange remains the
+        final authority.  When present, reject locally instead of sending an
+        order that the exchange will refuse after a fast move.
+        """
+        if reference_price is None or reference_price <= 0 or price <= 0:
+            return True
+        flt = self.get_filter(symbol)
+        if flt.price_multiplier_up <= 0 or flt.price_multiplier_down <= 0:
+            return True
+        return (
+            reference_price * flt.price_multiplier_down
+            <= price
+            <= reference_price * flt.price_multiplier_up
+        )
+
     def validate_order(
-        self, symbol: str, qty: Decimal, price: Decimal
+        self,
+        symbol: str,
+        qty: Decimal,
+        price: Decimal,
+        reference_price: Decimal | None = None,
     ) -> tuple[bool, str]:
-        """验证订单是否满足最小数量与最小名义价值"""
+        """验证订单是否满足最小数量、最小名义价值与价格带"""
         flt = self.get_filter(symbol)
         if qty < flt.min_qty:
             return False, f"数量 {qty} 低于标的最小下单量 {flt.min_qty}"
@@ -98,4 +137,6 @@ class SymbolRulesRegistry:
                 False,
                 f"名义价值 {notional} 低于标的最小名义价值 {flt.min_notional}",
             )
+        if not self.price_allowed(symbol, price, reference_price):
+            return False, "价格超出币安 PERCENT_PRICE 价格带"
         return True, ""

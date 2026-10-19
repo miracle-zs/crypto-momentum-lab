@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
@@ -17,6 +17,7 @@ from crypto_momentum_lab.domain.strategy.entry_candidate import prepare_entry_ca
 from crypto_momentum_lab.live_rollout.runtime_config import _live_strategy_config
 from crypto_momentum_lab.live_rollout.runtime_manifest import LiveRuntimeAccount
 from crypto_momentum_lab.live_rollout.volume import QuoteVolume24hProvider
+from crypto_momentum_lab.next_gen.client import BinanceOrderRejectedError
 from crypto_momentum_lab.next_gen.engine import AccountState
 from crypto_momentum_lab.next_gen.executor import OrderExecutor
 from crypto_momentum_lab.next_gen.models import generate_batch_id
@@ -50,6 +51,7 @@ class MomentumStrategyEngine:
         self.market_connected = False
         self.market_data_observation: dict[str, Any] | None = None
         self.latest_prices = state.latest_prices
+        self._rejected_entry_until: dict[tuple[str, str], datetime] = {}
         self._last_state_at: dict[str, datetime] = {}
         inputs = account_config.strategy_inputs
         if inputs.entry_order_type is not EntryType.LIMIT:
@@ -163,6 +165,7 @@ class MomentumStrategyEngine:
             )
         finally:
             # Observations follow submission; their failure must not change trading.
+            repository = self.state.db
             for signal in decision.signals:
                 recorded_at = datetime.now(UTC)
                 try:
@@ -174,7 +177,13 @@ class MomentumStrategyEngine:
                         ].items()
                         if value["signal_id"] == signal.signal_id
                     }
-                    context["universe"] = await self.state.db.async_get_signal_universe(
+                    if repository is None:
+                        log.warning(
+                            "entry_signal_not_persisted_without_repository",
+                            signal_id=signal.signal_id,
+                        )
+                        continue
+                    context["universe"] = await repository.async_get_signal_universe(
                         market_state.bucket_end, signal.symbol
                     )
                     volume = (
@@ -184,7 +193,7 @@ class MomentumStrategyEngine:
                             signal.symbol, as_of=now
                         )
                     )
-                    await self.state.db.async_save_entry_signal(
+                    await repository.async_save_entry_signal(
                         self.state.environment,
                         self.state.account_label,
                         recorded_at,
@@ -275,6 +284,10 @@ class MomentumStrategyEngine:
                 result["rejection_reason"] = "outside_positive_gainer_top"
                 continue
             side = candidate.side.value.upper()
+            reject_until = self._rejected_entry_until.get((symbol, side))
+            if reject_until is not None and now < reject_until:
+                result["rejection_reason"] = "exchange_reject_cooldown"
+                continue
             key = (self.state.account_label, symbol, side)
             if key in self.state.active_entry_orders:
                 result["rejection_reason"] = "active_entry_order"
@@ -286,11 +299,19 @@ class MomentumStrategyEngine:
                 symbol, execution.target_notional / price
             )
             price = self.symbol_rules.round_price(symbol, price)
-            valid, reason = self.symbol_rules.validate_order(symbol, quantity, price)
+            reference_price = market_state.mark_price or market_state.effective_price
+            valid, reason = self.symbol_rules.validate_order(
+                symbol, quantity, price, reference_price=reference_price
+            )
             if not valid:
                 result["rejection_reason"] = reason
                 log.warning(
-                    "entry_rejected_by_symbol_rules", symbol=symbol, reason=reason
+                    "entry_rejected_by_symbol_rules",
+                    symbol=symbol,
+                    reason=reason,
+                    reference_price=None
+                    if reference_price is None
+                    else str(reference_price),
                 )
                 continue
             if not self.state.check_notional_limits(
@@ -318,7 +339,21 @@ class MomentumStrategyEngine:
             order = self.state.create_entry_order(
                 symbol, side, quantity, price, batch_id, order_type="LIMIT"
             )
-            await self.order_executor.submit_order(order)
+            try:
+                await self.order_executor.submit_order(order)
+            except BinanceOrderRejectedError as error:
+                reason = f"exchange_reject:{error.code}:{error.message}"
+                result["rejection_reason"] = reason[:300]
+                self._rejected_entry_until[(symbol, side)] = now + timedelta(seconds=30)
+                log.warning(
+                    "entry_order_rejected",
+                    account=self.state.account_label,
+                    symbol=symbol,
+                    side=side,
+                    code=error.code,
+                    reason=error.message,
+                )
+                continue
             submitted.append(order.client_order_id)
             result.update(passed=True, rejection_reason=None)
         return submitted

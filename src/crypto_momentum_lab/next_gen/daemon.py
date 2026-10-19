@@ -21,6 +21,7 @@ from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
 from crypto_momentum_lab.live_rollout.volume import WebSocketQuoteVolumeProvider
 from crypto_momentum_lab.market_data.quote_hub import WebSocketMarketQuoteVolumeSource
 from crypto_momentum_lab.next_gen.client import (
+    BinanceOrderRejectedError,
     BinanceRestClient,
     BinanceUserDataStream,
     get_binance_urls,
@@ -369,14 +370,26 @@ class NextGenDaemon:
                         if not order.is_terminal
                     }
                     for symbol in sorted(active_symbols):
-                        await self.rest_client.set_margin_type(
-                            symbol,
-                            self.account_config.execution_inputs.margin_type,
-                        )
-                        await self.rest_client.set_leverage(
-                            symbol,
-                            leverage=self.account_config.execution_inputs.entry_leverage,
-                        )
+                        try:
+                            await self.rest_client.set_margin_type(
+                                symbol,
+                                self.account_config.execution_inputs.margin_type,
+                            )
+                            await self.rest_client.set_leverage(
+                                symbol,
+                                leverage=self.account_config.execution_inputs.entry_leverage,
+                            )
+                        except BinanceOrderRejectedError as error:
+                            # A restored position may sit on a symbol whose max
+                            # leverage is below the new entry setting.  Keep
+                            # managing it; only the next entry is disabled.
+                            log.warning(
+                                "active_symbol_settings_failed",
+                                account=self.account_label,
+                                symbol=symbol,
+                                code=error.code,
+                                reason=error.message,
+                            )
                     if (
                         not self.state.ws_connected
                         or self.state.private_stream_gap

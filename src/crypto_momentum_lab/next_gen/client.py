@@ -110,6 +110,7 @@ class BinanceRestClient:
         path: str,
         signed: bool = False,
         params: dict[str, Any] | None = None,
+        _rate_limit_attempt: int = 0,
     ) -> Any:
         url = f"{self.base_url}{path}"
         req_params = dict(params or {})
@@ -133,6 +134,35 @@ class BinanceRestClient:
             ) from e
 
         if response.is_error:
+            # 429 on an idempotent read is safe to retry with the server's
+            # requested delay.  Never retry a POST order here: it may already
+            # have reached the matching engine.
+            if (
+                response.status_code == 429
+                and method.upper() == "GET"
+                and _rate_limit_attempt < 2
+            ):
+                retry_after_raw = response.headers.get("Retry-After", "")
+                try:
+                    retry_after = float(retry_after_raw)
+                except ValueError:
+                    retry_after = 5.0
+                delay = min(max(retry_after, 1.0), 30.0)
+                log.warning(
+                    "binance_rate_limited_retry",
+                    path=path,
+                    attempt=_rate_limit_attempt + 1,
+                    delay_seconds=delay,
+                )
+                await asyncio.sleep(delay)
+                return await self._request(
+                    method,
+                    path,
+                    signed=signed,
+                    params=params,
+                    _rate_limit_attempt=_rate_limit_attempt + 1,
+                )
+
             # 1. 5xx 服务端错误、408 超时、429 限频：状态存疑或不可用，严禁标记为已拒单
             if response.status_code >= 500 or response.status_code in (408, 429):
                 raise BinanceNetworkError(

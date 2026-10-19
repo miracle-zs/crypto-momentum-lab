@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from functools import partial
 from typing import Any
@@ -18,7 +18,10 @@ from crypto_momentum_lab.domain.strategy.position_exit import (
 from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
     ScheduledRiskWindowPhase,
 )
-from crypto_momentum_lab.next_gen.client import BinanceRestClient
+from crypto_momentum_lab.next_gen.client import (
+    BinanceOrderRejectedError,
+    BinanceRestClient,
+)
 from crypto_momentum_lab.next_gen.engine import AccountState
 from crypto_momentum_lab.next_gen.executor import OrderExecutor
 from crypto_momentum_lab.next_gen.models import Order, OrderStatus, SystemMode
@@ -50,6 +53,7 @@ class ExitManager:
         self.grace_profit_pct = grace_profit_pct
         self.eval_interval_sec = eval_interval_sec
         self._active_exit_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._rejected_exit_until: dict[str, datetime] = {}
         self._last_schedule_observation: tuple[str, str] | None = None
 
         if executor is not None:
@@ -116,7 +120,63 @@ class ExitManager:
             price=None if immediate else rounded_limit_price,
             order_type="MARKET" if immediate else "LIMIT",
         )
-        await self._executor.submit_order(limit_order)
+        try:
+            await self._executor.submit_order(limit_order)
+        except RuntimeError as error:
+            log.warning(
+                "exit_order_blocked_by_gate",
+                batch_id=batch_id,
+                symbol=batch.symbol,
+                immediate=immediate,
+                reason=str(error),
+            )
+            return
+        except BinanceOrderRejectedError as error:
+            log.warning(
+                "exit_order_rejected",
+                batch_id=batch_id,
+                symbol=batch.symbol,
+                immediate=immediate,
+                code=error.code,
+                reason=error.message,
+            )
+            self._rejected_exit_until[batch_id] = datetime.now(UTC) + timedelta(
+                seconds=30
+            )
+            if immediate:
+                return
+            # A rejected limit (for example a stale PERCENT_PRICE band) must
+            # not leave the position unmanaged: try a market sweep once.
+            batch = self._state.batches.get(batch_id)
+            if batch is None or batch.quantity <= 0:
+                return
+            sweep_qty = self.symbol_rules.round_quantity(batch.symbol, batch.quantity)
+            if sweep_qty <= 0:
+                return
+            market_order = self._state.create_exit_order(
+                batch_id=batch_id,
+                quantity=sweep_qty,
+                price=None,
+                order_type="MARKET",
+            )
+            try:
+                await self._executor.submit_order(market_order)
+            except BinanceOrderRejectedError as sweep_error:
+                log.warning(
+                    "exit_market_sweep_rejected",
+                    batch_id=batch_id,
+                    symbol=batch.symbol,
+                    code=sweep_error.code,
+                    reason=sweep_error.message,
+                )
+            except RuntimeError as block_error:
+                log.warning(
+                    "exit_market_sweep_blocked_by_gate",
+                    batch_id=batch_id,
+                    symbol=batch.symbol,
+                    reason=str(block_error),
+                )
+            return
         if immediate:
             return
 
@@ -199,6 +259,9 @@ class ExitManager:
             if batch.status == "CLOSED" or batch.quantity <= Decimal("0"):
                 continue
 
+            reject_until = self._rejected_exit_until.get(batch.batch_id)
+            if reject_until is not None and eval_now < reject_until:
+                continue
             exit_key = (self._state.account_label, batch.batch_id)
             if (
                 exit_key in self._state.active_exit_orders

@@ -150,7 +150,21 @@ def test_cli_drain_live_flow_cancels_and_sweeps() -> None:
     batch.status = "EXITING"
     batch.exiting_quantity = batch.quantity
     repo.orders[("testnet", "a1", old_order.client_order_id)] = old_order
-    mock_rest.fetch_open_orders.return_value = []
+    mock_rest.fetch_open_orders.side_effect = [
+        [{"clientOrderId": old_order.client_order_id}],
+        [],
+    ]
+    mock_rest.fetch_startup_order.return_value = {
+        "clientOrderId": old_order.client_order_id,
+        "symbol": old_order.symbol,
+        "side": old_order.side,
+        "positionSide": old_order.position_side,
+        "status": "NEW",
+        "executedQty": "0",
+        "avgPrice": "0",
+        "orderId": 12345,
+        "updateTime": int(datetime.now(UTC).timestamp() * 1000),
+    }
     mock_rest.cancel_order.return_value = {"orderId": 12345, "status": "CANCELED"}
     mock_rest.fetch_exchange_info.return_value = exchange_info()
     mock_rest.post_order.return_value = {"orderId": 999, "clientOrderId": "sweep_1"}
@@ -223,11 +237,11 @@ def test_cli_drain_live_flow_cancels_and_sweeps() -> None:
     ):
         result = runner.invoke(app, ["drain", "-e", "testnet", "-a", "a1"])
         assert result.exit_code == 0
-        assert mock_rest.fetch_open_orders.await_count == 1
+        assert mock_rest.fetch_open_orders.await_count == 2
         mock_rest.query_order.assert_not_awaited()
         mock_rest.cancel_order.assert_awaited_once()
         mock_rest.post_order.assert_awaited_once()
-        assert mock_rest.fetch_account_information.await_count == 1
+        assert mock_rest.fetch_account_information.await_count == 2
 
 
 def test_cli_run_dry_run_does_not_connect() -> None:

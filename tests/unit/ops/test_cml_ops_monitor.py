@@ -2315,6 +2315,14 @@ def test_unhealthy_live_account_is_restarted_with_cooldown_and_cap(
     restart_commands = [
         call for call in runner.calls if call[:2] == ["docker", "compose"]
     ]
+    if engine == "nextgen":
+        # NextGen account restarts require an explicit operator request; the
+        # monitor must alert but never recreate a live account on its own.
+        assert restart_commands == []
+        assert any(
+            alert.name == "live_heartbeat_stale:account-2" for alert in first_alerts
+        )
+        return
     assert len(restart_commands) == 1
     assert restart_commands[0][-2:] == ["restart", expected_service]
     assert any(alert.name == "live_heartbeat_stale:account-2" for alert in first_alerts)

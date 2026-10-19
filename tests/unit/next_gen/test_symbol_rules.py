@@ -121,3 +121,33 @@ def test_symbol_rules_skip_symbols_without_required_filters() -> None:
     )
     assert registry.has_filter("BTCUSDT") is True
     assert registry.has_filter("SETTLINGUSDT") is False
+
+
+def test_symbol_rules_percent_price_band() -> None:
+    registry = SymbolRulesRegistry()
+    registry.update_from_exchange_info(
+        {
+            "symbols": [
+                {
+                    "symbol": "BANDUSDT",
+                    "filters": [
+                        {"filterType": "PRICE_FILTER", "tickSize": "0.001"},
+                        {"filterType": "LOT_SIZE", "stepSize": "1", "minQty": "1"},
+                        {"filterType": "MIN_NOTIONAL", "notional": "5"},
+                        {
+                            "filterType": "PERCENT_PRICE",
+                            "multiplierUp": "1.15",
+                            "multiplierDown": "0.85",
+                        },
+                    ],
+                }
+            ]
+        }
+    )
+    assert registry.price_allowed("BANDUSDT", Decimal("1.14"), Decimal("1")) is True
+    assert registry.price_allowed("BANDUSDT", Decimal("1.16"), Decimal("1")) is False
+    valid, reason = registry.validate_order(
+        "BANDUSDT", Decimal("10"), Decimal("1.16"), reference_price=Decimal("1")
+    )
+    assert valid is False
+    assert "PERCENT_PRICE" in reason

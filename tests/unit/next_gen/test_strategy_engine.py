@@ -230,3 +230,23 @@ async def test_active_halt_is_checked_before_submitting_signal(strategy_setup):
     assert await strategy.on_market_state(last) == []
     assert state.entry_halted
     rest.post_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_exchange_entry_rejection_is_recorded_and_cools_down(strategy_setup):
+    state, repository, rest, executor, strategy, last = strategy_setup
+    from crypto_momentum_lab.next_gen.client import BinanceOrderRejectedError
+
+    rest.post_order.side_effect = BinanceOrderRejectedError(
+        code=-2010, message="Margin is insufficient."
+    )
+
+    assert await strategy.on_market_state(last) == []
+    assert rest.post_order.await_count == 1
+    assert not state.active_entry_orders
+    signal = repository.entry_signals[-1]
+    candidate_results = signal["filter_context"]["candidate_filter_results"]
+    assert candidate_results
+    reason = next(iter(candidate_results.values()))["rejection_reason"]
+    assert "exchange_reject:-2010" in reason
+    assert ("BTCUSDT", "LONG") in strategy._rejected_entry_until

@@ -5,6 +5,7 @@ import json
 import os
 import signal
 from collections.abc import Awaitable, Callable
+from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -344,6 +345,19 @@ def drain_command(
                 await executor.restore_startup_state()
                 state.set_system_mode(SystemMode.DRAINING)
                 drained_count = await executor.drain(rules)
+                # The local ledger is not enough to declare a drain complete.
+                final_snapshot = await read_client.fetch_account_information()
+                final_orders = await read_client.fetch_open_orders()
+                remaining_positions = [
+                    p
+                    for p in final_snapshot.positions
+                    if p.position_amt != Decimal("0")
+                ]
+                if remaining_positions or final_orders:
+                    state.set_system_mode(SystemMode.DEGRADED)
+                    raise RuntimeError(
+                        "Drain final exchange check found remaining positions or orders"
+                    )
                 state.set_system_mode(SystemMode.STOPPED)
                 log.info(
                     "next_gen_drain_completed", drained_batches_count=drained_count

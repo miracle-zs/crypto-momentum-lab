@@ -479,3 +479,40 @@ async def test_candle_exit_uses_configured_profit_targets(
         immediate=immediate,
     )
     await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_exit_business_rejection_falls_back_to_market_without_degrade(
+    exit_setup,
+):
+    state, repo, rest, manager = exit_setup
+    batch = PositionBatch(
+        "live",
+        "a1",
+        "reject-exit",
+        "BTCUSDT",
+        "LONG",
+        Decimal("1"),
+        Decimal("65000"),
+        datetime.now(UTC),
+    )
+    state.batches[batch.batch_id] = batch
+    from crypto_momentum_lab.next_gen.client import BinanceOrderRejectedError
+
+    rest.post_order.side_effect = [
+        BinanceOrderRejectedError(code=-4131, message="price band"),
+        {"orderId": 333},
+    ]
+
+    await manager.execute_batch_exit(
+        batch.batch_id,
+        limit_price=Decimal("65500"),
+        immediate=False,
+    )
+
+    assert state.has_unrecoverable_fault is False
+    assert state.system_mode == SystemMode.RUNNING
+    assert rest.post_order.await_count == 2
+    assert rest.post_order.await_args_list[0].kwargs["order_type"] == "LIMIT"
+    assert rest.post_order.await_args_list[1].kwargs["order_type"] == "MARKET"
+    assert state.batches[batch.batch_id].quantity == Decimal("1")
