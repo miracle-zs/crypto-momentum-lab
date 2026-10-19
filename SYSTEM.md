@@ -953,3 +953,12 @@ NextGen Compose 补齐与现有研究采集器一致的 market-data healthy 启�
 现场发布e0ad990f完成，标准脚本耗时150秒；停机前后四账户交易所仓位/挂单均为空，7个应用服务同版且healthy，PostgreSQL未重启。4账户成交额缓存实际接收74个标的；08:14:45自然APRUSDT空信号记录成交额123539946.18 USDT、涨幅榜第3、scheduled_risk_window拒绝，前端实际显示全部三列，未发送订单。浏览器确认顶部定时停开仓至09:00、性能“未接入/不适用”。复核再清理账户详情顶部旧live-strategy/execution-account名称与“交易所配置已同步”错误文案；这项仅看板静态资源后续定向发布，不重启交易账户。
 
 08:17 CST看板文案修正e7867581已定向发布，仅重建dashboard，四账户/行情/采集继续运行e0ad990f。看板资源dashboard-e2a066af66798f23.js已实际返回，全部容器healthy；readiness=READY，开仓门scheduled_risk_window关闭、退出门开放。API再次确认APRUSDT自然信号三列完整，订单累计记录trade_at=null并明确order_updated_at。维护窗口已撤销，未改定时归档或手动清理数据。
+
+
+### 归档清理冻结行核验超限与维护负载（2026-10-19）
+
+08:22定时归档于08:44失败：148716条decision_traces已导出并校验，失败发生在冻结待删行的指纹查询。生产EXPLAIN确认旧ctid关联被规划为对整张宽表构建Hash Join，超过256MB临时文件上限。改为prune_targets驱动的LATERAL逐ctid查询，OFFSET 0保留参数化Tid Scan；EXPLAIN确认Nested Loop + Tid Scan。指纹读取同步改为COPY CSV流，与归档指纹使用同一CSV字段上限及JSON行编码，避免psql对整个PGresult缓冲。仍保持原始256MB上限、行数/内容指纹一致检查与冻结目标集合，不降低删除保护。
+
+08:23–08:33行情延迟134–217ms时CPU PSI some avg10约44–61，归档结束后约6–10且行情lag为1–4ms；目前为资源争用的相关证据，不宣称已经证明唯一根因。归档systemd任务增加Nice=10和低磁盘调度优先级，使主机归档进程让出实盘资源，不调整行情告警阈值。修正正针对同一真实148716行与原manifest执行源数据只读指纹核验；尚未清理数据、未重启交易账户。未新增或运行测试套件，仅静态检查及真实数据库执行计划/指纹核验。
+
+同一失败范围只读核验已完成：冻结148716行，修正查询的内容指纹与原归档manifest完全一致，耗时59.88秒，核验Python峰值RSS23.17MiB；仍使用4MB work_mem/256MB temp_file_limit，未执行删除。同期行情9个健康采样窗口最大loop lag27ms，无新延迟警告。完整定时任务及ExecStartPost仍需真实重跑后才能确认恢复。

@@ -6,6 +6,10 @@ Requires=docker.service
 
 [Service]
 Type=oneshot
+# Cold-data export must yield CPU and disk scheduling to live trading.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
 User=root
 WorkingDirectory=/opt/crypto-momentum-lab
 # Archives the exact range about to be dropped and verifies the manifest's row

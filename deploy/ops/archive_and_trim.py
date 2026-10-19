@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import subprocess
@@ -33,7 +34,10 @@ if str(_REPO_ROOT / "src") not in sys.path:
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-from archive_table import retention_row_predicate  # noqa: E402
+from archive_table import (  # noqa: E402
+    _DECISION_ARCHIVE_CSV_FIELD_LIMIT,
+    retention_row_predicate,
+)
 from stream_digest import StreamingContentDigest  # noqa: E402
 
 from crypto_momentum_lab.domain.operational.retention_authority import (  # noqa: E402
@@ -211,9 +215,9 @@ class PsqlSession:
     def stream_digest(self, sql: str) -> str:
         """Digest one query result row at a time in the locked psql session.
 
-        The query deliberately has no global ordering or aggregate.  The
-        accumulator is commutative, so this preserves a stable content check
-        while keeping both PostgreSQL and this process at constant memory.
+        COPY streams rows without psql buffering the entire PGresult. The CSV
+        decoder hashes the same JSON lines as archive_table's fingerprint path.
+        The SELECT must itself avoid wide hash/sort intermediates.
         """
 
         proc = self._proc
@@ -225,14 +229,18 @@ class PsqlSession:
             )
         self._seq += 1
         marker = f"__cml_done_{self._seq}__"
-        proc.stdin.write(_terminated(sql) + "\n")
+        query = sql.rstrip().removesuffix(";")
+        proc.stdin.write(f"COPY ({query}) TO STDOUT WITH (FORMAT csv);\n")
         proc.stdin.write(f"SELECT '{marker}';\n")
         proc.stdin.flush()
         digest = StreamingContentDigest()
-        for line in proc.stdout:
-            if line.rstrip("\n") == marker:
+        csv.field_size_limit(_DECISION_ARCHIVE_CSV_FIELD_LIMIT)
+        for row in csv.reader(proc.stdout):
+            if len(row) != 1:
+                raise RuntimeError("Fingerprint COPY must return one JSON column")
+            if row[0] == marker:
                 return digest.hexdigest()
-            digest.update(line.encode("utf-8"))
+            digest.update(row[0].encode("utf-8") + b"\n")
         raise RuntimeError(
             "psql session ended before marker: " + "".join(self._stderr_lines)
         )
@@ -554,10 +562,11 @@ def build_freeze_targets_sql(
 
 
 def build_frozen_content_digest_sql(table: str) -> str:
-    """Return frozen rows without sorting or aggregating them in PostgreSQL."""
+    """Fetch each frozen tuple without hashing or sorting wide source rows."""
     return (
-        "SELECT row_to_json(t)::text "
-        f"FROM {table} t JOIN prune_targets p ON t.ctid = p.id;"
+        "SELECT row_to_json(t)::text FROM prune_targets p "
+        f"CROSS JOIN LATERAL (SELECT * FROM {table} "
+        "WHERE ctid = p.id OFFSET 0) t;"
     )
 
 
