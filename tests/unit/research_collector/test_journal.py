@@ -96,12 +96,7 @@ def test_resolution_identity_cache_preserves_restarts_and_external_appends(
     assert len(audit.read_text().splitlines()) == 3
 
 
-def test_resolution_cache_limit_falls_back_to_scoped_stream_scan(
-    tmp_path: Path, monkeypatch
-) -> None:
-    import crypto_momentum_lab.research_collector.journal as module
-
-    monkeypatch.setattr(module, "_MAX_CACHED_RESOLUTION_IDENTITIES", 2, raising=False)
+def test_resolution_disk_index_finds_historical_identity(tmp_path: Path) -> None:
     journal = ArchiveJournal(
         tmp_path / "journal", environment="research", max_bytes=1024**2
     )

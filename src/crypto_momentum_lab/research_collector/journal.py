@@ -16,10 +16,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import structlog
 
@@ -78,11 +79,12 @@ def _require_sequence(value: object, name: str = "sequence") -> int:
     return value
 
 
-_MAX_CACHED_RESOLUTION_IDENTITIES = 131072
+_RESOLUTION_IDENTITY_BYTES = hashlib.sha256().digest_size
+_RESOLUTION_INDEX_CHUNK_BYTES = _RESOLUTION_IDENTITY_BYTES * 2048
 
 
 def _resolution_identities(record: Mapping[str, Any]) -> set[bytes]:
-    identities = []
+    identities: list[tuple[str | int, ...]] = []
     record_id = record.get("record_id")
     if record_id:
         identities.append(("record", str(record_id)))
@@ -129,7 +131,7 @@ class ArchiveJournal:
         self._last_materialized_bucket: datetime | None = None
         self._last_materialized_symbol: str | None = None
         self._cached_resolution_stamp: tuple[int, int, int, int] | None = None
-        self._cached_resolution_identities: set[bytes] | None = None
+        self._resolution_identity_index: BinaryIO | None = None
 
         self._pending_root.mkdir(parents=True, exist_ok=True)
 
@@ -419,15 +421,13 @@ class ArchiveJournal:
                     f.flush()
                     os.fsync(f.fileno())
                 _fsync_directory(self._root)
-                # Publish cache entries only after the append is durable. A
-                # failed write must never make a later retry skip audit output.
-                if self._cached_resolution_identities is not None:
-                    self._cached_resolution_identities.update(appended_identities)
-                    if (
-                        len(self._cached_resolution_identities)
-                        > _MAX_CACHED_RESOLUTION_IDENTITIES
-                    ):
-                        self._cached_resolution_identities = None
+                # This temporary index is derived, not authoritative. Update it
+                # only after the audit append is durable; restart rebuilds it.
+                if self._resolution_identity_index is not None:
+                    self._resolution_identity_index.seek(0, os.SEEK_END)
+                    for identity in appended_identities:
+                        self._resolution_identity_index.write(identity)
+                    self._resolution_identity_index.flush()
                 self._cached_resolution_stamp = self._resolution_stamp()
 
         # 2. WRITE-AHEAD AUDIT: Update manifest atomically BEFORE deleting any journal
@@ -486,27 +486,36 @@ class ArchiveJournal:
         return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
 
     def _resolution_index(self, candidates: set[bytes]) -> set[bytes]:
-        """Cache bounded identities, never payloads; validate changed files anew."""
+        """Scan compact hashes with bounded RAM, without rereading audit payloads."""
         stamp = self._resolution_stamp()
         if (
-            self._cached_resolution_identities is not None
-            and stamp == self._cached_resolution_stamp
+            self._resolution_identity_index is None
+            or stamp != self._cached_resolution_stamp
         ):
-            return self._cached_resolution_identities
-        cache: set[bytes] | None = set()
+            index: BinaryIO = tempfile.TemporaryFile(
+                prefix="cml-resolution-identities-"
+            )
+            try:
+                for record in self._iter_resolutions():
+                    for identity in _resolution_identities(record):
+                        index.write(identity)
+                index.flush()
+            except BaseException:
+                index.close()
+                raise
+            if self._resolution_identity_index is not None:
+                self._resolution_identity_index.close()
+            self._resolution_identity_index = index
+            self._cached_resolution_stamp = stamp
+        index = self._resolution_identity_index
+        index.seek(0)
         matches: set[bytes] = set()
-        for record in self._iter_resolutions():
-            identities = _resolution_identities(record)
-            matches.update(identities & candidates)
-            if cache is not None:
-                cache.update(identities)
-                if len(cache) > _MAX_CACHED_RESOLUTION_IDENTITIES:
-                    cache = None
-        self._cached_resolution_identities = cache
-        self._cached_resolution_stamp = stamp
-        # Once the cache limit is reached, retain only identities relevant to
-        # this batch. Recovery/commit remain correct with bounded memory.
-        return matches if cache is None else cache
+        while chunk := index.read(_RESOLUTION_INDEX_CHUNK_BYTES):
+            for offset in range(0, len(chunk), _RESOLUTION_IDENTITY_BYTES):
+                identity = chunk[offset:offset + _RESOLUTION_IDENTITY_BYTES]
+                if identity in candidates:
+                    matches.add(identity)
+        return matches
 
     def _iter_resolutions(self) -> Iterator[dict[str, Any]]:
         res_path = self._root / "resolutions.jsonl"
