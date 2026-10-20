@@ -59,16 +59,6 @@ def test_non_flat_or_unreadable_accounts_wait_and_retry() -> None:
     assert 'sleep "$(( remaining < 30 ? remaining : 30 ))"' in script
 
 
-def test_retired_account_containers_stop_in_parallel_with_app_services() -> None:
-    script = remote_script()
-
-    assert 'retired_containers+=("$container")' in script
-    assert 'docker stop --time 90 "$container" >/dev/null &' in script
-    assert 'execution_stop_pids+=("$!")' in script
-    assert '"${compose[@]}" stop --timeout 90 "${running_services[@]}" &' in script
-    assert 'wait "$stop_pid"' in script
-
-
 def test_target_image_build_overlaps_account_flat_checks() -> None:
     script = remote_script()
 
@@ -78,16 +68,7 @@ def test_target_image_build_overlaps_account_flat_checks() -> None:
     assert 'docker image inspect "$target_image"' in script
     assert '"${build_compose[@]}" build migrate &' in script
     assert "check_target_build" in script
-    assert "finish_target_build\n\n# This timer" in script
-    assert (
-        script.index("finish_target_build")
-        < script.index("systemctl disable --now cml-position-recovery-retention.timer")
-        < script.index("running_services=()")
-    )
-    timer_shutdown = script[
-        script.index("# This timer") : script.index("\nrunning_services=()")
-    ]
-    assert "|| true" not in timer_shutdown
+    assert "finish_target_build\n\nrunning_services=()" in script
     assert "trap cleanup_build_worktree EXIT" in script
 
 
@@ -155,7 +136,9 @@ def test_deployment_has_no_legacy_engine_selector():
         "nextgen-strategy-account-4",
     ):
         assert service in script
-    assert "docker stop --time 90 \"$container\"" in script
+    assert "retired_containers" not in script
+    assert "execution-account-live" not in script
+    assert "live-strategy-account" not in script
     assert script.index("Deployment stopped: account=$account") > script.index(
-        'wait "$stop_pid"'
+        '"${compose[@]}" stop --timeout 90 "${running_services[@]}"'
     )

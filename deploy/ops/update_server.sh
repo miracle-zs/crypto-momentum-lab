@@ -297,17 +297,6 @@ while :; do
 done
 finish_target_build
 
-# This timer only prunes the retired position journal tables. Stop it before
-# the schema migration drops those tables.
-if command -v systemctl >/dev/null 2>&1; then
-  if systemctl cat cml-position-recovery-retention.timer >/dev/null 2>&1; then
-    systemctl disable --now cml-position-recovery-retention.timer
-  fi
-  if systemctl cat cml-position-recovery-retention.service >/dev/null 2>&1; then
-    systemctl stop cml-position-recovery-retention.service
-  fi
-fi
-
 running_services=()
 for service in dashboard market-data research-collector \
   nextgen-strategy-primary nextgen-strategy-account-2 nextgen-strategy-account-3 nextgen-strategy-account-4; do
@@ -324,48 +313,14 @@ for item in "${accounts[@]}"; do
   services+=("${item#*:}")
 done
 
-retired_containers=()
-for service in live-strategy live-strategy-account-2 live-strategy-account-3 \
-  live-strategy-account-4 execution-account-live execution-account-live-account-2 \
-  execution-account-live-account-3 execution-account-live-account-4; do
-  container="$(docker ps -q --filter label=com.docker.compose.project=crypto-momentum-lab \
-    --filter "label=com.docker.compose.service=$service" | head -n 1)"
-  if [[ -n "$container" ]]; then
-    retired_containers+=("$container")
-  fi
-done
-execution_stop_pids=()
-application_stop_pid=""
-if (( ${#retired_containers[@]} > 0 )); then
-  for container in "${retired_containers[@]}"; do
-    docker stop --time 90 "$container" >/dev/null &
-    execution_stop_pids+=("$!")
-  done
-fi
 if (( ${#running_services[@]} > 0 )); then
-  "${compose[@]}" stop --timeout 90 "${running_services[@]}" &
-  application_stop_pid=$!
-  execution_stop_pids+=("$application_stop_pid")
-fi
-stop_status=0
-if (( ${#execution_stop_pids[@]} > 0 )); then
-for stop_pid in "${execution_stop_pids[@]}"; do
-  if [[ -z "$stop_pid" ]]; then
-    continue
-  fi
-  if wait "$stop_pid"; then
-    continue
+  if "${compose[@]}" stop --timeout 90 "${running_services[@]}"; then
+    :
   else
-    status=$?
+    stop_status=$?
+    echo "Deployment failed while stopping services: status=$stop_status" >&2
+    exit "$stop_status"
   fi
-  if (( stop_status == 0 )); then
-    stop_status=$status
-  fi
-done
-fi
-if (( stop_status != 0 )); then
-  echo "Deployment failed while stopping services: status=$stop_status" >&2
-  exit "$stop_status"
 fi
 
 for item in "${accounts[@]}"; do
