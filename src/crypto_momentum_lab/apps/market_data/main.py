@@ -88,6 +88,7 @@ from crypto_momentum_lab.market_data.runtime_states import (
     ClosedMarketStatePublisher,
     ClosedMarketStatePublisherConfig,
 )
+from crypto_momentum_lab.next_gen.persistence import PostgresTradingRepository
 from crypto_momentum_lab.persistence.postgres.account_repository import (
     PostgresAccountRepository,
 )
@@ -139,7 +140,6 @@ _SYMBOL_LOG_LIMIT = 20
 _MARKET_DATA_STARTUP_GRACE_SECONDS = 120.0
 _MARKET_DATA_STALE_AFTER_SECONDS = 120.0
 _MARKET_DATA_WATCHDOG_INTERVAL_SECONDS = 15.0
-_PAPER_EXIT_RECONCILE_SECONDS = 15.0
 _DATABASE_RETENTION_INTERVAL_SECONDS = 300.0
 _DATABASE_RETENTION_MAX_RUNTIME_SECONDS = 45.0
 _CONTRACT_METADATA_RETENTION_HOURS = 6.0
@@ -259,32 +259,14 @@ def _ignore_backfill_result(
 async def _load_protected_symbols(
     *,
     paper_repository: PostgresPaperDaemonRepository,
-    account_repository: PostgresAccountRepository,
+    trading_repository: PostgresTradingRepository,
     protected_run_ids: frozenset[str],
-    configured_live_position_account_labels: frozenset[str],
 ) -> frozenset[str]:
-    """Load paper symbols plus every live account with a durable open position.
-
-    Configured labels and the latest reconciliation runs determine the live
-    accounts whose authoritative position states are included.
-    """
+    """Load paper symbols plus symbols in current live position batches."""
     paper_symbols = await paper_repository.load_open_position_symbols(protected_run_ids)
-    discovered_labels = await account_repository.load_active_position_account_labels(
+    live_symbols = await trading_repository.async_get_active_position_symbols(
         environment="live"
     )
-
-    live_position_account_labels = (
-        configured_live_position_account_labels | discovered_labels
-    )
-    live_symbols: set[str] = set()
-    for account_label in sorted(live_position_account_labels):
-        position_state = await account_repository.load_active_position_state(
-            environment="live",
-            account_label=account_label,
-        )
-        if position_state is None:
-            raise RuntimeError(f"missing account position state for {account_label}")
-        live_symbols.update(position_state.symbols)
     return paper_symbols | live_symbols
 
 
@@ -542,12 +524,6 @@ class CaptureUniverseObserver:
         forced = self._universe_forced_symbols
         applied = self._applied_symbols or frozenset()
         return self._universe_symbols | prewarm | forced | applied
-
-    async def refresh_protected_symbols(self) -> None:
-        async with self._lock:
-            if self._universe_symbols is None:
-                return
-            await self._apply_symbols()
 
     def _active_trade_tier_symbols(
         self,
@@ -822,30 +798,6 @@ class CaptureUniverseObserver:
         # universe refreshes represent a real promotion into the trade tier.
         if previous_symbols is not None and needing_backfill:
             self._schedule_history_backfill(needing_backfill)
-
-
-async def reconcile_paper_exit_subscriptions(
-    observer: CaptureUniverseObserver,
-    *,
-    interval_seconds: float = _PAPER_EXIT_RECONCILE_SECONDS,
-    retry_delay_seconds: float = 5.0,
-    sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
-) -> None:
-    if interval_seconds <= 0:
-        raise ValueError("interval_seconds must be positive")
-    if retry_delay_seconds < 0:
-        raise ValueError("retry_delay_seconds must be non-negative")
-    while True:
-        await sleeper(interval_seconds)
-        try:
-            await observer.refresh_protected_symbols()
-        except Exception as error:
-            log.exception(
-                "paper_exit_subscription_reconcile_failed",
-                error=str(error),
-            )
-            if retry_delay_seconds > 0:
-                await sleeper(retry_delay_seconds)
 
 
 async def prune_expired_raw_archives(
@@ -1128,7 +1080,6 @@ class MarketDataRuntime:
     archive_retention_interval_seconds: float
     capture_shutdown_timeout_seconds: float
     universe: UniverseRefreshService
-    subscription_observer: CaptureUniverseObserver
     runtime_state_publisher: ClosedMarketStatePublisher
     agg_trade_recovery: AggTradeGapRecoverer
     state_hub: MarketStateHub
@@ -1226,7 +1177,7 @@ async def build_market_data_runtime(
     maintenance_capture_repository = PostgresCaptureRepository(maintenance_sessions)
     operational_retention = PostgresOperationalRetentionRepository(maintenance_sessions)
     paper_repository = PostgresPaperDaemonRepository(maintenance_sessions)
-    account_repository = PostgresAccountRepository(maintenance_sessions)
+    trading_repository = PostgresTradingRepository(maintenance_engine)
     runtime_state_repository = PostgresRuntimeMarketStateRepository(market_sessions)
     if startup_timer is not None:
         startup_timer.mark("database_resources_created")
@@ -1266,16 +1217,12 @@ async def build_market_data_runtime(
         on_durable_state_persisted=on_durable_state_persisted,
     )
     protected_run_ids = parse_paper_exit_run_ids()
-    configured_live_position_account_labels = parse_live_position_account_labels()
 
     async def load_protected_symbols() -> frozenset[str]:
         return await _load_protected_symbols(
             paper_repository=paper_repository,
-            account_repository=account_repository,
+            trading_repository=trading_repository,
             protected_run_ids=protected_run_ids,
-            configured_live_position_account_labels=(
-                configured_live_position_account_labels
-            ),
         )
 
     persisted_memberships = await universe_repository.load_active_memberships()
@@ -1559,7 +1506,6 @@ async def build_market_data_runtime(
                     runtime.capture.shutdown_timeout_seconds
                 ),
                 universe=universe,
-                subscription_observer=observer,
                 runtime_state_publisher=runtime_state_publisher,
                 agg_trade_recovery=agg_trade_recovery,
                 state_hub=state_hub,
@@ -1746,9 +1692,6 @@ async def run_market_data(
                         ),
                         recovery_metrics=lambda: runtime.agg_trade_recovery.metrics,
                     )
-                ),
-                asyncio.create_task(
-                    reconcile_paper_exit_subscriptions(runtime.subscription_observer)
                 ),
                 asyncio.create_task(
                     run_raw_archive_retention_loop(

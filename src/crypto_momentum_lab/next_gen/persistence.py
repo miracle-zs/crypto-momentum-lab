@@ -684,6 +684,21 @@ class PostgresTradingRepository:
                 for r in rows
             ]
 
+    async def async_get_active_position_symbols(
+        self, environment: str
+    ) -> frozenset[str]:
+        """Return symbols with a non-zero active or exiting position batch."""
+        sql = """
+        SELECT DISTINCT symbol
+        FROM live_position_batches
+        WHERE environment = :env
+          AND status IN ('ACTIVE', 'EXITING')
+          AND quantity > 0;
+        """
+        async with self._engine.connect() as conn:
+            result = await conn.execute(text(sql), {"env": environment})
+            return frozenset(result.scalars().all())
+
     async def async_get_order(
         self, environment: str, account_label: str, client_order_id: str
     ) -> Order | None:
