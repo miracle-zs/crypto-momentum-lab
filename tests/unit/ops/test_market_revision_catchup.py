@@ -18,6 +18,28 @@ def script():
     return module
 
 
+def test_critical_containers_tracks_nextgen_accounts_only(script, monkeypatch):
+    names = [
+        "crypto-momentum-lab-postgres-1",
+        "crypto-momentum-lab-dashboard-1",
+        "crypto-momentum-lab-market-data-1",
+        "crypto-momentum-lab-research-collector-1",
+        "cml-nextgen-strategy-primary",
+        "cml-nextgen-strategy-account-2",
+        "cml-nextgen-strategy-account-3",
+        "cml-nextgen-strategy-account-4",
+        "crypto-momentum-lab-live-strategy-1",
+    ]
+    monkeypatch.setattr(script, "command", lambda _args: "\n".join(names))
+
+    containers = script.critical_containers()
+
+    assert {name for name in names if name.startswith("cml-nextgen-strategy-")} <= set(
+        containers
+    )
+    assert "crypto-momentum-lab-live-strategy-1" not in containers
+
+
 def _healthy():
     return {
         "unhealthy": [],

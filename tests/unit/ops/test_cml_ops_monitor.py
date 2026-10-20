@@ -36,7 +36,6 @@ from deploy.ops.cml_ops_monitor import (
     coalesce_shared_market_state_alerts,
     evaluate_container,
     evaluate_container_memory_growth,
-    evaluate_database_state,
     evaluate_log_signals,
     evaluate_position_divergence,
     evaluate_position_intent_divergence,
@@ -100,101 +99,6 @@ def test_ops_monitor_requires_authenticated_external_heartbeat(tmp_path) -> None
                 external_heartbeat_url="https://monitor.example.net/cml",
             )
         )
-
-
-def test_database_state_alerts_when_live_checkpoint_is_stale() -> None:
-    alerts = evaluate_database_state(
-        now=datetime(2026, 8, 29, 1, 0, tzinfo=UTC),
-        latest_checkpoint_age_seconds=901,
-        live_session_ready=True,
-        pg_stat_statements_ready=True,
-        track_io_timing=True,
-        track_wal_io_timing=True,
-        max_parallel_maintenance_workers=0,
-        stale_after_seconds=900,
-        account_process_state="ready_readonly",
-        account_process_age_seconds=12,
-        latest_reconciliation_status="ready",
-        latest_reconciliation_age_seconds=12,
-        latest_market_progress_age_seconds=12,
-        latest_market_delay_ms=100,
-    )
-
-    assert [alert.name for alert in alerts] == ["live_checkpoint_stale"]
-    assert alerts[0].severity == "critical"
-
-
-def test_database_state_reports_which_live_ready_arm_failed() -> None:
-    """A not-ready live session names the failing arm, not three tables to check."""
-
-    alerts = evaluate_database_state(
-        now=datetime(2026, 8, 29, 1, 0, tzinfo=UTC),
-        latest_checkpoint_age_seconds=12,
-        live_session_ready=False,
-        live_session_state_ready=True,
-        live_checkpoint_present=True,
-        pg_stat_statements_ready=True,
-        track_io_timing=True,
-        track_wal_io_timing=True,
-        max_parallel_maintenance_workers=0,
-        stale_after_seconds=900,
-        account_process_state="ready_readonly",
-        account_process_age_seconds=12,
-        latest_reconciliation_status="ready",
-        latest_reconciliation_age_seconds=12,
-        latest_market_progress_age_seconds=12,
-        latest_market_delay_ms=100,
-    )
-
-    assert [alert.name for alert in alerts] == ["live_session_not_ready"]
-    assert alerts[0].details["session_state_ready"] is True
-    assert alerts[0].details["checkpoint_present"] is True
-    assert alerts[0].details["checkpoint_age_seconds"] == 12
-    assert alerts[0].details["stale_after_seconds"] == 900
-
-
-def test_database_state_treats_absent_live_ready_arms_as_ready() -> None:
-    """Older SQL output omits the three arms; absence must not read as not-ready."""
-
-    alerts = evaluate_database_state(
-        now=datetime(2026, 8, 29, 1, 0, tzinfo=UTC),
-        latest_checkpoint_age_seconds=12,
-        live_session_ready=True,
-        pg_stat_statements_ready=True,
-        track_io_timing=True,
-        track_wal_io_timing=True,
-        max_parallel_maintenance_workers=0,
-        stale_after_seconds=900,
-        account_process_state="ready_readonly",
-        account_process_age_seconds=12,
-        latest_reconciliation_status="ready",
-        latest_reconciliation_age_seconds=12,
-        latest_market_progress_age_seconds=12,
-        latest_market_delay_ms=100,
-    )
-
-    assert [alert.name for alert in alerts] == []
-
-
-def test_database_state_does_not_alert_when_only_order_telemetry_is_quiet() -> None:
-    alerts = evaluate_database_state(
-        now=datetime(2026, 8, 29, 1, 0, tzinfo=UTC),
-        latest_checkpoint_age_seconds=12,
-        live_session_ready=True,
-        pg_stat_statements_ready=True,
-        track_io_timing=True,
-        track_wal_io_timing=True,
-        max_parallel_maintenance_workers=0,
-        stale_after_seconds=900,
-        account_process_state="ready_readonly",
-        account_process_age_seconds=12,
-        latest_reconciliation_status="ready",
-        latest_reconciliation_age_seconds=12,
-        latest_market_progress_age_seconds=12,
-        latest_market_delay_ms=100,
-    )
-
-    assert alerts == ()
 
 
 def test_merge_log_signals_keeps_every_field() -> None:
@@ -442,6 +346,64 @@ def test_log_signals_alert_on_binance_avg_price_schema_drift() -> None:
     }
 
 
+def test_monitor_reads_market_data_logs_once_for_all_accounts(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from deploy.ops import cml_ops_monitor
+
+    accounts = (
+        ("primary", "live-primary-v1"),
+        ("account-2", "live-account-2-v1"),
+        ("account-3", "live-account-3-v1"),
+        ("account-4", "live-account-4-v1"),
+    )
+    container_ids = {
+        "market-data": "market-container",
+        **{
+            f"nextgen-strategy-{account}": f"{account}-container"
+            for account, _run_id in accounts
+        },
+    }
+    monitor = OpsMonitor(
+        MonitorConfig(
+            services=(),
+            live_accounts=accounts,
+            state_path=tmp_path / "state.json",
+            retention_timer_unit="",
+        )
+    )
+    log_reads: list[tuple[str | None, str | None]] = []
+
+    def collect_logs(market_id, live_id, *, since_seconds):
+        del since_seconds
+        log_reads.append((market_id, live_id))
+        return LogSignals(
+            dead_connection_tasks=("market:aggTrade:0000",) if market_id else ()
+        )
+
+    monkeypatch.setattr(monitor, "_container_snapshots", lambda: ())
+    monkeypatch.setattr(
+        monitor, "_container_id", lambda service: container_ids.get(service)
+    )
+    monkeypatch.setattr(monitor, "_log_signals", collect_logs)
+    monkeypatch.setattr(monitor, "_retention_schedule_state", lambda: None)
+    monkeypatch.setattr(monitor, "_market_revision_purge_schedule_state", lambda: None)
+    monkeypatch.setattr(monitor, "_market_revision_archive_schedule_state", lambda: None)
+    monkeypatch.setattr(monitor, "_disk_usage_alerts", lambda **_kwargs: ())
+    monkeypatch.setattr(monitor, "_emit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(monitor, "_emit_resolutions", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(monitor, "_send_external_heartbeat", lambda *_args: None)
+    monkeypatch.setattr(cml_ops_monitor, "read_maintenance_window", lambda *_args: None)
+
+    alerts = monitor.run_once()
+
+    assert log_reads.count(("market-container", None)) == 1
+    assert sum(market_id is not None for market_id, _live_id in log_reads) == 1
+    market_alert = next(alert for alert in alerts if alert.name == "market_task_not_alive")
+    assert market_alert.details["group_ids"] == ("market:aggTrade:0000",)
+
+
 def test_container_alerts_on_oom_and_rss_limit() -> None:
     alerts = evaluate_container(
         ContainerSnapshot(
@@ -469,7 +431,7 @@ def test_postgres_gets_a_higher_memory_warning_threshold() -> None:
 
     assert rss_warning_fraction_for("postgres", 0.75) == 0.85
     # Services without an override keep the configured default.
-    assert rss_warning_fraction_for("live-strategy", 0.75) == 0.75
+    assert rss_warning_fraction_for("nextgen-strategy-primary", 0.75) == 0.75
     assert rss_warning_fraction_for("market-data", 0.75) == 0.75
     # ...including an explicitly configured one.
     assert rss_warning_fraction_for("dashboard", 0.60) == 0.60
@@ -533,8 +495,8 @@ def test_postgres_warning_override_suppresses_page_cache_noise() -> None:
     assert [
         alert.name
         for alert in evaluate_container(
-            snapshot("live-strategy"),
-            rss_warning_fraction=rss_warning_fraction_for("live-strategy", 0.75),
+            snapshot("nextgen-strategy-primary"),
+            rss_warning_fraction=rss_warning_fraction_for("nextgen-strategy-primary", 0.75),
             rss_critical_fraction=0.90,
         )
     ] == ["container_memory_high"]
@@ -593,13 +555,13 @@ def test_postgres_memory_high_reads_anon_not_working_set() -> None:
 def test_memory_growth_ignores_a_restart_warmup() -> None:
     """Growing from an empty container to steady state is not a leak.
 
-    This is the real alert: live-strategy-account-3 restarted, the trend
+    This is the real alert: nextgen-strategy-account-3 restarted, the trend
     baseline was reset to its near-empty startup footprint, and the climb to
     ~148 MiB looked like 130 MiB of growth -- at 19% of its limit.
     """
 
     warmup = {
-        "service": "live-strategy-account-3",
+        "service": "nextgen-strategy-account-3",
         "baseline_bytes": 18 * 1024 * 1024,
         "baseline_age_seconds": 1080.0,
         "consecutive_samples": 18,
@@ -646,7 +608,7 @@ def test_memory_growth_details_include_human_readable_sizes() -> None:
     """These are triaged on a phone; bytes alone are unreadable."""
 
     alert = evaluate_container_memory_growth(
-        service="live-strategy",
+        service="nextgen-strategy-primary",
         current_bytes=740 * 1024 * 1024,
         baseline_bytes=600 * 1024 * 1024,
         baseline_age_seconds=900.0,
@@ -959,38 +921,6 @@ def test_postgres_memory_pressure_context_is_aggregate_and_query_text_free(
     assert "'query', query" not in sql
 
 
-def test_market_delay_reads_only_event_backed_buckets(tmp_path) -> None:
-    """Empty buckets are a dense-clock device, not a latency measurement.
-
-    market-data materializes zero-event buckets for quiet symbols so consumers
-    see a continuous 15-second clock.  Every one of them sits at a past
-    bucket_end, so received_at - bucket_end measures the bucket's age.  The
-    monitor saw 18 and 65 minute "delays" that way while healthy buckets sat at
-    1.3 seconds.
-    """
-
-    class Runner:
-        last_args = None
-
-        def run(self, args, *, timeout_seconds):
-            del timeout_seconds
-            self.last_args = args
-            return ""
-
-    runner = Runner()
-    monitor = OpsMonitor(
-        MonitorConfig(state_path=tmp_path / "state.json"),
-        runner=runner,
-    )
-
-    monitor._database_state("postgres")
-    sql = str(runner.last_args[-1])
-
-    assert "'source_event_count'" in sql
-    # The filter belongs to the delay lookup and nowhere else.
-    assert sql.count("source_event_count") == 1
-
-
 def test_durations_and_fractions_are_rendered_for_a_reader() -> None:
     """A raw number in a push notification makes the reader do the arithmetic.
 
@@ -1072,150 +1002,6 @@ def test_push_title_drops_the_scope_before_truncating_the_label() -> None:
     assert _serverchan_title("恢复", "", "行情延迟过高") == "CML | 恢复 | 行情延迟过高"
 
 
-def test_database_state_parses_postgres_boolean_text(tmp_path) -> None:
-    class Runner:
-        def run(self, args, *, timeout_seconds):
-            del args, timeout_seconds
-            return (
-                "checkpoint_age\t12\n"
-                "live_ready\ttrue\n"
-                "pg_stat_statements\ttrue\n"
-                "track_io_timing\ton\n"
-                "track_wal_io_timing\tt\n"
-                "parallel_maintenance\t0\n"
-                "market_progress_age\t15\n"
-                "market_delay_ms\t250\n"
-                "account_process_state\tready_readonly\n"
-                "account_process_age\t5\n"
-                "reconciliation_status\tready\n"
-                "reconciliation_age\t6\n"
-                "unknown_order_count\t0\n"
-                "oldest_unknown_order_age\t-1\n"
-            )
-
-    monitor = OpsMonitor(
-        MonitorConfig(state_path=tmp_path / "state.json"),
-        runner=Runner(),
-    )
-
-    state = monitor._database_state("postgres")
-
-    assert state.latest_checkpoint_age_seconds == 12
-    assert state.live_session_ready is True
-    assert state.pg_stat_statements_ready is True
-    assert state.track_io_timing is True
-    assert state.track_wal_io_timing is True
-    assert state.max_parallel_maintenance_workers == 0
-    assert state.latest_market_progress_age_seconds == 15
-    assert state.latest_market_delay_ms == 250
-    assert state.account_process_state == "ready_readonly"
-    assert state.account_process_age_seconds == 5
-    assert state.latest_reconciliation_status == "ready"
-    assert state.latest_reconciliation_age_seconds == 6
-    assert state.unknown_order_count == 0
-    assert state.oldest_unknown_order_age_seconds is None
-
-
-def test_database_state_uses_checkpoint_without_lease_table_query(
-    tmp_path,
-) -> None:
-    class Runner:
-        last_args = None
-
-        def run(self, args, *, timeout_seconds):
-            del timeout_seconds
-            self.last_args = args
-            return (
-                "checkpoint_age\t12\n"
-                "live_ready\ttrue\n"
-                "pg_stat_statements\ttrue\n"
-                "track_io_timing\ton\n"
-                "track_wal_io_timing\ton\n"
-                "parallel_maintenance\t0\n"
-            )
-
-    runner = Runner()
-    monitor = OpsMonitor(
-        MonitorConfig(
-            state_path=tmp_path / "state.json",
-            live_run_id="live-session",
-            live_account_label="primary",
-        ),
-        runner=runner,
-    )
-
-    monitor._database_state("postgres")
-    sql = str(runner.last_args[-1])
-
-    assert "strategy_runtime_checkpoints" in sql
-    assert "live_session_transitions" in sql
-    assert "strategy_runtime_events" in sql
-    assert "market_state_progress" in sql
-    assert "data_complete" in sql
-    assert "interval '5 minutes'" in sql
-    assert "execution_account_process_states" in sql
-    assert "account_reconciliation_runs" in sql
-
-
-def test_database_state_reads_checkpoint_and_session_in_one_snapshot(tmp_path) -> None:
-    class Runner:
-        last_args = None
-
-        def run(self, args, *, timeout_seconds):
-            del timeout_seconds
-            self.last_args = args
-            return (
-                "checkpoint_age\t12\n"
-                "live_ready\ttrue\n"
-                "live_session_state_ready\ttrue\n"
-                "live_checkpoint_present\ttrue\n"
-                "pg_stat_statements\ttrue\n"
-                "track_io_timing\ton\n"
-                "track_wal_io_timing\ton\n"
-                "parallel_maintenance\t0\n"
-            )
-
-    runner = Runner()
-    monitor = OpsMonitor(
-        MonitorConfig(state_path=tmp_path / "state.json"), runner=runner
-    )
-
-    monitor._database_state("postgres")
-    sql = str(runner.last_args[-1])
-
-    assert "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;" in sql
-    assert sql.rstrip().endswith("COMMIT;")
-
-
-def test_database_state_alerts_on_lifecycle_market_and_unknown_order_state() -> None:
-    alerts = evaluate_database_state(
-        now=datetime(2026, 8, 29, 1, 0, tzinfo=UTC),
-        latest_checkpoint_age_seconds=12,
-        live_session_ready=True,
-        pg_stat_statements_ready=True,
-        track_io_timing=True,
-        track_wal_io_timing=True,
-        max_parallel_maintenance_workers=0,
-        stale_after_seconds=900,
-        account_process_state="degraded",
-        account_process_age_seconds=3,
-        latest_reconciliation_status="halted",
-        latest_reconciliation_age_seconds=3,
-        latest_market_progress_age_seconds=901,
-        latest_market_delay_ms=121_000,
-        unknown_order_count=1,
-        oldest_unknown_order_age_seconds=42,
-    )
-
-    assert {alert.name for alert in alerts} == {
-        "live_account_lifecycle_not_ready",
-        "live_account_reconciliation_stale",
-        "live_market_state_stale",
-        "live_market_state_delay",
-        "live_unknown_orders",
-    }
-
-
 def test_coalesce_shared_market_state_alerts_reports_one_root_cause() -> None:
     alerts = (
         Alert(
@@ -1273,27 +1059,6 @@ def test_coalesce_shared_market_state_alerts_keeps_partial_failure_scoped() -> N
         )
         == alerts
     )
-
-
-def test_evaluate_database_state_reconciliation_ready_with_large_age() -> None:
-    alerts = evaluate_database_state(
-        now=datetime(2026, 9, 1, 0, 0, tzinfo=UTC),
-        latest_checkpoint_age_seconds=12,
-        live_session_ready=True,
-        pg_stat_statements_ready=True,
-        track_io_timing=True,
-        track_wal_io_timing=True,
-        max_parallel_maintenance_workers=0,
-        stale_after_seconds=900,
-        account_process_state="ready_readonly",
-        account_process_age_seconds=15,
-        latest_reconciliation_status="ready",
-        latest_reconciliation_age_seconds=3600,
-        latest_market_progress_age_seconds=15,
-        latest_market_delay_ms=100,
-    )
-    assert "live_account_reconciliation_stale" not in {alert.name for alert in alerts}
-    assert alerts == ()
 
 
 def test_signal_divergence_compares_only_same_strategy_configuration() -> None:
@@ -1716,7 +1481,6 @@ def test_build_config_reads_live_session_from_compose_env(
         live_run_id=None,
         interval_seconds=60.0,
         log_window_seconds=120.0,
-        telemetry_stale_after_seconds=900.0,
         rss_warning_fraction=0.75,
         rss_critical_fraction=0.90,
         rss_growth_bytes=64 * 1024 * 1024,
@@ -1735,19 +1499,18 @@ def test_build_config_reads_live_session_from_compose_env(
 def test_build_config_supports_multiple_compose_files_and_live_accounts(
     tmp_path, monkeypatch
 ) -> None:
-    monkeypatch.setenv("CML_COMPOSE_PROFILES", "live")
+    monkeypatch.delenv("CML_COMPOSE_PROFILES", raising=False)
     monkeypatch.setenv(
         "CML_MONITOR_LIVE_ACCOUNTS",
         "primary|live-primary-v1,account-2|live-account-2-v1",
     )
     args = argparse.Namespace(
         project_directory=str(tmp_path),
-        compose_file=(f"{tmp_path / 'compose.yaml'},{tmp_path / 'compose.live.yaml'}"),
-        services="postgres,live-strategy,live-strategy-account-2",
+        compose_file=str(tmp_path / "ignored-compose.yaml"),
+        services="postgres,nextgen-strategy-primary,nextgen-strategy-account-2",
         live_run_id=None,
         interval_seconds=60.0,
         log_window_seconds=120.0,
-        telemetry_stale_after_seconds=900.0,
         rss_warning_fraction=0.75,
         rss_critical_fraction=0.90,
         rss_growth_bytes=64 * 1024 * 1024,
@@ -1761,39 +1524,41 @@ def test_build_config_supports_multiple_compose_files_and_live_accounts(
     monitor = OpsMonitor(config, runner=None)
 
     assert config.compose_files == (
-        tmp_path / "compose.yaml",
-        tmp_path / "compose.live.yaml",
+        tmp_path / "compose.server.yaml",
+        tmp_path / "compose.next_gen.yaml",
     )
-    assert config.compose_profiles == ("live",)
+    assert config.compose_profiles == ("nextgen",)
     assert config.live_accounts == (
         ("primary", "live-primary-v1"),
         ("account-2", "live-account-2-v1"),
     )
     assert monitor._compose_prefix()[-4:] == [
         "-f",
-        str(tmp_path / "compose.live.yaml"),
+        str(tmp_path / "compose.next_gen.yaml"),
         "--profile",
-        "live",
+        "nextgen",
     ]
 
 
 def test_build_config_discovers_live_accounts_from_compose_files(
     tmp_path, monkeypatch
 ) -> None:
-    base_file = tmp_path / "compose.yaml"
-    overlay_file = tmp_path / "compose.live.yaml"
+    base_file = tmp_path / "compose.server.yaml"
+    overlay_file = tmp_path / "compose.next_gen.yaml"
     env_file = tmp_path / ".env.server"
     base_file.write_text(
         "services:\n"
         "  postgres:\n"
         "  market-data:\n"
-        "  live-strategy:\n"
         "volumes:\n"
         "  postgres-data:\n",
         encoding="utf-8",
     )
     overlay_file.write_text(
-        "services:\n  live-strategy-account-2:\n  live-strategy-account-4:\n",
+        "services:\n"
+        "  nextgen-strategy-primary:\n"
+        "  nextgen-strategy-account-2:\n"
+        "  nextgen-strategy-account-4:\n",
         encoding="utf-8",
     )
     env_file.write_text(
@@ -1805,12 +1570,11 @@ def test_build_config_discovers_live_accounts_from_compose_files(
     monkeypatch.setenv("CML_COMPOSE_ENV_FILE", str(env_file))
     args = argparse.Namespace(
         project_directory=str(tmp_path),
-        compose_file=f"{base_file},{overlay_file}",
+        compose_file=str(tmp_path / "ignored-compose.yaml"),
         services=None,
         live_run_id=None,
         interval_seconds=60.0,
         log_window_seconds=120.0,
-        telemetry_stale_after_seconds=900.0,
         rss_warning_fraction=0.75,
         rss_critical_fraction=0.90,
         rss_growth_bytes=64 * 1024 * 1024,
@@ -1831,9 +1595,9 @@ def test_build_config_discovers_live_accounts_from_compose_files(
         "postgres",
         "market-data",
         "research-collector",
-        "live-strategy",
-        "live-strategy-account-2",
-        "live-strategy-account-4",
+        "nextgen-strategy-primary",
+        "nextgen-strategy-account-2",
+        "nextgen-strategy-account-4",
     )
 
 
@@ -1852,12 +1616,12 @@ def test_container_id_uses_docker_service_labels(tmp_path) -> None:
         runner=runner,
     )
 
-    assert monitor._container_id("live-strategy-account-2") == "container-id"
+    assert monitor._container_id("nextgen-strategy-account-2") == "container-id"
     assert runner.last_args == [
         "docker",
         "ps",
         "--filter",
-        "label=com.docker.compose.service=live-strategy-account-2",
+        "label=com.docker.compose.service=nextgen-strategy-account-2",
         "--format",
         "{{.ID}}",
     ]
@@ -1872,7 +1636,6 @@ def test_serverchan_config_and_payload(monkeypatch, tmp_path) -> None:
         live_run_id="live-session",
         interval_seconds=60.0,
         log_window_seconds=120.0,
-        telemetry_stale_after_seconds=900.0,
         rss_warning_fraction=0.75,
         rss_critical_fraction=0.90,
         rss_growth_bytes=64 * 1024 * 1024,
@@ -1890,7 +1653,7 @@ def test_serverchan_config_and_payload(monkeypatch, tmp_path) -> None:
             "severity": "critical",
             "summary": "Live strategy is unhealthy",
             "observed_at": "2026-09-01T12:00:00+00:00",
-            "details": {"service": "live-strategy"},
+            "details": {"service": "nextgen-strategy-primary"},
         }
     )
 
@@ -1902,7 +1665,7 @@ def test_serverchan_config_and_payload(monkeypatch, tmp_path) -> None:
     assert "[严重] primary：服务健康检查失败" in form["desp"]
     assert "2026-09-01 20:00:00（北京时间）" in form["desp"]
     assert "诊断结论" in form["desp"]
-    assert "live-strategy" in form["desp"]
+    assert "nextgen-strategy-primary" in form["desp"]
 
 
 def test_serverchan_recovery_form_includes_duration_and_local_time() -> None:
@@ -1967,7 +1730,7 @@ def test_resolution_payload_preserves_alert_context_and_duration(
             "container_unhealthy",
             "critical",
             "service health failed",
-            {"service": "live-strategy-account-2"},
+            {"service": "nextgen-strategy-account-2"},
         ),
         now=100.0,
     )
@@ -1975,7 +1738,7 @@ def test_resolution_payload_preserves_alert_context_and_duration(
 
     assert delivered[1]["event"] == "ops_alert_resolved"
     assert delivered[1]["duration_seconds"] == 60.0
-    assert delivered[1]["details"] == {"service": "live-strategy-account-2"}
+    assert delivered[1]["details"] == {"service": "nextgen-strategy-account-2"}
 
 
 def test_alert_debounce_requires_consecutive_failures(monkeypatch, tmp_path) -> None:
@@ -1996,7 +1759,7 @@ def test_alert_debounce_requires_consecutive_failures(monkeypatch, tmp_path) -> 
         ),
     )
     alert = Alert(
-        "live_market_state_delay:live-strategy-account-2",
+        "live_market_state_delay:nextgen-strategy-account-2",
         "critical",
         "Market state delay exceeded",
         {"delay_ms": 150000},
@@ -2015,7 +1778,7 @@ def test_alert_debounce_requires_consecutive_failures(monkeypatch, tmp_path) -> 
     assert len(delivered) == 1
     assert delivered[0]["event"] == "ops_alert"
     assert (
-        delivered[0]["alert_name"] == "live_market_state_delay:live-strategy-account-2"
+        delivered[0]["alert_name"] == "live_market_state_delay:nextgen-strategy-account-2"
     )
 
 
@@ -2082,7 +1845,7 @@ def test_cooldown_persists_across_resolutions(monkeypatch, tmp_path) -> None:
         ),
     )
     alert = Alert(
-        "live_market_state_delay:live-strategy-account-2",
+        "live_market_state_delay:nextgen-strategy-account-2",
         "critical",
         "Market state delay exceeded",
         {"delay_ms": 150000},
@@ -2102,15 +1865,15 @@ def test_cooldown_persists_across_resolutions(monkeypatch, tmp_path) -> None:
     # Must NOT send another ops_alert notification!
     assert len(delivered) == 2
     assert (
-        "live_market_state_delay:live-strategy-account-2"
+        "live_market_state_delay:nextgen-strategy-account-2"
         not in monitor._state["active_alerts"]
     )
     assert (
-        "live_market_state_delay:live-strategy-account-2"
+        "live_market_state_delay:nextgen-strategy-account-2"
         not in monitor._state["active_alert_context"]
     )
     assert (
-        "live_market_state_delay:live-strategy-account-2"
+        "live_market_state_delay:nextgen-strategy-account-2"
         not in monitor._state["alert_occurrences"]
     )
 
@@ -2213,18 +1976,12 @@ def test_flapping_detection_flags_frequent_state_changes(monkeypatch, tmp_path) 
 
 
 @pytest.mark.parametrize("maintenance", [False, True])
-@pytest.mark.parametrize("engine", ["legacy", "nextgen"])
-def test_unhealthy_live_account_is_restarted_with_cooldown_and_cap(
+def test_unhealthy_nextgen_account_alerts_without_automatic_restart(
     tmp_path,
     monkeypatch,
     maintenance,
-    engine,
 ) -> None:
-    expected_service = (
-        "nextgen-strategy-account-2"
-        if engine == "nextgen"
-        else "live-strategy-account-2"
-    )
+    expected_service = "nextgen-strategy-account-2"
 
     class Runner:
         def __init__(self) -> None:
@@ -2259,41 +2016,27 @@ def test_unhealthy_live_account_is_restarted_with_cooldown_and_cap(
             if command[:2] == ["docker", "logs"]:
                 return ""
             if command[:2] == ["docker", "exec"]:
-                return (
-                    "checkpoint_age\t12\n"
-                    "live_ready\ttrue\n"
-                    "pg_stat_statements\ttrue\n"
-                    "track_io_timing\ton\n"
-                    "track_wal_io_timing\ton\n"
-                    "parallel_maintenance\t0\n"
-                )
-            if command[:2] == ["docker", "compose"]:
-                return "restarted\n"
-            if command and command[0] == "systemctl":
-                # The retention-schedule check reads systemd on the host; this
-                # runner stubs only the container and database probes.
                 return ""
+            if command and command[0] == "systemctl":
+                return ""
+            if command[:2] == ["docker", "compose"]:
+                return "unexpected restart\n"
             raise AssertionError(f"unexpected command: {command}")
 
-    now = [1000.0]
     runner = Runner()
     monitor = OpsMonitor(
         MonitorConfig(
-            trading_engine=engine,
             project_directory=tmp_path,
             compose_file=tmp_path / "compose.yaml",
             compose_files=(tmp_path / "compose.yaml",),
-            compose_profiles=("nextgen" if engine == "nextgen" else "live",),
+            compose_profiles=("nextgen",),
             compose_env_file=None,
             services=(expected_service,),
             live_accounts=(("account-2", "live-account-2-v1"),),
             state_path=tmp_path / "state.json",
-            auto_restart_stale_live_services=True,
-            live_restart_cooldown_seconds=900.0,
-            live_restart_max_attempts=2,
         ),
         runner=runner,
-        clock=lambda: now[0],
+        clock=lambda: 1_000.0,
     )
 
     if maintenance:
@@ -2307,53 +2050,19 @@ def test_unhealthy_live_account_is_restarted_with_cooldown_and_cap(
         write_maintenance_window(
             marker, started_at=datetime.now(UTC), expected_seconds=900
         )
-        monitor.run_once()
-        assert not [call for call in runner.calls if call[:2] == ["docker", "compose"]]
-        assert not monitor._state.get("live_restart_state")
+        assert monitor.run_once() == ()
+        assert not any(call[:2] == ["docker", "compose"] for call in runner.calls)
         clear_maintenance_window(marker)
-    first_alerts = monitor.run_once()
-    restart_commands = [
-        call for call in runner.calls if call[:2] == ["docker", "compose"]
-    ]
-    if engine == "nextgen":
-        # NextGen account restarts require an explicit operator request; the
-        # monitor must alert but never recreate a live account on its own.
-        assert restart_commands == []
-        assert any(
-            alert.name == "live_heartbeat_stale:account-2" for alert in first_alerts
-        )
-        return
-    assert len(restart_commands) == 1
-    assert restart_commands[0][-2:] == ["restart", expected_service]
-    assert any(alert.name == "live_heartbeat_stale:account-2" for alert in first_alerts)
+
+    alerts = monitor.run_once()
+    assert any(alert.name == "live_heartbeat_stale:account-2" for alert in alerts)
+    assert not any(call[:2] == ["docker", "compose"] for call in runner.calls)
     archives = tuple((tmp_path / "crash-logs").glob("*.log"))
     assert len(archives) == 1
     assert "container_id=account-2-container" in archives[0].read_text(encoding="utf-8")
     assert any(
         alert.details.get("crash_log_archive") == str(archives[0])
-        for alert in first_alerts
-    )
-
-    now[0] += 10
-    monitor.run_once()
-    assert (
-        len([call for call in runner.calls if call[:2] == ["docker", "compose"]]) == 1
-    )
-
-    now[0] += 900
-    monitor.run_once()
-    assert (
-        len([call for call in runner.calls if call[:2] == ["docker", "compose"]]) == 2
-    )
-
-    now[0] += 900
-    final_alerts = monitor.run_once()
-    assert (
-        len([call for call in runner.calls if call[:2] == ["docker", "compose"]]) == 2
-    )
-    assert any(
-        alert.name == "live_heartbeat_restart_suppressed:account-2"
-        for alert in final_alerts
+        for alert in alerts
     )
 
 
@@ -2796,60 +2505,6 @@ def test_evaluate_log_signals_expired_candidates() -> None:
     assert alerts_crit[0].severity == "critical"
 
 
-def test_evaluate_database_state_terminal_mismatch_and_unknown_orders() -> None:
-    alerts = evaluate_database_state(
-        now=datetime(2026, 9, 1, 0, 0, tzinfo=UTC),
-        latest_checkpoint_age_seconds=12,
-        live_session_ready=True,
-        pg_stat_statements_ready=True,
-        track_io_timing=True,
-        track_wal_io_timing=True,
-        max_parallel_maintenance_workers=0,
-        stale_after_seconds=900,
-        account_process_state="ready_readonly",
-        account_process_age_seconds=5,
-        latest_reconciliation_status="ready",
-        latest_reconciliation_age_seconds=5,
-        latest_market_progress_age_seconds=15,
-        latest_market_delay_ms=250,
-        unknown_order_count=1,
-        oldest_unknown_order_age_seconds=30,
-        terminal_state_mismatch_count=2,
-        oldest_terminal_mismatch_age_seconds=120,
-    )
-    alert_map = {a.name: a for a in alerts}
-    assert "live_unknown_orders" in alert_map
-    assert alert_map["live_unknown_orders"].severity == "warning"
-    assert "live_order_command_terminal_mismatch" in alert_map
-    assert alert_map["live_order_command_terminal_mismatch"].severity == "critical"
-    assert (
-        alert_map["live_order_command_terminal_mismatch"].details["mismatch_count"] == 2
-    )
-
-    alerts_escalated = evaluate_database_state(
-        now=datetime(2026, 9, 1, 0, 0, tzinfo=UTC),
-        latest_checkpoint_age_seconds=12,
-        live_session_ready=True,
-        pg_stat_statements_ready=True,
-        track_io_timing=True,
-        track_wal_io_timing=True,
-        max_parallel_maintenance_workers=0,
-        stale_after_seconds=900,
-        account_process_state="ready_readonly",
-        account_process_age_seconds=5,
-        latest_reconciliation_status="ready",
-        latest_reconciliation_age_seconds=5,
-        latest_market_progress_age_seconds=15,
-        latest_market_delay_ms=250,
-        unknown_order_count=1,
-        oldest_unknown_order_age_seconds=75,
-        terminal_state_mismatch_count=0,
-    )
-    alert_map2 = {a.name: a for a in alerts_escalated}
-    assert alert_map2["live_unknown_orders"].severity == "critical"
-    assert "live_order_command_terminal_mismatch" not in alert_map2
-
-
 def test_severity_escalation_bypasses_cooldown_and_tracks_occurrences(
     monkeypatch, tmp_path
 ) -> None:
@@ -3084,7 +2739,7 @@ def test_deliver_serverchan_bounded_retry_and_no_leak(monkeypatch, capsys) -> No
     assert "SCT123456TestKeySecret" not in captured.err
 
 
-def test_trading_engine_zero_serverchan_calls() -> None:
+def test_trading_core_has_no_serverchan_calls() -> None:
     """Ensure trading core does not import or make ServerChan network calls."""
     import subprocess
 
@@ -3095,115 +2750,17 @@ def test_trading_engine_zero_serverchan_calls() -> None:
     )
 
 
-def _queue_alerts(**overrides):
-    kwargs = {
-        "now": datetime(2026, 8, 29, 1, 0, tzinfo=UTC),
-        "latest_checkpoint_age_seconds": 12,
-        "live_session_ready": True,
-        "pg_stat_statements_ready": True,
-        "track_io_timing": True,
-        "track_wal_io_timing": True,
-        "max_parallel_maintenance_workers": 0,
-        "stale_after_seconds": 900,
-        "account_process_state": "ready_readonly",
-        "account_process_age_seconds": 12,
-        "latest_reconciliation_status": "ready",
-        "latest_reconciliation_age_seconds": 12,
-        "latest_market_progress_age_seconds": 12,
-        "latest_market_delay_ms": 100,
-    }
-    kwargs.update(overrides)
-    return evaluate_database_state(**kwargs)
-
-
-def test_observation_queue_saturation_is_critical() -> None:
-    alerts = _queue_alerts(
-        observation_queue_depth=256,
-        observation_queue_capacity=256,
-        observation_queue_oldest_age_seconds=5.0,
-    )
-    assert [alert.name for alert in alerts] == ["live_order_observation_backpressure"]
-    assert alerts[0].severity == "critical"
-    assert alerts[0].details["depth_fraction"] == 1.0
-
-
-def test_observation_queue_pressure_warns_at_eighty_percent() -> None:
-    alerts = _queue_alerts(
-        observation_queue_depth=205,
-        observation_queue_capacity=256,
-        observation_queue_oldest_age_seconds=2.0,
-    )
-    assert [alert.name for alert in alerts] == ["live_order_observation_backpressure"]
-    assert alerts[0].severity == "warning"
-
-
-def test_observation_queue_oldest_pending_age_alerts() -> None:
-    fresh = _queue_alerts(
-        observation_queue_depth=1,
-        observation_queue_capacity=256,
-        observation_queue_oldest_age_seconds=45.0,
-    )
-    assert [alert.name for alert in fresh] == ["live_order_observation_backpressure"]
-    assert fresh[0].severity == "warning"
-
-    saturated = _queue_alerts(
-        observation_queue_depth=1,
-        observation_queue_capacity=256,
-        observation_queue_oldest_age_seconds=150.0,
-    )
-    assert saturated[0].severity == "critical"
-
-
-def test_observation_queue_overflow_is_reported_separately() -> None:
-    alerts = _queue_alerts(
-        observation_queue_depth=4,
-        observation_queue_capacity=256,
-        observation_queue_oldest_age_seconds=1.0,
-        observation_queue_overflow_count=3,
-    )
-    assert [alert.name for alert in alerts] == ["live_order_observation_overflow"]
-    assert alerts[0].severity == "warning"
-    assert alerts[0].details["overflow_count"] == 3
-
-
-def test_observation_queue_without_a_fresh_snapshot_does_not_alert() -> None:
-    assert _queue_alerts() == ()
-
-    # A stale/absent snapshot is reported as None capacity, never as fullness.
-    assert (
-        _queue_alerts(
-            observation_queue_depth=None,
-            observation_queue_capacity=None,
-            observation_queue_oldest_age_seconds=None,
-        )
-        == ()
-    )
-
-
-def test_observation_queue_below_thresholds_does_not_alert() -> None:
-    assert (
-        _queue_alerts(
-            observation_queue_depth=10,
-            observation_queue_capacity=256,
-            observation_queue_oldest_age_seconds=1.0,
-        )
-        == ()
-    )
-
-
-def test_nextgen_monitor_reads_persisted_engine_and_never_targets_legacy(
+def test_monitor_is_pinned_to_nextgen_even_if_legacy_setting_remains(
     tmp_path, monkeypatch
 ):
     from pathlib import Path
 
     root = Path(__file__).parents[3]
     env_file = tmp_path / ".env.server"
-    env_file.write_text("CML_TRADING_ENGINE=nextgen\n")
+    env_file.write_text("CML_TRADING_ENGINE=legacy\n")
     monkeypatch.setenv("CML_COMPOSE_ENV_FILE", str(env_file))
-    monkeypatch.delenv("CML_TRADING_ENGINE", raising=False)
     monkeypatch.delenv("CML_MONITOR_LIVE_ACCOUNTS", raising=False)
     monkeypatch.delenv("CML_MONITOR_SERVICES", raising=False)
-    monkeypatch.setenv("CML_COMPOSE_PROFILES", "live")
     args = argparse.Namespace(
         project_directory=str(root),
         compose_file=str(root / "compose.server.yaml"),
@@ -3211,7 +2768,6 @@ def test_nextgen_monitor_reads_persisted_engine_and_never_targets_legacy(
         live_run_id=None,
         interval_seconds=60,
         log_window_seconds=120,
-        telemetry_stale_after_seconds=900,
         rss_warning_fraction=0.75,
         rss_critical_fraction=0.9,
         rss_growth_bytes=64 * 1024 * 1024,
@@ -3221,7 +2777,6 @@ def test_nextgen_monitor_reads_persisted_engine_and_never_targets_legacy(
         state_path=str(tmp_path / "state.json"),
     )
     config = build_config(args)
-    assert config.trading_engine == "nextgen"
     assert config.compose_profiles == ("nextgen",)
     assert config.compose_files == (
         root / "compose.server.yaml",

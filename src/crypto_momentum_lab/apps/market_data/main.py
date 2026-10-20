@@ -946,7 +946,7 @@ async def prune_operational_database_once(
             f"Operational retention did not complete: {receipt.status.value}: "
             f"{receipt.details}"
         )
-    # Keep tomorrow's event partitions present so live-strategy writers never
+    # Keep tomorrow's event partitions present so strategy writers never
     # miss a day boundary.  Deletion stays on the daily archive-and-trim job.
     event_partitions_ensured = (
         await repository.ensure_strategy_runtime_event_partitions()

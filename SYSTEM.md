@@ -379,9 +379,9 @@ rtk proxy .venv/bin/ruff check src tests
 
 部分网络测试需显式 opt-in；报告跳过项，不能记通过。研究源码/数据可能在 Git 忽略的 `local_optimization/`、`server_exports/` 与 data 中，不能靠 Git 恢复；数据接口改动不删除这些目录。历史结果和退役 CLI 不作为当前验收。
 
-部署入口为 `deploy/ops/update_server.sh <host> [git-ref]`；基础配置 `compose.server.yaml`，账户 overlay `compose.live.accounts.yaml`，环境 `.env.server`/`.env.live` 权限0600。脚本停止当前运行的应用服务，再启动基础服务与所选引擎的四个账户服务（即使账户此前已停止），PostgreSQL 和数据卷保留。代码必须快进更新；数据库迁移由 Compose 依赖在应用重启前执行，数据库回退需单独处理。
+部署入口为 `deploy/ops/update_server.sh <host> [git-ref]`；基础配置为 `compose.server.yaml` 与 `compose.next_gen.yaml` 的 `nextgen` profile，环境文件为权限0600的 `.env.server`。NextGen 是唯一交易运行时；旧版 Compose overlay、CLI 和引擎选择回退已退役。完整部署前脚本逐一确认四账户空仓且无挂单，停止当前应用服务并停掉残留的旧版运行容器，然后由 Compose 执行迁移并启动基础服务与四个 NextGen 账户服务。PostgreSQL 和数据卷保留。代码必须快进更新；数据库回退需单独处理。
 
-部署前逐一查询四个账户的交易所实时仓位和挂单；策略服务运行时从该进程查询，服务未运行时用 Compose 启动一次性只读查询。任一账户有仓位、挂单或查询失败时，旧服务继续运行，每 30 秒重查；目标代码先快进到服务器，目标镜像构建与空仓检查并行；四账户都为空且镜像就绪后，一次停掉当前运行的应用服务，再次查询交易所确认空仓与无挂单，然后由 Compose 执行迁移，启动基础服务与所选引擎的四个账户服务。PostgreSQL 与数据卷保留。部署准入不扫描历史成交、不回放旧逐标的快照，也不要求数据库历史投影再次证明交易所当前事实。
+部署前逐一查询四个账户的交易所实时仓位和挂单；NextGen 策略服务运行时从该进程查询，服务未运行时用 Compose 启动一次性只读查询。任一账户有仓位、挂单或查询失败时，当前运行服务继续运行，每 30 秒重查；目标代码先快进到服务器，目标镜像构建与空仓检查并行；四账户都为空且镜像就绪后，停掉当前运行的应用服务和残留的退役运行容器，再次查询交易所确认空仓与无挂单，然后由 Compose 执行迁移并启动基础服务与四个 NextGen 账户服务。PostgreSQL 与数据卷保留。部署准入不扫描历史成交、不回放旧逐标的快照，也不要求数据库历史投影再次证明交易所当前事实。
 
 回退先停入场并检查新格式兼容及当前交易责任，不能将带仓新状态交给不兼容旧版本。备份包含数据库与归档完整root/manifest；同机压缩归档不是异机备份。维护先dry-run，保护活动引用、未知订单、成交身份、累计水位及未结算责任；旧timer按现场unit核验，不自动启用裁剪。普通VACUUM复用页，不等于文件缩小；实盘期间不执行VACUUM FULL，不关闭fsync/full_page_writes。
 

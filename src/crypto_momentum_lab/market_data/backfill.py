@@ -4,7 +4,7 @@ The live aggregator drops events that arrive after the durable close, so a
 symbol that jumps from the watch tier cannot warm its order-flow buffer from
 late WebSocket traffic.  This module fetches a bounded window of public
 aggTrades and synthesizes closed 15s states that are published straight to the
-Hub, oldest first, so live-strategy can warm up before the first live bucket.
+Hub, oldest first, so the trading strategy can warm up before its first live bucket.
 """
 
 from __future__ import annotations

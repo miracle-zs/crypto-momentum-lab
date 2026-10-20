@@ -16,11 +16,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the operator dashboard")
     parser.add_argument("--database-url")
     parser.add_argument(
-        "--execution-engine",
-        choices=("legacy", "nextgen"),
-        default=os.environ.get("CML_TRADING_ENGINE", "legacy"),
-    )
-    parser.add_argument(
         "--runtime-manifest", type=Path, default=Path("/app/deploy/live-runtime.yaml")
     )
     parser.add_argument("--host", default="127.0.0.1")
@@ -40,7 +35,7 @@ def main() -> None:
     uvicorn.run(
         create_dashboard_app(
             database_url=database_url,
-            execution_engine=args.execution_engine,
+            execution_engine="nextgen",
             runtime_manifest=args.runtime_manifest,
             auth_username=args.username,
             auth_password=args.password,

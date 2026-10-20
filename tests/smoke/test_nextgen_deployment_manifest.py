@@ -15,7 +15,6 @@ def test_compose_passes_all_account_settings_and_keeps_role_credentials_separate
         pytest.skip("Docker Compose CLI is required to verify interpolation")
     files = [
         "compose.server.yaml",
-        "compose.live.accounts.yaml",
         "compose.next_gen.yaml",
     ]
     required = set()
@@ -27,7 +26,6 @@ def test_compose_passes_all_account_settings_and_keeps_role_credentials_separate
             del environment[key]
     environment.update({key: "test-" + key for key in required})
     environment.update(
-        CML_TRADING_ENGINE="nextgen",
         CML_LIVE_TARGET_NOTIONAL="150",
         CML_LIVE_MIN_RETURN_PCT_ACCOUNT_2="0.0123",
     )
@@ -51,7 +49,7 @@ def test_compose_passes_all_account_settings_and_keeps_role_credentials_separate
         assert values["BINANCE_READ_API_KEY"] != values["BINANCE_TRADE_API_KEY"]
         if label == "account-2":
             assert str(config.strategy_inputs.profile.min_return_pct) == "0.0123"
-    assert services["dashboard"]["environment"]["CML_TRADING_ENGINE"] == "nextgen"
+    assert "CML_TRADING_ENGINE" not in services["dashboard"]["environment"]
     assert not any(
         key.startswith("BINANCE_") for key in services["dashboard"]["environment"]
     )

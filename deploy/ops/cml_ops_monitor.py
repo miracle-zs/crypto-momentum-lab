@@ -42,11 +42,10 @@ _DEFAULT_SERVICES = (
     "postgres",
     "market-data",
     "research-collector",
-    "live-strategy",
+    "nextgen-strategy-primary",
 )
 _DEFAULT_INTERVAL_SECONDS = 60.0
 _DEFAULT_LOG_WINDOW_SECONDS = 120.0
-_DEFAULT_TELEMETRY_STALE_AFTER_SECONDS = 900.0
 _DEFAULT_RSS_WARNING_FRACTION = 0.75
 _DEFAULT_RSS_CRITICAL_FRACTION = 0.90
 # Per-service warning overrides.  postgres is judged on its working set, which
@@ -90,16 +89,10 @@ _DEFAULT_RELATION_GROWTH_CRITICAL_BYTES_PER_DAY = 512 * 1024 * 1024
 _DEFAULT_STORAGE_GROWTH_MINIMUM_WINDOW_SECONDS = 6.0 * 60.0 * 60.0
 _DEFAULT_STORAGE_GROWTH_RECOVERY_FRACTION = 0.8
 _DEFAULT_STORAGE_GROWTH_RECOVERY_SECONDS = 30.0 * 60.0
-_DEFAULT_LIVE_RESTART_COOLDOWN_SECONDS = 900.0
-_DEFAULT_LIVE_RESTART_MAX_ATTEMPTS = 3
 # How long after a container starts lifecycle alerts stay quiet.  Every deploy
 # recreates containers, and a booting container is unhealthy and silent by
 # definition; without this each deploy reports a fake crash.
 _DEFAULT_START_GRACE_SECONDS = 180.0
-_DEFAULT_MARKET_STATE_STALE_AFTER_SECONDS = 120.0
-_DEFAULT_MARKET_DELAY_WARNING_MS = 30_000.0
-_DEFAULT_MARKET_DELAY_CRITICAL_MS = 120_000.0
-_DEFAULT_ACCOUNT_STATE_STALE_AFTER_SECONDS = 120.0
 _DEFAULT_POSITION_STALE_AFTER_SECONDS = 120.0
 _DEFAULT_POSITION_QUANTITY_TOLERANCE = Decimal("0.00000001")
 _DEFAULT_CONSISTENCY_WINDOW_SECONDS = 120.0
@@ -348,22 +341,16 @@ _ALERT_ACTIONS = {
     "live_order_command_terminal_mismatch": (
         "系统调度对账任务自动收敛终态；核对 exchange_orders 与 execution_commands 表记录。"
     ),
-    "live_heartbeat_stale": "主事件循环已失联；核对是否正在自动重启，若未自愈请人工排查阻塞或崩溃日志。",
+    "live_heartbeat_stale": "账户进程心跳已过期；检查进程日志和交易所实际仓位，再按运维流程恢复。",
     "ops_monitor_failed": "检查 cml-ops-monitor 自身运行日志与未捕获异常堆栈，必要时重启监控服务。",
 }
 _COMPOSE_SERVICE_HEADER = re.compile(r"^  (?P<service>[A-Za-z0-9][A-Za-z0-9_-]*):\s*$")
 
 
-def _live_strategy_service(account_label: str, trading_engine: str = "legacy") -> str:
-    """Map a configured account label to its Compose strategy service."""
+def _nextgen_strategy_service(account_label: str) -> str:
+    """Map an account label to its NextGen Compose service."""
 
-    if trading_engine == "nextgen":
-        return f"nextgen-strategy-{account_label}"
-    return (
-        "live-strategy"
-        if account_label == "primary"
-        else f"live-strategy-{account_label}"
-    )
+    return f"nextgen-strategy-{account_label}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -519,35 +506,159 @@ class LogSignals:
     expired_candidates: tuple[tuple[str, str], ...] = ()
 
 
-@dataclass(frozen=True, slots=True)
-class DatabaseState:
-    latest_checkpoint_age_seconds: float | None
-    live_session_ready: bool
-    pg_stat_statements_ready: bool
-    track_io_timing: bool
-    track_wal_io_timing: bool
-    max_parallel_maintenance_workers: int | None
-    # The three arms of live_session_ready, reported separately so a not-ready
-    # alert can name the failing one.  Default True keeps older SQL output
-    # (which omits them) from being read as "not ready".
-    live_session_state_ready: bool = True
-    live_checkpoint_present: bool = True
-    latest_market_progress_age_seconds: float | None = None
-    latest_market_delay_ms: float | None = None
-    account_process_state: str | None = None
-    account_process_age_seconds: float | None = None
-    latest_reconciliation_status: str | None = None
-    latest_reconciliation_age_seconds: float | None = None
-    unknown_order_count: int = 0
-    oldest_unknown_order_age_seconds: float | None = None
-    terminal_state_mismatch_count: int = 0
-    oldest_terminal_mismatch_age_seconds: float | None = None
-    # Order-observation queue from the freshest runtime readiness snapshot
-    # (None/0 means "no fresh snapshot", which must not alert).
-    observation_queue_depth: int | None = None
-    observation_queue_capacity: int | None = None
-    observation_queue_oldest_age_seconds: float | None = None
-    observation_queue_overflow_count: int = 0
+def _merge_log_signals(left: LogSignals, right: LogSignals) -> LogSignals:
+    """Combine per-account log signals without dropping any field."""
+
+    return LogSignals(
+        telemetry_persist_failures=(
+            left.telemetry_persist_failures + right.telemetry_persist_failures
+        ),
+        exit_processing_degraded_symbols=(
+            *left.exit_processing_degraded_symbols,
+            *right.exit_processing_degraded_symbols,
+        ),
+        dead_connection_tasks=(
+            *left.dead_connection_tasks,
+            *right.dead_connection_tasks,
+        ),
+        avg_price_schema_drifts=(
+            *left.avg_price_schema_drifts,
+            *right.avg_price_schema_drifts,
+        ),
+        latest_rss_bytes=(
+            right.latest_rss_bytes
+            if right.latest_rss_bytes is not None
+            else left.latest_rss_bytes
+        ),
+        rss_observed_at=(
+            right.rss_observed_at
+            if right.rss_observed_at is not None
+            else left.rss_observed_at
+        ),
+        fact_inconsistencies=(
+            *left.fact_inconsistencies,
+            *right.fact_inconsistencies,
+        ),
+        deferred_exits=(*left.deferred_exits, *right.deferred_exits),
+        expired_candidates=(*left.expired_candidates, *right.expired_candidates),
+    )
+
+
+def evaluate_log_signals(signals: LogSignals) -> tuple[Alert, ...]:
+    """Return alerts represented by recent structured application logs."""
+
+    alerts: list[Alert] = []
+    if signals.telemetry_persist_failures:
+        severity = "critical" if signals.telemetry_persist_failures >= 3 else "warning"
+        alerts.append(
+            Alert(
+                "telemetry_persist_failure",
+                severity,
+                "Runtime telemetry batches failed to persist",
+                {"failure_count": signals.telemetry_persist_failures},
+            )
+        )
+    if signals.exit_processing_degraded_symbols:
+        alerts.append(
+            Alert(
+                "live_exit_processing_degraded",
+                "critical",
+                "Live exit processing is degraded and positions may not close",
+                {"symbols": signals.exit_processing_degraded_symbols},
+            )
+        )
+    if signals.dead_connection_tasks:
+        alerts.append(
+            Alert(
+                "market_task_not_alive",
+                "critical",
+                "A market-data connection task reported not alive",
+                {"group_ids": signals.dead_connection_tasks},
+            )
+        )
+
+    schema_drift_counts: dict[tuple[str, str, str], int] = {}
+    for account_label, symbol, avg_price_json_type in signals.avg_price_schema_drifts:
+        key = (account_label, symbol, avg_price_json_type)
+        schema_drift_counts[key] = schema_drift_counts.get(key, 0) + 1
+    for (account_label, symbol, avg_price_json_type), count in sorted(
+        schema_drift_counts.items()
+    ):
+        scope = f":{account_label}:{symbol}" if account_label else f":{symbol}"
+        alerts.append(
+            Alert(
+                f"binance_avg_price_schema_drift{scope}",
+                "warning",
+                "Binance order response avgPrice has an unexpected JSON type",
+                {
+                    "account_label": account_label,
+                    "symbol": symbol,
+                    "avg_price_json_type": avg_price_json_type,
+                    "count": count,
+                },
+            )
+        )
+
+    fact_counts: dict[tuple[str, str], list[str]] = {}
+    for account, symbol, reason in signals.fact_inconsistencies:
+        reasons = fact_counts.setdefault((account, symbol), [])
+        if reason not in reasons:
+            reasons.append(reason)
+    for (account, symbol), reasons in sorted(fact_counts.items()):
+        count = len(reasons)
+        scope = f":{account}:{symbol}" if account else f":{symbol}"
+        alerts.append(
+            Alert(
+                f"live_local_fact_inconsistency{scope}",
+                "critical" if count >= 3 else "warning",
+                f"Local facts or projection for {symbol} are inconsistent",
+                {
+                    "account_label": account,
+                    "symbol": symbol,
+                    "count": count,
+                    "reason": reasons[-1],
+                },
+            )
+        )
+
+    exit_counts: dict[tuple[str, str], list[str]] = {}
+    for account, symbol, reason in signals.deferred_exits:
+        exit_counts.setdefault((account, symbol), []).append(reason)
+    for (account, symbol), reasons in sorted(exit_counts.items()):
+        count = len(reasons)
+        if count >= 3:
+            scope = f":{account}:{symbol}" if account else f":{symbol}"
+            alerts.append(
+                Alert(
+                    f"live_exit_evaluation_deferred{scope}",
+                    "critical" if count >= 10 else "warning",
+                    f"Exit evaluation for {symbol} is deferred pending facts",
+                    {
+                        "account_label": account,
+                        "symbol": symbol,
+                        "count": count,
+                        "reason": reasons[-1],
+                    },
+                )
+            )
+
+    candidate_counts: dict[tuple[str, str], int] = {}
+    for account, symbol in signals.expired_candidates:
+        key = (account, symbol)
+        candidate_counts[key] = candidate_counts.get(key, 0) + 1
+    for (account, symbol), count in sorted(candidate_counts.items()):
+        if count >= 2:
+            scope = f":{account}:{symbol}" if account else f":{symbol}"
+            alerts.append(
+                Alert(
+                    f"live_candidate_expired{scope}",
+                    "critical" if count >= 5 else "warning",
+                    f"Candidates for {symbol} expired before execution",
+                    {"account_label": account, "symbol": symbol, "count": count},
+                )
+            )
+
+    return tuple(alerts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -836,470 +947,6 @@ def evaluate_position_intent_divergence(
             },
         ),
     )
-
-
-def evaluate_database_state(
-    *,
-    now: datetime,
-    latest_checkpoint_age_seconds: float | None,
-    live_session_ready: bool,
-    live_session_state_ready: bool = True,
-    live_checkpoint_present: bool = True,
-    pg_stat_statements_ready: bool,
-    track_io_timing: bool,
-    track_wal_io_timing: bool,
-    max_parallel_maintenance_workers: int | None,
-    stale_after_seconds: float,
-    market_state_stale_after_seconds: float = (
-        _DEFAULT_MARKET_STATE_STALE_AFTER_SECONDS
-    ),
-    market_delay_warning_ms: float = _DEFAULT_MARKET_DELAY_WARNING_MS,
-    market_delay_critical_ms: float = _DEFAULT_MARKET_DELAY_CRITICAL_MS,
-    account_state_stale_after_seconds: float = (
-        _DEFAULT_ACCOUNT_STATE_STALE_AFTER_SECONDS
-    ),
-    account_process_state: str | None = None,
-    account_process_age_seconds: float | None = None,
-    latest_reconciliation_status: str | None = None,
-    latest_reconciliation_age_seconds: float | None = None,
-    latest_market_progress_age_seconds: float | None = None,
-    latest_market_delay_ms: float | None = None,
-    unknown_order_count: int = 0,
-    oldest_unknown_order_age_seconds: float | None = None,
-    observation_queue_depth: int | None = None,
-    observation_queue_capacity: int | None = None,
-    observation_queue_oldest_age_seconds: float | None = None,
-    observation_queue_overflow_count: int = 0,
-    terminal_state_mismatch_count: int = 0,
-    oldest_terminal_mismatch_age_seconds: float | None = None,
-) -> tuple[Alert, ...]:
-    """Return alerts for live liveness and PostgreSQL observability."""
-
-    del now
-    alerts: list[Alert] = []
-    if account_process_state not in ("running", "ready_readonly") or (
-        account_process_age_seconds is None
-        or account_process_age_seconds < 0
-        or account_process_age_seconds > account_state_stale_after_seconds
-    ):
-        alerts.append(
-            Alert(
-                "live_account_lifecycle_not_ready",
-                "critical",
-                "Execution account lifecycle is not ready",
-                {
-                    "state": account_process_state,
-                    "age_seconds": account_process_age_seconds,
-                    "age_human": _human_seconds(account_process_age_seconds),
-                    "threshold_seconds": account_state_stale_after_seconds,
-                    "threshold_human": _human_seconds(
-                        account_state_stale_after_seconds
-                    ),
-                },
-            )
-        )
-    if latest_reconciliation_status != "ready":
-        alerts.append(
-            Alert(
-                "live_account_reconciliation_stale",
-                "critical",
-                "Latest account reconciliation is missing, stale, or failed",
-                {
-                    "status": latest_reconciliation_status,
-                    "age_seconds": latest_reconciliation_age_seconds,
-                    "age_human": _human_seconds(latest_reconciliation_age_seconds),
-                    "threshold_seconds": account_state_stale_after_seconds,
-                    "threshold_human": _human_seconds(
-                        account_state_stale_after_seconds
-                    ),
-                },
-            )
-        )
-    if (
-        latest_market_progress_age_seconds is None
-        or latest_market_progress_age_seconds < 0
-        or latest_market_progress_age_seconds > market_state_stale_after_seconds
-    ):
-        alerts.append(
-            Alert(
-                "live_market_state_stale",
-                "critical",
-                "Durable market-state progress is missing or stale",
-                {
-                    "age_seconds": latest_market_progress_age_seconds,
-                    "age_human": _human_seconds(latest_market_progress_age_seconds),
-                    "threshold_seconds": market_state_stale_after_seconds,
-                    "threshold_human": _human_seconds(market_state_stale_after_seconds),
-                },
-            )
-        )
-    if latest_market_delay_ms is not None and latest_market_delay_ms >= 0:
-        if latest_market_delay_ms >= market_delay_critical_ms:
-            alerts.append(
-                Alert(
-                    "live_market_state_delay",
-                    "critical",
-                    "Market-state receive delay exceeded the critical budget",
-                    {
-                        "delay_ms": round(latest_market_delay_ms, 3),
-                        "delay_human": _human_seconds(latest_market_delay_ms / 1000),
-                        "warning_threshold_ms": market_delay_warning_ms,
-                        "warning_threshold_human": _human_seconds(
-                            market_delay_warning_ms / 1000
-                        ),
-                        "critical_threshold_ms": market_delay_critical_ms,
-                        "critical_threshold_human": _human_seconds(
-                            market_delay_critical_ms / 1000
-                        ),
-                    },
-                )
-            )
-        elif latest_market_delay_ms >= market_delay_warning_ms:
-            alerts.append(
-                Alert(
-                    "live_market_state_delay",
-                    "warning",
-                    "Market-state receive delay exceeded the warning budget",
-                    {
-                        "delay_ms": round(latest_market_delay_ms, 3),
-                        "delay_human": _human_seconds(latest_market_delay_ms / 1000),
-                        "warning_threshold_ms": market_delay_warning_ms,
-                        "warning_threshold_human": _human_seconds(
-                            market_delay_warning_ms / 1000
-                        ),
-                        "critical_threshold_ms": market_delay_critical_ms,
-                        "critical_threshold_human": _human_seconds(
-                            market_delay_critical_ms / 1000
-                        ),
-                    },
-                )
-            )
-    if unknown_order_count > 0:
-        severity = (
-            "critical"
-            if oldest_unknown_order_age_seconds is not None
-            and oldest_unknown_order_age_seconds >= 60.0
-            else "warning"
-        )
-        alerts.append(
-            Alert(
-                "live_unknown_orders",
-                severity,
-                "Exchange order state is pending reconciliation",
-                {
-                    "unknown_order_count": unknown_order_count,
-                    "oldest_age_seconds": oldest_unknown_order_age_seconds,
-                    "oldest_age_human": _human_seconds(
-                        oldest_unknown_order_age_seconds
-                    ),
-                },
-            )
-        )
-    if observation_queue_overflow_count > 0:
-        alerts.append(
-            Alert(
-                "live_order_observation_overflow",
-                "warning",
-                "Order observation queue overflowed and forced command recovery",
-                {
-                    "overflow_count": observation_queue_overflow_count,
-                    "capacity": observation_queue_capacity,
-                    "depth": observation_queue_depth,
-                },
-            )
-        )
-    if observation_queue_capacity is not None and observation_queue_capacity > 0:
-        depth_fraction = (observation_queue_depth or 0) / observation_queue_capacity
-        oldest_age = observation_queue_oldest_age_seconds
-        saturated = depth_fraction >= 1.0 or (oldest_age or 0.0) >= 120.0
-        pressured = depth_fraction >= 0.8 or (oldest_age or 0.0) >= 30.0
-        if saturated or pressured:
-            alerts.append(
-                Alert(
-                    "live_order_observation_backpressure",
-                    "critical" if saturated else "warning",
-                    "Order observation queue is filling up",
-                    {
-                        "depth": observation_queue_depth,
-                        "capacity": observation_queue_capacity,
-                        "depth_fraction": round(depth_fraction, 3),
-                        "oldest_pending_age_seconds": oldest_age,
-                        "oldest_pending_age_human": _human_seconds(oldest_age),
-                    },
-                )
-            )
-    if terminal_state_mismatch_count > 0:
-        alerts.append(
-            Alert(
-                "live_order_command_terminal_mismatch",
-                "critical",
-                "Exchange order is terminal but execution command remains active",
-                {
-                    "mismatch_count": terminal_state_mismatch_count,
-                    "oldest_age_seconds": oldest_terminal_mismatch_age_seconds,
-                    "oldest_age_human": _human_seconds(
-                        oldest_terminal_mismatch_age_seconds
-                    ),
-                },
-            )
-        )
-    if not live_session_ready:
-        alerts.append(
-            Alert(
-                "live_session_not_ready",
-                "critical",
-                "Live session checkpoint or running state is not ready",
-                {
-                    # Which of the three arms of live_ready actually failed.
-                    "session_state_ready": live_session_state_ready,
-                    "checkpoint_present": live_checkpoint_present,
-                    "checkpoint_age_seconds": (
-                        None
-                        if latest_checkpoint_age_seconds is None
-                        else round(latest_checkpoint_age_seconds, 3)
-                    ),
-                    "checkpoint_age_human": _human_seconds(
-                        latest_checkpoint_age_seconds
-                    ),
-                    "stale_after_seconds": stale_after_seconds,
-                },
-            )
-        )
-    elif (
-        latest_checkpoint_age_seconds is None
-        or latest_checkpoint_age_seconds < 0
-        or latest_checkpoint_age_seconds > stale_after_seconds
-    ):
-        alerts.append(
-            Alert(
-                "live_checkpoint_stale",
-                "critical",
-                "Live strategy checkpoint is older than the freshness budget",
-                {
-                    "age_seconds": (
-                        None
-                        if latest_checkpoint_age_seconds is None
-                        else round(latest_checkpoint_age_seconds, 3)
-                    ),
-                    "age_human": _human_seconds(latest_checkpoint_age_seconds),
-                    "threshold_seconds": stale_after_seconds,
-                    "threshold_human": _human_seconds(stale_after_seconds),
-                },
-            )
-        )
-    if not pg_stat_statements_ready:
-        alerts.append(
-            Alert(
-                "database_query_stats_unavailable",
-                "warning",
-                "pg_stat_statements is not loaded",
-            )
-        )
-    if not track_io_timing or not track_wal_io_timing:
-        alerts.append(
-            Alert(
-                "database_io_timing_disabled",
-                "warning",
-                "PostgreSQL I/O timing is disabled",
-                {
-                    "track_io_timing": track_io_timing,
-                    "track_wal_io_timing": track_wal_io_timing,
-                },
-            )
-        )
-    if (
-        max_parallel_maintenance_workers is not None
-        and max_parallel_maintenance_workers > 0
-    ):
-        alerts.append(
-            Alert(
-                "database_parallel_maintenance_enabled",
-                "warning",
-                "Parallel maintenance is enabled above the OOM guardrail",
-                {
-                    "max_parallel_maintenance_workers": (
-                        max_parallel_maintenance_workers
-                    )
-                },
-            )
-        )
-    return tuple(alerts)
-
-
-def _merge_log_signals(left: LogSignals, right: LogSignals) -> LogSignals:
-    """Combine two accounts' log signals without dropping any field.
-
-    The live accounts are scanned one container at a time and merged.  Listing
-    the fields by hand here means a newly added field is silently discarded for
-    every account but the last, which is exactly how a stuck exit stayed
-    invisible.  Keep this in step with LogSignals.
-    """
-
-    return LogSignals(
-        telemetry_persist_failures=(
-            left.telemetry_persist_failures + right.telemetry_persist_failures
-        ),
-        exit_processing_degraded_symbols=(
-            *left.exit_processing_degraded_symbols,
-            *right.exit_processing_degraded_symbols,
-        ),
-        dead_connection_tasks=(
-            *left.dead_connection_tasks,
-            *right.dead_connection_tasks,
-        ),
-        avg_price_schema_drifts=(
-            *left.avg_price_schema_drifts,
-            *right.avg_price_schema_drifts,
-        ),
-        latest_rss_bytes=(
-            right.latest_rss_bytes
-            if right.latest_rss_bytes is not None
-            else left.latest_rss_bytes
-        ),
-        rss_observed_at=(
-            right.rss_observed_at
-            if right.rss_observed_at is not None
-            else left.rss_observed_at
-        ),
-        fact_inconsistencies=(
-            *left.fact_inconsistencies,
-            *right.fact_inconsistencies,
-        ),
-        deferred_exits=(
-            *left.deferred_exits,
-            *right.deferred_exits,
-        ),
-        expired_candidates=(
-            *left.expired_candidates,
-            *right.expired_candidates,
-        ),
-    )
-
-
-def evaluate_log_signals(signals: LogSignals) -> tuple[Alert, ...]:
-    """Return alerts represented by recent structured application logs."""
-
-    alerts: list[Alert] = []
-    if signals.telemetry_persist_failures:
-        severity = "critical" if signals.telemetry_persist_failures >= 3 else "warning"
-        alerts.append(
-            Alert(
-                "telemetry_persist_failure",
-                severity,
-                "Runtime telemetry batches failed to persist",
-                {"failure_count": signals.telemetry_persist_failures},
-            )
-        )
-    if signals.exit_processing_degraded_symbols:
-        alerts.append(
-            Alert(
-                "live_exit_processing_degraded",
-                "critical",
-                "Live exit processing is degraded and positions may not close",
-                {"symbols": signals.exit_processing_degraded_symbols},
-            )
-        )
-    if signals.dead_connection_tasks:
-        alerts.append(
-            Alert(
-                "market_task_not_alive",
-                "critical",
-                "A market-data connection task reported not alive",
-                {"group_ids": signals.dead_connection_tasks},
-            )
-        )
-
-    schema_drift_counts: dict[tuple[str, str, str], int] = {}
-    for account_label, symbol, avg_price_json_type in signals.avg_price_schema_drifts:
-        key = (account_label, symbol, avg_price_json_type)
-        schema_drift_counts[key] = schema_drift_counts.get(key, 0) + 1
-    for (account_label, symbol, avg_price_json_type), count in sorted(
-        schema_drift_counts.items()
-    ):
-        scope_str = f":{account_label}:{symbol}" if account_label else f":{symbol}"
-        alerts.append(
-            Alert(
-                f"binance_avg_price_schema_drift{scope_str}",
-                "warning",
-                "Binance order response avgPrice has an unexpected JSON type",
-                {
-                    "account_label": account_label,
-                    "symbol": symbol,
-                    "avg_price_json_type": avg_price_json_type,
-                    "count": count,
-                },
-            )
-        )
-
-    fact_counts: dict[tuple[str, str], list[str]] = {}
-    for acc, sym, reason in signals.fact_inconsistencies:
-        # A burst of account updates can schedule the same safe repair more
-        # than once. Count distinct blocked reasons, not repeated log lines,
-        # so one immutable fact mismatch is one incident.
-        reasons = fact_counts.setdefault((acc, sym), [])
-        if reason not in reasons:
-            reasons.append(reason)
-    for (acc, sym), reasons in sorted(fact_counts.items()):
-        count = len(reasons)
-        severity = "critical" if count >= 3 else "warning"
-        scope_str = f":{acc}:{sym}" if acc else f":{sym}"
-        alerts.append(
-            Alert(
-                f"live_local_fact_inconsistency{scope_str}",
-                severity,
-                f"Local facts or projection for {sym} are inconsistent",
-                {
-                    "account_label": acc,
-                    "symbol": sym,
-                    "count": count,
-                    "reason": reasons[-1],
-                },
-            )
-        )
-
-    exit_counts: dict[tuple[str, str], list[str]] = {}
-    for acc, sym, reason in signals.deferred_exits:
-        exit_counts.setdefault((acc, sym), []).append(reason)
-    for (acc, sym), reasons in sorted(exit_counts.items()):
-        count = len(reasons)
-        if count >= 3:
-            severity = "critical" if count >= 10 else "warning"
-            scope_str = f":{acc}:{sym}" if acc else f":{sym}"
-            alerts.append(
-                Alert(
-                    f"live_exit_evaluation_deferred{scope_str}",
-                    severity,
-                    f"Exit evaluation for {sym} is deferred pending facts",
-                    {
-                        "account_label": acc,
-                        "symbol": sym,
-                        "count": count,
-                        "reason": reasons[-1],
-                    },
-                )
-            )
-
-    candidate_counts: dict[tuple[str, str], int] = {}
-    for acc, sym in signals.expired_candidates:
-        candidate_counts[(acc, sym)] = candidate_counts.get((acc, sym), 0) + 1
-    for (acc, sym), count in sorted(candidate_counts.items()):
-        if count >= 2:
-            severity = "critical" if count >= 5 else "warning"
-            scope_str = f":{acc}:{sym}" if acc else f":{sym}"
-            alerts.append(
-                Alert(
-                    f"live_candidate_expired{scope_str}",
-                    severity,
-                    f"Candidates for {sym} expired before execution",
-                    {
-                        "account_label": acc,
-                        "symbol": sym,
-                        "count": count,
-                    },
-                )
-            )
-
-    return tuple(alerts)
 
 
 def rss_warning_fraction_for(service: str, default: float) -> float:
@@ -1909,11 +1556,13 @@ def evaluate_disk_usage(
 
 @dataclass(frozen=True, slots=True)
 class MonitorConfig:
-    trading_engine: str = "legacy"
     project_directory: Path = Path("/opt/crypto-momentum-lab")
     compose_file: Path = Path("/opt/crypto-momentum-lab/compose.server.yaml")
-    compose_files: tuple[Path, ...] = ()
-    compose_profiles: tuple[str, ...] = ()
+    compose_files: tuple[Path, ...] = (
+        Path("/opt/crypto-momentum-lab/compose.server.yaml"),
+        Path("/opt/crypto-momentum-lab/compose.next_gen.yaml"),
+    )
+    compose_profiles: tuple[str, ...] = ("nextgen",)
     compose_env_file: Path | None = Path("/opt/crypto-momentum-lab/.env.server")
     services: tuple[str, ...] = _DEFAULT_SERVICES
     live_accounts: tuple[tuple[str, str], ...] = (("primary", "live-primary-v1"),)
@@ -1921,7 +1570,6 @@ class MonitorConfig:
     live_account_label: str = "primary"
     interval_seconds: float = _DEFAULT_INTERVAL_SECONDS
     log_window_seconds: float = _DEFAULT_LOG_WINDOW_SECONDS
-    telemetry_stale_after_seconds: float = _DEFAULT_TELEMETRY_STALE_AFTER_SECONDS
     rss_warning_fraction: float = _DEFAULT_RSS_WARNING_FRACTION
     rss_critical_fraction: float = _DEFAULT_RSS_CRITICAL_FRACTION
     rss_growth_bytes: int = _DEFAULT_RSS_GROWTH_BYTES
@@ -1985,15 +1633,6 @@ class MonitorConfig:
     external_heartbeat_url: str | None = None
     external_heartbeat_token: str | None = None
     external_heartbeat_timeout_seconds: float = 5.0
-    auto_restart_stale_live_services: bool = True
-    live_restart_cooldown_seconds: float = _DEFAULT_LIVE_RESTART_COOLDOWN_SECONDS
-    live_restart_max_attempts: int = _DEFAULT_LIVE_RESTART_MAX_ATTEMPTS
-    market_state_stale_after_seconds: float = _DEFAULT_MARKET_STATE_STALE_AFTER_SECONDS
-    market_delay_warning_ms: float = _DEFAULT_MARKET_DELAY_WARNING_MS
-    market_delay_critical_ms: float = _DEFAULT_MARKET_DELAY_CRITICAL_MS
-    account_state_stale_after_seconds: float = (
-        _DEFAULT_ACCOUNT_STATE_STALE_AFTER_SECONDS
-    )
     position_stale_after_seconds: float = _DEFAULT_POSITION_STALE_AFTER_SECONDS
     position_quantity_tolerance: Decimal = _DEFAULT_POSITION_QUANTITY_TOLERANCE
     consistency_window_seconds: float = _DEFAULT_CONSISTENCY_WINDOW_SECONDS
@@ -2026,16 +1665,6 @@ class OpsMonitor:
                 raise ValueError("external heartbeat URL must be an HTTPS URL")
         if config.external_heartbeat_timeout_seconds <= 0:
             raise ValueError("external heartbeat timeout must be positive")
-        if config.live_restart_cooldown_seconds <= 0:
-            raise ValueError("live_restart_cooldown_seconds must be positive")
-        if config.live_restart_max_attempts <= 0:
-            raise ValueError("live_restart_max_attempts must be positive")
-        if config.market_state_stale_after_seconds <= 0:
-            raise ValueError("market_state_stale_after_seconds must be positive")
-        if not (0 < config.market_delay_warning_ms < config.market_delay_critical_ms):
-            raise ValueError("market delay thresholds are invalid")
-        if config.account_state_stale_after_seconds <= 0:
-            raise ValueError("account_state_stale_after_seconds must be positive")
         if config.position_stale_after_seconds <= 0:
             raise ValueError("position_stale_after_seconds must be positive")
         if config.position_quantity_tolerance < 0:
@@ -2564,9 +2193,7 @@ SELECT json_build_object(
         alerts: list[Alert] = []
         containers = self._container_snapshots()
         live_strategy_accounts = {
-            _live_strategy_service(
-                account_label, self._config.trading_engine
-            ): account_label
+            _nextgen_strategy_service(account_label): account_label
             for account_label, _run_id in live_accounts
         }
         seen_services = {snapshot.service for snapshot in containers}
@@ -2624,14 +2251,18 @@ SELECT json_build_object(
 
         market_id = self._container_id("market-data")
         strategy_services = tuple(
-            _live_strategy_service(account_label, self._config.trading_engine)
+            _nextgen_strategy_service(account_label)
             for account_label, _run_id in live_accounts
         )
-        combined_signals = LogSignals()
+        combined_signals = self._log_signals(
+            market_id,
+            None,
+            since_seconds=self._config.log_window_seconds,
+        )
         for strategy_service in strategy_services:
             live_id = self._container_id(strategy_service)
             signals = self._log_signals(
-                market_id,
+                None,
                 live_id,
                 since_seconds=self._config.log_window_seconds,
             )
@@ -2704,135 +2335,6 @@ SELECT json_build_object(
                     alerts.extend(
                         self._database_storage_growth_alerts(footprint, now=now)
                     )
-            if self._config.trading_engine == "legacy":
-                for account_label, run_id in live_accounts:
-                    try:
-                        database_state = self._database_state(
-                            postgres_id,
-                            live_run_id=run_id,
-                            live_account_label=account_label,
-                        )
-                    except Exception as error:
-                        alerts.append(
-                            Alert(
-                                f"database_check_failed:{account_label}",
-                                "critical",
-                                "PostgreSQL observability query failed",
-                                {
-                                    "account_label": account_label,
-                                    "error_type": type(error).__name__,
-                                    "error": str(error),
-                                },
-                            )
-                        )
-                    else:
-                        account_alerts = evaluate_database_state(
-                            now=datetime.fromtimestamp(now, UTC),
-                            latest_checkpoint_age_seconds=(
-                                database_state.latest_checkpoint_age_seconds
-                            ),
-                            live_session_ready=database_state.live_session_ready,
-                            live_session_state_ready=(
-                                database_state.live_session_state_ready
-                            ),
-                            live_checkpoint_present=(
-                                database_state.live_checkpoint_present
-                            ),
-                            pg_stat_statements_ready=database_state.pg_stat_statements_ready,
-                            track_io_timing=database_state.track_io_timing,
-                            track_wal_io_timing=database_state.track_wal_io_timing,
-                            max_parallel_maintenance_workers=(
-                                database_state.max_parallel_maintenance_workers
-                            ),
-                            stale_after_seconds=self._config.telemetry_stale_after_seconds,
-                            market_state_stale_after_seconds=(
-                                self._config.market_state_stale_after_seconds
-                            ),
-                            market_delay_warning_ms=self._config.market_delay_warning_ms,
-                            market_delay_critical_ms=self._config.market_delay_critical_ms,
-                            account_state_stale_after_seconds=(
-                                self._config.account_state_stale_after_seconds
-                            ),
-                            account_process_state=database_state.account_process_state,
-                            account_process_age_seconds=(
-                                database_state.account_process_age_seconds
-                            ),
-                            latest_reconciliation_status=(
-                                database_state.latest_reconciliation_status
-                            ),
-                            latest_reconciliation_age_seconds=(
-                                database_state.latest_reconciliation_age_seconds
-                            ),
-                            latest_market_progress_age_seconds=(
-                                database_state.latest_market_progress_age_seconds
-                            ),
-                            latest_market_delay_ms=database_state.latest_market_delay_ms,
-                            unknown_order_count=database_state.unknown_order_count,
-                            oldest_unknown_order_age_seconds=(
-                                database_state.oldest_unknown_order_age_seconds
-                            ),
-                            observation_queue_depth=(
-                                database_state.observation_queue_depth
-                            ),
-                            observation_queue_capacity=(
-                                database_state.observation_queue_capacity
-                            ),
-                            observation_queue_oldest_age_seconds=(
-                                database_state.observation_queue_oldest_age_seconds
-                            ),
-                            observation_queue_overflow_count=(
-                                database_state.observation_queue_overflow_count
-                            ),
-                            terminal_state_mismatch_count=(
-                                database_state.terminal_state_mismatch_count
-                            ),
-                            oldest_terminal_mismatch_age_seconds=(
-                                database_state.oldest_terminal_mismatch_age_seconds
-                            ),
-                        )
-                        alerts.extend(
-                            replace(
-                                alert,
-                                name=f"{alert.name}:{account_label}",
-                                details={
-                                    **alert.details,
-                                    "account_label": account_label,
-                                },
-                            )
-                            for alert in account_alerts
-                        )
-
-                try:
-                    (
-                        signal_observations,
-                        position_observations,
-                        order_intent_observations,
-                    ) = self._consistency_observations(postgres_id)
-                except Exception as error:
-                    alerts.append(
-                        Alert(
-                            "live_consistency_check_failed",
-                            "critical",
-                            "Cross-account consistency query failed",
-                            {
-                                "error_type": type(error).__name__,
-                                "error": str(error),
-                                "accounts": [
-                                    account_label
-                                    for account_label, _run_id in live_accounts
-                                ],
-                            },
-                        )
-                    )
-                else:
-                    alerts.extend(evaluate_signal_divergence(signal_observations))
-                    alerts.extend(
-                        evaluate_position_intent_divergence(order_intent_observations)
-                    )
-                    # The spread between accounts is recorded, not alerted: it is
-                    # the *result* of execution, so a difference here is the normal
-                    # outcome of a partially filled order, not a fault.
-                    self._record_position_spread(position_observations)
 
         alerts = list(
             coalesce_shared_market_state_alerts(
@@ -2908,106 +2410,44 @@ SELECT json_build_object(
         account_label: str,
         now: float,
     ) -> tuple[Alert, ...]:
-        """Alert on a stale live marker and restart that account's service.
+        """Alert on an unhealthy NextGen account and preserve its logs."""
 
-        Docker's healthcheck reads the worker's local heartbeat marker, so an
-        ``unhealthy`` live strategy is the host-side representation of a
-        stale heartbeat.  Restart state is kept per Compose service so one
-        frozen account cannot restart another account or consume its retry
-        budget.
-        """
-
-        # Filtering alerts after evaluation cannot undo a Compose restart.
-        # The deploy owns lifecycle changes throughout its declared window.
         window = read_maintenance_window(default_maintenance_path())
         if window is not None and window.is_active(now=now_utc()):
             return ()
 
-        restart_states = self._state.setdefault("live_restart_state", {})
-        if not isinstance(restart_states, dict):
-            restart_states = {}
-            self._state["live_restart_state"] = restart_states
+        worker_states = self._state.setdefault("live_health_state", {})
+        if not isinstance(worker_states, dict):
+            worker_states = {}
+            self._state["live_health_state"] = worker_states
 
-        state = restart_states.get(snapshot.service)
+        state = worker_states.get(snapshot.service)
         if not isinstance(state, dict):
             state = {}
-            restart_states[snapshot.service] = state
+            worker_states[snapshot.service] = state
 
         if snapshot.health == "healthy":
-            restart_states.pop(snapshot.service, None)
+            worker_states.pop(snapshot.service, None)
             return ()
-
-        # A container that was just recreated is booting, not frozen.  Deploys
-        # recreate every live container, so without this each deploy reports a
-        # stale heartbeat and tries to restart a container that is still starting.
         if _is_within_start_grace(
             snapshot.started_at,
             now=datetime.now(tz=UTC),
             grace_seconds=_DEFAULT_START_GRACE_SECONDS,
         ):
             return ()
+        if snapshot.health not in {"unhealthy", "dead"}:
+            return ()
 
-        last_restart_at = state.get("last_restart_at")
-        if not isinstance(last_restart_at, int | float) or isinstance(
-            last_restart_at, bool
-        ):
-            last_restart_at = None
-        restart_attempts = state.get("restart_attempts", 0)
-        if not isinstance(restart_attempts, int) or isinstance(restart_attempts, bool):
-            restart_attempts = 0
-
+        state.setdefault("first_unhealthy_at", now)
         details: dict[str, object] = {
             "account_label": account_label,
             "service": snapshot.service,
             "health": snapshot.health,
             "container_id": snapshot.container_id,
             "restart_count": snapshot.restart_count,
+            "first_unhealthy_at": state["first_unhealthy_at"],
         }
-        if "first_unhealthy_at" not in state:
-            state["first_unhealthy_at"] = now
-        stale = snapshot.health in {"unhealthy", "dead"}
-        if not stale:
-            if last_restart_at is None:
-                restart_states.pop(snapshot.service, None)
-                return ()
-            details.update(
-                {
-                    "restart_attempts": restart_attempts,
-                    "last_restart_at": last_restart_at,
-                }
-            )
-            if state.get("last_restart_succeeded") is False:
-                return (
-                    Alert(
-                        f"live_heartbeat_restart_failed:{account_label}",
-                        "critical",
-                        "Automatic live strategy restart failed",
-                        {
-                            **details,
-                            "error_type": state.get("last_restart_error_type"),
-                            "error": state.get("last_restart_error"),
-                        },
-                    ),
-                )
-            return (
-                Alert(
-                    f"live_heartbeat_auto_restarted:{account_label}",
-                    "warning",
-                    "Live strategy restart is in progress",
-                    details,
-                ),
-            )
-
-        stale_alert = Alert(
-            f"live_heartbeat_stale:{account_label}",
-            "critical",
-            "Live strategy heartbeat is stale",
-            {
-                **details,
-                "first_unhealthy_at": state["first_unhealthy_at"],
-            },
-        )
-        alerts = [stale_alert]
+        alerts: list[Alert] = []
         if state.get("log_archive_container_id") != snapshot.container_id:
             archive_path, archive_error = self._archive_container_logs(
                 snapshot,
@@ -3022,131 +2462,22 @@ SELECT json_build_object(
                     Alert(
                         f"live_crash_log_archive_failed:{account_label}",
                         "critical",
-                        "Worker crash logs could not be archived before recovery",
+                        "Worker crash logs could not be archived before operator recovery",
                         {
                             **details,
                             "error_type": type(archive_error).__name__,
                         },
                     )
                 )
-        # NextGen readiness can be false while public data is rewarming and
-        # private-stream exits remain healthy. A host probe cannot authorize
-        # an account restart, especially while it holds a position.
-        if (
-            self._config.trading_engine == "nextgen"
-            or not self._config.auto_restart_stale_live_services
-        ):
-            return tuple(alerts)
-
-        if restart_attempts >= self._config.live_restart_max_attempts:
-            alerts.append(
-                Alert(
-                    f"live_heartbeat_restart_suppressed:{account_label}",
-                    "critical",
-                    "Automatic live strategy restart limit reached",
-                    {
-                        **details,
-                        "restart_attempts": restart_attempts,
-                        "max_attempts": self._config.live_restart_max_attempts,
-                        "cooldown_seconds": (
-                            self._config.live_restart_cooldown_seconds
-                        ),
-                    },
-                )
+        alerts = [
+            Alert(
+                f"live_heartbeat_stale:{account_label}",
+                "critical",
+                "NextGen account heartbeat is stale; "
+                "account restart is operator-controlled",
+                details.copy(),
             )
-            return tuple(alerts)
-
-        if (
-            last_restart_at is not None
-            and now - last_restart_at < self._config.live_restart_cooldown_seconds
-        ):
-            details.update(
-                {
-                    "restart_attempts": restart_attempts,
-                    "last_restart_at": last_restart_at,
-                    "cooldown_seconds": self._config.live_restart_cooldown_seconds,
-                }
-            )
-            if state.get("last_restart_succeeded") is False:
-                alerts.append(
-                    Alert(
-                        f"live_heartbeat_restart_failed:{account_label}",
-                        "critical",
-                        "Automatic live strategy restart failed",
-                        {
-                            **details,
-                            "error_type": state.get("last_restart_error_type"),
-                            "error": state.get("last_restart_error"),
-                        },
-                    )
-                )
-            else:
-                alerts.append(
-                    Alert(
-                        f"live_heartbeat_auto_restarted:{account_label}",
-                        "warning",
-                        "Live strategy restart is awaiting health recovery",
-                        details,
-                    )
-                )
-            return tuple(alerts)
-
-        attempt = restart_attempts + 1
-        state.update(
-            {
-                "last_restart_at": now,
-                "restart_attempts": attempt,
-                "last_restart_succeeded": False,
-            }
-        )
-        restart_command = [
-            *self._compose_prefix(),
-            "restart",
-            snapshot.service,
         ]
-        try:
-            self._runner.run(
-                restart_command,
-                timeout_seconds=self._config.command_timeout_seconds,
-            )
-        except Exception as error:
-            state.update(
-                {
-                    "last_restart_error_type": type(error).__name__,
-                    "last_restart_error": str(error),
-                }
-            )
-            alerts.append(
-                Alert(
-                    f"live_heartbeat_restart_failed:{account_label}",
-                    "critical",
-                    "Automatic live strategy restart failed",
-                    {
-                        **details,
-                        "attempt": attempt,
-                        "error_type": type(error).__name__,
-                        "error": str(error),
-                    },
-                )
-            )
-        else:
-            state["last_restart_succeeded"] = True
-            state.pop("last_restart_error_type", None)
-            state.pop("last_restart_error", None)
-            alerts.append(
-                Alert(
-                    f"live_heartbeat_auto_restarted:{account_label}",
-                    "warning",
-                    "Stale live strategy heartbeat triggered an automatic restart",
-                    {
-                        **details,
-                        "attempt": attempt,
-                        "cooldown_seconds": (
-                            self._config.live_restart_cooldown_seconds
-                        ),
-                    },
-                )
-            )
         return tuple(alerts)
 
     def _archive_container_logs(
@@ -3155,12 +2486,10 @@ SELECT json_build_object(
         *,
         observed_at: float,
     ) -> tuple[Path | None, Exception | None]:
-        """Copy Docker's retained log stream before a worker recovery.
+        """Copy Docker's retained log stream for operator diagnosis.
 
-        A Compose restart normally keeps the container, but a deployment or a
-        crash-loop can recreate it and erase the only useful traceback.  The
-        archive is therefore a best-effort side effect and never blocks the
-        actual recovery command on a logging failure.
+        A deployment or crash-loop can recreate a container and erase the only
+        useful traceback, so archiving is best effort and never blocks alerts.
         """
 
         directory = self._crash_log_directory
@@ -3202,9 +2531,7 @@ SELECT json_build_object(
         return destination, None
 
     def _container_id(self, service: str) -> str | None:
-        # Docker labels avoid re-interpolating every Compose file on each
-        # monitor tick. An optional live overlay may contain required secret
-        # variables for accounts that are not enabled on this host.
+        # Docker labels avoid re-interpolating Compose files on every monitor tick.
         command = [
             "docker",
             "ps",
@@ -3584,301 +2911,6 @@ FROM activity CROSS JOIN checkpoint CROSS JOIN temp_queries;
                 "capture_error": str(error),
             }
         return payload if isinstance(payload, dict) else {"capture_error": "bad_json"}
-
-    def _database_state(
-        self,
-        container_id: str,
-        *,
-        live_run_id: str | None = None,
-        live_account_label: str | None = None,
-    ) -> DatabaseState:
-        run_id = _sql_literal(live_run_id or self._config.live_run_id)
-        account_label = _sql_literal(
-            live_account_label or self._config.live_account_label
-        )
-        sql = f"""
-BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
-SELECT 'checkpoint_age' || E'\\t' || COALESCE(
-  EXTRACT(EPOCH FROM (clock_timestamp() - max(saved_at)))::text, '-1'
-)
-FROM strategy_runtime_checkpoints WHERE run_id = {run_id};
-SELECT 'live_ready' || E'\\t' || (
-  EXISTS (
-    SELECT 1 FROM live_session_transitions
-    WHERE session_id = {run_id}
-      AND state IN ('live_enabled', 'draining')
-  )
-  AND EXISTS (
-    SELECT 1 FROM strategy_runtime_checkpoints
-    WHERE run_id = {run_id}
-  )
-);
-  -- The three arms of live_ready are reported separately so a not-ready alert can
-  -- name the failing arm instead of sending the operator to three tables.
-  SELECT 'live_session_state_ready' || E'\t' || (
-    EXISTS (
-      SELECT 1 FROM live_session_transitions
-      WHERE session_id = {run_id}
-        AND state IN ('live_enabled', 'draining')
-    )
-  )::text;
-  SELECT 'live_checkpoint_present' || E'\t' || (
-    EXISTS (
-      SELECT 1 FROM strategy_runtime_checkpoints
-      WHERE run_id = {run_id}
-    )
-  )::text;
-SELECT 'pg_stat_statements' || E'\\t' || (
-  EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements')
-  AND position('pg_stat_statements' in current_setting('shared_preload_libraries')) > 0
-);
-SELECT 'track_io_timing' || E'\\t' || current_setting('track_io_timing');
-SELECT 'track_wal_io_timing' || E'\\t' || current_setting('track_wal_io_timing');
-SELECT 'parallel_maintenance' || E'\\t' || current_setting(
-  'max_parallel_maintenance_workers'
-);
-SELECT 'market_progress_age' || E'\\t' || COALESCE(
-  EXTRACT(EPOCH FROM (clock_timestamp() - max(occurred_at)))::text, '-1'
-)
-FROM strategy_runtime_events
-WHERE run_id = {run_id} AND event_type = 'market_state_progress';
-SELECT 'market_delay_ms' || E'\\t' || COALESCE(
-  (
-    -- Only buckets a real event advanced carry a meaningful delay.  The
-    -- market layer materializes zero-event buckets for quiet symbols so
-    -- consumers see a dense 15-second clock, and every one of those sits at a
-    -- past bucket_end by construction.  Promotion backfill also produces
-    -- historical buckets with events from up to 35 minutes ago, but with
-    -- data_complete=false.  Furthermore, live receive latency must only judge
-    -- buckets whose bucket_end is close to occurred_at (within 5 minutes),
-    -- never historical backfill/catchup data.
-    SELECT details->>'market_delay_ms'
-    FROM strategy_runtime_events
-    WHERE run_id = {run_id} AND event_type = 'market_state_progress'
-      AND COALESCE((details->>'source_event_count')::int, 0) > 0
-      AND COALESCE((details->>'data_complete')::boolean, false) = true
-      AND (details->>'bucket_end')::timestamptz >= occurred_at - interval '5 minutes'
-    ORDER BY occurred_at DESC
-    LIMIT 1
-  ), '-1'
-);
-SELECT 'account_process_state' || E'\\t' || COALESCE(
-  (
-    SELECT state
-    FROM execution_account_process_states
-    WHERE environment = 'live' AND account_label = {account_label}
-    ORDER BY occurred_at DESC
-    LIMIT 1
-  ), ''
-);
-SELECT 'account_process_age' || E'\\t' || COALESCE(
-  (
-    SELECT EXTRACT(EPOCH FROM (clock_timestamp() - occurred_at))::text
-    FROM execution_account_process_states
-    WHERE environment = 'live' AND account_label = {account_label}
-    ORDER BY occurred_at DESC
-    LIMIT 1
-  ), '-1'
-);
-SELECT 'reconciliation_status' || E'\\t' || COALESCE(
-  (
-    SELECT status
-    FROM account_reconciliation_runs
-    WHERE environment = 'live' AND account_label = {account_label}
-    ORDER BY observed_at DESC
-    LIMIT 1
-  ), ''
-);
-SELECT 'reconciliation_age' || E'\\t' || COALESCE(
-  (
-    SELECT EXTRACT(EPOCH FROM (clock_timestamp() - observed_at))::text
-    FROM account_reconciliation_runs
-    WHERE environment = 'live' AND account_label = {account_label}
-    ORDER BY observed_at DESC
-    LIMIT 1
-  ), '-1'
-);
-SELECT 'observation_queue_depth' || E'\\t' || COALESCE(
-  (
-    SELECT details->'order_observation'->>'depth'
-    FROM strategy_runtime_events
-    WHERE run_id = {run_id} AND event_type = 'runtime_readiness'
-      AND occurred_at >= clock_timestamp() - interval '180 seconds'
-      AND details ? 'order_observation'
-    ORDER BY occurred_at DESC
-    LIMIT 1
-  ), '-1'
-);
-SELECT 'observation_queue_capacity' || E'\\t' || COALESCE(
-  (
-    SELECT details->'order_observation'->>'capacity'
-    FROM strategy_runtime_events
-    WHERE run_id = {run_id} AND event_type = 'runtime_readiness'
-      AND occurred_at >= clock_timestamp() - interval '180 seconds'
-      AND details ? 'order_observation'
-    ORDER BY occurred_at DESC
-    LIMIT 1
-  ), '-1'
-);
-SELECT 'observation_queue_oldest_age' || E'\\t' || COALESCE(
-  (
-    SELECT details->'order_observation'->>'oldest_pending_age_seconds'
-    FROM strategy_runtime_events
-    WHERE run_id = {run_id} AND event_type = 'runtime_readiness'
-      AND occurred_at >= clock_timestamp() - interval '180 seconds'
-      AND details ? 'order_observation'
-    ORDER BY occurred_at DESC
-    LIMIT 1
-  ), '-1'
-);
-SELECT 'observation_queue_overflow_count' || E'\\t' || COALESCE(
-  (
-    SELECT details->'order_observation'->>'overflow_count'
-    FROM strategy_runtime_events
-    WHERE run_id = {run_id} AND event_type = 'runtime_readiness'
-      AND occurred_at >= clock_timestamp() - interval '180 seconds'
-      AND details ? 'order_observation'
-    ORDER BY occurred_at DESC
-    LIMIT 1
-  ), '-1'
-);
-SELECT 'unknown_order_count' || E'\\t' || count(*)::text
-FROM exchange_orders
-WHERE run_id = {run_id} AND state = 'unknown_pending_reconciliation';
-SELECT 'oldest_unknown_order_age' || E'\\t' || COALESCE(
-  EXTRACT(EPOCH FROM (clock_timestamp() - min(created_at)))::text, '-1'
-)
-FROM exchange_orders
-WHERE run_id = {run_id} AND state = 'unknown_pending_reconciliation';
-SELECT 'terminal_state_mismatch_count' || E'\\t' || count(*)::text
-FROM exchange_orders o
-JOIN execution_commands c ON o.client_order_id = c.client_order_id
-WHERE o.run_id = {run_id}
-  AND o.state IN ('canceled', 'filled')
-  AND c.status IN ('acknowledged', 'submitted')
-  AND c.requested_at < clock_timestamp() - interval '60 seconds';
-SELECT 'oldest_terminal_mismatch_age' || E'\\t' || COALESCE(
-  EXTRACT(EPOCH FROM (clock_timestamp() - min(c.requested_at)))::text, '-1'
-)
-FROM exchange_orders o
-JOIN execution_commands c ON o.client_order_id = c.client_order_id
-WHERE o.run_id = {run_id}
-  AND o.state IN ('canceled', 'filled')
-  AND c.status IN ('acknowledged', 'submitted')
-  AND c.requested_at < clock_timestamp() - interval '60 seconds';
-COMMIT;
-"""
-        output = self._runner.run(
-            [
-                "docker",
-                "exec",
-                container_id,
-                "psql",
-                "-At",
-                "-q",
-                "-U",
-                "cml",
-                "-d",
-                "cml",
-                "-c",
-                sql,
-            ],
-            timeout_seconds=self._config.command_timeout_seconds,
-        )
-        values: dict[str, str] = {}
-        for line in output.splitlines():
-            key, separator, value = line.partition("\t")
-            if separator:
-                values[key] = value.strip()
-        age = _parse_float(values.get("checkpoint_age"))
-        market_progress_age = _parse_float(values.get("market_progress_age"))
-        market_delay_ms = _parse_float(values.get("market_delay_ms"))
-        account_process_age = _parse_float(values.get("account_process_age"))
-        reconciliation_age = _parse_float(values.get("reconciliation_age"))
-        oldest_unknown_order_age = _parse_float(values.get("oldest_unknown_order_age"))
-        terminal_state_mismatch_count = (
-            _parse_int(values.get("terminal_state_mismatch_count")) or 0
-        )
-        oldest_terminal_mismatch_age = _parse_float(
-            values.get("oldest_terminal_mismatch_age")
-        )
-        observation_queue_depth = _parse_int(values.get("observation_queue_depth"))
-        observation_queue_capacity = _parse_int(
-            values.get("observation_queue_capacity")
-        )
-        observation_queue_oldest_age = _parse_float(
-            values.get("observation_queue_oldest_age")
-        )
-        return DatabaseState(
-            latest_checkpoint_age_seconds=None if age is None or age < 0 else age,
-            live_session_ready=_parse_bool(values.get("live_ready")),
-            live_session_state_ready=_parse_bool_default(
-                values.get("live_session_state_ready"), True
-            ),
-            live_checkpoint_present=_parse_bool_default(
-                values.get("live_checkpoint_present"), True
-            ),
-            pg_stat_statements_ready=_parse_bool(values.get("pg_stat_statements")),
-            track_io_timing=_parse_bool(values.get("track_io_timing")),
-            track_wal_io_timing=_parse_bool(values.get("track_wal_io_timing")),
-            max_parallel_maintenance_workers=_parse_int(
-                values.get("parallel_maintenance")
-            ),
-            latest_market_progress_age_seconds=(
-                None
-                if market_progress_age is None or market_progress_age < 0
-                else market_progress_age
-            ),
-            latest_market_delay_ms=(
-                None
-                if market_delay_ms is None or market_delay_ms < 0
-                else market_delay_ms
-            ),
-            account_process_state=values.get("account_process_state") or None,
-            account_process_age_seconds=(
-                None
-                if account_process_age is None or account_process_age < 0
-                else account_process_age
-            ),
-            latest_reconciliation_status=(values.get("reconciliation_status") or None),
-            latest_reconciliation_age_seconds=(
-                None
-                if reconciliation_age is None or reconciliation_age < 0
-                else reconciliation_age
-            ),
-            unknown_order_count=_parse_int(values.get("unknown_order_count")) or 0,
-            oldest_unknown_order_age_seconds=(
-                None
-                if oldest_unknown_order_age is None or oldest_unknown_order_age < 0
-                else oldest_unknown_order_age
-            ),
-            terminal_state_mismatch_count=terminal_state_mismatch_count,
-            oldest_terminal_mismatch_age_seconds=(
-                None
-                if oldest_terminal_mismatch_age is None
-                or oldest_terminal_mismatch_age < 0
-                else oldest_terminal_mismatch_age
-            ),
-            observation_queue_depth=(
-                None
-                if observation_queue_depth is None or observation_queue_depth < 0
-                else observation_queue_depth
-            ),
-            observation_queue_capacity=(
-                None
-                if observation_queue_capacity is None or observation_queue_capacity <= 0
-                else observation_queue_capacity
-            ),
-            observation_queue_oldest_age_seconds=(
-                None
-                if observation_queue_oldest_age is None
-                or observation_queue_oldest_age < 0
-                else observation_queue_oldest_age
-            ),
-            observation_queue_overflow_count=(
-                _parse_int(values.get("observation_queue_overflow_count")) or 0
-            ),
-        )
 
     def _consistency_observations(
         self,
@@ -4793,20 +3825,6 @@ def _parse_int(value: str | None) -> int | None:
         return None
 
 
-def _parse_bool(value: str | None) -> bool:
-    """Parse the boolean spellings emitted by PostgreSQL's text output."""
-
-    return (value or "").strip().lower() in {"1", "on", "t", "true", "yes"}
-
-
-def _parse_bool_default(value: str | None, default: bool) -> bool:
-    """Parse a boolean that older SQL output may not have emitted yet."""
-
-    if value is None or not str(value).strip():
-        return default
-    return _parse_bool(value)
-
-
 def _parse_env_bool(value: str | None, *, default: bool) -> bool:
     """Parse a monitor boolean and fail closed on an invalid override."""
 
@@ -5152,11 +4170,9 @@ def _alert_account_scope(details: Mapping[str, object]) -> str:
 def _service_scope(service: object) -> str | None:
     if not isinstance(service, str) or not service:
         return None
-    if service == "live-strategy":
-        return "primary"
-    for prefix in ("live-strategy-", "execution-account-live-", "nextgen-strategy-"):
-        if service.startswith(prefix):
-            return service.removeprefix(prefix)
+    prefix = "nextgen-strategy-"
+    if service.startswith(prefix):
+        return service.removeprefix(prefix)
     return service
 
 
@@ -6224,12 +5240,9 @@ def _compose_service_names(compose_files: Sequence[Path]) -> tuple[str, ...]:
 
 
 def _live_account_label_for_service(service: str) -> str | None:
-    for prefix in ("execution-account-live", "live-strategy", "nextgen-strategy"):
-        if service == prefix:
-            return "primary"
-        prefix_with_separator = f"{prefix}-"
-        if service.startswith(prefix_with_separator):
-            return service[len(prefix_with_separator) :]
+    prefix = "nextgen-strategy-"
+    if service.startswith(prefix):
+        return service.removeprefix(prefix)
     return None
 
 
@@ -6286,11 +5299,10 @@ def _discover_live_accounts(
 
 def _monitor_services_for_accounts(
     live_accounts: Sequence[tuple[str, str]],
-    trading_engine: str = "legacy",
 ) -> tuple[str, ...]:
     services = ["postgres", "market-data", "research-collector"]
     for account_label, _run_id in live_accounts:
-        services.append(_live_strategy_service(account_label, trading_engine))
+        services.append(_nextgen_strategy_service(account_label))
     return tuple(dict.fromkeys(services))
 
 
@@ -6313,27 +5325,12 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
         or _read_env_value(compose_env_file, "CML_LIVE_ACCOUNT_LABEL")
         or "primary"
     )
-    compose_file_values = tuple(
-        item.strip() for item in str(args.compose_file).split(",") if item.strip()
+    project_directory = Path(args.project_directory)
+    compose_files = (
+        project_directory / "compose.server.yaml",
+        project_directory / "compose.next_gen.yaml",
     )
-    compose_files = tuple(Path(item) for item in compose_file_values)
-    profile_values = tuple(
-        item.strip()
-        for item in os.environ.get("CML_COMPOSE_PROFILES", "").split(",")
-        if item.strip()
-    )
-    trading_engine = (
-        _configured_env_value(compose_env_file, "CML_TRADING_ENGINE") or "legacy"
-    )
-    if trading_engine not in ("legacy", "nextgen"):
-        raise ValueError("Unsupported CML_TRADING_ENGINE")
-    if trading_engine == "nextgen":
-        project = Path(args.project_directory)
-        compose_files = (
-            project / "compose.server.yaml",
-            project / "compose.next_gen.yaml",
-        )
-        profile_values = ("nextgen",)
+    profile_values = ("nextgen",)
     configured_live_accounts = os.environ.get("CML_MONITOR_LIVE_ACCOUNTS")
     live_accounts = (
         _parse_live_accounts(configured_live_accounts)
@@ -6348,15 +5345,15 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
             item.strip() for item in configured_services.split(",") if item.strip()
         )
     else:
-        services = _monitor_services_for_accounts(live_accounts, trading_engine)
-    if trading_engine == "nextgen" and any(
-        name.startswith("live-strategy") for name in services
+        services = _monitor_services_for_accounts(live_accounts)
+    if any(
+        name.startswith(("live-strategy", "execution-account-live"))
+        for name in services
     ):
         raise ValueError("CML_MONITOR_SERVICES still names the retired legacy workers")
     return MonitorConfig(
-        trading_engine=trading_engine,
-        project_directory=Path(args.project_directory),
-        compose_file=(compose_files[0] if compose_files else Path(args.compose_file)),
+        project_directory=project_directory,
+        compose_file=compose_files[0],
         compose_files=compose_files,
         compose_profiles=profile_values,
         compose_env_file=compose_env_file,
@@ -6366,7 +5363,6 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
         live_account_label=live_account_label,
         interval_seconds=args.interval_seconds,
         log_window_seconds=args.log_window_seconds,
-        telemetry_stale_after_seconds=args.telemetry_stale_after_seconds,
         rss_warning_fraction=args.rss_warning_fraction,
         retention_timer_unit=getattr(
             args, "retention_timer_unit", _DEFAULT_RETENTION_TIMER_UNIT
@@ -6512,62 +5508,6 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
             )
         ),
         command_timeout_seconds=args.command_timeout_seconds,
-        auto_restart_stale_live_services=_parse_env_bool(
-            os.environ.get("CML_AUTO_RESTART_STALE_LIVE_SERVICES"),
-            default=True,
-        ),
-        live_restart_cooldown_seconds=float(
-            os.environ.get(
-                "CML_LIVE_RESTART_COOLDOWN_SECONDS",
-                _DEFAULT_LIVE_RESTART_COOLDOWN_SECONDS,
-            )
-        ),
-        live_restart_max_attempts=int(
-            os.environ.get(
-                "CML_LIVE_RESTART_MAX_ATTEMPTS",
-                _DEFAULT_LIVE_RESTART_MAX_ATTEMPTS,
-            )
-        ),
-        market_state_stale_after_seconds=float(
-            getattr(
-                args,
-                "market_state_stale_after_seconds",
-                os.environ.get(
-                    "CML_MARKET_STATE_STALE_AFTER_SECONDS",
-                    _DEFAULT_MARKET_STATE_STALE_AFTER_SECONDS,
-                ),
-            )
-        ),
-        market_delay_warning_ms=float(
-            getattr(
-                args,
-                "market_delay_warning_ms",
-                os.environ.get(
-                    "CML_MARKET_DELAY_WARNING_MS",
-                    _DEFAULT_MARKET_DELAY_WARNING_MS,
-                ),
-            )
-        ),
-        market_delay_critical_ms=float(
-            getattr(
-                args,
-                "market_delay_critical_ms",
-                os.environ.get(
-                    "CML_MARKET_DELAY_CRITICAL_MS",
-                    _DEFAULT_MARKET_DELAY_CRITICAL_MS,
-                ),
-            )
-        ),
-        account_state_stale_after_seconds=float(
-            getattr(
-                args,
-                "account_state_stale_after_seconds",
-                os.environ.get(
-                    "CML_ACCOUNT_STATE_STALE_AFTER_SECONDS",
-                    _DEFAULT_ACCOUNT_STATE_STALE_AFTER_SECONDS,
-                ),
-            )
-        ),
         position_stale_after_seconds=float(
             getattr(
                 args,
@@ -6629,13 +5569,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=os.environ.get("CML_PROJECT_DIRECTORY", "/opt/crypto-momentum-lab"),
     )
     parser.add_argument(
-        "--compose-file",
-        default=os.environ.get(
-            "CML_COMPOSE_FILE",
-            "/opt/crypto-momentum-lab/compose.server.yaml",
-        ),
-    )
-    parser.add_argument(
         "--services",
         default=None,
     )
@@ -6656,51 +5589,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--log-window-seconds",
         type=float,
         default=_DEFAULT_LOG_WINDOW_SECONDS,
-    )
-    parser.add_argument(
-        "--telemetry-stale-after-seconds",
-        type=float,
-        default=_DEFAULT_TELEMETRY_STALE_AFTER_SECONDS,
-    )
-    parser.add_argument(
-        "--market-state-stale-after-seconds",
-        type=float,
-        default=float(
-            os.environ.get(
-                "CML_MARKET_STATE_STALE_AFTER_SECONDS",
-                _DEFAULT_MARKET_STATE_STALE_AFTER_SECONDS,
-            )
-        ),
-    )
-    parser.add_argument(
-        "--market-delay-warning-ms",
-        type=float,
-        default=float(
-            os.environ.get(
-                "CML_MARKET_DELAY_WARNING_MS",
-                _DEFAULT_MARKET_DELAY_WARNING_MS,
-            )
-        ),
-    )
-    parser.add_argument(
-        "--market-delay-critical-ms",
-        type=float,
-        default=float(
-            os.environ.get(
-                "CML_MARKET_DELAY_CRITICAL_MS",
-                _DEFAULT_MARKET_DELAY_CRITICAL_MS,
-            )
-        ),
-    )
-    parser.add_argument(
-        "--account-state-stale-after-seconds",
-        type=float,
-        default=float(
-            os.environ.get(
-                "CML_ACCOUNT_STATE_STALE_AFTER_SECONDS",
-                _DEFAULT_ACCOUNT_STATE_STALE_AFTER_SECONDS,
-            )
-        ),
     )
     parser.add_argument(
         "--position-stale-after-seconds",

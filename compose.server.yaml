@@ -237,132 +237,6 @@ services:
       start_period: 2m
     mem_limit: 256m
 
-  live-strategy:
-    <<: *app
-    profiles: ["live"]
-    environment:
-      <<: *app-environment
-      BINANCE_READ_API_KEY: ${BINANCE_READ_API_KEY:-}
-      BINANCE_READ_API_SECRET: ${BINANCE_READ_API_SECRET:-}
-      BINANCE_TRADE_API_KEY: ${BINANCE_TRADE_API_KEY:-}
-      BINANCE_TRADE_API_SECRET: ${BINANCE_TRADE_API_SECRET:-}
-      CML_LIVE_STRATEGY: ${CML_LIVE_STRATEGY:-orderflow_impulse}
-      CML_LIVE_SESSION_ID: ${CML_LIVE_SESSION_ID:-live-primary-v1}
-      CML_LIVE_STRATEGY_CONFIG_HASH: ${CML_LIVE_STRATEGY_CONFIG_HASH:-unset}
-      CML_LIVE_MIGRATION_REVISION: ${CML_LIVE_MIGRATION_REVISION:-20260925_0043}
-      CML_LIVE_ENTRY_POLICY_MODE: ${CML_LIVE_ENTRY_POLICY_MODE:-enforce}
-      CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT: ${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT:-30}
-      CML_LIVE_IMPULSE_WINDOW_BUCKETS: ${CML_LIVE_IMPULSE_WINDOW_BUCKETS:-2}
-      CML_LIVE_CONFIRMATION_BUCKETS: ${CML_LIVE_CONFIRMATION_BUCKETS:-1}
-      CML_LIVE_MIN_RETURN_PCT: ${CML_LIVE_MIN_RETURN_PCT:-0.0075}
-      CML_LIVE_MIN_IMBALANCE: ${CML_LIVE_MIN_IMBALANCE:-0.30}
-      CML_LIVE_MIN_INTENSITY: ${CML_LIVE_MIN_INTENSITY:-3.0}
-      CML_LIVE_MIN_NOTIONAL_5M_VS_30M: ${CML_LIVE_MIN_NOTIONAL_5M_VS_30M:-1.25}
-      CML_LIVE_COOLDOWN_BUCKETS: ${CML_LIVE_COOLDOWN_BUCKETS:-0}
-      CML_LIVE_MAX_CONCURRENCY_PER_SYMBOL: ${CML_LIVE_MAX_CONCURRENCY_PER_SYMBOL:-2}
-      CML_LIVE_TARGET_NOTIONAL: ${CML_LIVE_TARGET_NOTIONAL:-100.00}
-      CML_LIVE_ENTRY_LEVERAGE: ${CML_LIVE_ENTRY_LEVERAGE:-5}
-      CML_LIVE_MARGIN_TYPE: ${CML_LIVE_MARGIN_TYPE:-CROSSED}
-      CML_LIVE_PERSIST_EXCHANGE_OPERATIONS: ${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS:-submit,cancel}
-      CML_LIVE_EXIT_MODE: ${CML_LIVE_EXIT_MODE:-candle_15m}
-      CML_LIVE_CANDLE_GRACE_BARS: ${CML_LIVE_CANDLE_GRACE_BARS:-8}
-      CML_LIVE_CANDLE_GRACE_DECISION_PROFIT_PCT: ${CML_LIVE_CANDLE_GRACE_DECISION_PROFIT_PCT:-0.001}
-      CML_LIVE_CANDLE_GRACE_PROFIT_PCT: ${CML_LIVE_CANDLE_GRACE_PROFIT_PCT:-0.0088}
-      CML_MARKET_STATE_HUB_URL: ${CML_MARKET_STATE_HUB_URL:-ws://market-data:8766}
-      CML_MARKET_QUOTE_HUB_URL: ${CML_MARKET_QUOTE_HUB_URL:-ws://market-data:8768}
-      CML_MARKET_QUOTE_VOLUME_HUB_URL: ${CML_MARKET_QUOTE_VOLUME_HUB_URL:-ws://market-data:8768}
-      CML_BINANCE_SHARED_REQUEST_PACER_PATH: ${CML_BINANCE_SHARED_REQUEST_PACER_PATH:-/run/cml/binance-rest-pacer/private-read.lock}
-      CML_BINANCE_SHARED_COMMAND_REQUEST_PACER_PATH: ${CML_BINANCE_SHARED_COMMAND_REQUEST_PACER_PATH:-/run/cml/binance-rest-pacer/private-command.lock}
-    entrypoint: ["cml-live-rollout"]
-    command:
-      - run
-      - --account-label
-      - ${CML_LIVE_ACCOUNT_LABEL:-primary}
-      - --strategy
-      - ${CML_LIVE_STRATEGY:-orderflow_impulse}
-      - --runtime-manifest
-      - /app/deploy/live-runtime.yaml
-      - --market-environment
-      - research
-      - --market-state-source
-      - hub
-      - --market-state-hub-url
-      - ${CML_MARKET_STATE_HUB_URL:-ws://market-data:8766}
-      - --market-quote-hub-url
-      - ${CML_MARKET_QUOTE_HUB_URL:-ws://market-data:8768}
-      - --market-quote-volume-hub-url
-      - ${CML_MARKET_QUOTE_VOLUME_HUB_URL:-ws://market-data:8768}
-      - --session-id
-      - ${CML_LIVE_SESSION_ID:-live-primary-v1}
-      - --operator
-      - ${CML_LIVE_OPERATOR:-operator}
-      - --strategy-config-hash
-      - ${CML_LIVE_STRATEGY_CONFIG_HASH:-unset}
-      - --git-commit-hash
-      - ${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
-      - --max-runtime-seconds
-      - "31536000"
-      - --poll-interval-seconds
-      - "0.25"
-      - --checkpoint-every-states
-      - "1000"
-      - --checkpoint-every-seconds
-      - "60"
-      - --checkpoint-phase-seconds
-      - "0"
-      - --hedge-mode
-      - --entry-long-only
-      - --no-entry-price-above-ema5
-      - --no-entry-price-above-ema10
-      - --entry-leverage
-      - ${CML_LIVE_ENTRY_LEVERAGE:-5}
-      - --margin-type
-      - ${CML_LIVE_MARGIN_TYPE:-CROSSED}
-      # Production rollout retains only auditable write boundaries by default.
-      # Set CML_LIVE_PERSIST_EXCHANGE_OPERATIONS=all for a temporary
-      # full-operation diagnostic capture.
-      - --persist-exchange-operations
-      - ${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS:-submit,cancel}
-      - --max-concurrency-per-symbol
-      - "${CML_LIVE_MAX_CONCURRENCY_PER_SYMBOL:-2}"
-      - --exit-mode
-      - ${CML_LIVE_EXIT_MODE:-candle_15m}
-      - --candle-grace-bars
-      - ${CML_LIVE_CANDLE_GRACE_BARS:-8}
-      - --candle-grace-decision-profit-pct
-      - ${CML_LIVE_CANDLE_GRACE_DECISION_PROFIT_PCT:-0.001}
-      - --candle-grace-profit-pct
-      - ${CML_LIVE_CANDLE_GRACE_PROFIT_PCT:-0.0088}
-      - --i-understand-this-places-real-orders
-    depends_on:
-      market-data:
-        # Live starts with the feed process; no hidden freshness gate.
-        condition: service_started
-    volumes:
-      - binance-rest-pacer:/run/cml/binance-rest-pacer
-    healthcheck:
-      # The live process refreshes liveness locally and refreshes the database
-      # marker after lease/checkpoint writes.
-      test: ["CMD", "/usr/local/bin/cml-local-healthcheck", "300"]
-      interval: 60s
-      start_interval: 5s
-      timeout: 10s
-      retries: 3
-      start_period: 5m
-    stop_grace_period: 90s
-    # Startup observed below 200 MiB, so this was trimmed to 512 MiB.  In
-    # steady state the working set now sits near 400 MiB (77% of that budget),
-    # which keeps tripping container_memory_high; give it real headroom again.
-    # 512m: aligned with live-strategy-account-2/3/4 in
-    # compose.live.accounts.yaml.  The earlier 384m rested on a post-restart
-    # reading of ~173 MiB, but the steady state grows well past that: it was
-    # observed at 364 MiB (95% of 384m) with container_memory_high firing and
-    # container_memory_growth reporting +81.9 MiB in 30 minutes.  A post-restart
-    # peak is not a steady-state figure.  The limit is a ceiling, not a
-    # reservation.
-    mem_limit: 512m
-    memswap_limit: 1024m
-
   dashboard:
     <<: *app
     # Keep dashboard-only copy changes from forcing a live approval/code hash
@@ -395,7 +269,7 @@ services:
       retries: 4
       start_period: 30s
     # The dashboard process regularly uses over 200 MiB with all sections
-    # loaded, so keep headroom without reserving the old live-strategy budget.
+    # loaded, so keep headroom without reserving an account-worker budget.
     # 192m: peak measured at 109 MiB.
     mem_limit: 192m
     memswap_limit: 512m

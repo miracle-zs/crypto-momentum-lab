@@ -21,7 +21,7 @@ def test_checked_in_live_runtime_manifest_resolves_account_identity() -> None:
     assert primary.strategy == "orderflow_impulse"
     assert primary.image_commit == "a" * 40
     assert primary.migration_revision == "20261018_0067"
-    assert primary.services == ("live-strategy",)
+    assert primary.services == ("nextgen-strategy-primary",)
     assert account_3.session_id == "live-account-3-v1"
     assert account_3.migration_revision == "20261018_0067"
     assert len(primary.strategy_config_hash) == 64
@@ -94,7 +94,7 @@ accounts:
     session_id: live-primary-v1
     profile_ref: profile.yaml
     limits_ref: postgres:risk_config/primary
-    services: [live-strategy]
+    services: [nextgen-strategy-primary]
     execution_config:
       target_notional: 100
       hedge_mode: true
@@ -149,7 +149,7 @@ accounts:
     session_id: session-1
     profile_ref: profile.yaml
     limits_ref: limits.yaml
-    services: [live-strategy]
+    services: [nextgen-strategy-primary]
     execution_config:
       target_notional: 100
       hedge_mode: true
@@ -181,7 +181,7 @@ accounts:
     session_id: session-2
     profile_ref: profile.yaml
     limits_ref: limits.yaml
-    services: [live-strategy-2]
+    services: [nextgen-strategy-account-2]
     execution_config:
       target_notional: 100
       hedge_mode: true

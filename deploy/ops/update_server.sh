@@ -16,7 +16,6 @@ Environment:
   CML_SERVER_USER  SSH user (default: root)
   CML_REMOTE_DIR   server checkout (default: /opt/crypto-momentum-lab)
   CML_SSH_PASSWORD optional sshpass password; SSH keys are preferred
-  CML_TRADING_ENGINE legacy or nextgen (default: server setting)
   CML_DEPLOY_SCOPE full (default) or dashboard (no migration/account restart)
   CML_FLAT_WAIT_SECONDS maximum flat wait (default: 1800; 0 checks once)
 USAGE
@@ -70,14 +69,13 @@ if [[ ! "$flat_wait_seconds" =~ ^[0-9]+$ || ${#flat_wait_seconds} -gt 8 ]]; then
 fi
 flat_wait_seconds=$((10#$flat_wait_seconds))
 client_started_at="$(date +%s)"
-if "${runner[@]}" "$remote_dir" "$target_ref" "${CML_TRADING_ENGINE:-auto}" "$deploy_scope" "$flat_wait_seconds" <<'REMOTE_SCRIPT'; then
+if "${runner[@]}" "$remote_dir" "$target_ref" "$deploy_scope" "$flat_wait_seconds" <<'REMOTE_SCRIPT'; then
 set -Eeuo pipefail
 
 remote_dir="$1"
 target_ref="$2"
-requested_engine="$3"
-deploy_scope="$4"
-flat_wait_seconds="$5"
+deploy_scope="$3"
+flat_wait_seconds="$4"
 cd "$remote_dir"
 
 if [[ ! -f .env.server ]]; then
@@ -101,21 +99,8 @@ if ! flock -n 9; then
   exit 75
 fi
 
-trading_engine="$requested_engine"
-if [[ "$trading_engine" == auto ]]; then
-  trading_engine="$(sed -n 's/^CML_TRADING_ENGINE=//p' .env.server | tail -n 1)"
-  trading_engine="${trading_engine:-legacy}"
-fi
-case "$trading_engine" in
-  nextgen) compose_profile="nextgen" ;;
-  legacy) compose_profile="live" ;;
-  *) echo "Unsupported CML_TRADING_ENGINE: $trading_engine" >&2; exit 64 ;;
-esac
-export CML_TRADING_ENGINE="$trading_engine"
-
-# Both definitions are needed to stop old containers during an engine switch.
 compose=(docker compose --env-file .env.server -f compose.server.yaml
-  -f compose.live.accounts.yaml -f compose.next_gen.yaml --profile "$compose_profile")
+  -f compose.next_gen.yaml --profile nextgen)
 git fetch --prune origin main
 previous_commit="$(git rev-parse HEAD)"
 target_commit="$(git rev-parse "$target_ref^{commit}")"
@@ -144,10 +129,6 @@ set_maintenance_image() {
 }
 
 if [[ "$deploy_scope" == dashboard ]]; then
-  if [[ -n "$requested_engine" ]]; then
-    echo "Dashboard-only deployment cannot switch trading engine" >&2
-    exit 64
-  fi
   current_code="$(sed -n 's/^CML_CODE_COMMIT=//p' .env.server | tail -n 1)"
   if [[ -z "$current_code" ]] || ! git diff --quiet "$current_code" "$target_commit" -- alembic alembic.ini; then
     echo "Dashboard-only deployment requires unchanged database migrations; use full deployment" >&2
@@ -172,18 +153,16 @@ cleanup_build_worktree() {
 }
 trap cleanup_build_worktree EXIT
 git worktree add --detach "$build_dir" "$target_commit"
-# The target may add an engine-specific Compose overlay (for example
-# compose.next_gen.yaml).  Fast-forward the checkout before the flat check so
-# every Compose invocation sees the target service definitions.  The running
-# containers keep their current images until the explicit stop below.
+# Fast-forward the checkout before the flat check so every Compose invocation
+# sees the target service definitions. Running containers keep their current
+# images until the explicit stop below.
 if [[ "$target_commit" != "$previous_commit" ]]; then
   git merge --ff-only "$target_commit"
 fi
 build_compose=(docker compose --project-directory "$build_dir" \
   --env-file "$remote_dir/.env.server" \
   -f "$build_dir/compose.server.yaml" \
-  -f "$build_dir/compose.live.accounts.yaml"
-  -f "$build_dir/compose.next_gen.yaml" --profile "$compose_profile")
+  -f "$build_dir/compose.next_gen.yaml" --profile nextgen)
 target_image="crypto-momentum-lab-app:${target_commit}"
 if ! docker image inspect "$target_image" >/dev/null 2>&1; then
   CML_CODE_COMMIT="$target_commit" CML_DASHBOARD_IMAGE="$target_image" \
@@ -233,21 +212,12 @@ if [[ "$deploy_scope" == dashboard ]]; then
   exit 0
 fi
 
-if [[ "$trading_engine" == "nextgen" ]]; then
-  accounts=(
-    "primary:nextgen-strategy-primary"
-    "account-2:nextgen-strategy-account-2"
-    "account-3:nextgen-strategy-account-3"
-    "account-4:nextgen-strategy-account-4"
-  )
-else
-  accounts=(
-    "primary:live-strategy"
-    "account-2:live-strategy-account-2"
-    "account-3:live-strategy-account-3"
-    "account-4:live-strategy-account-4"
-  )
-fi
+accounts=(
+  "primary:nextgen-strategy-primary"
+  "account-2:nextgen-strategy-account-2"
+  "account-3:nextgen-strategy-account-3"
+  "account-4:nextgen-strategy-account-4"
+)
 flat_check_python=$(cat <<'PY'
 import asyncio, json, os, sys
 from crypto_momentum_lab.execution_account.binance.client import BinanceUsdMPrivateReadClient
@@ -340,7 +310,6 @@ fi
 
 running_services=()
 for service in dashboard market-data research-collector \
-  live-strategy live-strategy-account-2 live-strategy-account-3 live-strategy-account-4 \
   nextgen-strategy-primary nextgen-strategy-account-2 nextgen-strategy-account-3 nextgen-strategy-account-4; do
   if docker ps -q --filter label=com.docker.compose.project=crypto-momentum-lab \
     --filter "label=com.docker.compose.service=$service" | grep -q .; then
@@ -348,27 +317,27 @@ for service in dashboard market-data research-collector \
   fi
 done
 
-# Start the base application services even after a previous deployment attempt
-# stopped them, and always start the selected engine's account services.  A
-# controlled flatten may have stopped the legacy strategies beforehand.
+# Start shared services even after a previous deployment attempt stopped them,
+# and always start the four NextGen account services.
 services=(dashboard market-data research-collector)
 for item in "${accounts[@]}"; do
   services+=("${item#*:}")
 done
 
-execution_account_containers=()
-for service in execution-account-live execution-account-live-account-2 \
+retired_containers=()
+for service in live-strategy live-strategy-account-2 live-strategy-account-3 \
+  live-strategy-account-4 execution-account-live execution-account-live-account-2 \
   execution-account-live-account-3 execution-account-live-account-4; do
   container="$(docker ps -q --filter label=com.docker.compose.project=crypto-momentum-lab \
     --filter "label=com.docker.compose.service=$service" | head -n 1)"
   if [[ -n "$container" ]]; then
-    execution_account_containers+=("$container")
+    retired_containers+=("$container")
   fi
 done
 execution_stop_pids=()
 application_stop_pid=""
-if (( ${#execution_account_containers[@]} > 0 )); then
-  for container in "${execution_account_containers[@]}"; do
+if (( ${#retired_containers[@]} > 0 )); then
+  for container in "${retired_containers[@]}"; do
     docker stop --time 90 "$container" >/dev/null &
     execution_stop_pids+=("$!")
   done
@@ -413,7 +382,6 @@ done
 if [[ "$target_commit" != "$previous_commit" ]]; then
   git merge --ff-only "$target_commit"
 fi
-set_env_value CML_TRADING_ENGINE "$trading_engine"
 set_env_value CML_CODE_COMMIT "$target_commit"
 set_env_value CML_DASHBOARD_IMAGE "crypto-momentum-lab-app:${target_commit}"
 set_maintenance_image "$target_image"

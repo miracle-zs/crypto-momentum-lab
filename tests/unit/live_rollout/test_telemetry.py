@@ -819,25 +819,6 @@ async def test_high_frequency_telemetry_stays_in_memory_when_not_persisted() -> 
     assert telemetry.persist_failure_count == 0
 
 
-def test_live_database_plane_urls_prefer_explicit_plane_environment(
-    monkeypatch,
-) -> None:
-    from crypto_momentum_lab.apps.live_rollout import main
-
-    monkeypatch.setenv("CML_DATABASE_URL", "postgresql+asyncpg://data")
-    monkeypatch.setenv("CML_EXECUTION_DATABASE_URL", "postgresql+asyncpg://exec")
-    monkeypatch.setenv(
-        "CML_OBSERVABILITY_DATABASE_URL",
-        "postgresql+asyncpg://observability",
-    )
-
-    assert main._execution_database_url(None) == "postgresql+asyncpg://exec"
-    assert main._observability_database_url(None) == (
-        "postgresql+asyncpg://observability"
-    )
-    assert main._market_database_url(None) == "postgresql+asyncpg://data"
-
-
 async def test_repeated_candidate_evaluations_refresh_phase_timestamps() -> None:
     telemetry = LiveRuntimeTelemetry(run_id="run-1")
     candidate = SimpleNamespace(

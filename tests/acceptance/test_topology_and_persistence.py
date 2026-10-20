@@ -110,13 +110,12 @@ def _merged_live_services() -> dict[str, dict[str, object]]:
         "services"
     ]
     overlay = yaml.safe_load(
-        Path("compose.live.accounts.yaml").read_text(encoding="utf-8")
+        Path("compose.next_gen.yaml").read_text(encoding="utf-8")
     )["services"]
-    assert not set(base) & set(overlay), "overlay must not redefine an account"
     return {
         name: body
         for name, body in (base | overlay).items()
-        if "live" in body.get("profiles", [])
+        if "nextgen" in body.get("profiles", [])
     }
 
 
@@ -144,7 +143,7 @@ def test_each_account_is_assembled_as_one_process_holding_both_roles() -> None:
     """Q5/T3: one process per account, holding the read and trade roles.
 
     An account is 'one process' when the merged deployment descriptor gives it
-    exactly one live service, and that service is the one that both
+        exactly one NextGen service, and that service is the one that both
     synchronises account facts (read credentials) and executes trades (trade
     credentials).  No service name is treated as the target architecture: the
     account label and the credential roles are the only inputs.

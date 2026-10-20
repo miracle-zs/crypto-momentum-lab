@@ -120,7 +120,7 @@ def test_maintenance_filters_before_notification_and_deadman(monkeypatch, tmp_pa
 
     monitor = OpsMonitor(
         MonitorConfig(
-            services=("live-strategy",),
+            services=("nextgen-strategy-primary",),
             live_accounts=(),
             state_path=tmp_path / "state.json",
             consecutive_alerts_required=1,

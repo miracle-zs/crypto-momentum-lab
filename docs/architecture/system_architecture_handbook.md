@@ -2,8 +2,8 @@
 > **文档版本**: 2026.10-T2-Production-Audit
 > **设计基准**: Git 仓库真实源码（Alembic 迁移 `20261018_0067_next_gen_execution_tables` 已合并；执行 Head schema 仍为 4，NextGen 另用两张独立关系表）
 > **编写角色**: 首席系统架构师
-> **模型演进**: Legacy T2 单一 Durable Head 与 NextGen 极简执行引擎并存；NextGen 代码、PostgreSQL 集成测试和部署定义已完成，生产尚未切换（切换需显式 `CML_TRADING_ENGINE=nextgen` 并完成空仓/停机演练；NextGen ORM 定义在 `src/crypto_momentum_lab/next_gen/db_models.py`）
-> **部署现状**: 线上 4 账户（`primary`、`account-2`、`account-3`、`account-4`）共用同一个 PostgreSQL 数据库；Legacy 仍为默认执行栈（`--profile live`），NextGen 通过独立 Profile（`--profile nextgen`，见 [`compose.next_gen.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.next_gen.yaml)）部署并与 Legacy 隔离
+> **模型演进**: NextGen 是当前唯一部署的交易执行栈；旧版运行入口和 Compose 服务已退役。NextGen 仍复用 `live_rollout` 与 `execution_account` 中的运行组件；历史数据读取代码按需保留。
+> **部署现状**: 线上 4 个 NextGen 账户（`primary`、`account-2`、`account-3`、`account-4`）共用同一个 PostgreSQL 数据库，由 [`compose.next_gen.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.next_gen.yaml) 的 `nextgen` Profile 启动。
 
 ---
 
@@ -98,7 +98,7 @@ flowchart TB
         Repo_Check["PostgresPaperDaemonRepository<br/>(Paper Daemon 策略检查点)"]
     end
 
-    subgraph Storage["共享基础设施 (PostgreSQL Database - compose.live.accounts.yaml)"]
+    subgraph Storage["共享基础设施 (PostgreSQL Database - compose.server.yaml)"]
         DB_Control[("live_session_transitions<br/>live_operator_approvals")]
         DB_Book[("execution_book_heads<br/>execution_commands<br/>position_reservations<br/>execution_order_watermarks<br/>execution_trade_identities<br/>execution_evidence_receipts<br/>account_fill_events")]
         DB_Market[("runtime_market_states_15s<br/>runtime_market_state_gaps")]
@@ -151,7 +151,7 @@ flowchart TB
    - 五大独立连接池职责与配置参数（注意代码默认值与线上环境变量覆盖）：
      - `execution_engine` (`pool_size=4, max_overflow=0`)：超时 3.0s，命令超时 5.0s（线上环境变量 `CML_DB_EXECUTION_POOL_SIZE: 4, CML_DB_EXECUTION_MAX_OVERFLOW: 0`）。专用于 `ExecutionUnitOfWork`，支撑订单预留、CAS Head 写入与执行状态机持久化。
      - `market_engine` (`pool_size=2, max_overflow=0`)：超时 2.0s，命令超时 5.0s。专用于高频 15s 行情写入（[`runtime_market_states_15s`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/persistence/postgres/models.py)）与市场指标拉取。
-     - `observability_engine`：代码默认配置为 `pool_size=2, max_overflow=2`；在生产环境 [`compose.server.yaml:28-29`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.server.yaml#L28-L29) 与 [`compose.live.accounts.yaml:28-29`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.live.accounts.yaml#L28-L29) 中明确覆盖为 `CML_DB_OBSERVABILITY_POOL_SIZE: 1, CML_DB_OBSERVABILITY_MAX_OVERFLOW: 0`。专用于运行时遥测指标（`telemetry_repository`）与审计写入。
+     - `observability_engine`：代码默认配置为 `pool_size=2, max_overflow=2`；生产环境在 [`compose.server.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.server.yaml) 与 [`compose.next_gen.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.next_gen.yaml) 中覆盖为 `CML_DB_OBSERVABILITY_POOL_SIZE: 1, CML_DB_OBSERVABILITY_MAX_OVERFLOW: 0`。专用于运行时遥测指标（`telemetry_repository`）与审计写入。
      - `checkpoint_engine` (`pool_size=1, max_overflow=0`)：超时 2.0s，命令超时 10.0s。服务于 `PostgresPaperDaemonRepository`（用于模拟/策略检查点持久化），而非持仓位置恢复仓储。
      - `heartbeat_engine` (`pool_size=1, max_overflow=0`)：超时 3.0s，命令超时 5.0s。专用于控制面会话状态检查（`session_is_draining`、`load_active_halts`）以及订单修复查询（`repair_order_repository` / `PostgresOrderReadRepository`）。
 3. **`heartbeat_engine` 物理隔离的关键安全考量**：

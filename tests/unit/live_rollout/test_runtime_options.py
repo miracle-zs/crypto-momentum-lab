@@ -100,6 +100,31 @@ def test_manual_options_resolve_to_grouped_runtime_config() -> None:
     assert config.credentials.api_key == "test-key"
 
 
+def test_runtime_database_planes_prefer_explicit_environment_urls() -> None:
+    config = resolve_live_runtime_config(
+        _options(database_url=None),
+        credentials=_credentials(),
+        environment={
+            "CML_LIVE_IMPULSE_WINDOW_BUCKETS": "2",
+            "CML_LIVE_CONFIRMATION_BUCKETS": "1",
+            "CML_LIVE_MIN_RETURN_PCT": "0.0075",
+            "CML_LIVE_MIN_IMBALANCE": "0.30",
+            "CML_LIVE_MIN_INTENSITY": "3.0",
+            "CML_LIVE_MIN_NOTIONAL_5M_VS_30M": "1.25",
+            "CML_LIVE_COOLDOWN_BUCKETS": "0",
+            "CML_EXECUTION_DATABASE_URL": "postgresql+asyncpg://exec",
+            "CML_MARKET_DATABASE_URL": "postgresql+asyncpg://market",
+            "CML_OBSERVABILITY_DATABASE_URL": "postgresql+asyncpg://observability",
+        },
+    )
+
+    assert config.databases.execution_database_url == "postgresql+asyncpg://exec"
+    assert config.databases.market_database_url == "postgresql+asyncpg://market"
+    assert config.databases.observability_database_url == (
+        "postgresql+asyncpg://observability"
+    )
+
+
 def test_manifest_options_resolve_identity_and_derive_strategy_hash() -> None:
     config = resolve_live_runtime_config(
         _options(

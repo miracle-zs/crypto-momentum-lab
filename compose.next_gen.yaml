@@ -131,7 +131,6 @@ services:
   dashboard:
     environment:
       <<: *nextgen-account-environment
-      CML_TRADING_ENGINE: ${CML_TRADING_ENGINE:-legacy}
 
   nextgen-strategy-primary:
     <<: *nextgen-account-app

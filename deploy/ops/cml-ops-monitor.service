@@ -10,20 +10,17 @@ User=root
 WorkingDirectory=/opt/crypto-momentum-lab
 Environment=PYTHONUNBUFFERED=1
 Environment=CML_PROJECT_DIRECTORY=/opt/crypto-momentum-lab
-Environment=CML_COMPOSE_FILE=/opt/crypto-momentum-lab/compose.server.yaml,/opt/crypto-momentum-lab/compose.live.accounts.yaml
-Environment=CML_COMPOSE_PROFILES=live
 Environment=CML_COMPOSE_ENV_FILE=/opt/crypto-momentum-lab/.env.server
 Environment=CML_CRASH_LOG_DIRECTORY=/var/lib/crypto-momentum-lab/crash-logs
 Environment=CML_MARKET_REVISION_PURGE_TIMER_UNIT=cml-market-revision-purge.timer
 Environment=CML_MARKET_REVISION_ARCHIVE_TIMER_UNIT=cml-market-revision-archive.timer
 Environment=CML_STORAGE_PATH=/var/lib/docker
 Environment=CML_DATABASE_STORAGE_MONITORING=true
-# cml_ops_monitor derives live services and sessions from the Compose files
-# above. CML_MONITOR_SERVICES and CML_MONITOR_LIVE_ACCOUNTS remain
-# supported in /etc/crypto-momentum-lab/ops-monitor.env for explicit overrides.
+# cml_ops_monitor always watches the NextGen services; account sessions are
+# loaded from the runtime settings in .env.server. Explicit service/account
+# overrides remain available in /etc/crypto-momentum-lab/ops-monitor.env.
 EnvironmentFile=-/etc/crypto-momentum-lab/ops-monitor.env
-# Live containers use a 90-second stop grace period. Keep monitor operations
-# bounded while allowing a targeted restart to finish cleanly.
+# Keep host and Docker probes bounded; account recovery remains operator-controlled.
 ExecStart=/usr/bin/python3 /opt/crypto-momentum-lab/deploy/ops/cml_ops_monitor.py --command-timeout-seconds 120
 Restart=always
 RestartSec=10s

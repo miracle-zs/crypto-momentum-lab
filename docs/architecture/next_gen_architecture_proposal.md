@@ -2,7 +2,7 @@
 > **设计版本**: 2026.10-NextGen-Proposal-v2-Streamlined  
 > **设计基准**: Git 仓库真实源码（Alembic 迁移 `20261018_0067_next_gen_execution_tables` 已合并，Schema Version 4，包含生产发单安全门、错误分类、WS 撤单成交核对与 Compose 部署定义）  
 > **架构定位**: 现代 Python 3.12+ 结构化异步、内存权威、低认知负荷的中低频量化交易执行引擎  
-> **多账户部署现状**: 线上 4 账户（`primary`、`account-2`、`account-3`、`account-4`）共用同一个 PostgreSQL 数据库实例（[`compose.live.accounts.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.live.accounts.yaml) / [`compose.next_gen.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.next_gen.yaml)）  
+> **多账户部署现状**: 线上 4 个 NextGen 账户（`primary`、`account-2`、`account-3`、`account-4`）共用同一个 PostgreSQL 数据库实例（[`compose.next_gen.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.next_gen.yaml)）
 
 ---
 
@@ -1021,9 +1021,9 @@ flowchart TD
 ### 附录 A：数据库平迁与旧表归档实施指南（Database Migration Runbook）
 
 > [!NOTE] **实施状态说明（Implementation Status）**
-> Alembic 迁移 [`20261018_0067_next_gen_execution_tables.py`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/alembic/versions/20261018_0067_next_gen_execution_tables.py) 创建了全新的两张 Next-Gen 执行表（`live_position_batches`、`live_orders`），**只新增、不归档或重命名旧表**；旧表在切换后仍可作为回滚与只读审计依据，物理归档需另行批准。对应的 SQLAlchemy 2.0 ORM 模型与仓储层已在 [`db_models.py`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/next_gen/db_models.py) 和 [`PostgresTradingRepository`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/next_gen/persistence.py) 中实现并通过真实 PostgreSQL 集成测试。切换时以 [`compose.next_gen.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.next_gen.yaml) 作为 `compose.server.yaml` 的 overlay，设置 `CML_TRADING_ENGINE=nextgen`、`--profile nextgen`，并确保 `migrate` 与 `market-data` 就绪；legacy 服务（`--profile live`）必须停止，不能与新引擎并行运行。
+> Alembic 迁移 [`20261018_0067_next_gen_execution_tables.py`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/alembic/versions/20261018_0067_next_gen_execution_tables.py) 创建了全新的两张 NextGen 执行表（`live_position_batches`、`live_orders`），**只新增、不归档或重命名旧表**。旧表继续作为历史审计数据保留，不再作为运行时回退路径；旧版执行服务、入口和部署选择已退役。当前更新固定使用 [`compose.next_gen.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.next_gen.yaml) 的 `nextgen` Profile，并确保 `migrate` 与 `market-data` 就绪。对应的 SQLAlchemy 2.0 ORM 模型与仓储层已在 [`db_models.py`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/next_gen/db_models.py) 和 [`PostgresTradingRepository`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/next_gen/persistence.py) 中实现。
 >
-> **关于旧表清理**：下面的 Flat-State 归档步骤是可选的历史清理 Runbook，不是 0067 迁移的一部分，也不是 NextGen 启动的前置条件；执行前必须完成代码切换、灰度与回滚演练。
+> **关于旧表清理**：下面的 Flat-State 归档步骤是可选的历史清理 Runbook，不是 0067 迁移的一部分，也不是 NextGen 启动的前置条件；执行前应确认归档范围和备份可读。
 
 如决定物理归档当前 10 张执行/决策持久化表，可采用**一次性干净停机平迁（Flat-State Cutover，可选）**：
 

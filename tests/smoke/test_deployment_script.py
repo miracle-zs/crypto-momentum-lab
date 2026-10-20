@@ -40,10 +40,10 @@ def test_normal_deployment_checks_live_accounts_before_stopping_services() -> No
     )
     assert account_orders < stop_services
     for account, service in (
-        ("primary", "live-strategy"),
-        ("account-2", "live-strategy-account-2"),
-        ("account-3", "live-strategy-account-3"),
-        ("account-4", "live-strategy-account-4"),
+        ("primary", "nextgen-strategy-primary"),
+        ("account-2", "nextgen-strategy-account-2"),
+        ("account-3", "nextgen-strategy-account-3"),
+        ("account-4", "nextgen-strategy-account-4"),
     ):
         assert f'"{account}:{service}"' in script
 
@@ -59,10 +59,10 @@ def test_non_flat_or_unreadable_accounts_wait_and_retry() -> None:
     assert 'sleep "$(( remaining < 30 ? remaining : 30 ))"' in script
 
 
-def test_execution_account_containers_stop_in_parallel_with_app_services() -> None:
+def test_retired_account_containers_stop_in_parallel_with_app_services() -> None:
     script = remote_script()
 
-    assert 'execution_account_containers+=("$container")' in script
+    assert 'retired_containers+=("$container")' in script
     assert 'docker stop --time 90 "$container" >/dev/null &' in script
     assert 'execution_stop_pids+=("$!")' in script
     assert '"${compose[@]}" stop --timeout 90 "${running_services[@]}" &' in script
@@ -104,7 +104,7 @@ def test_all_four_accounts_are_checked_even_if_a_strategy_is_stopped() -> None:
     assert 'for item in "${accounts[@]}"; do' in script
 
 
-def test_deployment_maps_running_accounts_to_selected_engine() -> None:
+def test_deployment_starts_nextgen_accounts_and_stops_running_services() -> None:
     script = remote_script()
 
     assert 'running_services+=("$service")' in script
@@ -138,148 +138,24 @@ def test_deployment_has_one_normal_entrypoint(argument: str) -> None:
     assert "Usage:" in result.stderr
 
 
-def test_engine_selection_is_forwarded_and_persisted():
+def test_deployment_has_no_legacy_engine_selector():
     full_script = DEPLOY_SCRIPT.read_text()
     script = remote_script()
     assert 'CML_DEPLOY_SCOPE' in full_script
     assert 'CML_FLAT_WAIT_SECONDS' in full_script
-    assert 'requested_engine="$3"' in script
-    assert 'deploy_scope="$4"' in script
-    assert 'flat_wait_seconds="$5"' in script
-    assert 'set_env_value CML_TRADING_ENGINE "$trading_engine"' in script
-    assert "-f compose.live.accounts.yaml -f compose.next_gen.yaml" in script
+    assert 'deploy_scope="$3"' in script
+    assert 'flat_wait_seconds="$4"' in script
+    assert "CML_TRADING_ENGINE" not in full_script
+    assert "compose.live.accounts.yaml" not in script
+    assert "--profile nextgen" in script
+    for service in (
+        "nextgen-strategy-primary",
+        "nextgen-strategy-account-2",
+        "nextgen-strategy-account-3",
+        "nextgen-strategy-account-4",
+    ):
+        assert service in script
+    assert "docker stop --time 90 \"$container\"" in script
     assert script.index("Deployment stopped: account=$account") > script.index(
         'wait "$stop_pid"'
     )
-
-
-@pytest.mark.parametrize("engine", ["legacy", "nextgen"])
-def test_engine_switch_executes_correct_stop_and_start_lists(tmp_path, engine):
-    import json
-    import os
-    import sys
-
-    checkout = tmp_path / "checkout"
-    checkout.mkdir()
-    (checkout / "git-meta").mkdir()
-    (checkout / ".env.server").write_text("CML_CODE_COMMIT=release\n")
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    log = tmp_path / "commands.jsonl"
-    stopped = tmp_path / "stopped"
-    source_services = (
-        [
-            "live-strategy",
-            "live-strategy-account-2",
-            "live-strategy-account-3",
-            "live-strategy-account-4",
-        ]
-        if engine == "nextgen"
-        else [
-            "nextgen-strategy-primary",
-            "nextgen-strategy-account-2",
-            "nextgen-strategy-account-3",
-            "nextgen-strategy-account-4",
-        ]
-    )
-    stub = fake_bin / "stub"
-    stub.write_text(
-        "#!"
-        + sys.executable
-        + "\n"
-        + r"""
-import json, os, pathlib, re, shutil, sys
-name, args = pathlib.Path(sys.argv[0]).name, sys.argv[1:]
-with open(os.environ["CML_TEST_COMMAND_LOG"], "a") as output:
-    output.write(json.dumps([name, *args]) + "\n")
-if name == "git":
-    if args[:2] == ["rev-parse", "--git-dir"]: print("git-meta")
-    elif args[:2] == ["branch", "--show-current"]: print("main")
-    elif args and args[0] == "rev-parse": print("release")
-    elif args[:2] == ["worktree", "add"]:
-        path = pathlib.Path(args[-2]); path.mkdir(); (path / ".git").touch()
-    elif args[:2] == ["worktree", "remove"]: shutil.rmtree(args[-1])
-elif name == "docker":
-    if args[0] == "ps":
-        prefix = "label=com.docker.compose.service="
-        service = next(
-            value[len(prefix):] for value in args if value.startswith(prefix)
-        )
-        if service in json.loads(os.environ["CML_TEST_RUNNING_SERVICES"]):
-            print("id-" + service)
-    elif args[0] == "exec": print('{"positions":[],"orders":[]}')
-    elif args[0] == "inspect":
-        image = "crypto-momentum-lab-app:release"
-        print(image if "Config.Image" in args[2] else "running|healthy")
-    elif args[0] == "compose":
-        if "stop" in args: pathlib.Path(os.environ["CML_TEST_STOPPED_MARKER"]).touch()
-        elif "ps" in args and "-q" in args: print("id-" + args[-1])
-        elif "run" in args: print('{"positions":[],"orders":[]}')
-elif name == "sed":
-    assert args[0] == "-i"
-    _, pattern, replacement, _ = args[1].split("#")
-    path = pathlib.Path(args[-1])
-    path.write_text(re.sub(pattern, replacement, path.read_text(), flags=re.MULTILINE))
-elif name == "systemctl": sys.exit(1)
-"""
-    )
-    stub.chmod(0o755)
-    for name in ("git", "docker", "flock", "curl", "systemctl", "sed"):
-        (fake_bin / name).symlink_to(stub)
-    environment = dict(
-        os.environ,
-        PATH=str(fake_bin) + os.pathsep + os.environ["PATH"],
-        CML_TEST_COMMAND_LOG=str(log),
-        CML_TEST_STOPPED_MARKER=str(stopped),
-        CML_TEST_RUNNING_SERVICES=json.dumps(
-            [*source_services, "dashboard", "market-data"]
-        ),
-    )
-    result = subprocess.run(
-        [
-            "bash",
-            "-s",
-            "--",
-            str(checkout),
-            "origin/main",
-            engine,
-            "full",
-            "1800",
-        ],
-        input=remote_script(),
-        text=True,
-        capture_output=True,
-        env=environment,
-        timeout=20,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    calls = [json.loads(line) for line in log.read_text().splitlines()]
-    stop = next(
-        call for call in calls if call[:2] == ["docker", "compose"] and "stop" in call
-    )
-    start = next(
-        call
-        for call in calls
-        if call[:2] == ["docker", "compose"] and "--force-recreate" in call
-    )
-    assert set(source_services) <= set(stop)
-    targets = (
-        [
-            "nextgen-strategy-primary",
-            "nextgen-strategy-account-2",
-            "nextgen-strategy-account-3",
-            "nextgen-strategy-account-4",
-        ]
-        if engine == "nextgen"
-        else [
-            "live-strategy",
-            "live-strategy-account-2",
-            "live-strategy-account-3",
-            "live-strategy-account-4",
-        ]
-    )
-    assert set(targets) <= set(start)
-    assert not set(source_services) & set(start)
-    assert f"CML_TRADING_ENGINE={engine}" in (checkout / ".env.server").read_text()
-    stop_index = calls.index(stop)
-    assert sum("run" in call for call in calls[stop_index + 1 :]) == 4
