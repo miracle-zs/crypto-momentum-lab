@@ -383,6 +383,80 @@ def build(root: Path) -> None:
     print("history database: " + str(target), flush=True)
 
 
+MATERIALIZED_TABLES = {
+    **{
+        name: name
+        for name in (
+            "fills",
+            "orders",
+            "signals",
+            "balances",
+            "runtime_events",
+            "position_batches",
+            "logs",
+            "history_sources",
+        )
+    },
+    "account_configs": "raw_account_config_snapshots",
+    "position_snapshots": "raw_account_position_snapshots",
+    "strategy_runs": "raw_strategy_runs",
+    "order_intents": "raw_order_intents",
+    "order_events": "raw_exchange_order_events",
+    "universe_snapshots": "raw_universe_snapshots",
+    "universe_entries": "raw_universe_entries",
+    "session_transitions": "raw_live_session_transitions",
+    "legacy_position_state": "raw_execution_book_heads",
+}
+
+
+def materialize(root: Path) -> None:
+    """Publish one self-contained research database; retain raw source backups."""
+    source = root / "history.duckdb"
+    target = root / "research_history.duckdb"
+    pending = root / "research_history.building.duckdb"
+    if pending.exists():
+        pending.unlink()
+    with duckdb.connect(str(source), read_only=True) as db:
+        db.execute("SET memory_limit='2GB'")
+        db.execute("SET threads=1")
+        db.execute("SET preserve_insertion_order=false")
+        db.execute("SET TimeZone='UTC'")
+        db.execute("SET max_temp_directory_size='4GB'")
+        db.execute(f"ATTACH {literal(str(pending))} AS merged (READ_WRITE)")
+        counts = []
+        for name, relation in MATERIALIZED_TABLES.items():
+            count = db.execute(
+                f"CREATE TABLE merged.{name} AS SELECT * FROM main.{relation}"
+            ).fetchone()[0]
+            counts.append((name, count))
+            print(f"materialized {name}: {count} rows", flush=True)
+        db.execute(
+            "CREATE TABLE merged.row_counts (table_name VARCHAR,row_count BIGINT)"
+        )
+        db.executemany("INSERT INTO merged.row_counts VALUES (?,?)", counts)
+        db.execute(
+            "CREATE TABLE merged.build_metadata AS SELECT "
+            "current_timestamp AS built_at, ?::VARCHAR AS normalizer_sha256",
+            [digest(Path(__file__))],
+        )
+        db.execute("DETACH merged")
+    with duckdb.connect(str(pending), read_only=True) as db:
+        for name, expected in counts:
+            actual = db.execute(f"SELECT count(*) FROM {name}").fetchone()[0]
+            if actual != expected:
+                raise RuntimeError(f"materialized row count mismatch: {name}")
+        views = db.execute(
+            "SELECT count(*) FROM duckdb_views() WHERE NOT internal"
+        ).fetchone()[0]
+        if views:
+            raise RuntimeError("research database still contains views")
+    pending.replace(target)
+    print(
+        f"standalone history database: {target} ({target.stat().st_size} bytes)",
+        flush=True,
+    )
+
+
 # Fields absent from a source remain NULL. Keep raw JSON and exact decimal strings.
 def field(name: str) -> str:
     expression = f"json_extract_string(raw, '$.{name}')"
@@ -625,12 +699,15 @@ def main() -> None:
     parser.add_argument("--host", default="root@43.167.191.253")
     parser.add_argument("--control-path")
     parser.add_argument("--build-only", action="store_true")
+    parser.add_argument("--materialize-only", action="store_true")
     parser.add_argument("--query", help="Read-only SQL against the local history")
     args = parser.parse_args()
     root = args.root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     if args.query:
-        with duckdb.connect(str(root / "history.duckdb"), read_only=True) as db:
+        with duckdb.connect(
+            str(root / "research_history.duckdb"), read_only=True
+        ) as db:
             db.execute("SET memory_limit='2GB'")
             db.execute("SET TimeZone='UTC'")
             db.execute("SET threads=1")
@@ -641,9 +718,11 @@ def main() -> None:
             while rows := result.fetchmany(1000):
                 writer.writerows(rows)
         return
-    if not args.build_only:
-        sync(args, root)
-    build(root)
+    if not args.materialize_only:
+        if not args.build_only:
+            sync(args, root)
+        build(root)
+    materialize(root)
 
 
 if __name__ == "__main__":
