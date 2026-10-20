@@ -16,7 +16,7 @@ Environment:
   CML_SERVER_USER  SSH user (default: root)
   CML_REMOTE_DIR   server checkout (default: /opt/crypto-momentum-lab)
   CML_SSH_PASSWORD optional sshpass password; SSH keys are preferred
-  CML_TRADING_ENGINE legacy or nextgen; persisted on the server
+  CML_TRADING_ENGINE legacy or nextgen (default: server setting)
   CML_DEPLOY_SCOPE full (default) or dashboard (no migration/account restart)
   CML_FLAT_WAIT_SECONDS maximum flat wait (default: 1800; 0 checks once)
 USAGE
@@ -70,7 +70,7 @@ if [[ ! "$flat_wait_seconds" =~ ^[0-9]+$ || ${#flat_wait_seconds} -gt 8 ]]; then
 fi
 flat_wait_seconds=$((10#$flat_wait_seconds))
 client_started_at="$(date +%s)"
-if "${runner[@]}" "$remote_dir" "$target_ref" "${CML_TRADING_ENGINE:-}" "$deploy_scope" "$flat_wait_seconds" <<'REMOTE_SCRIPT'; then
+if "${runner[@]}" "$remote_dir" "$target_ref" "${CML_TRADING_ENGINE:-auto}" "$deploy_scope" "$flat_wait_seconds" <<'REMOTE_SCRIPT'; then
 set -Eeuo pipefail
 
 remote_dir="$1"
@@ -102,7 +102,7 @@ if ! flock -n 9; then
 fi
 
 trading_engine="$requested_engine"
-if [[ -z "$trading_engine" ]]; then
+if [[ "$trading_engine" == auto ]]; then
   trading_engine="$(sed -n 's/^CML_TRADING_ENGINE=//p' .env.server | tail -n 1)"
   trading_engine="${trading_engine:-legacy}"
 fi
