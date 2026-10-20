@@ -398,3 +398,61 @@ async def test_nextgen_daemon_health_heartbeat(
     # After shutdown, health files should be unlinked
     account_health_file = health_dir / "nextgen-a1.ok"
     assert not account_health_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_transient_risk_config_read_failure_keeps_exits_and_recovers(
+    account_config,
+    mock_rest_client: AsyncMock,
+) -> None:
+    repo = InMemoryTradingRepository()
+    config = risk_config("live", "a1")
+    repo.risk_configs[("live", "a1")] = config
+    get_risk_config = repo.async_get_risk_config
+    read_count = 0
+
+    async def fail_once(environment: str, account_label: str):
+        nonlocal read_count
+        read_count += 1
+        if read_count == 1:
+            raise ConnectionError("temporary database read failure")
+        return await get_risk_config(environment, account_label)
+
+    repo.async_get_risk_config = fail_once  # type: ignore[method-assign]
+    daemon = NextGenDaemon(
+        environment="live",
+        account_label="a1",
+        account_config=account_config,
+        db=repo,
+        rest_client=mock_rest_client,
+        ws_client=BinanceUserDataStream(mock_rest_client, ws_connector=False),
+    )
+    daemon.state.risk_config = config
+    daemon.state.set_system_mode(SystemMode.RUNNING)
+    daemon.state.ws_connected = True
+    stop_event = asyncio.Event()
+    heartbeat = asyncio.create_task(
+        daemon._run_health_heartbeat(stop_event, interval_sec=0.1)
+    )
+
+    try:
+        for _ in range(100):
+            if daemon.state.system_mode == SystemMode.DEGRADED:
+                break
+            await asyncio.sleep(0.001)
+
+        assert daemon.state.system_mode == SystemMode.DEGRADED
+        assert daemon.state.can_submit_entry_order() is False
+        assert daemon.state.can_submit_exit_order() is True
+        assert daemon.state.has_unrecoverable_fault is False
+
+        for _ in range(200):
+            if daemon.state.system_mode == SystemMode.RUNNING:
+                break
+            await asyncio.sleep(0.001)
+
+        assert daemon.state.system_mode == SystemMode.RUNNING
+        assert daemon.state.can_submit_entry_order() is True
+    finally:
+        stop_event.set()
+        await heartbeat

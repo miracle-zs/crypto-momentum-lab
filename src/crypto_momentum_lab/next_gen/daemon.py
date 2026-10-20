@@ -264,9 +264,10 @@ class NextGenDaemon:
                         self.account_label,
                     )
                 except Exception:
-                    self.state.has_unrecoverable_fault = True
                     self.state.set_system_mode(SystemMode.DEGRADED)
                     log.exception("risk_configuration_refresh_failed")
+                else:
+                    self.state.recheck_system_mode()
                 healthy = (
                     self.state.system_mode == SystemMode.RUNNING
                     and self.state.can_submit_exit_order()

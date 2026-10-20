@@ -98,8 +98,7 @@ class AccountState:
         log.info("system_mode_changed", mode=mode.name, account=self.account_label)
 
     def recheck_system_mode(self) -> None:
-        """【状态收敛核心路径】：在迟到推流确认或人工复位后，
-        重新评估是否能回到 RUNNING。
+        """外部条件恢复后，按仍未解决的安全阻断重新评估运行状态。
         """
         if self.system_mode != SystemMode.DEGRADED:
             return
