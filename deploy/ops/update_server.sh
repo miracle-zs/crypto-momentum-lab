@@ -134,6 +134,15 @@ set_env_value() {
   fi
 }
 
+set_maintenance_image() {
+  local image="$1"
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    echo "Maintenance image is not available locally: image=$image" >&2
+    return 1
+  fi
+  set_env_value CML_MAINTENANCE_IMAGE "$image"
+}
+
 if [[ "$deploy_scope" == dashboard ]]; then
   if [[ -n "$requested_engine" ]]; then
     echo "Dashboard-only deployment cannot switch trading engine" >&2
@@ -217,6 +226,7 @@ if [[ "$deploy_scope" == dashboard ]]; then
   curl --fail --silent --show-error --max-time 10 \
     http://127.0.0.1:8765/api/health >/dev/null
   set_env_value CML_DASHBOARD_IMAGE "$target_image"
+  set_maintenance_image "$target_image"
   chmod 600 .env.server
   echo "deployed_commit=$target_commit scope=dashboard"
   "${compose[@]}" ps dashboard
@@ -406,6 +416,7 @@ fi
 set_env_value CML_TRADING_ENGINE "$trading_engine"
 set_env_value CML_CODE_COMMIT "$target_commit"
 set_env_value CML_DASHBOARD_IMAGE "crypto-momentum-lab-app:${target_commit}"
+set_maintenance_image "$target_image"
 chmod 600 .env.server
 "${compose[@]}" up -d postgres
 if (( ${#services[@]} > 0 )); then
