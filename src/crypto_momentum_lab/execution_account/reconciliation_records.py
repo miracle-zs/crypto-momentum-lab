@@ -8,18 +8,9 @@ from crypto_momentum_lab.domain.account.models import (
     AccountReconciliationRun,
 )
 from crypto_momentum_lab.domain.market.models import JsonValue
-from crypto_momentum_lab.execution_account.sync_models import ExecutionAccountSyncConfig
-
-
-def account_reconciliation_id(config: ExecutionAccountSyncConfig) -> str:
-    return str(
-        uuid5(
-            NAMESPACE_URL,
-            "account-reconciliation:"
-            f"{config.environment}:{config.account_label}:"
-            f"{config.observed_at.isoformat()}",
-        )
-    )
+from crypto_momentum_lab.execution_account.sync_models import (
+    AccountReconciliationContext,
+)
 
 
 def position_state_details(
@@ -47,7 +38,7 @@ def position_state_details(
 
 
 def user_data_reconciliation_id(
-    config: ExecutionAccountSyncConfig,
+    config: AccountReconciliationContext,
     event_id: str,
 ) -> str:
     return str(
@@ -60,7 +51,7 @@ def user_data_reconciliation_id(
 
 
 def reconciliation_run(
-    config: ExecutionAccountSyncConfig,
+    config: AccountReconciliationContext,
     *,
     reconciliation_id: str,
     status: str,

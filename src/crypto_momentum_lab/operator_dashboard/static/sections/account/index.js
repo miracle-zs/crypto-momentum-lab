@@ -165,7 +165,7 @@ export async function updateLiveAccountsDynamic(root, data) {
   const fleetKpisEl = root.querySelector(`.${K.liveAccountFleetKpis}`);
   if (fleetKpisEl) {
     const tiles = [
-      tile("实盘账户", `${accounts.length} 个`, "execution-account 独立状态"),
+      tile("实盘账户", `${accounts.length} 个`, "NextGen 账户进程状态"),
       tile("正常账户", `${readyCount} 个`, "可继续观察"),
       tile("停止账户", `${haltedCount} 个`, "需要检查"),
       tile("待确认", `${reviewCount} 个`, "缺少可靠状态"),

@@ -109,7 +109,7 @@ from crypto_momentum_lab.execution_account.risk_control_hub import (
     RiskControlEvent,
 )
 from crypto_momentum_lab.execution_account.sync_models import (
-    ExecutionAccountSyncConfig,
+    AccountReconciliationContext,
 )
 from crypto_momentum_lab.health.resources import ProcessResourceSampler
 from crypto_momentum_lab.live_rollout.account_channel import LiveAccountEventRuntime
@@ -840,11 +840,9 @@ async def run_live_daemon(
                 """Persist the account observation and its exchange fills."""
 
                 observed_at = snapshot.config.observed_at
-                sync_config = ExecutionAccountSyncConfig(
+                reconciliation_context = AccountReconciliationContext(
                     environment="live",
                     account_label=account_label,
-                    expected_multi_assets_mode=account_config.multi_assets_mode,
-                    expected_hedge_mode=hedge_mode,
                     observed_at=observed_at,
                 )
                 persisted_balances = select_balance_history(
@@ -860,9 +858,9 @@ async def run_live_daemon(
                     open_orders=snapshot.open_orders,
                     fills=event.fills,
                     run=reconciliation_run(
-                        sync_config,
+                        reconciliation_context,
                         reconciliation_id=user_data_reconciliation_id(
-                            sync_config, event.event_id
+                            reconciliation_context, event.event_id
                         ),
                         status="ready",
                         mismatch_count=0,

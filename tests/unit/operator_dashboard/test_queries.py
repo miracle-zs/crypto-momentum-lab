@@ -1,14 +1,9 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
 from types import SimpleNamespace
 
 from sqlalchemy.dialects.postgresql import dialect as postgresql_dialect
 
-from crypto_momentum_lab.operator_dashboard.account_queries import (
-    _aggregate_account_fills,
-    _live_strategy_signal,
-)
 from crypto_momentum_lab.operator_dashboard.common_equity import (
     EquityObservation as _EquityObservation,
 )
@@ -24,26 +19,8 @@ from crypto_momentum_lab.operator_dashboard.common_equity import (
 from crypto_momentum_lab.operator_dashboard.common_equity import (
     live_aggregated_equity_observations as _live_aggregated_equity_observations,
 )
-from crypto_momentum_lab.operator_dashboard.live_account_metrics_queries import (
-    account_equity_statement as _account_equity_statement,
-)
-from crypto_momentum_lab.operator_dashboard.live_account_metrics_queries import (
-    account_margin_statement as _account_margin_statement,
-)
-from crypto_momentum_lab.operator_dashboard.live_account_metrics_queries import (
-    live_account_metric_points as _live_account_metric_points,
-)
-from crypto_momentum_lab.operator_dashboard.live_account_metrics_queries import (
-    live_account_metrics_window_start as _live_account_metrics_window_start,
-)
 from crypto_momentum_lab.operator_dashboard.overview_queries import (
     latest_live_account_process_statement as _latest_live_account_process_statement,
-)
-from crypto_momentum_lab.operator_dashboard.overview_queries import (
-    live_account_summaries,
-)
-from crypto_momentum_lab.operator_dashboard.overview_queries import (
-    live_observation as _live_observation,
 )
 from crypto_momentum_lab.operator_dashboard.overview_queries import (
     universe_membership as _universe_membership,
@@ -67,56 +44,11 @@ from crypto_momentum_lab.operator_dashboard.queries import (
     parse_common_equity_start_at,
     parse_live_cash_flow_adjustments,
 )
-from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
-    split_exchange_orders as _split_exchange_orders,
-)
 from crypto_momentum_lab.operator_dashboard.status import OperationalStatus
 from crypto_momentum_lab.operator_dashboard.telemetry_queries import (
     _decision_slo_response,
 )
 from crypto_momentum_lab.persistence.postgres.models import PaperEquitySnapshotRow
-
-
-def test_live_account_summary_keeps_four_account_order_and_state_join() -> None:
-    observed_at = datetime(2026, 9, 6, 0, 0, tzinfo=UTC)
-    processes = [
-        SimpleNamespace(
-            account_label=label,
-            environment="live",
-            state="ready_readonly" if label != "account-3" else "halted",
-            occurred_at=observed_at,
-        )
-        for label in ("account-4", "account-3", "account-2", "primary")
-    ]
-    strategy_states = [
-        SimpleNamespace(
-            account_label=label,
-            strategy_name="orderflow_impulse",
-            state="running",
-            changed_at=observed_at,
-        )
-        for label in ("primary", "account-2", "account-3", "account-4")
-    ]
-    summaries = live_account_summaries(
-        processes,
-        strategy_states,
-    )
-
-    assert [summary.account_label for summary in summaries] == [
-        "primary",
-        "account-2",
-        "account-3",
-        "account-4",
-    ]
-    assert [summary.status for summary in summaries] == [
-        OperationalStatus.READY,
-        OperationalStatus.READY,
-        OperationalStatus.HALTED,
-        OperationalStatus.READY,
-    ]
-
-
-
 
 def test_latest_live_account_process_query_excludes_non_live_states() -> None:
     statement = _latest_live_account_process_statement()
@@ -129,105 +61,6 @@ def test_latest_live_account_process_query_excludes_non_live_states() -> None:
 
     assert "environment = 'live'" in sql
     assert "group by execution_account_process_states.account_label" in sql
-
-
-def test_live_account_metric_points_derive_equity_margin_and_drawdown_ratios() -> None:
-    start = datetime(2026, 9, 6, 0, 0, tzinfo=UTC)
-    equity_rows = [
-        SimpleNamespace(
-            observed_at=start,
-            wallet_balance=Decimal("1000"),
-            unrealized_pnl=Decimal("0"),
-        ),
-        SimpleNamespace(
-            observed_at=start + timedelta(minutes=6),
-            wallet_balance=Decimal("1010"),
-            unrealized_pnl=Decimal("0"),
-        ),
-        SimpleNamespace(
-            observed_at=start + timedelta(minutes=12),
-            wallet_balance=Decimal("990"),
-            unrealized_pnl=Decimal("0"),
-        ),
-    ]
-    points = _live_account_metric_points(
-        equity_rows,
-        [
-            (start, Decimal("100")),
-            (start + timedelta(minutes=6), Decimal("120")),
-            (start + timedelta(minutes=12), Decimal("80")),
-        ],
-        interval_seconds=6 * 60,
-    )
-
-    assert [point.equity for point in points] == ["1000", "1010", "990"]
-    assert [point.equity_change_ratio for point in points] == [
-        "0",
-        "0.01",
-        "-0.01",
-    ]
-    assert [point.margin_used for point in points] == ["100", "120", "80"]
-    assert points[1].margin_occupancy_ratio == str(Decimal("120") / Decimal("1010"))
-    assert [point.drawdown for point in points] == ["0", "0", "-20"]
-    assert points[2].drawdown_ratio == "-0.01980198019801980198019801980"
-
-
-def test_live_account_metrics_window_starts_at_daily_0800_utc_plus_8() -> None:
-    window_end = datetime(2026, 9, 9, 1, 0, tzinfo=UTC)
-
-    assert _live_account_metrics_window_start(
-        window_end,
-        timedelta(hours=24),
-    ) == datetime(2026, 9, 9, 0, 0, tzinfo=UTC)
-
-    assert _live_account_metrics_window_start(
-        datetime(2026, 9, 8, 23, 0, tzinfo=UTC),
-        timedelta(hours=24),
-    ) == datetime(2026, 9, 8, 0, 0, tzinfo=UTC)
-
-
-def test_live_account_margin_query_uses_account_level_rest_margin() -> None:
-    statement = _account_margin_statement(
-        environment="live",
-        account_label="account-2",
-        window_start=datetime(2026, 9, 5, tzinfo=UTC),
-        window_end=datetime(2026, 9, 6, tzinfo=UTC),
-        interval_seconds=6 * 60,
-    )
-    sql = str(
-        statement.compile(
-            dialect=postgresql_dialect(),
-            compile_kwargs={"literal_binds": True},
-        )
-    ).lower()
-
-    assert "account_config_snapshots" in sql
-    assert "account_reconciliation_runs" in sql
-    assert "totalinitialmargin" in sql
-    assert "rest_reconciliation" in sql
-    assert "account_position_snapshots" not in sql
-    assert "notional" not in sql
-
-
-def test_live_account_margin_query_excludes_websocket_config_observations() -> None:
-    statement = _account_margin_statement(
-        environment="live",
-        account_label="account-2",
-        window_start=datetime(2026, 9, 5, tzinfo=UTC),
-        window_end=datetime(2026, 9, 6, tzinfo=UTC),
-        interval_seconds=6 * 60,
-    )
-    sql = str(
-        statement.compile(
-            dialect=postgresql_dialect(),
-            compile_kwargs={"literal_binds": True},
-        )
-    ).lower()
-
-    assert "raw_payload" in sql
-    assert "totalinitialmargin" in sql
-    assert "user_data_stream" not in sql
-
 
 def test_downsample_equity_snapshots_keeps_latest_row_in_each_utc_bucket() -> None:
     start = datetime(2026, 7, 28, tzinfo=UTC)
@@ -243,7 +76,6 @@ def test_downsample_equity_snapshots_keeps_latest_row_in_each_utc_bucket() -> No
         "latest-in-bucket",
         "next-bucket",
     ]
-
 
 async def test_recent_paper_history_keeps_open_rows_and_caps_closed_query() -> None:
     opened_at = datetime(2026, 8, 1, tzinfo=UTC)
@@ -294,7 +126,7 @@ async def test_recent_paper_history_keeps_open_rows_and_caps_closed_query() -> N
             return SessionContext(self.session)
 
     session = Session()
-    queries = DashboardQueries(SessionFactory(session))
+    queries = DashboardQueries(SessionFactory(session), nextgen_accounts=())
 
     result = await queries.paper_history("paper-run")
 
@@ -302,7 +134,6 @@ async def test_recent_paper_history_keeps_open_rows_and_caps_closed_query() -> N
     assert result.history_complete is False
     assert [item["position_id"] for item in result.closed_trades] == ["closed"]
     assert len(result.trade_events) == 3
-
 
 async def test_universe_dashboard_hides_loser_ranking() -> None:
     observed_at = datetime(2026, 9, 14, 0, 0, tzinfo=UTC)
@@ -357,11 +188,11 @@ async def test_universe_dashboard_hides_loser_ranking() -> None:
     result = await DashboardQueries(
         SessionFactory(Session()),
         clock=lambda: observed_at,
+        nextgen_accounts=(),
     ).universe()
 
     assert [row["symbol"] for row in result.gainers] == ["GAINERUSDT"]
     assert result.losers == []
-
 
 def test_downsample_equity_snapshots_caps_result_to_latest_240_buckets() -> None:
     start = datetime(2026, 7, 27, tzinfo=UTC)
@@ -375,9 +206,6 @@ def test_downsample_equity_snapshots_caps_result_to_latest_240_buckets() -> None
     assert len(sampled) == 240
     assert sampled[0].snapshot_id == "2"
     assert sampled[-1].snapshot_id == "241"
-
-
-
 
 def test_decision_slo_response_aggregates_latency_health_and_reasons() -> None:
     start = datetime(2026, 9, 11, tzinfo=UTC)
@@ -466,7 +294,6 @@ def test_decision_slo_response_aggregates_latency_health_and_reasons() -> None:
     assert response.consumers[0].lag_event_count == 1
     assert response.consumers[0].last_available is True
 
-
 def test_decision_slo_response_preserves_true_unfiltered_latencies() -> None:
     start = datetime(2026, 9, 11, tzinfo=UTC)
     rows = [
@@ -498,7 +325,6 @@ def test_decision_slo_response_preserves_true_unfiltered_latencies() -> None:
     samples = response.phase_latency["candidate_accepted->risk_approved"]
     assert samples.sample_count == 2
     assert samples.max_ms == 54000.0
-
 
 async def test_decision_slo_query_uses_bounded_historical_window() -> None:
     window_end = datetime(2026, 9, 11, 12, 0, tzinfo=UTC)
@@ -545,6 +371,7 @@ async def test_decision_slo_query_uses_bounded_historical_window() -> None:
     queries = DashboardQueries(
         SessionFactory(session),
         clock=lambda: window_end,
+        nextgen_accounts=(),
     )
 
     response = await queries.decision_slo("6h")
@@ -554,7 +381,6 @@ async def test_decision_slo_query_uses_bounded_historical_window() -> None:
     assert response.window_end == window_end
     assert response.persisted_event_count == 1
     assert session.statement is not None
-
 
 def test_common_equity_query_uses_indexable_lateral_bucket_lookups() -> None:
     statement = _paper_common_equity_statement(
@@ -569,7 +395,6 @@ def test_common_equity_query_uses_indexable_lateral_bucket_lookups() -> None:
     assert "AS equity_buckets(bucket)" in sql
     assert "LATERAL" in sql
     assert "DISTINCT ON" not in sql
-
 
 def test_common_equity_interval_keeps_long_history_bounded() -> None:
     start = datetime(2026, 8, 1, 2, 45, tzinfo=UTC)
@@ -586,7 +411,6 @@ def test_common_equity_interval_keeps_long_history_bounded() -> None:
     assert interval_seconds >= 15 * 60
     assert interval_seconds % (15 * 60) == 0
     assert bucket_count <= 240
-
 
 def test_common_equity_curve_caps_points_for_an_unbounded_caller() -> None:
     start = datetime(2026, 8, 1, 2, 45, tzinfo=UTC)
@@ -616,26 +440,6 @@ def test_common_equity_curve_caps_points_for_an_unbounded_caller() -> None:
     assert len(points) <= 8
     assert points[0]["delta"] == "0"
 
-
-def test_account_equity_query_uses_narrow_lateral_bucket_lookups() -> None:
-    statement = _account_equity_statement(
-        environment="live",
-        account_label="primary",
-        asset="USDT",
-        window_start=datetime(2026, 8, 1, tzinfo=UTC),
-        window_end=datetime(2026, 8, 31, tzinfo=UTC),
-        interval_seconds=3 * 60 * 60,
-    )
-
-    sql = str(statement.compile(dialect=postgresql_dialect()))
-
-    assert "generate_series" in sql
-    assert "LATERAL" in sql
-    assert "wallet_balance" in sql
-    assert "unrealized_pnl" in sql
-    assert "DISTINCT ON" in sql
-
-
 def test_paper_equity_query_is_bounded_and_narrow() -> None:
     statement = _paper_equity_statement(
         ["paper-a", "paper-b"],
@@ -650,7 +454,6 @@ def test_paper_equity_query_is_bounded_and_narrow() -> None:
     assert "raw_payload" not in sql
     assert "DISTINCT ON" not in sql
 
-
 def test_paper_latest_equity_query_uses_one_narrow_probe_per_run() -> None:
     statement = _paper_latest_equity_statement(["paper-a", "paper-b"])
 
@@ -660,7 +463,6 @@ def test_paper_latest_equity_query_uses_one_narrow_probe_per_run() -> None:
     assert "ORDER BY paper_equity_snapshots_1.observed_at DESC" in sql
     assert "raw_payload" not in sql
     assert "max(" not in sql.lower()
-
 
 def test_live_common_equity_query_aggregates_latest_timestamp_per_bucket() -> None:
     statement = _live_common_equity_statement(
@@ -677,7 +479,6 @@ def test_live_common_equity_query_aggregates_latest_timestamp_per_bucket() -> No
     assert "GROUP BY" in sql
     assert "raw_payload" not in sql
 
-
 def test_first_equity_query_uses_one_index_lookup_per_run() -> None:
     statement = _paper_first_equity_statement(["paper-a", "paper-b"])
 
@@ -685,68 +486,6 @@ def test_first_equity_query_uses_one_index_lookup_per_run() -> None:
 
     assert "LATERAL" in sql
     assert "min(" not in sql.lower()
-
-
-def test_live_preflight_uses_current_transition_instead_of_old_checkpoint() -> None:
-    transition_at = datetime(2026, 8, 21, 0, 40, tzinfo=UTC)
-    old_checkpoint_at = transition_at - timedelta(hours=6)
-
-    observed_at, heartbeat_source = _live_observation(
-        state="preflight",
-        runtime_checkpoint_at=old_checkpoint_at,
-        transition_at=transition_at,
-    )
-
-    assert observed_at == transition_at
-    assert heartbeat_source == "state_transition"
-
-
-def test_live_enabled_uses_runtime_checkpoint() -> None:
-    transition_at = datetime(2026, 8, 21, 0, 40, tzinfo=UTC)
-    checkpoint_at = transition_at - timedelta(seconds=3)
-
-    observed_at, heartbeat_source = _live_observation(
-        state="live_enabled",
-        runtime_checkpoint_at=checkpoint_at,
-        transition_at=transition_at,
-    )
-
-    assert observed_at == checkpoint_at
-    assert heartbeat_source == "runtime_checkpoint"
-
-
-def test_live_enabled_rejects_stale_checkpoint_from_previous_session() -> None:
-    transition_at = datetime(2026, 8, 21, 0, 40, tzinfo=UTC)
-    # Checkpoint from 6 minutes ago left over from a previous run
-    stale_checkpoint_at = transition_at - timedelta(minutes=6)
-
-    observed_at, heartbeat_source = _live_observation(
-        state="live_enabled",
-        runtime_checkpoint_at=stale_checkpoint_at,
-        transition_at=transition_at,
-    )
-
-    # Must choose current transition_at instead of stale checkpoint
-    assert observed_at == transition_at
-    assert heartbeat_source == "state_transition"
-
-
-def test_dashboard_separates_confirmed_open_orders_from_uncertain_orders() -> None:
-    rows = [
-        SimpleNamespace(state="acknowledged"),
-        SimpleNamespace(state="partially_filled"),
-        SimpleNamespace(state="submitting"),
-        SimpleNamespace(state="mystery"),
-        SimpleNamespace(state="filled"),
-    ]
-
-    pending, ambiguous = _split_exchange_orders(rows)
-
-    assert [row.state for row in pending] == [
-        "acknowledged",
-        "partially_filled",
-    ]
-    assert [row.state for row in ambiguous] == ["submitting", "mystery"]
 
 
 def test_universe_membership_carries_rank_and_market_fields() -> None:
@@ -773,7 +512,6 @@ def test_universe_membership_carries_rank_and_market_fields() -> None:
         "utc_day_return": "0.0123",
         "current_price": "10.50",
     }
-
 
 def test_candle_exit_label_includes_entry_filter_variants() -> None:
     portfolio = {
@@ -816,7 +554,6 @@ def test_candle_exit_label_includes_entry_filter_variants() -> None:
         == "15M 收线退出 · 仅多头 · 价格 > 15M EMA5 · 价格 > 15M EMA10"
     )
 
-
 def test_candle_exit_label_includes_grace_recovery_threshold() -> None:
     assert (
         _paper_exit_label(
@@ -829,7 +566,6 @@ def test_candle_exit_label_includes_grace_recovery_threshold() -> None:
         == "反向后宽限 8 根 15M · 回收 +0.58%"
     )
 
-
 def test_dashboard_excludes_fixed_exit_paper_accounts() -> None:
     assert not _is_dashboard_paper_run(
         SimpleNamespace(execution_config={"portfolio": {"exit_mode": "fixed"}})
@@ -837,7 +573,6 @@ def test_dashboard_excludes_fixed_exit_paper_accounts() -> None:
     assert _is_dashboard_paper_run(
         SimpleNamespace(execution_config={"portfolio": {"exit_mode": "candle_15m"}})
     )
-
 
 def test_dashboard_marks_paper_account_stale_when_checkpoint_is_old() -> None:
     now = datetime(2026, 8, 21, 5, 15, tzinfo=UTC)
@@ -859,7 +594,6 @@ def test_dashboard_marks_paper_account_stale_when_checkpoint_is_old() -> None:
 
     assert summary.status is OperationalStatus.STALE
 
-
 def test_live_account_balance_becomes_equity_point() -> None:
     point = _live_account_equity_point(
         SimpleNamespace(
@@ -872,50 +606,6 @@ def test_live_account_balance_becomes_equity_point() -> None:
     assert point["equity"] == "276.80"
     assert point["balance"] == "282.28"
     assert point["unrealized_pnl"] == "-5.48"
-
-
-def test_live_strategy_signal_serializes_context_and_volume() -> None:
-    detected_at = datetime(2026, 8, 28, 11, 0, tzinfo=UTC)
-    recorded_at = datetime(2026, 8, 28, 11, 0, 1, tzinfo=UTC)
-    signal = _live_strategy_signal(
-        SimpleNamespace(
-            observation_id="live-observation",
-            signal_id="signal-1",
-            candidate_id=None,
-            run_id="live-run",
-            account_label="primary",
-            strategy_name="orderflow_impulse",
-            strategy_version="v0",
-            config_hash="config-hash",
-            code_commit="commit-hash",
-            signal_kind="strategy_signal",
-            symbol="BTCUSDT",
-            side="long",
-            detected_at=detected_at,
-            source_state_at=detected_at,
-            recorded_at=recorded_at,
-            reason="orderflow_impulse",
-            schema_version=1,
-            quote_volume_24h=Decimal("1234.50"),
-            quote_volume_24h_quote_asset="USDT",
-            quote_volume_24h_source="ticker",
-            quote_volume_24h_source_at=detected_at,
-            quote_volume_24h_fetched_at=recorded_at,
-            quote_volume_24h_age_ms=1000,
-            features={"impulse_return_pct": "0.01"},
-            reference_prices={"midpoint": "100"},
-            market_context={"spread": "0.001"},
-            filter_context={"entry_enabled": True},
-            candidate_context={"candidate_count": 1},
-            account_context={"gross_exposure": "10"},
-        )
-    )
-
-    assert signal["detected_at"] == detected_at.isoformat()
-    assert signal["quote_volume_24h"] == "1234.50"
-    assert signal["features"] == {"impulse_return_pct": "0.01"}
-    assert signal["filter_context"] == {"entry_enabled": True}
-
 
 def test_common_equity_curve_starts_at_zero_and_carries_latest_15m_bucket() -> None:
     common_start = datetime(2026, 8, 21, 2, 45, tzinfo=UTC)
@@ -949,7 +639,6 @@ def test_common_equity_curve_starts_at_zero_and_carries_latest_15m_bucket() -> N
         "1",
     ]
     assert all(point["return_pct"] is not None for point in points)
-
 
 def test_common_equity_curve_respects_shared_source_watermark() -> None:
     common_start = datetime(2026, 8, 21, 2, 45, tzinfo=UTC)
@@ -989,7 +678,6 @@ def test_common_equity_curve_respects_shared_source_watermark() -> None:
         for point in points
     )
 
-
 def test_live_common_equity_removes_configured_external_deposit() -> None:
     observed_at = datetime(2026, 8, 21, 9, 45, tzinfo=UTC)
     observations = _live_aggregated_equity_observations(
@@ -1008,13 +696,11 @@ def test_live_common_equity_removes_configured_external_deposit() -> None:
         Decimal("1002"),
     ]
 
-
 def test_live_cash_flow_parser_allows_explicit_empty_configuration() -> None:
     assert parse_live_cash_flow_adjustments("[]") == ()
     default = parse_live_cash_flow_adjustments("")
     assert len(default) == 0
     assert default == ()
-
 
 def test_common_equity_start_is_fixed_to_august_21_anchor() -> None:
     assert parse_common_equity_start_at("") == FIXED_COMMON_EQUITY_START_AT
@@ -1023,7 +709,6 @@ def test_common_equity_start_is_fixed_to_august_21_anchor() -> None:
         == FIXED_COMMON_EQUITY_START_AT
     )
 
-
 def test_common_equity_start_rejects_moving_the_production_anchor() -> None:
     try:
         parse_common_equity_start_at("2026-08-22T00:00:00Z")
@@ -1031,81 +716,6 @@ def test_common_equity_start_rejects_moving_the_production_anchor() -> None:
         assert "fixed" in str(error)
     else:
         raise AssertionError("expected fixed common-equity anchor validation")
-
-
-def test_account_fills_are_aggregated_to_one_row_per_order() -> None:
-    rows = [
-        SimpleNamespace(
-            order_id="order-1",
-            symbol="TUTUSDT",
-            side="SELL",
-            fee_asset="BNB",
-            price=Decimal("0.03158"),
-            quantity=Decimal("736"),
-            realized_pnl=Decimal("-1.27"),
-            fee=Decimal("0.0116"),
-            trade_at=datetime(2026, 8, 16, 1, 40, 13, tzinfo=UTC),
-        ),
-        SimpleNamespace(
-            order_id="order-1",
-            symbol="TUTUSDT",
-            side="SELL",
-            fee_asset="USDT",
-            price=Decimal("0.03159"),
-            quantity=Decimal("163"),
-            realized_pnl=Decimal("-0.28"),
-            fee=Decimal("0.0026"),
-            trade_at=datetime(2026, 8, 16, 1, 40, 13, tzinfo=UTC),
-        ),
-    ]
-
-    aggregated = _aggregate_account_fills(
-        rows,
-        {"order-1": "orderflow_impulse"},
-    )
-
-    assert len(aggregated) == 1
-    assert aggregated[0]["order_id"] == "order-1"
-    assert aggregated[0]["quantity"] == "899"
-    assert aggregated[0]["realized_pnl"] == "-1.55"
-    assert aggregated[0]["fee"] == "0.0142"
-    assert aggregated[0]["fee_asset"] == "BNB / USDT"
-    assert aggregated[0]["fill_count"] == 2
-    assert aggregated[0]["strategy_name"] == "orderflow_impulse"
-    assert aggregated[0]["reduce_only"] is False
-    assert aggregated[0]["close_reason"] is None
-    assert Decimal(str(aggregated[0]["price"])).quantize(Decimal("0.00001")) == Decimal(
-        "0.03158"
-    )
-
-
-def test_account_fills_preserve_live_exit_reason_metadata() -> None:
-    row = SimpleNamespace(
-        order_id="exit-order-1",
-        symbol="ONUSDT",
-        side="SELL",
-        fee_asset="USDT",
-        price=Decimal("0.05000"),
-        quantity=Decimal("10"),
-        realized_pnl=Decimal("1.20"),
-        fee=Decimal("0.001"),
-        trade_at=datetime(2026, 8, 16, 2, 0, tzinfo=UTC),
-    )
-
-    aggregated = _aggregate_account_fills(
-        [row],
-        {"exit-order-1": "orderflow_impulse"},
-        {
-            "exit-order-1": {
-                "reduce_only": True,
-                "close_reason": "candle_15m_grace_timeout_1",
-            }
-        },
-    )
-
-    assert aggregated[0]["reduce_only"] is True
-    assert aggregated[0]["close_reason"] == "candle_15m_grace_timeout_1"
-
 
 def _snapshot(
     snapshot_id: str,
@@ -1124,7 +734,6 @@ def _snapshot(
         total_fees=Decimal("0"),
         open_position_count=0,
     )
-
 
 def _paper_position_row(
     *,
@@ -1152,872 +761,6 @@ def _paper_position_row(
         exit_fee=Decimal("0"),
         close_reason=None if closed_at is None else "take_profit",
     )
-
-
-async def test_readiness_handles_halt_without_unhealthy_attribute_error() -> None:
-    from crypto_momentum_lab.operator_dashboard.overview_queries import OverviewQueries
-    from crypto_momentum_lab.operator_dashboard.schemas import (
-        LiveAccountsResponse,
-        LiveAccountSummaryResponse,
-        ServiceStatusResponse,
-        SystemOverviewResponse,
-    )
-
-    now = datetime(2026, 9, 25, 0, 0, tzinfo=UTC)
-
-    class StubOverviewQueries(OverviewQueries):
-        def __init__(self) -> None:
-            super().__init__(
-                session_factory=None,  # type: ignore[arg-type]
-                clock=lambda: now,
-                stale_after_seconds=60.0,
-                research_collector_root=Path("/tmp"),
-            )
-
-        async def health(self) -> dict[str, str]:
-            return {"app_status": "UP", "database_status": "UP"}
-
-        async def live_accounts(self) -> LiveAccountsResponse:
-            return LiveAccountsResponse(
-                status=OperationalStatus.READY,
-                accounts=[
-                    LiveAccountSummaryResponse(
-                        account_label="primary",
-                        environment="live",
-                        status=OperationalStatus.READY,
-                        readiness="ready_readonly",
-                        observed_at=now,
-                        strategy_name="orderflow_impulse",
-                        strategy_state="running",
-                    )
-                ],
-            )
-
-        async def overview(self) -> SystemOverviewResponse:
-            return SystemOverviewResponse(
-                generated_at=now,
-                database_status=OperationalStatus.READY,
-                services=[
-                    ServiceStatusResponse(
-                        name="market-data",
-                        status=OperationalStatus.FRESH,
-                        observed_at=now,
-                        age_seconds=1.0,
-                    )
-                ],
-                active_halt_count=1,
-            )
-
-    queries = StubOverviewQueries()
-    resp = await queries.readiness()
-    assert resp.status == OperationalStatus.HALTED
-    assert resp.tradeability.mode == "HALTED"
-    assert resp.tradeability.entry_gate_open is False
-    assert resp.tradeability.halt_active is True
-    assert resp.tradeability.entry_gate_reason == "halt_active"
-
-
-async def test_readiness_prevents_fully_tradeable_when_prerequisites_missing() -> None:
-    from crypto_momentum_lab.operator_dashboard.overview_queries import OverviewQueries
-    from crypto_momentum_lab.operator_dashboard.schemas import (
-        LiveAccountsResponse,
-        LiveAccountSummaryResponse,
-        ServiceStatusResponse,
-        SystemOverviewResponse,
-    )
-
-    now = datetime(2026, 9, 25, 0, 0, tzinfo=UTC)
-    yesterday = now - timedelta(days=1)
-
-    class StubOverviewQueries(OverviewQueries):
-        def __init__(self) -> None:
-            super().__init__(
-                session_factory=None,  # type: ignore[arg-type]
-                clock=lambda: now,
-                stale_after_seconds=60.0,
-                research_collector_root=Path("/tmp"),
-            )
-
-        async def health(self) -> dict[str, str]:
-            return {"app_status": "UP", "database_status": "UP"}
-
-        async def live_accounts(self) -> LiveAccountsResponse:
-            # Day-old account, no strategy state, no active lease
-            return LiveAccountsResponse(
-                status=OperationalStatus.READY,
-                accounts=[
-                    LiveAccountSummaryResponse(
-                        account_label="primary",
-                        environment="live",
-                        status=OperationalStatus.READY,
-                        readiness="ready_readonly",
-                        observed_at=yesterday,
-                        strategy_name=None,
-                        strategy_state=None,
-                    )
-                ],
-            )
-
-        async def overview(self) -> SystemOverviewResponse:
-            # market-data is recovering / stale
-            return SystemOverviewResponse(
-                generated_at=now,
-                database_status=OperationalStatus.READY,
-                services=[
-                    ServiceStatusResponse(
-                        name="market-data",
-                        status=OperationalStatus.STALE,
-                        observed_at=yesterday,
-                        age_seconds=86400.0,
-                    )
-                ],
-                active_halt_count=0,
-            )
-
-    queries = StubOverviewQueries()
-    resp = await queries.readiness()
-    # Must NOT be FULLY_TRADEABLE
-    assert resp.tradeability.mode == "UNKNOWN"
-    assert resp.tradeability.entry_gate_open is False
-    assert resp.stream_readiness.overall == "RECOVERING"
-    assert resp.status == OperationalStatus.UNKNOWN
-
-
-async def test_readiness_identifies_stale_strategy_stream_without_blame_on_market_data(
-) -> None:
-    from crypto_momentum_lab.operator_dashboard.overview_queries import OverviewQueries
-    from crypto_momentum_lab.operator_dashboard.schemas import (
-        LiveAccountsResponse,
-        LiveAccountSummaryResponse,
-        ServiceStatusResponse,
-        SystemOverviewResponse,
-    )
-
-    now = datetime(2026, 9, 28, tzinfo=UTC)
-
-    class StubOverviewQueries(OverviewQueries):
-        def __init__(self) -> None:
-            super().__init__(
-                session_factory=None,  # type: ignore[arg-type]
-                clock=lambda: now,
-                stale_after_seconds=60.0,
-                research_collector_root=Path("/tmp"),
-            )
-
-        async def health(self) -> dict[str, str]:
-            return {"app_status": "UP", "database_status": "UP"}
-
-        async def live_accounts(self) -> LiveAccountsResponse:
-            return LiveAccountsResponse(
-                status=OperationalStatus.READY,
-                accounts=[
-                    LiveAccountSummaryResponse(
-                        account_label="primary",
-                        environment="live",
-                        status=OperationalStatus.READY,
-                        readiness="ready_readonly",
-                        observed_at=now,
-                        strategy_name="orderflow_impulse",
-                        strategy_state="running",
-                    )
-                ],
-            )
-
-        async def overview(self) -> SystemOverviewResponse:
-            return SystemOverviewResponse(
-                generated_at=now,
-                database_status=OperationalStatus.READY,
-                services=[
-                    ServiceStatusResponse(
-                        name="market-data",
-                        status=OperationalStatus.FRESH,
-                        observed_at=now,
-                        age_seconds=0,
-                    ),
-                    ServiceStatusResponse(
-                        name="strategy-runner",
-                        status=OperationalStatus.STALE,
-                        observed_at=now - timedelta(minutes=5),
-                        age_seconds=300,
-                    ),
-                ],
-                active_halt_count=0,
-            )
-
-    response = await StubOverviewQueries().readiness()
-    assert (
-        response.tradeability.entry_gate_reason
-        == "runtime_readiness_missing_or_stale"
-    )
-    assert response.stream_readiness.streams["market-data"] == "READY"
-
-
-async def test_readiness_allows_fully_tradeable_when_services_include_database_ready(
-) -> None:
-    from crypto_momentum_lab.operator_dashboard.overview_queries import OverviewQueries
-    from crypto_momentum_lab.operator_dashboard.schemas import (
-        LiveAccountsResponse,
-        LiveAccountSummaryResponse,
-        ServiceStatusResponse,
-        SystemOverviewResponse,
-        TradeabilityDetailResponse,
-    )
-
-    now = datetime(2026, 9, 25, 0, 0, tzinfo=UTC)
-
-    class StubOverviewQueries(OverviewQueries):
-        def __init__(self) -> None:
-            super().__init__(
-                session_factory=None,  # type: ignore[arg-type]
-                clock=lambda: now,
-                stale_after_seconds=60.0,
-                research_collector_root=Path("/tmp"),
-            )
-
-        async def operational_health(self):
-            return {"dimensions": [{"name": "fact_integrity", "status": "healthy"}]}
-
-        async def health(self) -> dict[str, str]:
-            return {"app_status": "UP", "database_status": "UP"}
-
-        async def live_accounts(self) -> LiveAccountsResponse:
-            return LiveAccountsResponse(
-                status=OperationalStatus.READY,
-                accounts=[
-                    LiveAccountSummaryResponse(
-                        account_label="primary",
-                        environment="live",
-                        status=OperationalStatus.READY,
-                        readiness="ready_readonly",
-                        observed_at=now,
-                        strategy_name="orderflow_impulse",
-                        strategy_state="running",
-                        runtime_observed_at=now,
-                        runtime_tradeability=TradeabilityDetailResponse(
-                            mode="FULLY_TRADEABLE", entry_gate_open=True,
-                            entry_gate_reason="live_entry_prerequisites_ready",
-                            exit_gate_open=True, exit_gate_reason="normal",
-                            unmanaged_risk_clear=True, halt_active=False,
-                        ),
-                    )
-                ],
-            )
-
-        async def overview(self) -> SystemOverviewResponse:
-            return SystemOverviewResponse(
-                generated_at=now,
-                database_status=OperationalStatus.READY,
-                services=[
-                    ServiceStatusResponse(
-                        name="market-data",
-                        status=OperationalStatus.FRESH,
-                        observed_at=now,
-                        age_seconds=1.0,
-                    ),
-                    ServiceStatusResponse(
-                        name="execution-account",
-                        status=OperationalStatus.FRESH,
-                        observed_at=now,
-                        age_seconds=1.0,
-                    ),
-                    ServiceStatusResponse(
-                        name="strategy-runner",
-                        status=OperationalStatus.FRESH,
-                        observed_at=now,
-                        age_seconds=1.0,
-                    ),
-                    ServiceStatusResponse(
-                        name="database",
-                        status=OperationalStatus.READY,
-                        observed_at=now,
-                        age_seconds=0.0,
-                    ),
-                ],
-                active_halt_count=0,
-            )
-
-    queries = StubOverviewQueries()
-    resp = await queries.readiness()
-    assert resp.status == OperationalStatus.READY
-    assert resp.tradeability.mode == "FULLY_TRADEABLE"
-    assert resp.tradeability.entry_gate_open is True
-    assert resp.tradeability.exit_gate_open is True
-    assert resp.stream_readiness.overall == "READY"
-
-
-async def test_readiness_shields_exceptions_to_degraded_response() -> None:
-    from crypto_momentum_lab.operator_dashboard.overview_queries import OverviewQueries
-
-    now = datetime(2026, 9, 25, 0, 0, tzinfo=UTC)
-
-    class FailingOverviewQueries(OverviewQueries):
-        def __init__(self) -> None:
-            super().__init__(
-                session_factory=None,  # type: ignore[arg-type]
-                clock=lambda: now,
-                stale_after_seconds=60.0,
-                research_collector_root=Path("/tmp"),
-            )
-
-        async def health(self) -> dict[str, str]:
-            raise ConnectionRefusedError("PostgreSQL connection refused")
-
-    queries = FailingOverviewQueries()
-    resp = await queries.readiness()
-    assert resp.status == OperationalStatus.DEGRADED
-    assert resp.tradeability.mode == "UNKNOWN"
-    assert resp.tradeability.entry_gate_open is False
-    assert resp.tradeability.exit_gate_open is False
-    assert "readiness_query_failed" in resp.tradeability.entry_gate_reason
-
-
-def test_live_account_status_syncing_is_degraded() -> None:
-    from crypto_momentum_lab.operator_dashboard.overview_queries import (
-        live_account_status,
-    )
-
-    now = datetime(2026, 9, 25, 0, 0, tzinfo=UTC)
-    status = live_account_status("syncing", observed_at=now, now=now)
-    assert status == OperationalStatus.DEGRADED
-
-
-async def test_risk_execution_computes_data_age_and_freshness() -> None:
-    from unittest.mock import AsyncMock, MagicMock
-
-    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
-        RiskExecutionQueries,
-    )
-
-    now = datetime.now(UTC)
-    old_time = now - timedelta(seconds=200)
-
-    # 1. Test Stale case
-    scalars_mock = MagicMock()
-    scalars_mock.all.side_effect = [
-        [],  # halts
-        [],  # decisions
-        [],  # orders
-    ]
-    session_mock = AsyncMock()
-    session_mock.scalars.return_value = scalars_mock
-    session_mock.scalar.return_value = None  # universe snapshot
-    exec_mock = MagicMock()
-    exec_mock.all.return_value = [("BTCUSDT", old_time)]
-    session_mock.execute.return_value = exec_mock
-
-    factory_mock = MagicMock()
-    factory_mock.return_value.__aenter__.return_value = session_mock
-
-    queries = RiskExecutionQueries(session_factory=factory_mock)
-    resp = await queries.risk_execution()
-
-    assert resp.status == OperationalStatus.STALE
-    assert resp.source_status == "STALE"
-    assert resp.data_age_seconds is not None
-    assert resp.data_age_seconds >= 199.0
-    assert resp.observed_at == old_time
-
-    # 2. Test Empty / No Data case
-    scalars_mock2 = MagicMock()
-    scalars_mock2.all.side_effect = [[], [], []]
-    session_mock2 = AsyncMock()
-    session_mock2.scalars.return_value = scalars_mock2
-    session_mock2.scalar.return_value = None  # universe snapshot
-    exec_mock2 = MagicMock()
-    exec_mock2.all.return_value = []
-    session_mock2.execute.return_value = exec_mock2
-
-    factory_mock2 = MagicMock()
-    factory_mock2.return_value.__aenter__.return_value = session_mock2
-
-    queries2 = RiskExecutionQueries(session_factory=factory_mock2)
-    resp2 = await queries2.risk_execution()
-
-    assert resp2.status == OperationalStatus.NO_DATA
-    assert resp2.source_status == "NO_DATA"
-    assert resp2.observed_at is None
-    assert resp2.data_age_seconds is None
-
-
-async def test_risk_execution_stale_market_not_masked_by_recent_orders() -> None:
-    from unittest.mock import AsyncMock, MagicMock
-
-    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
-        RiskExecutionQueries,
-    )
-    from crypto_momentum_lab.persistence.postgres.models import ExchangeOrderRow
-
-    now = datetime.now(UTC)
-    old_market_time = now - timedelta(seconds=240)
-    fresh_order_time = now - timedelta(seconds=1)
-
-    fake_order = MagicMock(spec=ExchangeOrderRow)
-    fake_order.updated_at = fresh_order_time
-    fake_order.state = "acknowledged"
-    fake_order.client_order_id = "test_order"
-    fake_order.exchange_order_id = "ex_1"
-    fake_order.symbol = "BTCUSDT"
-    fake_order.side = "BUY"
-    fake_order.price = Decimal("60000")
-    fake_order.quantity = Decimal("1.0")
-    fake_order.filled_quantity = Decimal("0.0")
-    fake_order.average_price = None
-    fake_order.fee = Decimal("0")
-    fake_order.created_at = fresh_order_time
-
-    scalars_mock = MagicMock()
-    scalars_mock.all.side_effect = [
-        [],  # halts
-        [],  # decisions
-        [fake_order],  # orders updated just 1s ago
-    ]
-    session_mock = AsyncMock()
-    session_mock.scalars.return_value = scalars_mock
-    session_mock.scalar.return_value = None
-    exec_mock = MagicMock()
-    exec_mock.all.return_value = [("BTCUSDT", old_market_time)]
-    session_mock.execute.return_value = exec_mock
-
-    factory_mock = MagicMock()
-    factory_mock.return_value.__aenter__.return_value = session_mock
-
-    queries = RiskExecutionQueries(session_factory=factory_mock)
-    resp = await queries.risk_execution()
-
-    # The 240s old market must NOT be masked by fresh order
-    assert resp.status == OperationalStatus.STALE
-    assert resp.source_status == "STALE"
-    assert resp.data_age_seconds is not None
-    assert resp.data_age_seconds >= 239.0
-    assert resp.observed_at == old_market_time
-
-
-async def test_risk_execution_filters_by_environment_and_complete_data() -> None:
-    from unittest.mock import AsyncMock, MagicMock
-
-    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
-        RiskExecutionQueries,
-    )
-
-    scalars_mock = MagicMock()
-    scalars_mock.all.side_effect = [[], [], []]
-    session_mock = AsyncMock()
-    session_mock.scalars.return_value = scalars_mock
-    session_mock.scalar.return_value = None
-    exec_mock = MagicMock()
-    exec_mock.all.return_value = []
-    session_mock.execute.return_value = exec_mock
-
-    factory_mock = MagicMock()
-    factory_mock.return_value.__aenter__.return_value = session_mock
-
-    queries = RiskExecutionQueries(session_factory=factory_mock, environment="paper_1")
-    await queries.risk_execution()
-
-    assert session_mock.execute.called
-    statement = session_mock.execute.call_args[0][0]
-    compiled = str(statement.compile(compile_kwargs={"literal_binds": True}))
-    assert "runtime_market_states_15s.environment = 'paper_1'" in compiled
-    assert "runtime_market_states_15s.data_complete IS true" in compiled
-    assert "GROUP BY runtime_market_states_15s.symbol" in compiled
-
-
-async def test_risk_execution_stale_if_any_required_symbol_stale() -> None:
-    """F04: A single fresh symbol cannot mask a stale symbol among required symbols."""
-    from unittest.mock import AsyncMock, MagicMock
-
-    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
-        RiskExecutionQueries,
-    )
-
-    now = datetime.now(UTC)
-    fresh_time = now - timedelta(seconds=5)
-    stale_time = now - timedelta(seconds=200)
-
-    scalars_mock = MagicMock()
-    scalars_mock.all.side_effect = [[], [], []]
-    session_mock = AsyncMock()
-    session_mock.scalars.return_value = scalars_mock
-    session_mock.scalar.return_value = None
-    exec_mock = MagicMock()
-    exec_mock.all.return_value = [
-        ("BTCUSDT", fresh_time),
-        ("ETHUSDT", stale_time),
-    ]
-    session_mock.execute.return_value = exec_mock
-
-    factory_mock = MagicMock()
-    factory_mock.return_value.__aenter__.return_value = session_mock
-
-    queries = RiskExecutionQueries(
-        session_factory=factory_mock,
-        required_symbols=["BTCUSDT", "ETHUSDT"],
-    )
-    resp = await queries.risk_execution()
-
-    assert resp.status == OperationalStatus.STALE
-    assert resp.source_status == "STALE"
-    assert resp.observed_at == stale_time
-    assert resp.data_age_seconds is not None
-    assert resp.data_age_seconds >= 199.0
-
-
-async def test_risk_execution_stale_if_required_symbol_missing_data() -> None:
-    """F04: Incomplete symbol coverage must cause STALE status,
-    even if present symbol is fresh.
-    """
-    from unittest.mock import AsyncMock, MagicMock
-
-    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
-        RiskExecutionQueries,
-    )
-
-    now = datetime.now(UTC)
-    fresh_time = now - timedelta(seconds=5)
-
-    scalars_mock = MagicMock()
-    scalars_mock.all.side_effect = [[], [], []]
-    session_mock = AsyncMock()
-    session_mock.scalars.return_value = scalars_mock
-    session_mock.scalar.return_value = None
-    # Only BTC has complete data, ETH is completely missing from complete buckets
-    exec_mock = MagicMock()
-    exec_mock.all.return_value = [
-        ("BTCUSDT", fresh_time),
-    ]
-    session_mock.execute.return_value = exec_mock
-
-    factory_mock = MagicMock()
-    factory_mock.return_value.__aenter__.return_value = session_mock
-
-    queries = RiskExecutionQueries(
-        session_factory=factory_mock,
-        required_symbols=["BTCUSDT", "ETHUSDT"],
-    )
-    resp = await queries.risk_execution()
-
-    # Missing ETH data means coverage is incomplete -> STALE
-    assert resp.status == OperationalStatus.STALE
-    assert resp.source_status == "STALE"
-    assert resp.observed_at == fresh_time
-
-
-async def test_risk_execution_ready_when_all_required_symbols_fresh() -> None:
-    """F04: When all required symbols have complete, fresh data,
-    status is READY / LIVE.
-    """
-    from unittest.mock import AsyncMock, MagicMock
-
-    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
-        RiskExecutionQueries,
-    )
-
-    now = datetime.now(UTC)
-    btc_time = now - timedelta(seconds=5)
-    eth_time = now - timedelta(seconds=10)
-
-    scalars_mock = MagicMock()
-    scalars_mock.all.side_effect = [[], [], []]
-    session_mock = AsyncMock()
-    session_mock.scalars.return_value = scalars_mock
-    session_mock.scalar.return_value = None
-    exec_mock = MagicMock()
-    exec_mock.all.return_value = [
-        ("BTCUSDT", btc_time),
-        ("ETHUSDT", eth_time),
-    ]
-    session_mock.execute.return_value = exec_mock
-
-    factory_mock = MagicMock()
-    factory_mock.return_value.__aenter__.return_value = session_mock
-
-    queries = RiskExecutionQueries(
-        session_factory=factory_mock,
-        required_symbols=["BTCUSDT", "ETHUSDT"],
-    )
-    resp = await queries.risk_execution()
-    assert resp.status == OperationalStatus.READY
-    assert resp.source_status == "LIVE"
-    assert resp.observed_at == eth_time
-    assert resp.data_age_seconds is not None
-    assert 9.0 <= resp.data_age_seconds <= 11.0
-    assert resp.required_symbols == ["BTCUSDT", "ETHUSDT"]
-    assert resp.missing_symbols == []
-    assert resp.coverage_scope == "2/2 covered"
-
-
-async def test_risk_execution_loads_universe_snapshot_with_uuid_and_filters_extended(
-) -> None:
-    """Snapshot UUIDs and active target memberships are loaded
-    without falling back to all historical symbols.
-    """
-    from unittest.mock import AsyncMock, MagicMock
-    from uuid import uuid4
-
-    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
-        RiskExecutionQueries,
-    )
-
-    now = datetime.now(UTC)
-    btc_time = now - timedelta(seconds=12)
-    test_snapshot_id = uuid4()
-
-    scalars_mock = MagicMock()
-    # halts, decisions, orders, then monitoring memberships
-    scalars_mock.all.side_effect = [
-        [],  # halts
-        [],  # decisions
-        [],  # orders
-        ["BTCUSDT"],  # monitored symbols (filtered out extended)
-    ]
-    session_mock = AsyncMock()
-    session_mock.scalars.return_value = scalars_mock
-    session_mock.scalar.return_value = test_snapshot_id  # UUID snapshot id!
-    exec_mock = MagicMock()
-    exec_mock.all.return_value = [("BTCUSDT", btc_time)]
-    session_mock.execute.return_value = exec_mock
-
-    factory_mock = MagicMock()
-    factory_mock.return_value.__aenter__.return_value = session_mock
-
-    queries = RiskExecutionQueries(session_factory=factory_mock)
-    resp = await queries.risk_execution()
-
-    assert resp.status == OperationalStatus.READY
-    assert resp.source_status == "LIVE"
-    assert resp.observed_at == btc_time
-    assert resp.required_symbols == ["BTCUSDT"]
-    assert resp.coverage_scope == "1/1 covered"
-
-
-async def test_risk_execution_fails_closed_when_coverage_query_errors() -> None:
-    """F04: When coverage query fails, API MUST return only safe error code
-    & trace ID without raw exception text.
-    """
-    from unittest.mock import AsyncMock, MagicMock
-
-    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
-        RiskExecutionQueries,
-    )
-
-    now = datetime.now(UTC)
-    fresh_time = now - timedelta(seconds=5)
-
-    scalars_mock = MagicMock()
-    scalars_mock.all.side_effect = [[], [], []]
-    session_mock = AsyncMock()
-    session_mock.scalars.return_value = scalars_mock
-    # Simulate DB failure with sensitive tokens / host / credentials
-    session_mock.scalar.side_effect = RuntimeError(
-        "CRITICAL_DB_FAILURE user=admin secret_key=secret_12345 host=db.internal:5432"
-    )
-
-    # Even if market state rows exist and are fresh:
-    exec_mock = MagicMock()
-    exec_mock.all.return_value = [("BTCUSDT", fresh_time)]
-    session_mock.execute.return_value = exec_mock
-
-    factory_mock = MagicMock()
-    factory_mock.return_value.__aenter__.return_value = session_mock
-
-    queries = RiskExecutionQueries(session_factory=factory_mock)
-    resp = await queries.risk_execution()
-
-    # Must NOT swallow error and report READY/LIVE! Must report UNKNOWN/QUERY_ERROR
-    assert resp.status == OperationalStatus.UNKNOWN
-    assert resp.source_status == "QUERY_ERROR"
-    assert resp.coverage_scope == "QUERY_ERROR"
-    assert resp.coverage_error_code == "UNIVERSE_QUERY_FAILED"
-    assert resp.coverage_trace_id is not None
-    assert resp.coverage_trace_id.startswith("cov_")
-    assert (
-        resp.coverage_error == f"UNIVERSE_QUERY_FAILED (ref: {resp.coverage_trace_id})"
-    )
-
-    # Critical security assertion: NEVER leak raw exception, credentials,
-    # or internal topology to the response!
-    assert "secret_12345" not in resp.coverage_error
-    assert "db.internal" not in resp.coverage_error
-    assert "RuntimeError" not in resp.coverage_error
-    assert resp.missing_symbols == []
-
-
-async def test_risk_execution_halts_prioritized_over_coverage_query_error() -> None:
-    """F04: If halts exist when coverage query fails, status is HALTED but
-    safe error code & trace are preserved.
-    """
-    from unittest.mock import AsyncMock, MagicMock
-
-    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
-        RiskExecutionQueries,
-    )
-    from crypto_momentum_lab.persistence.postgres.models import RiskHaltRow
-
-    now = datetime.now(UTC)
-    halt_row = RiskHaltRow(
-        halt_id=1,
-        reason="Manual emergency stop",
-        created_at=now - timedelta(minutes=1),
-    )
-
-    scalars_mock = MagicMock()
-    scalars_mock.all.side_effect = [[halt_row], [], []]
-    session_mock = AsyncMock()
-    session_mock.scalars.return_value = scalars_mock
-    session_mock.scalar.side_effect = RuntimeError("DB connection dropped")
-    exec_mock = MagicMock()
-    exec_mock.all.return_value = []
-    session_mock.execute.return_value = exec_mock
-
-    factory_mock = MagicMock()
-    factory_mock.return_value.__aenter__.return_value = session_mock
-
-    queries = RiskExecutionQueries(session_factory=factory_mock)
-    resp = await queries.risk_execution()
-
-    assert resp.status == OperationalStatus.HALTED
-    assert resp.source_status == "HALTED"
-    assert resp.coverage_scope == "QUERY_ERROR"
-    assert resp.coverage_error_code == "UNIVERSE_QUERY_FAILED"
-    assert resp.coverage_trace_id is not None
-    assert (
-        resp.coverage_error == f"UNIVERSE_QUERY_FAILED (ref: {resp.coverage_trace_id})"
-    )
-    assert resp.missing_symbols == []
-
-
-def test_sanitize_error_detail_redacts_credentials_and_tokens() -> None:
-    """F04: Log sanitization must redact client_secret, access_token,
-    JSON/colon passwords, Authorization Bearer, and DSNs.
-    """
-    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
-        _sanitize_error_detail,
-    )
-
-    # 1. Database DSN credentials
-    exc_dsn = RuntimeError(
-        "Failed connecting to postgresql://cml_user:super_secret_pw@10.0.0.1:5432/cml_prod"
-    )
-    sanitized_dsn = _sanitize_error_detail(exc_dsn)
-    assert "super_secret_pw" not in sanitized_dsn
-    assert "postgresql://cml_user:***@10.0.0.1:5432/cml_prod" in sanitized_dsn
-
-    # 2. client_secret=... and access_token=...
-    exc_tokens = RuntimeError(
-        "OAuth failed client_secret=cs_live_99887766 and access_token=at_live_11223344"
-    )
-    sanitized_tokens = _sanitize_error_detail(exc_tokens)
-    assert "cs_live_99887766" not in sanitized_tokens
-    assert "at_live_11223344" not in sanitized_tokens
-    assert "client_secret=***" in sanitized_tokens
-    assert "access_token=***" in sanitized_tokens
-
-    # 3. JSON format passwords and secrets
-    exc_json = ValueError(
-        "Invalid json "
-        '{"password": "p@ssw0rd123", "client_secret": "cs_json_456", '
-        '"access_token": "at_json_789"}'
-    )
-    sanitized_json = _sanitize_error_detail(exc_json)
-    assert "p@ssw0rd123" not in sanitized_json
-    assert "cs_json_456" not in sanitized_json
-    assert "at_json_789" not in sanitized_json
-    assert (
-        '{"password": "***", "client_secret": "***", "access_token": "***"}'
-        in sanitized_json
-    )
-
-    # 4. Colon format (YAML/header/freeform): password: ...
-    exc_colon = RuntimeError(
-        "Config error password: plain_yaml_pass\nclient_secret: plain_yaml_cs"
-    )
-    sanitized_colon = _sanitize_error_detail(exc_colon)
-    assert "plain_yaml_pass" not in sanitized_colon
-    assert "plain_yaml_cs" not in sanitized_colon
-    assert "password: ***" in sanitized_colon
-    assert "client_secret: ***" in sanitized_colon
-
-    # 5. Authorization: Bearer <token> and Authorization: Basic <token>
-    exc_auth = ConnectionError(
-        "HTTP header Authorization: Bearer jwt_secret_token_123456 rejected"
-    )
-    sanitized_auth = _sanitize_error_detail(exc_auth)
-    assert "jwt_secret_token_123456" not in sanitized_auth
-    assert "Authorization: Bearer ***" in sanitized_auth
-
-    exc_basic = ConnectionError(
-        "HTTP header Authorization: Basic dXNlcjpwYXNz rejected"
-    )
-    sanitized_basic = _sanitize_error_detail(exc_basic)
-    assert "dXNlcjpwYXNz" not in sanitized_basic
-    assert "Authorization: Basic ***" in sanitized_basic
-
-    # 6. Standalone Bearer token
-    exc_bearer = RuntimeError(
-        "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.token_payload expired"
-    )
-    sanitized_bearer = _sanitize_error_detail(exc_bearer)
-    assert "token_payload" not in sanitized_bearer
-    assert "Bearer ***" in sanitized_bearer
-
-    # 7. api_key, signature in query string or assignments
-    exc_api = ValueError("Auth rejected api_key='ak_live_xyz987' signature=sig1234567")
-    sanitized_api = _sanitize_error_detail(exc_api)
-    assert "ak_live_xyz987" not in sanitized_api
-    assert "sig1234567" not in sanitized_api
-
-    exc_query = RuntimeError(
-        "URL request https://api.binance.com/api/v3/order"
-        "?symbol=BTCUSDT&signature=d98a72ef8912&timestamp=123 failed"
-    )
-    sanitized_query = _sanitize_error_detail(exc_query)
-    assert "d98a72ef8912" not in sanitized_query
-    assert "signature=***" in sanitized_query
-
-    # 8. Private key blocks
-    exc_pkey = RuntimeError(
-        "Bad key: -----BEGIN RSA PRIVATE KEY-----\n"
-        "MIIEowIBAAKCAQEA0...\n"
-        "-----END RSA PRIVATE KEY-----"
-    )
-    sanitized_pkey = _sanitize_error_detail(exc_pkey)
-    assert "MIIEowIBAAKCAQEA0" not in sanitized_pkey
-    assert "[REDACTED_PRIVATE_KEY]" in sanitized_pkey
-
-    # 9. Hyphenated and header formats: X-API-Key, api-key, X-MBX-APIKEY
-    exc_xapikey = RuntimeError("Header X-API-Key: xapi_secret_123 rejected by gateway")
-    sanitized_xapikey = _sanitize_error_detail(exc_xapikey)
-    assert "xapi_secret_123" not in sanitized_xapikey
-    assert "X-API-Key: ***" in sanitized_xapikey
-
-    exc_hyphen_param = ValueError("Parameter api-key=api_secret_123 is invalid")
-    sanitized_hyphen_param = _sanitize_error_detail(exc_hyphen_param)
-    assert "api_secret_123" not in sanitized_hyphen_param
-    assert "api-key=***" in sanitized_hyphen_param
-
-    exc_mbx = ConnectionError("Exchange request X-MBX-APIKEY: mbx_secret_123 failed")
-    sanitized_mbx = _sanitize_error_detail(exc_mbx)
-    assert "mbx_secret_123" not in sanitized_mbx
-    assert "X-MBX-APIKEY: ***" in sanitized_mbx
-
-
-def test_extract_sqlstate_retrieves_pgcode_or_sqlstate() -> None:
-    """F04: Helper extracts standard SQLSTATE from DBAPI/SQLAlchemy exceptions."""
-    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
-        _extract_sqlstate,
-    )
-
-    class MockOrig:
-        pgcode = "08006"
-
-    class MockDBError(Exception):
-        orig = MockOrig()
-
-    err = MockDBError("Connection lost")
-    assert _extract_sqlstate(err) == "08006"
-
-    # When no sqlstate is available, returns None safely
-    assert _extract_sqlstate(RuntimeError("generic")) is None
 
 
 async def test_dashboard_queries_account_performance_and_cash_flow_seeding() -> None:
@@ -2075,6 +818,7 @@ async def test_dashboard_queries_account_performance_and_cash_flow_seeding() -> 
     dashboard = DashboardQueries(
         session_factory=mock_factory,
         clock=lambda: now,
+        nextgen_accounts=(),
     )
 
     perf = await dashboard.account_performance("primary", window_hours=24)

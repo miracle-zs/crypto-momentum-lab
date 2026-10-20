@@ -10,9 +10,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.live_rollout.runtime_manifest import LiveRuntimeAccount
 from crypto_momentum_lab.next_gen.db_models import LiveOrderRow, LivePositionBatchRow
-from crypto_momentum_lab.operator_dashboard.live_account_metrics_queries import (
-    account_equity_range,
-)
 from crypto_momentum_lab.operator_dashboard.overview_queries import (
     live_account_fleet_status,
 )
@@ -39,6 +36,19 @@ from crypto_momentum_lab.persistence.postgres.models import (
 
 TERMINAL_STATUSES = ("FILLED", "CANCELED", "EXPIRED", "REJECTED")
 EquityRange = Literal["24h", "7d", "30d", "1y"]
+_EQUITY_RANGES: dict[str, tuple[timedelta, int]] = {
+    "24h": (timedelta(hours=24), 6 * 60),
+    "7d": (timedelta(days=7), 60 * 60),
+    "30d": (timedelta(days=30), 3 * 60 * 60),
+    "1y": (timedelta(days=365), 2 * 24 * 60 * 60),
+}
+
+
+def account_equity_range(value: str) -> tuple[timedelta, int]:
+    try:
+        return _EQUITY_RANGES[value]
+    except KeyError as error:
+        raise ValueError(f"unsupported account equity range: {value}") from error
 
 
 class NextGenDashboardQueries:
@@ -117,6 +127,17 @@ class NextGenDashboardQueries:
         return LiveAccountsResponse(
             status=live_account_fleet_status(accounts), accounts=accounts
         )
+
+    async def active_halt_count(self) -> int:
+        async with self._sessions() as session:
+            count = await session.scalar(
+                select(func.count(RiskHaltRow.halt_id)).where(
+                    RiskHaltRow.environment == "live",
+                    RiskHaltRow.account_label.in_(self._accounts),
+                    RiskHaltRow.active.is_(True),
+                )
+            )
+        return int(count or 0)
 
     async def market_performance(self) -> MarketDataPerformanceResponse:
         samples = []

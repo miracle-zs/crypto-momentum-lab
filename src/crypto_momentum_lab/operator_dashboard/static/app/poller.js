@@ -61,8 +61,9 @@ export function createPoller({ renderers, onAfterRender }) {
   const strategyHooks = renderers.__strategyHooks || null;
 
   function updateGlobalMode(data) {
-    const live = data.services?.find((service) => service.name === "live-rollout")
-      || data.services?.find((service) => service.name === "strategy-runner" && service.details?.engine === "nextgen");
+    const live = data.services?.find(
+      (service) => service.name === "strategy-runner" && service.details?.engine === "nextgen",
+    );
     const mode = liveModeForService(live, data.active_halt_count);
     setLiveService(live || null);
     if (getLiveMode() === "LIVE" && mode !== "LIVE") {

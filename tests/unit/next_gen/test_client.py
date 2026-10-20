@@ -163,6 +163,7 @@ async def test_user_data_stream_parse_order_trade_update():
         exchange_order_id=88888888,
         trade_time=datetime.fromtimestamp(1700000000005 / 1000.0, tz=UTC),
         exchange_realized_pnl=None,
+        trade_payload=raw_event["o"],
     )
 
 

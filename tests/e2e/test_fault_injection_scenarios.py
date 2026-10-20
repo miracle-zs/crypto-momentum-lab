@@ -14,10 +14,6 @@ from crypto_momentum_lab.domain.execution.order_state import (
 from crypto_momentum_lab.execution_account.binance.user_data_parser import (
     parse_user_data_event,
 )
-from crypto_momentum_lab.execution_account.daemon import (
-    UserDataAccountSyncConfig,
-    UserDataAccountSyncDaemon,
-)
 from crypto_momentum_lab.execution_account.hub import (
     WebSocketAccountEventSource,
 )
@@ -42,13 +38,6 @@ from tests.unit.execution_account.orders.test_state_machine import (
 )
 from tests.unit.execution_account.test_hub import _event
 from tests.unit.execution_account.test_user_data import _initial_snapshot
-from tests.unit.execution_account.test_user_data_daemon import (
-    BlockingSyncService,
-    FakeStream,
-)
-from tests.unit.execution_account.test_user_data_daemon import (
-    _snapshot as account_snapshot,
-)
 from tests.unit.market_data.test_hub import fixture_state
 
 pytestmark = pytest.mark.e2e
@@ -280,8 +269,8 @@ async def test_fault_injection_submitting_sigterm_is_reconciled_after_restart() 
     assert repository.events[-1].state is ExchangeOrderState.FILLED
 
 
-async def test_fault_injection_account_overflow_defers_and_recovers() -> None:
-    previous = account_snapshot()
+async def test_fault_injection_account_overflow_recovers_from_snapshot() -> None:
+    previous = _initial_snapshot()
     source = WebSocketAccountEventSource(
         url="ws://unused",
         environment="live",
@@ -314,58 +303,6 @@ async def test_fault_injection_account_overflow_defers_and_recovers() -> None:
     assert materialized.account_snapshot == previous
     assert source.metrics.recovery_count == 1
     assert source.metrics.last_recovery_reason == "account_event_queue_overflow"
-
-    service = BlockingSyncService(account_snapshot())
-    applied = []
-    daemon = UserDataAccountSyncDaemon(
-        service=service,
-        stream=FakeStream(),
-        config=UserDataAccountSyncConfig(),
-        on_event_applied=lambda event, result: applied.append((event, result)),
-    )
-    await daemon._reconcile(include_fills=True)
-    daemon._start_pipeline()
-    service.block_next_sync = True
-    service.sync_entered.clear()
-    service.release_sync.clear()
-    reconcile_task = asyncio.create_task(daemon._reconcile(include_fills=True))
-    try:
-        await asyncio.wait_for(service.sync_entered.wait(), timeout=1)
-        event = parse_user_data_event(
-            {
-                "e": "ACCOUNT_UPDATE",
-                "E": 1783123201000,
-                "T": 1783123201000,
-                "a": {
-                    "B": [{"a": "USDT", "wb": "101", "cw": "81"}],
-                    "P": [],
-                },
-            },
-            received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
-        )
-        await daemon._on_event(event)
-        assert daemon._event_queue is not None
-        await asyncio.wait_for(daemon._event_queue.join(), timeout=1)
-        assert len(daemon._deferred_events) == 1
-        assert applied == []
-
-        service.release_sync.set()
-        await asyncio.wait_for(reconcile_task, timeout=1)
-        assert daemon._event_queue is not None
-        assert daemon._persistence_queue is not None
-        await daemon._event_queue.join()
-        await daemon._persistence_queue.join()
-
-        assert len(applied) == 1
-        assert applied[0][0] is event
-        assert not daemon._deferred_events
-    finally:
-        service.release_sync.set()
-        if not reconcile_task.done():
-            reconcile_task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await reconcile_task
-        await daemon._stop_pipeline()
 
 
 def test_fault_injection_exchange_clock_rollback_requires_reconciliation() -> None:

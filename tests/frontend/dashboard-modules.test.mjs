@@ -38,7 +38,6 @@ import {
   createStrategySection,
 } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/strategy.js";
 import { renderUniverse } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/universe.js";
-import { renderPerformance } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/performance.js";
 import {
   POLL_MS,
   SECTION_POLL_MS,
@@ -433,15 +432,15 @@ test("overview renderer exposes local heartbeat update hooks", () => {
     database_status: "READY",
     active_halt_count: 0,
     services: [{
-      name: "live-rollout",
+      name: "strategy-runner",
       status: "LIVE",
       age_seconds: 5,
       observed_at: "2026-08-16T00:00:00Z",
     }],
   });
   assert.equal(status, "READY");
-  assert.match(html, /data-service-age="live-rollout"/);
-  assert.match(html, /data-service-meter="live-rollout"/);
+  assert.match(html, /data-service-age="strategy-runner"/);
+  assert.match(html, /data-service-meter="strategy-runner"/);
 });
 
 test("collector renderer exposes freshness, continuity, and capacity evidence", () => {
@@ -1065,136 +1064,6 @@ test("live account metric charts start at the first daily 08:00 UTC+8 bucket", (
     [0, 10],
     [0, 10],
   ]);
-});
-
-test("live account renderer separates sync service from account configuration", () => {
-  const [status, html] = renderAccount({
-    status: "READY",
-    observed_at: new Date().toISOString(),
-    environment: "live",
-    account_label: "primary",
-    account_config: { hedge_mode: false, multi_assets_mode: false, fee_tier: 0 },
-    reconciliation: {
-      status: "ready",
-      mismatch_count: 0,
-      balance_count: 1,
-      position_count: 0,
-      open_order_count: 0,
-      fill_count: 0,
-    },
-    summary: {
-      usdt_wallet_balance: "282.28",
-      usdt_available_balance: "257.84",
-      total_unrealized_pnl: "0",
-      gross_position_notional: "0",
-      position_count: 0,
-      open_order_count: 0,
-      recent_trade_count: 0,
-    },
-    balances: [{ asset: "USDT", wallet_balance: "282.28", available_balance: "257.84", unrealized_pnl: "0" }],
-    equity_curve: [
-      { observed_at: "2026-08-16T00:00:00Z", equity: "280" },
-      { observed_at: "2026-08-16T00:06:00Z", equity: "282" },
-    ],
-    equity_window_start: "2026-08-15T00:00:00Z",
-    equity_window_end: "2026-08-16T00:00:00Z",
-    equity_sample_interval_seconds: 360,
-    positions: [],
-    open_orders: [],
-    fills: [],
-  });
-  assert.equal(status, "READY");
-  assert.match(html, /execution-account · 只读同步/);
-  assert.match(html, /账户配置/);
-  assert.match(html, /Binance V3 账户配置快照/);
-  assert.match(html, /live-strategy/);
-  assert.match(html, /对账一致/);
-  assert.match(html, /数据新鲜度/);
-  assert.doesNotMatch(html, /READ-ONLY ACCOUNT SYNC/);
-});
-
-test("performance renderer exposes decision SLO, checkpoint phase, and host metrics", () => {
-  const [status, html] = renderPerformance({
-    status: "READY",
-    decision_slo: {
-      persisted_event_count: 142,
-      window: "24h",
-      phase_latency: {
-        "candidate_accepted->risk_approved": {
-          sample_count: 142,
-          p50_ms: 1.2,
-          p95_ms: 3.4,
-          max_ms: 5.0,
-        },
-      },
-    },
-    persistence: {
-      status: "READY",
-      p50_total_ms: 4.2,
-      p95_total_ms: 11.8,
-      max_total_ms: 18.0,
-      sample_count: 40,
-      stagger_slots: [
-        {
-          account_id: "primary",
-          phase_seconds: 0,
-          target_second: ":00",
-          status: "READY",
-          last_checkpoint_at: "2026-09-18T00:00:00Z",
-          avg_total_ms: 4.2,
-          p95_total_ms: 12.0,
-        },
-      ],
-      recent_checkpoints: [
-        {
-          account_id: "primary",
-          run_id: "primary",
-          phase_seconds: 0,
-          occurred_at: "2026-09-18T00:00:00Z",
-          prepare_ms: 0.1,
-          event_loop_lag_ms: 0.2,
-          pool_acquire_ms: 0.8,
-          sql_execute_ms: 3.5,
-          total_ms: 4.5,
-          is_new_connection: false,
-        },
-      ],
-    },
-    market_data: {
-      status: "READY",
-      market_delay_ms: 45.0,
-      latency_source: "strategy_receive",
-      latency_observed_at: "2026-09-18T00:00:00Z",
-      realtime_closure_delay_seconds: 0.4,
-      last_bucket_end: "2026-09-18T00:00:00Z",
-      dropped_batches_1h: 0,
-      missing_rows_1h: 0,
-    },
-    host_resources: {
-      status: "READY",
-      cpu_load_1m: 0.45,
-      cpu_load_5m: 0.52,
-      cpu_load_15m: 0.48,
-      mem_total_bytes: 8589934592,
-      mem_used_bytes: 4294967296,
-      mem_available_bytes: 4294967296,
-      mem_usage_percent: 50.0,
-      swap_total_bytes: 2147483648,
-      swap_used_bytes: 0,
-      swap_usage_percent: 0.0,
-      postgres_active_connections: 5,
-      postgres_idle_connections: 12,
-      postgres_database_size_bytes: 159383552,
-    },
-  });
-
-  assert.equal(status, "READY");
-  assert.match(html, /决策链路最高 P95/);
-  assert.match(html, /Checkpoint P95 耗时/);
-  assert.match(html, /多账户 Checkpoint 物理时钟相位错峰/);
-  assert.match(html, /收桶至策略接收 · 采样/);
-  assert.match(html, /primary/);
-  assert.match(html, /152.0 MiB/);
 });
 
 test("account equity and pnl ticks do not change structural render key", () => {

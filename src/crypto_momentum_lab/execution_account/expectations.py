@@ -3,7 +3,7 @@
 The Binance account stream can deliver ``ACCOUNT_UPDATE`` before the matching
 ``ORDER_TRADE_UPDATE``.  A position key is therefore not evidence of an
 accounting failure by itself.  The live order process registers an expected
-entry before it calls Binance; the execution-account process consumes that
+        entry before it calls Binance; the account-state Hub consumes that
 single-use hint when the first non-zero position arrives.
 
 The registry is intentionally in memory.  It is a fast-path correlation aid,

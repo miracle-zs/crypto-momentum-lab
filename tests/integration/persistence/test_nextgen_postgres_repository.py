@@ -529,7 +529,6 @@ async def test_dashboard_reads_nextgen_state_and_never_invents_margin(postgres_r
         facade = DashboardQueries(
             async_sessionmaker(postgres_repo._engine),
             clock=lambda: now,
-            execution_engine="nextgen",
             nextgen_accounts=(config,),
         )
         app = create_dashboard_app(queries=facade)

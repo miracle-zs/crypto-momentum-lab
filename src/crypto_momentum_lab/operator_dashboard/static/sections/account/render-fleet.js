@@ -124,11 +124,9 @@ export function liveAccountSummary(accounts, overallStatus) {
 
 export function renderLiveAccounts(state, data) {
   const sourceAccounts = Array.isArray(data?.accounts) ? data.accounts : [];
-  const accounts = sourceAccounts.length
-    ? sourceAccounts
-    : (data?.account_label || data?.summary ? [data] : []);
+  const accounts = sourceAccounts;
   if (!accounts.length) {
-    return [data?.status || "UNKNOWN", `<div class="live-account-empty">${emptyBox("等待实盘账户同步", "尚未发现 live execution-account；写入状态后会显示四账户矩阵。")}</div>`];
+    return [data?.status || "UNKNOWN", `<div class="live-account-empty">${emptyBox("等待实盘账户状态", "账户状态写入后会显示实盘账户矩阵。")}</div>`];
   }
   const selectedLabel = normalizeSelectedAccount(state, accounts, data?.selected_account_label);
   const selectedAccount = accounts.find(

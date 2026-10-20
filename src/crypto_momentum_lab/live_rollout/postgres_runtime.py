@@ -708,7 +708,7 @@ class PostgresLiveContextProvider(LiveContextReader):
     ) -> None:
         """Publish the latest Hub snapshot into the live context seam.
 
-        The snapshot is already merged by the execution-account daemon.  This
+        The snapshot is already merged by the account-state Hub.  This
         method only validates its scope, swaps the in-memory view, and
         invalidates the context cache; it performs no database I/O.
         """

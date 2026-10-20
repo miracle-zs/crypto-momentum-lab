@@ -14,13 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from crypto_momentum_lab.live_rollout.runtime_manifest import LiveRuntimeAccount
 from crypto_momentum_lab.next_gen.dashboard import NextGenDashboardQueries
 from crypto_momentum_lab.operator_dashboard import (
-    account_queries as _account_queries,
-)
-from crypto_momentum_lab.operator_dashboard import (
     common_equity as _common_equity,
-)
-from crypto_momentum_lab.operator_dashboard import (
-    live_account_metrics_queries as _live_account_metrics_queries,
 )
 from crypto_momentum_lab.operator_dashboard import (
     overview_queries as _overview_queries,
@@ -30,9 +24,6 @@ from crypto_momentum_lab.operator_dashboard import (
 )
 from crypto_momentum_lab.operator_dashboard import (
     paper_equity_queries as _paper_equity_queries,
-)
-from crypto_momentum_lab.operator_dashboard import (
-    risk_execution_queries as _risk_execution_queries,
 )
 from crypto_momentum_lab.operator_dashboard import (
     telemetry_queries as _telemetry_queries,
@@ -80,14 +71,11 @@ _PAPER_HISTORY_RECENT_LIMIT = 500
 _COMMON_EQUITY_BUCKET_SECONDS = 15 * 60
 FIXED_COMMON_EQUITY_START_AT = datetime(2026, 8, 21, 2, 45, tzinfo=UTC)
 DecisionSLOQueries = _telemetry_queries.DecisionSLOQueries
-RiskExecutionQueries = _risk_execution_queries.RiskExecutionQueries
 LiveCashFlowAdjustment = _common_equity.LiveCashFlowAdjustment
 _as_utc = _common_equity.as_utc
-LiveAccountMetricsQueries = _live_account_metrics_queries.LiveAccountMetricsQueries
 PaperAccountQueries = _paper_account_queries.PaperAccountQueries
 _paper_exit_details = _paper_account_queries._paper_exit_details
 PaperEquityQueries = _paper_equity_queries.PaperEquityQueries
-LiveAccountQueries = _account_queries.LiveAccountQueries
 
 
 DEFAULT_LIVE_CASH_FLOW_ADJUSTMENTS: tuple[LiveCashFlowAdjustment, ...] = ()
@@ -192,8 +180,7 @@ class DashboardQueries:
         live_cash_flow_adjustments: Sequence[LiveCashFlowAdjustment] | None = None,
         common_equity_start_at: datetime | None = None,
         research_collector_root: Path = DEFAULT_RESEARCH_COLLECTOR_ROOT,
-        execution_engine: str = "legacy",
-        nextgen_accounts: tuple[LiveRuntimeAccount, ...] | None = None,
+        nextgen_accounts: tuple[LiveRuntimeAccount, ...],
     ) -> None:
         self._session_factory = session_factory
         self._clock = clock
@@ -220,15 +207,6 @@ class DashboardQueries:
             stale_after_seconds=self._stale_after_seconds,
             research_collector_root=self._research_collector_root,
         )
-        self._risk_execution_queries = RiskExecutionQueries(
-            session_factory,
-            environment="live",
-            market_environment=os.environ.get("CML_MARKET_ENVIRONMENT", "research"),
-        )
-        self._live_account_metrics_queries = LiveAccountMetricsQueries(
-            session_factory,
-            clock=self._clock,
-        )
         self._paper_account_queries = PaperAccountQueries(
             session_factory,
             clock=self._clock,
@@ -243,68 +221,49 @@ class DashboardQueries:
             live_cash_flow_adjustments=self._live_cash_flow_adjustments,
             common_equity_start_at=self._common_equity_start_at,
         )
-        self._account_queries = LiveAccountQueries(
-            session_factory,
-            clock=self._clock,
-        )
         self._performance_queries = PerformanceQueries(
             session_factory,
             clock=self._clock,
             decision_slo_queries=self._telemetry_queries,
         )
 
-        self._nextgen_queries = None
-        if execution_engine not in ("legacy", "nextgen"):
-            raise ValueError("Unsupported dashboard execution engine")
-        if execution_engine == "nextgen":
-            if not nextgen_accounts:
-                raise ValueError(
-                    "NextGen dashboard requires the runtime account manifest"
-                )
-            self._nextgen_queries = NextGenDashboardQueries(
-                session_factory,
-                nextgen_accounts,
-                clock=clock,
-            )
-            self._account_queries = self._nextgen_queries
-            self._risk_execution_queries = self._nextgen_queries
-            self._live_account_metrics_queries = self._nextgen_queries
+        self._nextgen_queries = NextGenDashboardQueries(
+            session_factory,
+            nextgen_accounts,
+            clock=self._clock,
+        )
 
     async def health(self) -> dict[str, str]:
         return await self._overview_queries.health()
 
     async def operational_health(self) -> dict[str, Any]:
-        if self._nextgen_queries is not None:
-            readiness = await self.readiness()
-            ready = readiness.status is OperationalStatus.READY
-            return {
-                "scope": "nextgen",
-                "overall_status": "healthy" if ready else "degraded",
-                "is_execution_ready": ready,
-                "source_as_of": readiness.observed_at.isoformat(),
-                "evaluated_at": readiness.observed_at.isoformat(),
-                "dimensions": [],
-                "details": {
-                    "accounts": {
-                        account.account_label: account.readiness
-                        for account in readiness.accounts
-                    }
-                },
-                "account_capabilities": {
-                    account.account_label: (
-                        None
-                        if account.runtime_tradeability is None
-                        else account.runtime_tradeability.model_dump()
-                    )
+        readiness = await self.readiness()
+        ready = readiness.status is OperationalStatus.READY
+        return {
+            "scope": "nextgen",
+            "overall_status": "healthy" if ready else "degraded",
+            "is_execution_ready": ready,
+            "source_as_of": readiness.observed_at.isoformat(),
+            "evaluated_at": readiness.observed_at.isoformat(),
+            "dimensions": [],
+            "details": {
+                "accounts": {
+                    account.account_label: account.readiness
                     for account in readiness.accounts
                 },
-            }
-        return await self._overview_queries.operational_health()
+            },
+            "account_capabilities": {
+                account.account_label: (
+                    None
+                    if account.runtime_tradeability is None
+                    else account.runtime_tradeability.model_dump()
+                )
+                for account in readiness.accounts
+            },
+        }
 
     async def readiness(self) -> SystemReadinessResponse:
-        if self._nextgen_queries is not None:
-            return await self._nextgen_queries.readiness(await self.health())
-        return await self._overview_queries.readiness()
+        return await self._nextgen_queries.readiness(await self.health())
 
     async def decision_slo(
         self,
@@ -317,73 +276,60 @@ class DashboardQueries:
         window: str = "24h",
     ) -> SystemPerformanceResponse:
         result = await self._performance_queries.performance(window)
-        if self._nextgen_queries is not None:
-            result.execution_engine = "nextgen"
-            market = await self._nextgen_queries.market_performance()
-            market.missing_agg_trade_count = result.market_data.missing_agg_trade_count
-            market.quality_events_count_1h = result.market_data.quality_events_count_1h
-            result.market_data = market
+        result.execution_engine = "nextgen"
+        market = await self._nextgen_queries.market_performance()
+        market.missing_agg_trade_count = result.market_data.missing_agg_trade_count
+        market.quality_events_count_1h = result.market_data.quality_events_count_1h
+        result.market_data = market
         return result
 
     async def research_collector(self) -> ResearchCollectorResponse:
         return await self._overview_queries.research_collector()
 
     async def live_accounts(self) -> LiveAccountsResponse:
-        if self._nextgen_queries is not None:
-            return await self._nextgen_queries.live_accounts()
-        return await self._overview_queries.live_accounts()
+        return await self._nextgen_queries.live_accounts()
 
     async def live_account_metrics(
         self,
         equity_range: str = "24h",
     ) -> LiveAccountMetricsResponse:
-        return await self._live_account_metrics_queries.live_account_metrics(
-            equity_range
-        )
+        return await self._nextgen_queries.live_account_metrics(equity_range)
 
     async def overview(self) -> SystemOverviewResponse:
         overview = await self._overview_queries.overview()
-        if self._nextgen_queries is not None:
-            fleet = await self._nextgen_queries.live_accounts()
-            overview.account_statuses = fleet.accounts
-            overview.services = [
-                service
-                for service in overview.services
-                if not service.name.startswith("execution-account")
-                and service.name != "live-rollout"
-                and service.name != "strategy-runner"
-            ]
-            observed = [a.runtime_observed_at for a in fleet.accounts]
-            runner = _overview_queries.service(
-                "strategy-runner",
-                self._clock(),
-                min(observed) if observed and all(observed) else None,
-                180,
-            )
-            runner.details = {
-                "engine": "nextgen",
-                "status": fleet.status.value,
-                "started_at": (
-                    max(a.runtime_started_at for a in fleet.accounts).isoformat()
-                    if fleet.accounts
-                    and all(a.runtime_started_at for a in fleet.accounts)
-                    else None
-                ),
-                "accounts": {a.account_label: a.readiness for a in fleet.accounts},
-                "entry_gate_open": all(
-                    a.runtime_tradeability and a.runtime_tradeability.entry_gate_open
+        fleet = await self._nextgen_queries.live_accounts()
+        overview.account_statuses = fleet.accounts
+        overview.active_halt_count = await self._nextgen_queries.active_halt_count()
+        observed = [a.runtime_observed_at for a in fleet.accounts]
+        runner = _overview_queries.service(
+            "strategy-runner",
+            self._clock(),
+            min(observed) if observed and all(observed) else None,
+            180,
+        )
+        runner.details = {
+            "engine": "nextgen",
+            "status": fleet.status.value,
+            "started_at": (
+                max(a.runtime_started_at for a in fleet.accounts).isoformat()
+                if fleet.accounts and all(a.runtime_started_at for a in fleet.accounts)
+                else None
+            ),
+            "accounts": {a.account_label: a.readiness for a in fleet.accounts},
+            "entry_gate_open": all(
+                a.runtime_tradeability and a.runtime_tradeability.entry_gate_open
+                for a in fleet.accounts
+            ),
+            "entry_gate_reasons": sorted(
+                {
+                    a.runtime_tradeability.entry_gate_reason
                     for a in fleet.accounts
-                ),
-                "entry_gate_reasons": sorted(
-                    {
-                        a.runtime_tradeability.entry_gate_reason
-                        for a in fleet.accounts
-                        if a.runtime_tradeability
-                        and not a.runtime_tradeability.entry_gate_open
-                    }
-                ),
-            }
-            overview.services.insert(1, runner)
+                    if a.runtime_tradeability
+                    and not a.runtime_tradeability.entry_gate_open
+                }
+            ),
+        }
+        overview.services.insert(1, runner)
         return overview
 
     async def universe(self) -> UniverseStatusResponse:
@@ -428,14 +374,14 @@ class DashboardQueries:
         account_label: str | None = None,
         environment: str | None = None,
     ) -> AccountOverviewResponse:
-        return await self._account_queries.account(
+        return await self._nextgen_queries.account(
             equity_range=equity_range,
             account_label=account_label,
             environment=environment,
         )
 
     async def risk_execution(self) -> RiskExecutionResponse:
-        return await self._risk_execution_queries.risk_execution()
+        return await self._nextgen_queries.risk_execution()
 
     async def reports(self) -> RunReportSummaryResponse:
         async with self._session_factory() as session:

@@ -8,7 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import dialect
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from crypto_momentum_lab.operator_dashboard.live_account_metrics_queries import (
+from crypto_momentum_lab.operator_dashboard.account_equity_history import (
     account_equity_statement,
 )
 

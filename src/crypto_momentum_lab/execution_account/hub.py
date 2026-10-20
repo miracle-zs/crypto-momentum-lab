@@ -1,6 +1,6 @@
 """Low-latency account-state fan-out for live execution.
 
-The execution-account process owns the Binance user-data WebSocket and the
+The live account runtime owns the Binance user-data WebSocket and the
 complete in-memory account state.  A new subscriber receives a full account
 snapshot; ordinary notifications then carry versioned account-local deltas.
 The Hub retains the latest effective snapshot for gap recovery. PostgreSQL
@@ -353,7 +353,7 @@ class _ReplayEntry:
 
 
 class AccountEventHub:
-    """Bounded latest-event fan-out owned by execution-account."""
+    """Bounded latest-event fan-out owned by the live account runtime."""
 
     def __init__(
         self,

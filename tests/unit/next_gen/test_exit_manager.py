@@ -478,6 +478,7 @@ async def test_candle_exit_uses_configured_profit_targets(
         limit_price=Decimal("100.8800"),
         grace_period_sec=manager.grace_period_sec,
         immediate=immediate,
+        exit_reason="candle_15m_bearish",
     )
     await manager.close()
 

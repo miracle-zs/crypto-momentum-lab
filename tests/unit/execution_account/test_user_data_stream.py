@@ -4,7 +4,6 @@ from inspect import signature
 from websockets.protocol import State
 
 import crypto_momentum_lab.execution_account.binance.user_data as user_data_module
-from crypto_momentum_lab.apps.execution_account.main import sync_command
 from crypto_momentum_lab.execution_account.binance.user_data import (
     BinanceUsdMUserDataStream,
 )
@@ -32,10 +31,8 @@ def test_user_data_stream_defaults_to_private_user_data_endpoint() -> None:
     stream_default = (
         signature(BinanceUsdMUserDataStream).parameters["websocket_url"].default
     )
-    command_default = signature(sync_command).parameters["websocket_url"].default
 
     assert stream_default == expected
-    assert command_default == expected
 
 
 async def test_stream_replaces_listen_key_after_expiration(monkeypatch) -> None:

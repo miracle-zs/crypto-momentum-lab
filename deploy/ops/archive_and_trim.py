@@ -77,8 +77,8 @@ TABLES: tuple[tuple[str, str], ...] = (
     # to 17 days / 144 MB (89 MB of that is TOAST holding six jsonb columns,
     # so archiving it stays on the JSONL path).
     ("live_strategy_signals", "recorded_at"),
-    # State-machine transitions for execution-account daemons.  Only the
-    # latest row per account is load-bearing; history is audit and had no
+    # State transitions for live account runtimes.  Only the latest row per
+    # account is load-bearing; history is audit and had no
     # retention (~12k rows/day, 24 MB and growing).
     ("execution_account_process_states", "occurred_at"),
     # Market-data quality diagnostics (jsonb -> JSONL archive).  Volume

@@ -156,13 +156,6 @@ class _FakeReadClient:
     async def fetch_open_orders(self) -> tuple[AccountOpenOrderSnapshot, ...]:
         return self._open_orders
 
-    @property
-    def incomplete_fill_symbols(self) -> frozenset[str]:
-        return frozenset()
-
-    async def fetch_recent_fills(self, symbols=(), **kwargs):  # type: ignore[no-untyped-def]
-        return ()
-
     async def fetch_fills_with_provenance(self, symbol, **kwargs):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 

@@ -33,7 +33,7 @@ from crypto_momentum_lab.operator_dashboard.common_equity import (
 from crypto_momentum_lab.operator_dashboard.common_equity import (
     relative_bucket_end as _relative_bucket_end,
 )
-from crypto_momentum_lab.operator_dashboard.live_account_metrics_queries import (
+from crypto_momentum_lab.operator_dashboard.account_equity_history import (
     AccountEquityPoint,
     account_equity_statement,
 )

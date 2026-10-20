@@ -15,7 +15,7 @@ export function liveModeForService(service, activeHaltCount) {
     if (service.status !== "FRESH") return "UNKNOWN";
     return service.details.status === "READY" ? "LIVE" : "DEGRADED";
   }
-  return service?.status === "LIVE" ? "LIVE" : "UNKNOWN";
+  return "UNKNOWN";
 }
 
 export function renderLiveRuntime() {

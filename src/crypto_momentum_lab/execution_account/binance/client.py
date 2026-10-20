@@ -5,7 +5,7 @@ import heapq
 import hmac
 import math
 import time
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, DecimalException
@@ -56,7 +56,6 @@ from crypto_momentum_lab.execution_account.binance.exit_recovery_rules import (
 )
 from crypto_momentum_lab.execution_account.binance.request_rules import (
     entry_leverage_candidates,
-    normalize_fill_cursors,
     normalize_symbols,
     require_margin_type,
 )
@@ -282,7 +281,7 @@ class _AsyncRequestPacer:
 class _FileRequestPacer:
     """Coordinate request starts across account processes on one host.
 
-    The execution-account services run in separate containers, so an
+    The account services run in separate containers, so an
     in-process asyncio pacer cannot protect the aggregate Binance request
     budget.  A short-lived advisory lock reserves the next wall-clock slot in
     a shared volume; the network request starts after the lock is released.
@@ -411,8 +410,6 @@ class BinanceUsdMPrivateReadClient:
             trust_env=False,
         )
         self._endpoint_metrics: dict[str, _EndpointMetric] = {}
-        self._incomplete_fill_symbols: frozenset[str] = frozenset()
-
     @property
     def endpoint_metrics(self) -> dict[str, _EndpointMetric]:
         """Return request counts and latency totals without credentials."""
@@ -542,87 +539,6 @@ class BinanceUsdMPrivateReadClient:
                 expected_symbol=expected_symbol,
             )
             for item in rest_require_sequence_of_mappings(payload)
-        )
-
-    @property
-    def incomplete_fill_symbols(self) -> frozenset[str]:
-        return self._incomplete_fill_symbols
-
-    async def fetch_recent_fills(
-        self,
-        symbols: tuple[str, ...] = (),
-        *,
-        from_id_by_symbol: Mapping[str, int] | None = None,
-        start_time_by_symbol: Mapping[str, int] | None = None,
-        max_pages_per_symbol: int = 10,
-    ) -> tuple[AccountFillEvent, ...]:
-        normalized_symbols = normalize_symbols(symbols)
-        normalized_from_ids = normalize_fill_cursors(from_id_by_symbol)
-        normalized_start_times = normalize_fill_cursors(start_time_by_symbol)
-        fills: dict[tuple[str, str], AccountFillEvent] = {}
-        incomplete_symbols: set[str] = set()
-        for symbol in normalized_symbols:
-            if symbol in normalized_from_ids and symbol in normalized_start_times:
-                raise ValueError(
-                    f"from_id and start_time cannot both be set for {symbol}"
-                )
-            current_from_id = normalized_from_ids.get(symbol)
-            current_start_time = normalized_start_times.get(symbol)
-            reached_short_page = False
-            for _ in range(max_pages_per_symbol):
-                params: dict[str, str | int | float | bool | None] = {
-                    "symbol": symbol,
-                    "limit": 1000,
-                }
-                if current_from_id is not None:
-                    params["fromId"] = current_from_id
-                elif current_start_time is not None:
-                    params["startTime"] = current_start_time
-
-                payload = await self._signed_get(
-                    "/fapi/v1/userTrades",
-                    params,
-                )
-                items = rest_require_sequence_of_mappings(payload)
-                if not items:
-                    reached_short_page = True
-                    break
-
-                max_seen_trade_id: int | None = None
-                for item in items:
-                    fill = account_fill_from_trade_item(
-                        item,
-                        environment=self._environment,
-                        account_label=self._account_label,
-                        expected_symbol=symbol,
-                    )
-                    trade_id = int(fill.trade_id)
-                    if max_seen_trade_id is None or trade_id > max_seen_trade_id:
-                        max_seen_trade_id = trade_id
-                    fills[(fill.symbol, fill.trade_id)] = fill
-
-                # If the returned batch is less than limit, symbol coverage is complete
-                if len(items) < 1000:
-                    reached_short_page = True
-                    break
-
-                # Advance cursor for next page
-                if max_seen_trade_id is not None:
-                    current_from_id = max_seen_trade_id + 1
-                    current_start_time = None
-                else:
-                    reached_short_page = True
-                    break
-
-            if not reached_short_page:
-                incomplete_symbols.add(symbol)
-
-        self._incomplete_fill_symbols = frozenset(incomplete_symbols)
-        return tuple(
-            sorted(
-                fills.values(),
-                key=lambda fill: (fill.trade_at, fill.symbol, fill.trade_id),
-            )
         )
 
     async def fetch_fills_with_provenance(

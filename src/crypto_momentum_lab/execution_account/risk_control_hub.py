@@ -1,6 +1,6 @@
 """Low-volume, fail-closed risk-control notifications.
 
-The execution-account process owns this transport next to the account-state
+The live account runtime owns this transport next to the account-state
 Hub.  PostgreSQL remains the durable authority: an operator writes the
 transition or halt first and publishes a notification only as a latency
 optimization.  Consumers must therefore re-read durable control state after a
@@ -211,7 +211,7 @@ _QueueItem = RiskControlEvent | _QueueOverflow | Exception
 
 
 class RiskControlHub:
-    """Bounded control-event fan-out owned by execution-account."""
+    """Bounded control-event fan-out owned by the live account runtime."""
 
     def __init__(self, config: RiskControlHubConfig = RiskControlHubConfig()) -> None:
         self._config = config

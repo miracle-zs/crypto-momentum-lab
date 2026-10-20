@@ -1,15 +1,8 @@
-"""Operational overview queries for the operator dashboard.
-
-This module owns the read model for the dashboard's operational overview:
-health, collector state, live-account summaries, service freshness, and the
-active universe.  Other dashboard domains may reuse the account-summary seam,
-but do not need to know how the append-only process and lease rows are joined.
-"""
+"""Shared dashboard queries for health, research collection, and universe."""
 
 import asyncio
 from collections.abc import Callable, Sequence
-from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,30 +10,14 @@ from sqlalchemy import Select, and_, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.market.models import JsonValue
-from crypto_momentum_lab.domain.operational import (
-    CapabilityState,
-    HealthDimensionName,
-    OperationalView,
-    aggregate_operational_views,
-    evaluate_standard_health,
-    read_health,
-)
 from crypto_momentum_lab.operator_dashboard.collector_status import (
     read_research_collector_status,
 )
-from crypto_momentum_lab.operator_dashboard.fact_integrity_queries import (
-    FactIntegritySummary,
-    load_fact_integrity,
-)
 from crypto_momentum_lab.operator_dashboard.schemas import (
-    LiveAccountsResponse,
     LiveAccountSummaryResponse,
     ResearchCollectorResponse,
     ServiceStatusResponse,
-    StreamReadinessDetailResponse,
     SystemOverviewResponse,
-    SystemReadinessResponse,
-    TradeabilityDetailResponse,
     UniverseStatusResponse,
 )
 from crypto_momentum_lab.operator_dashboard.status import (
@@ -48,27 +25,12 @@ from crypto_momentum_lab.operator_dashboard.status import (
     freshness_status,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
-    AccountReconciliationRunRow,
     ExecutionAccountProcessStateRow,
-    LiveSessionTransitionRow,
     MonitoringMembershipRow,
-    RiskHaltRow,
     RuntimeMarketState15sRow,
-    StrategyLiveStateRow,
-    StrategyRuntimeCheckpointRow,
-    StrategyRuntimeEventRow,
     UniverseEntryRow,
     UniverseSnapshotRow,
 )
-
-
-def published_tradeability(
-    account: LiveAccountSummaryResponse, now: datetime
-) -> TradeabilityDetailResponse | None:
-    observed = account.runtime_observed_at
-    if observed is None or not 0 <= (now - observed).total_seconds() <= 180:
-        return None
-    return account.runtime_tradeability
 
 
 def latest_live_account_process_statement() -> Select[Any]:
@@ -112,25 +74,6 @@ def account_label_sort_key(account_label: str) -> tuple[int, int | str]:
     return (1, int(suffix)) if suffix.isdigit() else (2, account_label)
 
 
-def live_account_status(
-    state: str | None,
-    *,
-    observed_at: datetime | None = None,
-    now: datetime | None = None,
-    max_age_seconds: float = 180.0,
-) -> OperationalStatus:
-    if state is None:
-        return OperationalStatus.UNKNOWN
-    if observed_at is not None and now is not None:
-        if (now - observed_at).total_seconds() > max_age_seconds:
-            return OperationalStatus.STALE
-    if state in ("running", "ready_readonly"):
-        return OperationalStatus.READY
-    if state == "syncing":
-        return OperationalStatus.DEGRADED
-    return OperationalStatus.HALTED
-
-
 def live_account_fleet_status(
     accounts: Sequence[LiveAccountSummaryResponse],
 ) -> OperationalStatus:
@@ -149,68 +92,6 @@ def live_account_fleet_status(
         if all(account.status is OperationalStatus.READY for account in accounts)
         else OperationalStatus.DEGRADED
     )
-
-
-def live_account_summaries(
-    processes: Sequence[ExecutionAccountProcessStateRow],
-    strategy_states: Sequence[StrategyLiveStateRow],
-    *,
-    now: datetime | None = None,
-) -> list[LiveAccountSummaryResponse]:
-    """Join current process and strategy state by account label."""
-    process_by_account = {row.account_label: row for row in processes}
-    strategy_by_account: dict[str, StrategyLiveStateRow] = {}
-    for row in sorted(
-        strategy_states,
-        key=lambda item: item.changed_at,
-        reverse=True,
-    ):
-        strategy_by_account.setdefault(row.account_label, row)
-    account_labels = sorted(
-        set(process_by_account) | set(strategy_by_account),
-        key=account_label_sort_key,
-    )
-    summaries: list[LiveAccountSummaryResponse] = []
-    for account_label in account_labels:
-        process_row = process_by_account.get(account_label)
-        strategy = strategy_by_account.get(account_label)
-        occurred_at = process_row.occurred_at if process_row is not None else None
-        state = process_row.state if process_row is not None else None
-        summaries.append(
-            LiveAccountSummaryResponse(
-                account_label=account_label,
-                environment=(
-                    process_row.environment if process_row is not None else "live"
-                ),
-                status=live_account_status(
-                    state,
-                    observed_at=occurred_at,
-                    now=now,
-                ),
-                readiness=(state if state is not None else "missing"),
-                observed_at=occurred_at,
-                strategy_name=(
-                    strategy.strategy_name if strategy is not None else None
-                ),
-                strategy_state=(strategy.state if strategy is not None else None),
-            )
-        )
-    return summaries
-
-
-def _fact_integrity_details(
-    summary: FactIntegritySummary | None,
-) -> str | None:
-    """Name the missing evidence and its scope instead of a bare unknown."""
-    if summary is None:
-        # Keep the default "unconfirmed" wording: no proof was produced at all.
-        return None
-    if summary.gaps is not None and summary.gaps == 0:
-        return None
-    parts = list(summary.reasons) or ["fact_integrity_unconfirmed"]
-    if summary.unknown_scopes:
-        parts.append("scope=" + ",".join(summary.unknown_scopes))
-    return "_".join(("fact_integrity", *parts))
 
 
 class OverviewQueries:
@@ -237,428 +118,11 @@ class OverviewQueries:
         except Exception:
             return {"app_status": "UP", "database_status": "DOWN"}
 
-    async def operational_health(self) -> dict[str, Any]:
-        """Evaluates authoritative operational read model (R6 / Section 12.3)."""
-        now = self._clock()
-        liveness = await self.health()
-        db_up = liveness.get("database_status") == "UP"
-
-        try:
-            accounts_resp = await self.live_accounts()
-        except Exception as exc:
-            view = evaluate_standard_health(
-                scope="system",
-                liveness_ok=db_up,
-                liveness_details=f"query_error: {exc}",
-                lag_seconds=999.0,
-                fact_gaps_count=None,
-                capability_permitted=False,
-                capability_reason=f"query_error: {exc}",
-                reconciliation_matched=False,
-                reconciliation_details=f"query_error: {exc}",
-                observed_at=now,
-            )
-            return {
-                "scope": view.scope,
-                "overall_status": view.overall_status.value,
-                "is_execution_ready": view.is_execution_ready,
-                "source_as_of": view.source_as_of.isoformat(),
-                "evaluated_at": view.evaluated_at.isoformat(),
-                "dimensions": [
-                    {
-                        "name": d.name.value,
-                        "status": d.status.value,
-                        "details": d.details,
-                        "observed_at": d.observed_at.isoformat(),
-                        "metric_value": d.metric_value,
-                    }
-                    for d in view.dimensions
-                ],
-                "details": view.details,
-            }
-
-        ready_runs_by_account: dict[str, AccountReconciliationRunRow] = {}
-        try:
-            async with self._session_factory() as session:
-                runs = (
-                    await session.scalars(
-                        select(AccountReconciliationRunRow)
-                        .distinct(AccountReconciliationRunRow.account_label)
-                        .where(
-                            AccountReconciliationRunRow.environment == "live",
-                            AccountReconciliationRunRow.status == "ready",
-                        )
-                        .order_by(
-                            AccountReconciliationRunRow.account_label,
-                            AccountReconciliationRunRow.observed_at.desc(),
-                            AccountReconciliationRunRow.reconciliation_id.desc(),
-                        )
-                    )
-                ).all()
-                ready_runs_by_account = {run.account_label: run for run in runs}
-        except Exception:
-            pass
-
-        fact_integrity = {}
-        try:
-            fact_integrity = await load_fact_integrity(
-                self._session_factory,
-                account_position_counts={
-                    label: run.position_count
-                    for label, run in ready_runs_by_account.items()
-                },
-                now=now,
-            )
-        except Exception:
-            # An unavailable or malformed proof cannot be reported as complete.
-            pass
-        account_views: list[OperationalView] = []
-        account_capabilities: dict[str, object] = {}
-        for acc in accounts_resp.accounts:
-            observed = acc.observed_at or now
-            lag = max(0.0, (now - observed).total_seconds())
-
-            run = ready_runs_by_account.get(acc.account_label)
-            if run is not None:
-                recon_matched = (
-                    run.status in ("OK", "reconciled", "matched", "ready")
-                    and run.mismatch_count == 0
-                )
-                run_status = run.status.lower()
-                recon_details = (
-                    f"reconciliation_{run_status}_mismatches_{run.mismatch_count}"
-                )
-            else:
-                recon_matched = False
-                recon_details = "unconfirmed_reconciliation_run_absent"
-
-            # Entry and exit are independent: a blocked entry (new risk) must
-            # not hide an open exit (risk reduction), and missing runtime
-            # readiness leaves the unreported capability UNKNOWN.
-            runtime_gate = published_tradeability(acc, now)
-            if runtime_gate is None:
-                missing = "runtime_readiness_missing_or_stale"
-                entry_capability = CapabilityState("entry", False, missing)
-                exit_capability = CapabilityState("exit", None, missing)
-            else:
-                entry_capability = CapabilityState(
-                    "entry",
-                    runtime_gate.entry_gate_open,
-                    runtime_gate.entry_gate_reason,
-                )
-                exit_capability = CapabilityState(
-                    "exit",
-                    runtime_gate.exit_gate_open,
-                    runtime_gate.exit_gate_reason,
-                )
-
-            acc_view = evaluate_standard_health(
-                scope=f"account:{acc.account_label}",
-                liveness_ok=db_up and acc.status != OperationalStatus.HALTED,
-                liveness_details=f"account_status_{acc.status.value}",
-                lag_seconds=lag,
-                max_lag_seconds=90.0,
-                # Only a verified current ledger checkpoint establishes coverage.
-                fact_gaps_count=(
-                    fact_integrity[acc.account_label].gaps
-                    if acc.account_label in fact_integrity
-                    else None
-                ),
-                fact_details_override=_fact_integrity_details(
-                    fact_integrity.get(acc.account_label)
-                ),
-                entry_capability=entry_capability,
-                exit_capability=exit_capability,
-                reconciliation_matched=recon_matched,
-                reconciliation_details=recon_details,
-                observed_at=observed,
-            )
-            summary = fact_integrity.get(acc.account_label)
-            if summary is not None and summary.observed_at is not None:
-                acc_view = read_health(
-                    acc_view.scope,
-                    tuple(
-                        replace(dimension, observed_at=summary.observed_at)
-                        if dimension.name == HealthDimensionName.FACT_INTEGRITY
-                        else dimension
-                        for dimension in acc_view.dimensions
-                    ),
-                    evidence_cut=now,
-                    details=acc_view.details,
-                )
-            account_views.append(acc_view)
-            account_capabilities[acc.account_label] = acc_view.details.get(
-                "capabilities", {}
-            )
-
-        if account_views:
-            composite_view = aggregate_operational_views(
-                tuple(account_views),
-                composite_scope="system",
-                evaluated_at=now,
-            )
-        else:
-            composite_view = evaluate_standard_health(
-                scope="system",
-                liveness_ok=db_up,
-                lag_seconds=0.0,
-                fact_gaps_count=0,
-                capability_permitted=False,
-                capability_reason="no_live_accounts_configured",
-                reconciliation_matched=True,
-                observed_at=now,
-            )
-
-        return {
-            "scope": composite_view.scope,
-            "overall_status": composite_view.overall_status.value,
-            "is_execution_ready": composite_view.is_execution_ready,
-            "source_as_of": composite_view.source_as_of.isoformat(),
-            "evaluated_at": composite_view.evaluated_at.isoformat(),
-            "dimensions": [
-                {
-                    "name": d.name.value,
-                    "status": d.status.value,
-                    "details": d.details,
-                    "observed_at": d.observed_at.isoformat(),
-                    "metric_value": d.metric_value,
-                }
-                for d in composite_view.dimensions
-            ],
-            "details": composite_view.details,
-            # Per-account entry/exit capability: isolation must be visible in
-            # the payload, not only in the aggregate status.
-            "account_capabilities": account_capabilities,
-        }
-
-    async def readiness(self) -> SystemReadinessResponse:
-        now = self._clock()
-        try:
-            liveness = await self.health()
-            accounts_resp = await self.live_accounts()
-            overview_resp = await self.overview()
-        except Exception as exc:
-            return SystemReadinessResponse(
-                status=OperationalStatus.DEGRADED,
-                observed_at=now,
-                liveness={"app_status": "UP", "database_status": "DOWN"},
-                tradeability=TradeabilityDetailResponse(
-                    mode="UNKNOWN",
-                    entry_gate_open=False,
-                    entry_gate_reason=f"readiness_query_failed: {exc}",
-                    exit_gate_open=False,
-                    exit_gate_reason=f"readiness_query_failed: {exc}",
-                    unmanaged_risk_clear=None,
-                    halt_active=None,
-                ),
-                stream_readiness=StreamReadinessDetailResponse(
-                    overall="DOWN",
-                    streams={},
-                ),
-                accounts=[],
-            )
-
-        observed_halt = overview_resp.active_halt_count > 0 or any(
-            a.status == OperationalStatus.HALTED for a in accounts_resp.accounts
-        )
-        database_up = liveness.get("database_status") == "UP"
-
-        streams_dict: dict[str, str] = {}
-        for s in overview_resp.services:
-            if s.name == "database":
-                continue
-            streams_dict[s.name] = (
-                "READY"
-                if s.status
-                in (
-                    OperationalStatus.FRESH,
-                    OperationalStatus.READY,
-                    OperationalStatus.LIVE,
-                )
-                else "RECOVERING"
-            )
-        streams_all_ready = bool(
-            streams_dict and all(v == "READY" for v in streams_dict.values())
-        )
-
-        published = [published_tradeability(a, now) for a in accounts_resp.accounts]
-        confirmed = bool(published) and all(item is not None for item in published)
-        runtime_running = confirmed and any(
-            item.mode == "RUNNING" for item in published if item is not None
-        )
-        if confirmed:
-            gates = [item for item in published if item is not None]
-            blocked = next(
-                (item for item in gates if not item.entry_gate_open), gates[0]
-            )
-            entry_gate_open = all(item.entry_gate_open for item in gates)
-            exit_gate_open = all(item.exit_gate_open for item in gates)
-            entry_gate_reason = blocked.entry_gate_reason
-            exit_gate_reason = next(
-                (item.exit_gate_reason for item in gates if not item.exit_gate_open),
-                gates[0].exit_gate_reason,
-            )
-            unmanaged_risk_clear = (
-                all(item.unmanaged_risk_clear for item in gates)
-                if all(item.unmanaged_risk_clear is not None for item in gates)
-                else None
-            )
-            # The database overview owns current halt state. Keep honoring a
-            # halt explicitly reported by older runtime snapshots during rollout.
-            has_halt = observed_halt or any(item.halt_active is True for item in gates)
-            if runtime_running:
-                mode = "RUNNING"
-            elif has_halt:
-                mode = "HALTED"
-            elif all(item.mode == "FULLY_TRADEABLE" for item in gates):
-                mode = "FULLY_TRADEABLE"
-            else:
-                mode = "RUNNING"
-            status = (
-                OperationalStatus.HALTED
-                if has_halt
-                else (
-                    OperationalStatus.READY
-                    if (
-                        exit_gate_open
-                        and streams_all_ready
-                        and (
-                            entry_gate_open
-                            or any(item.mode == "RUNNING" for item in gates)
-                        )
-                    )
-                    else OperationalStatus.DEGRADED
-                )
-            )
-        else:
-            status = OperationalStatus.UNKNOWN
-            mode = "UNKNOWN"
-            entry_gate_open = exit_gate_open = False
-            unmanaged_risk_clear = None
-            entry_gate_reason = exit_gate_reason = "runtime_readiness_missing_or_stale"
-            has_halt = observed_halt
-        if not database_up:
-            status = OperationalStatus.DOWN
-            mode = "UNKNOWN"
-            entry_gate_open = exit_gate_open = False
-            unmanaged_risk_clear = None
-            if not has_halt:
-                has_halt = None
-            entry_gate_reason = exit_gate_reason = "runtime_readiness_unavailable"
-
-        if observed_halt:
-            status = OperationalStatus.HALTED
-            mode = "RUNNING" if runtime_running else "HALTED"
-            has_halt = True
-            entry_gate_open = exit_gate_open = False
-            entry_gate_reason = exit_gate_reason = "halt_active"
-
-        if status == OperationalStatus.READY:
-            # Runtime gates describe available actions; they cannot establish
-            # ledger integrity. Reuse the same proof reader as operational health.
-            integrity = await self.operational_health()
-            facts = [
-                dimension.get("status")
-                for dimension in integrity.get("dimensions", [])
-                if dimension.get("name") == "fact_integrity"
-            ]
-            if not facts or any(fact == "unknown" for fact in facts):
-                status = OperationalStatus.UNKNOWN
-            if any(fact not in ("healthy", "unknown") for fact in facts):
-                status = OperationalStatus.DEGRADED
-
-        stream_overall = (
-            "READY"
-            if streams_all_ready and bool(accounts_resp.accounts)
-            else "RECOVERING"
-        )
-
-        return SystemReadinessResponse(
-            status=status,
-            observed_at=now,
-            liveness=liveness,
-            tradeability=TradeabilityDetailResponse(
-                mode=mode,
-                entry_gate_open=entry_gate_open,
-                entry_gate_reason=entry_gate_reason,
-                exit_gate_open=exit_gate_open,
-                exit_gate_reason=exit_gate_reason,
-                unmanaged_risk_clear=unmanaged_risk_clear,
-                halt_active=has_halt,
-            ),
-            stream_readiness=StreamReadinessDetailResponse(
-                overall=stream_overall,
-                streams=streams_dict,
-            ),
-            accounts=accounts_resp.accounts,
-        )
-
     async def research_collector(self) -> ResearchCollectorResponse:
         return await asyncio.to_thread(
             read_research_collector_status,
             self._research_collector_root,
             now=self._clock(),
-        )
-
-    async def live_accounts(self) -> LiveAccountsResponse:
-        """Return a small, bounded operational snapshot for every live account."""
-        now = self._clock()
-        async with self._session_factory() as session:
-            processes = (
-                await session.scalars(latest_live_account_process_statement())
-            ).all()
-            strategy_states = (
-                await session.scalars(
-                    select(StrategyLiveStateRow).where(
-                        StrategyLiveStateRow.environment == "live"
-                    )
-                )
-            ).all()
-        accounts = live_account_summaries(
-            processes,
-            strategy_states,
-            now=now,
-        )
-        async with self._session_factory() as session:
-            for account in accounts:
-                row = await session.scalar(
-                    select(StrategyRuntimeEventRow)
-                    .where(
-                        StrategyRuntimeEventRow.event_type == "runtime_readiness",
-                        StrategyRuntimeEventRow.occurred_at
-                        >= now - timedelta(seconds=180),
-                        StrategyRuntimeEventRow.occurred_at <= now,
-                        StrategyRuntimeEventRow.details["account_label"].astext
-                        == account.account_label,
-                    )
-                    .order_by(StrategyRuntimeEventRow.occurred_at.desc())
-                    .limit(1)
-                )
-                if row is None:
-                    continue
-                payload = row.details
-                if (
-                    payload.get("schema_version") != 1
-                    or payload.get("account_label") != account.account_label
-                    or payload.get("session_id") != row.run_id
-                ):
-                    continue
-                try:
-                    account.runtime_tradeability = (
-                        TradeabilityDetailResponse.model_validate(
-                            payload["tradeability"], strict=True
-                        )
-                    )
-                    account.runtime_observed_at = row.occurred_at
-                except (ValueError, KeyError, TypeError):
-                    continue
-                observation = payload.get("order_observation")
-                if isinstance(observation, dict):
-                    account.runtime_order_observation = observation
-
-        return LiveAccountsResponse(
-            status=live_account_fleet_status(accounts),
-            accounts=accounts,
         )
 
     async def overview(self) -> SystemOverviewResponse:
@@ -669,77 +133,8 @@ class OverviewQueries:
                 .order_by(RuntimeMarketState15sRow.bucket_start.desc())
                 .limit(1)
             )
-            account_rows = (
-                await session.scalars(latest_live_account_process_statement())
-            ).all()
-            account = max(
-                account_rows,
-                key=lambda row: row.occurred_at,
-                default=None,
-            )
-            strategy_at = await session.scalar(
-                select(StrategyRuntimeCheckpointRow.saved_at)
-                .order_by(StrategyRuntimeCheckpointRow.saved_at.desc())
-                .limit(1)
-            )
-            halt_count = await session.scalar(
-                select(func.count(RiskHaltRow.halt_id)).where(
-                    RiskHaltRow.active.is_(True)
-                )
-            )
-            strategy_states = (
-                await session.scalars(
-                    select(StrategyLiveStateRow).where(
-                        StrategyLiveStateRow.environment == "live"
-                    )
-                )
-            ).all()
-            live = await session.scalar(
-                select(LiveSessionTransitionRow)
-                .order_by(LiveSessionTransitionRow.occurred_at.desc())
-                .limit(1)
-            )
-            live_heartbeat_at = None
-            live_started_at = None
-            if live is not None:
-                # A runtime checkpoint is meaningful for the current session
-                # only after the daemon has entered live_enabled. During
-                # preflight retries, an older checkpoint would make a healthy
-                # retry loop look dead in the dashboard.
-                live_heartbeat_at = await session.scalar(
-                    select(StrategyRuntimeCheckpointRow.saved_at).where(
-                        StrategyRuntimeCheckpointRow.run_id == live.session_id
-                    )
-                )
-                live_started_at = await session.scalar(
-                    select(LiveSessionTransitionRow.occurred_at)
-                    .where(
-                        LiveSessionTransitionRow.session_id == live.session_id,
-                        LiveSessionTransitionRow.state == "live_enabled",
-                    )
-                    .order_by(LiveSessionTransitionRow.occurred_at.desc())
-                    .limit(1)
-                )
-        account_at = None if account is None else account.occurred_at
-        account_statuses = live_account_summaries(
-            account_rows,
-            strategy_states=strategy_states,
-            now=now,
-        )
         services = [
             service("market-data", now, market_at, self._stale_after_seconds),
-            service(
-                "execution-account",
-                now,
-                account_at,
-                self._stale_after_seconds,
-            ),
-            service(
-                "strategy-runner",
-                now,
-                strategy_at,
-                self._stale_after_seconds,
-            ),
             ServiceStatusResponse(
                 name="database",
                 status=OperationalStatus.READY,
@@ -747,41 +142,11 @@ class OverviewQueries:
                 age_seconds=0,
             ),
         ]
-        if live is not None:
-            live_status = (
-                OperationalStatus.LIVE
-                if live.state == "live_enabled"
-                else OperationalStatus.HALTED
-                if live.state == "halted"
-                else OperationalStatus.UNKNOWN
-            )
-            live_observed_at, heartbeat_source = live_observation(
-                state=live.state,
-                runtime_checkpoint_at=live_heartbeat_at,
-                transition_at=live.occurred_at,
-            )
-            live_details: dict[str, JsonValue] = {
-                "state": live.state,
-                "session_id": live.session_id,
-                "heartbeat_source": heartbeat_source,
-            }
-            if live_started_at is not None:
-                live_details["started_at"] = live_started_at.isoformat()
-            services.append(
-                ServiceStatusResponse(
-                    name="live-rollout",
-                    status=live_status,
-                    observed_at=live_observed_at,
-                    age_seconds=age(now, live_observed_at),
-                    details=live_details,
-                )
-            )
         return SystemOverviewResponse(
             generated_at=now,
             database_status=OperationalStatus.READY,
             services=services,
-            active_halt_count=int(halt_count or 0),
-            account_statuses=account_statuses,
+            active_halt_count=0,
         )
 
     async def universe(self) -> UniverseStatusResponse:
@@ -865,24 +230,6 @@ def service(
     )
 
 
-def live_observation(
-    *,
-    state: str,
-    runtime_checkpoint_at: datetime | None,
-    transition_at: datetime,
-    max_checkpoint_lead_seconds: float = 30.0,
-) -> tuple[datetime, str]:
-    """Choose a heartbeat that belongs to the live session's current state."""
-    if (
-        state == "live_enabled"
-        and runtime_checkpoint_at is not None
-        and runtime_checkpoint_at
-        >= transition_at - timedelta(seconds=max_checkpoint_lead_seconds)
-    ):
-        return runtime_checkpoint_at, "runtime_checkpoint"
-    return transition_at, "state_transition"
-
-
 def age(now: datetime, observed_at: datetime) -> float:
     return max(0.0, (now - observed_at).total_seconds())
 
@@ -936,9 +283,6 @@ __all__ = [
     "age",
     "latest_live_account_process_statement",
     "live_account_fleet_status",
-    "live_account_status",
-    "live_account_summaries",
-    "live_observation",
     "service",
     "universe_entry",
     "universe_membership",

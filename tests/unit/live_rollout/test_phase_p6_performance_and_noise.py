@@ -20,7 +20,6 @@ from crypto_momentum_lab.domain.execution.execution_book_recovery import (
     restore_durable_positions,
 )
 from crypto_momentum_lab.domain.execution.position_recovery import RecoveredPosition
-from crypto_momentum_lab.execution_account.daemon import UserDataAccountSyncDaemon
 from crypto_momentum_lab.market_data.observability import _calculate_lag_percentiles
 from crypto_momentum_lab.research_collector.storage import ParquetWindowSink
 from tests.unit.persistence.postgres.test_runtime_state_repository import (
@@ -130,39 +129,6 @@ async def test_inactive_head_migrations_are_consolidated_at_info_level(monkeypat
     assert len(warning_logs) == 1
     assert warning_logs[0][0] == "execution_head_facts_migrated"
     assert warning_logs[0][1]["symbol"] == "ETHUSDT"
-
-
-def test_config_refresh_logs_as_info_and_pipeline_failures_as_errors(monkeypatch):
-    daemon = UserDataAccountSyncDaemon(
-        service=SimpleNamespace(),
-        stream=SimpleNamespace(),
-        config=SimpleNamespace(
-            environment="live",
-            account_label="primary",
-        ),
-    )
-
-    info_logs = []
-    error_logs = []
-    monkeypatch.setattr(
-        "crypto_momentum_lab.execution_account.daemon.log.info",
-        lambda event, **kwargs: info_logs.append((event, kwargs)),
-    )
-    monkeypatch.setattr(
-        "crypto_momentum_lab.execution_account.daemon.log.error",
-        lambda event, **kwargs: error_logs.append((event, kwargs)),
-    )
-
-    daemon._request_pipeline_recovery("account_config_update")
-    assert len(info_logs) == 1
-    assert info_logs[0][0] == "binance_user_data_pipeline_recovery_requested"
-    assert info_logs[0][1]["reason"] == "account_config_update"
-    assert error_logs == []
-
-    daemon._request_pipeline_recovery("connection_dropped")
-    assert len(error_logs) == 1
-    assert error_logs[0][0] == "binance_user_data_pipeline_recovery_requested"
-    assert error_logs[0][1]["reason"] == "connection_dropped"
 
 
 def test_research_collector_state_conflicts_aggregated(monkeypatch, tmp_path):

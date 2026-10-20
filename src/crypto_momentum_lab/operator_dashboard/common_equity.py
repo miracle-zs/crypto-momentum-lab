@@ -15,7 +15,7 @@ from decimal import Decimal
 
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.domain.performance.metric_models import LiveCashFlowAdjustment
-from crypto_momentum_lab.operator_dashboard.live_account_metrics_queries import (
+from crypto_momentum_lab.operator_dashboard.account_equity_history import (
     AccountEquityPoint,
 )
 from crypto_momentum_lab.persistence.postgres.models import (

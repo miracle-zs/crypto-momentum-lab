@@ -37,7 +37,6 @@ dev = [
 
 [project.scripts]
 cml-market-data = "crypto_momentum_lab.apps.market_data.main:app"
-cml-execution-account = "crypto_momentum_lab.apps.execution_account.main:app"
 cml-research-collector = "crypto_momentum_lab.apps.research_collector.main:app"
 cml-operator-dashboard = "crypto_momentum_lab.apps.operator_dashboard.main:main"
 cml-archive-market-revisions = "crypto_momentum_lab.tools.archive_market_revision_payloads:main"

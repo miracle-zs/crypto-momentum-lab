@@ -12,13 +12,7 @@ from crypto_momentum_lab.domain.account.models import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
     AccountOpenOrderSnapshot,
-    ExecutionAccountStatus,
-)
-from crypto_momentum_lab.domain.account.snapshot_models import AccountSnapshot
-from crypto_momentum_lab.execution_account.sync import ExecutionAccountSyncService
-from crypto_momentum_lab.execution_account.sync_models import (
-    ExecutionAccountSyncConfig,
-    ExecutionAccountSyncResult,
+    AccountReconciliationRun,
 )
 from crypto_momentum_lab.persistence.postgres.account_repository import (
     PostgresAccountRepository,
@@ -29,7 +23,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
     AccountOpenOrderRow,
     AccountPositionSnapshotRow,
     AccountReconciliationRunRow,
-    ExecutionAccountProcessStateRow,
 )
 from crypto_momentum_lab.persistence.postgres.session import (
     create_async_database_engine,
@@ -37,8 +30,8 @@ from crypto_momentum_lab.persistence.postgres.session import (
 
 
 async def test_reconciliation_snapshot_rolls_back_as_one_transaction(
-    async_database_url,
-):
+    async_database_url: str,
+) -> None:
     engine = create_async_database_engine(async_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     repository = PostgresAccountRepository(factory)
@@ -58,20 +51,44 @@ async def test_reconciliation_snapshot_rolls_back_as_one_transaction(
             {},
         ),
     )
-    snapshot = AccountSnapshot(config, balances, (), ())
-    service = ExecutionAccountSyncService(
-        client=None,
-        repository=repository,
-        config=ExecutionAccountSyncConfig(environment, account, False, False, now),
-    )
-    initial = ExecutionAccountSyncResult(
-        status=ExecutionAccountStatus.READY_READONLY,
-        reconciliation_id="baseline-" + environment,
+    initial_run = AccountReconciliationRun(
+        "baseline-" + environment,
+        environment,
+        account,
+        "ready",
+        now,
+        balance_count=1,
+        position_count=0,
+        open_order_count=1,
+        fill_count=0,
         mismatch_count=0,
-        snapshot=snapshot,
+        details={},
+    )
+    initial_order = AccountOpenOrderSnapshot(
+        environment,
+        account,
+        "BTCUSDT",
+        "100",
+        "client-initial",
+        "BUY",
+        "LIMIT",
+        "NEW",
+        Decimal("1"),
+        Decimal("2"),
+        Decimal("0"),
+        False,
+        now,
+        {},
     )
     try:
-        await service.persist_reconciliation_result(initial)
+        await repository.save_reconciliation_snapshot(
+            config=config,
+            balances=balances,
+            positions=(),
+            open_orders=(initial_order,),
+            fills=(),
+            run=initial_run,
+        )
 
         bad_at = datetime(2026, 10, 1, 0, 0, 1, tzinfo=UTC)
         bad_order = AccountOpenOrderSnapshot(
@@ -90,20 +107,19 @@ async def test_reconciliation_snapshot_rolls_back_as_one_transaction(
             bad_at,
             {},
         )
-        bad_snapshot = replace(
-            snapshot,
-            config=replace(config, observed_at=bad_at),
-            balances=tuple(replace(row, observed_at=bad_at) for row in balances),
-            open_orders=(bad_order,),
-        )
         with pytest.raises(DBAPIError):
-            await service.persist_reconciliation_result(
-                ExecutionAccountSyncResult(
-                    status=ExecutionAccountStatus.READY_READONLY,
+            await repository.save_reconciliation_snapshot(
+                config=replace(config, observed_at=bad_at),
+                balances=tuple(replace(row, observed_at=bad_at) for row in balances),
+                positions=(),
+                open_orders=(bad_order,),
+                fills=(),
+                run=replace(
+                    initial_run,
                     reconciliation_id="failed-" + environment,
-                    mismatch_count=0,
-                    snapshot=bad_snapshot,
-                )
+                    observed_at=bad_at,
+                    open_order_count=1,
+                ),
             )
 
         async with factory() as session:
@@ -138,8 +154,12 @@ async def test_reconciliation_snapshot_rolls_back_as_one_transaction(
         assert len(balance_rows) == 1
         assert balance_rows[0].observed_at == now
         assert len(config_rows) == 1
+        assert config_rows[0].observed_at == now
         assert len(run_rows) == 1
-        assert open_orders == []
+        assert run_rows[0].reconciliation_id == initial_run.reconciliation_id
+        assert len(open_orders) == 1
+        assert open_orders[0].order_id == initial_order.order_id
+        assert open_orders[0].observed_at == now
     finally:
         async with factory() as session:
             async with session.begin():
@@ -149,7 +169,6 @@ async def test_reconciliation_snapshot_rolls_back_as_one_transaction(
                     AccountPositionSnapshotRow,
                     AccountConfigSnapshotRow,
                     AccountOpenOrderRow,
-                    ExecutionAccountProcessStateRow,
                 ):
                     await session.execute(
                         delete(model).where(model.environment == environment)

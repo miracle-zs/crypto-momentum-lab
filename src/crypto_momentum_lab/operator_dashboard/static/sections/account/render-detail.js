@@ -34,16 +34,8 @@ import {
 } from "./constants.js";
 import { renderLiveSignalsContent } from "./signals.js";
 
-function renderAccountHero(data, syncStatus, freshnessSeconds) {
-  const accountHeroDescription = data.account_config?.engine === "nextgen"
-    ? `NextGen 账户进程 · 私有 WebSocket 更新 · ${syncStatus === "ready" ? "策略就绪" : "策略状态待确认"}`
-    : syncStatus === "ready" && freshnessSeconds != null && freshnessSeconds <= 120
-    ? "只读同步正常 · 实盘订单由 live-strategy 执行管控"
-    : syncStatus === "ready" && freshnessSeconds != null
-      ? "只读同步数据延迟 · 实盘订单由 live-strategy 执行管控，请检查同步服务"
-      : syncStatus === "halted"
-        ? "只读同步已停止 · 实盘订单由 live-strategy 执行管控，请检查同步服务"
-        : "只读同步状态待确认 · 实盘订单由 live-strategy 执行管控";
+function renderAccountHero(data, syncStatus) {
+  const accountHeroDescription = `NextGen 账户进程 · 私有 WebSocket 更新 · ${syncStatus === "ready" ? "策略就绪" : "策略状态待确认"}`;
 
   return `<div class="account-hero">
     <div>
@@ -108,8 +100,8 @@ function renderAccountEquityBlock(data, accountEquity, selectedEquityRange, acco
 
 function renderAccountFacts(config, reconciliation, mismatchCount, modeLabel, reconciliationLabel) {
   return `<div class="account-facts">
-    <div><span>实盘下单通道</span><b class="pos">${config.engine === "nextgen" ? "NextGen 账户进程" : "live-strategy"}</b></div>
-    <div><span>同步服务模式</span><b class="muted">${config.engine === "nextgen" ? "账户私有 WebSocket" : "只读同步 · 不下单"}</b></div>
+    <div><span>实盘下单通道</span><b class="pos">NextGen 账户进程</b></div>
+    <div><span>同步服务模式</span><b class="muted">账户私有 WebSocket</b></div>
     <div><span>持仓模式</span><b>${esc(modeLabel(config.hedge_mode, "Hedge · 双向", "One-way · 单向"))}</b></div>
     <div><span>保证金模式</span><b>${esc(modeLabel(config.multi_assets_mode, "Multi-Assets · 多资产", "Single-Asset · 单资产"))}</b></div>
     <div><span>手续费等级</span><b>${esc(config.fee_tier == null ? "—" : `VIP ${config.fee_tier}`)}</b></div>
@@ -118,7 +110,7 @@ function renderAccountFacts(config, reconciliation, mismatchCount, modeLabel, re
     <div><span>对账快照 资产 / 持仓</span><b>${esc(`${reconciliation.balance_count ?? "—"} / ${reconciliation.position_count ?? "—"}`)}</b></div>
     <div><span>对账快照 挂单 / 成交</span><b>${esc(`${reconciliation.open_order_count ?? "—"} / ${reconciliation.fill_count ?? "—"}`)}</b></div>
   </div>
-  <div class="account-facts-note">${config.engine === "nextgen" ? "正常运行由私有 WebSocket 更新账户；未接入的字段不代表零值，对账未接入不代表已核验一致。" : "<b>怎么读</b>：<code>只读同步</code>不会下单；实盘订单由 <code>live-strategy</code> 与风控闸门共同决定。<code>对账一致 / 0 项</code>表示本次快照未发现差异。"}</div>`;
+  <div class="account-facts-note">正常运行由私有 WebSocket 更新账户；未接入的字段不代表零值，对账未接入不代表已核验一致。</div>`;
 }
 
 function renderBalancesTable(usdtBalances) {
@@ -211,23 +203,22 @@ export function renderAccount(data) {
     degraded: "降级",
   }[String(value || "").toLowerCase()] || value || "—");
   const mismatchCount = asNumber(reconciliation.mismatch_count);
-  const nextgen = config.engine === "nextgen";
   const syncStatus = normalized(data.status);
   const syncState = syncStatus === "ready"
-    ? { className: "status-READY", label: "同步正常", detail: nextgen ? "NextGen · 私有 WebSocket" : "execution-account · 只读同步" }
+    ? { className: "status-READY", label: "同步正常", detail: "NextGen · 私有 WebSocket" }
     : syncStatus === "halted"
-      ? { className: "status-HALTED", label: "同步已停止", detail: nextgen ? "NextGen · 需要检查" : "execution-account · 需要检查" }
-      : { className: "status-UNKNOWN", label: "等待同步", detail: nextgen ? "NextGen · 暂无可靠状态" : "execution-account · 暂无可靠状态" };
+      ? { className: "status-HALTED", label: "同步已停止", detail: "NextGen · 需要检查" }
+      : { className: "status-UNKNOWN", label: "等待同步", detail: "NextGen · 暂无可靠状态" };
   const configState = {
     className: Object.keys(config).length > 0 ? "status-READY" : "status-UNKNOWN",
-    label: nextgen ? "本地策略配置" : Object.keys(config).length > 0 ? "已同步" : "等待同步",
-    detail: nextgen ? "交易所账户配置未接入" : "Binance V3 账户配置快照",
+    label: "本地策略配置",
+    detail: "交易所账户配置未接入",
   };
   const reconciliationState = mismatchCount != null && mismatchCount > 0
     ? { className: "status-ATTENTION", label: `${mismatchCount} 项差异`, detail: "余额、持仓或订单快照需要核对" }
     : normalized(reconciliation.status) === "ready"
       ? { className: "status-READY", label: "对账一致", detail: "快照已完成 · 0 项差异" }
-      : { className: "status-UNKNOWN", label: nextgen && !reconciliation.status ? "未接入" : reconciliationLabel(reconciliation.status), detail: nextgen && !reconciliation.status ? "未接入对账证据" : "等待本次对账结果" };
+      : { className: "status-UNKNOWN", label: !reconciliation.status ? "未接入" : reconciliationLabel(reconciliation.status), detail: !reconciliation.status ? "未接入对账证据" : "等待本次对账结果" };
   const observedAtMs = new Date(data.observed_at || "").getTime();
   const freshnessSeconds = Number.isFinite(observedAtMs)
     ? Math.max(0, (Date.now() - observedAtMs) / 1000)
@@ -239,14 +230,14 @@ export function renderAccount(data) {
       : { className: "status-STALE", label: "数据过期", detail: `${relToNow(data.observed_at)} · 请检查同步服务` };
   const executionState = {
     className: "status-SHADOW",
-    label: nextgen ? "NextGen 账户进程" : "live-strategy",
+    label: "NextGen 账户进程",
     detail: "实盘下单通道 · 状态见全局实盘状态与风控",
   };
   const strategy = (value) => value
     ? `<span class="account-strategy">${esc(value)}</span>`
     : `<span class="muted">未关联</span>`;
 
-  const hero = renderAccountHero(data, syncStatus, freshnessSeconds);
+  const hero = renderAccountHero(data, syncStatus);
   const stateGrid = renderAccountStateGrid(syncState, configState, executionState, reconciliationState, freshnessState);
   const kpis = renderAccountKpiGrid(summary);
   const equityChartBlock = renderAccountEquityBlock(
@@ -274,8 +265,7 @@ export function renderAccount(data) {
     || hasUncertainStatus(normalized(reconciliation.status))
     || !data.observed_at;
 
-  const retentionNote = data.account_config?.engine === "nextgen"
-    ? '<p class="muted">在线权益按 1 天热保留策略保存；更早数据请查询归档。曲线仅展示实际覆盖的时间。</p>' : "";
+  const retentionNote = '<p class="muted">在线权益按 1 天热保留策略保存；更早数据请查询归档。曲线仅展示实际覆盖的时间。</p>';
   const body = `${retentionNote}<div class="detail-meta"><span>同步时间 <b class="num">${esc(dayTime(data.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</b></span><span>${esc(relToNow(data.observed_at))}</span><small class="muted" data-refresh-state hidden></small></div>
     ${hero}${stateGrid}${kpis}${equityChartBlock}
     ${disclosure("实盘策略信号", "LIVE SIGNALS · LATEST 30", liveSignalContent,

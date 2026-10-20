@@ -1073,15 +1073,6 @@ async def test_real_assembled_lifecycle_with_fake_ws_exchange(
         async def fetch_open_orders(self) -> tuple[Any, ...]:
             return ()
 
-        @property
-        def incomplete_fill_symbols(self) -> frozenset[str]:
-            return frozenset()
-
-        async def fetch_recent_fills(
-            self, symbols: Any = (), **kwargs: Any
-        ) -> tuple[Any, ...]:
-            return ()
-
         async def fetch_fills_with_provenance(self, symbol: str, **kwargs: Any) -> Any:
             raise NotImplementedError
 
