@@ -934,9 +934,6 @@ class PositionRecoveryCodec:
             prefix_facts_complete=prefix_facts_complete,
         )
 
-    compute_projection_digest = staticmethod(projection_codec.compute_projection_digest)
-
-
 def _mapping(value: object, label: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise RecoverySchemaError(f"{label} must be an object")

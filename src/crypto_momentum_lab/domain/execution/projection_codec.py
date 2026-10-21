@@ -1,13 +1,7 @@
-"""Canonical materialized projection encoding and version-independent digest.
-
-This module depends only on ledger values. Recovery checkpoint validation and
-strict recovery decoding share this encoding without depending on each other.
-"""
+"""Canonical projection encoding used by the legacy execution-head migration."""
 
 from __future__ import annotations
 
-import hashlib
-import json
 from datetime import datetime
 from decimal import Decimal
 
@@ -180,9 +174,3 @@ def _datetime(value: datetime) -> str:
     return value.isoformat()
 
 
-def compute_projection_digest(projection: PositionLedgerProjection) -> str:
-    """Hash complete materialized state independently of the fact token."""
-    payload = encode_projection(projection)
-    payload.pop("projection_version", None)
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(encoded).hexdigest()

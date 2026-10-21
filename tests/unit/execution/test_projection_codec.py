@@ -22,14 +22,9 @@ def baseline():
     )
 
 
-def test_projection_encoding_and_digest_match_order_identity_baseline(baseline):
+def test_projection_encoding_matches_order_identity_baseline(baseline):
     projection = PositionRecoveryCodec.decode_projection(baseline["payload"])
     assert projection_codec.encode_projection(projection) == baseline["payload"]
-    assert projection_codec.compute_projection_digest(projection) == baseline["digest"]
-    assert (
-        PositionRecoveryCodec.compute_projection_digest(projection)
-        == baseline["digest"]
-    )
     assert projection.active_batches
     assert projection.archived_episodes[0].reductions
     assert projection.active_episode.reductions
@@ -41,31 +36,6 @@ def test_legacy_projection_without_order_count_evidence_is_rejected():
     )
     with pytest.raises(RecoverySchemaError, match="entry_order_ids"):
         PositionRecoveryCodec.decode_projection(old["payload"])
-
-
-def test_fact_token_is_excluded_from_digest_without_mutating_projection(baseline):
-    projection = PositionRecoveryCodec.decode_projection(baseline["payload"])
-    changed = replace(projection, projection_version="another-fact-token")
-    assert projection_codec.compute_projection_digest(changed) == baseline["digest"]
-    assert (
-        projection_codec.encode_projection(changed)["projection_version"]
-        == "another-fact-token"
-    )
-
-
-@pytest.mark.parametrize(
-    "field,value",
-    [
-        ("unallocated_quantity", Decimal("7.00")),
-        ("diagnostics", ("different",)),
-        ("stream_scope", None),
-        ("archived_episodes", ()),
-    ],
-)
-def test_materialized_state_changes_remain_bound_to_digest(baseline, field, value):
-    projection = PositionRecoveryCodec.decode_projection(baseline["payload"])
-    changed = replace(projection, **{field: value})
-    assert projection_codec.compute_projection_digest(changed) != baseline["digest"]
 
 
 def test_decimal_scale_and_timezone_encoding_remain_exact(baseline):
