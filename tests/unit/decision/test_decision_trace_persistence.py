@@ -1,8 +1,7 @@
-"""Tests for PostgresDecisionTraceRepository and live trace recording wiring (R2)."""
+"""Tests for historical decision trace storage and replay."""
 
 from __future__ import annotations
 
-import asyncio
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -12,27 +11,13 @@ from typing import Any
 import pytest
 from sqlalchemy.dialects import postgresql
 
-from crypto_momentum_lab.domain.decision.decision_engine import (
-    EffectivePolicy,
-    FrozenDecisionInputs,
-    PolicyState,
-    create_authoritative_async_decision_filter,
-)
 from crypto_momentum_lab.domain.decision.trace_audit import verify_decision_trace
-from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
-from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    PositionHealthStatus,
-    PositionKey,
-    PositionView,
-)
 from crypto_momentum_lab.domain.market.market_book import UnreproducibleError
-from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.revision_models import (
     DecisionTrace,
     MarketRevisionRef,
     MarketVisibilityMode,
 )
-from crypto_momentum_lab.domain.strategy.models import StrategyDecision
 from crypto_momentum_lab.persistence.postgres.decision_trace_repository import (
     PostgresDecisionTraceRepository,
 )
@@ -47,37 +32,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
 )
 from crypto_momentum_lab.tools.reproduce_decision import audit_decision_trace
 from tests.fixtures.symbol_rules import btc_lot_rules
-
-
-def _make_market_state(symbol: str = "BTCUSDT") -> MarketState15s:
-    start = datetime(2026, 9, 25, 8, 0, tzinfo=UTC)
-    return MarketState15s(
-        schema_version=1,
-        exchange="binance",
-        environment="live",
-        symbol=symbol,
-        bucket_start=start,
-        bucket_end=start + timedelta(seconds=15),
-        open_price=Decimal("100"),
-        high_price=Decimal("105"),
-        low_price=Decimal("98"),
-        close_price=Decimal("102"),
-        trade_count=10,
-        trade_notional=Decimal("1000"),
-        aggressive_buy_notional=Decimal("600"),
-        aggressive_sell_notional=Decimal("400"),
-        last_bid_price=Decimal("102"),
-        last_ask_price=Decimal("102.1"),
-        spread=Decimal("0.1"),
-        midpoint=Decimal("102.05"),
-        liquidation_count=0,
-        liquidation_notional=Decimal("0"),
-        mark_price=Decimal("102"),
-        closed_kline_count=0,
-        source_event_count=10,
-        first_received_at=start,
-        last_received_at=start + timedelta(seconds=14),
-    )
 
 
 def test_holding_position_trace_is_compacted_to_a_verifiable_hot_summary() -> None:
@@ -497,131 +451,6 @@ async def test_compressed_state_retry_accepts_legacy_encoding_but_rejects_change
         )
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("is_replay", [False, True])
-async def test_async_decision_filter_awaits_durable_commit_callback(
-    is_replay: bool,
-) -> None:
-
-    state = _make_market_state()
-    key = PositionKey(
-        environment="live",
-        account_label="primary",
-        symbol="BTCUSDT",
-        position_side=FuturesPositionSide.BOTH,
-    )
-    view = PositionView(
-        key=key,
-        projection_version="pv1",
-        input_revision=1,
-        event_cut=state.bucket_end,
-        policy_version="v1",
-        schema_version="v1",
-        active_episode=None,
-        batches=(),
-        unallocated_quantity=Decimal("0"),
-        reconciliation_gap=Decimal("0"),
-        health_status=PositionHealthStatus.READY,
-    )
-    frozen = FrozenDecisionInputs(
-        position_view=view,
-        cash_balance=Decimal("1000"),
-        policy_state=PolicyState(policy_version=1),
-        universe_version="univ_v1",
-        risk_config_version="risk_v1",
-    )
-
-    commits: list[tuple[DecisionTrace, object, object]] = []
-    callback_finished = False
-
-    async def provide_facts(
-        _state: MarketState15s, _side: object
-    ) -> FrozenDecisionInputs:
-        return frozen
-
-    async def durable_commit(
-        trace: DecisionTrace, result: object, inp: object
-    ) -> object:
-        from types import SimpleNamespace
-
-        nonlocal callback_finished
-        await asyncio.sleep(0)
-        commits.append((trace, result, inp))
-        callback_finished = True
-        return SimpleNamespace(is_replay=is_replay)
-
-    filt = create_authoritative_async_decision_filter(
-        "orderflow_impulse",
-        fact_provider=provide_facts,
-        durable_decision_commit=durable_commit,
-        effective_policy_provider=lambda _state: EffectivePolicy(
-            policy_id="policy_orderflow_impulse",
-            strategy_name="orderflow_impulse",
-            target_notional=Decimal("500"),
-            symbol_lot_rules=btc_lot_rules(),
-        ),
-    )
-
-    from crypto_momentum_lab.domain.strategy.models import (
-        EntryType,
-        OrderIntentCandidate,
-        StrategySide,
-        StrategySignal,
-    )
-
-    signal = StrategySignal(
-        signal_id="sig_trace_1",
-        run_id="run_trace_1",
-        strategy_name="orderflow_impulse",
-        strategy_version="v1",
-        config_hash="cfg_trace_1",
-        symbol="BTCUSDT",
-        side=StrategySide.LONG,
-        detected_at=state.bucket_end,
-        source_state_at=state.bucket_end,
-        reason="trace_test",
-        features={},
-        reference_prices={},
-    )
-    candidate = OrderIntentCandidate(
-        candidate_id="cand_trace_1",
-        signal_id="sig_trace_1",
-        run_id="run_trace_1",
-        strategy_name="orderflow_impulse",
-        strategy_version="v1",
-        config_hash="cfg_trace_1",
-        symbol="BTCUSDT",
-        side=StrategySide.LONG,
-        entry_type=EntryType.MARKET,
-        limit_price=Decimal("102"),
-        desired_notional=Decimal("500"),
-        reduce_only=False,
-        expires_at=state.bucket_end + timedelta(minutes=1),
-        created_at=state.bucket_end,
-        reason="trace_test",
-        features={},
-    )
-    dec = StrategyDecision(signals=(signal,), candidates=(candidate,), rejections=())
-    out = await filt(dec, state)
-
-    assert len(commits) == 1
-    assert callback_finished
-    assert bool(out.candidates) is not is_replay
-    trace = commits[0][0]
-    assert trace.account_label == "primary"
-    assert trace.strategy_name == "orderflow_impulse"
-    assert "market_state" in trace.trace_payload
-    assert trace.trace_payload["policy_parameters"]["symbol_lot_rules"]["symbol"] == (
-        "BTCUSDT"
-    )
-    assert "policy_parameters" in trace.trace_payload
-    assert "prior_policy_state" in trace.trace_payload
-    assert (
-        trace.trace_payload["input_candidate"]["candidate_id"] == candidate.candidate_id
-    )
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("sizing_kind", [None, "fixed", "equity", "large-state"])
 async def test_audit_decision_trace_reproducibility(
     monkeypatch: pytest.MonkeyPatch,

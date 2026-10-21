@@ -13,11 +13,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any, Protocol
+from typing import Any
 
 from crypto_momentum_lab.domain.decision.decision_frame import (
     ClockEvent as ClockEvent,
@@ -41,20 +41,14 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
 from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
 from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
 from crypto_momentum_lab.domain.market.market_book import compute_market_state_hash
-from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.revision_models import (
     DecisionTrace,
     MarketEnvelope,
     MarketRevisionRef,
-    MarketVisibilityMode,
 )
 from crypto_momentum_lab.domain.strategy.models import (
     EntryType,
     OrderIntentCandidate,
-    RejectionReason,
-    StrategyDecision,
-    StrategyRejection,
-    StrategySide,
 )
 from crypto_momentum_lab.domain.strategy.position_exit import PositionExitPolicy
 from crypto_momentum_lab.domain.strategy.sizing import SizingModel, SymbolLotRules
@@ -480,116 +474,6 @@ def decide(
     )
 
 
-@dataclass(frozen=True, slots=True)
-class FrozenDecisionInputs:
-    """Real, version-pinned facts a live decision must be evaluated against.
-
-    Callers supply these from the shared frozen input set (position
-    projection, cash, policy state). The filter never invents them.
-    """
-
-    position_view: PositionView
-    cash_balance: Decimal
-    policy_state: PolicyState
-    universe_version: str
-    risk_config_version: str
-
-    def __post_init__(self) -> None:
-        if self.cash_balance < Decimal("0"):
-            raise ValueError("cash_balance must not be negative")
-        if not self.universe_version.strip():
-            raise ValueError("universe_version must not be empty")
-        if not self.risk_config_version.strip():
-            raise ValueError("risk_config_version must not be empty")
-
-
-def build_decision_input(
-    *,
-    state: MarketState15s,
-    frozen: FrozenDecisionInputs,
-    clock_sequence: int = 1,
-    scope: str | None = None,
-    source_epoch: str | None = None,
-    market_ref: MarketRevisionRef | None = None,
-    market_envelope: MarketEnvelope | None = None,
-    frame: DecisionFrame | None = None,
-    policy: EffectivePolicy | None = None,
-    closed_candles: tuple[ClosedCandle15m, ...] = (),
-) -> DecisionInput:
-    """Shared DecisionInput assembly for live, paper, and research paths.
-
-    Every runner freezes the same kind of facts; only the epoch/scope
-    labels differ. Do not reassemble DecisionInput ad hoc in runners.
-    """
-    effective_scope = scope or state.environment
-    if not effective_scope:
-        raise ValueError(
-            "Decision input assembly requires an explicit environment/scope"
-        )
-    effective_source_epoch = source_epoch or f"seq_{state.trade_count}"
-
-    if market_ref is None:
-        pub_time = state.last_received_at or state.bucket_end
-        content_hash = compute_market_state_hash(state)
-        b_epoch = int(state.bucket_start.timestamp())
-        market_ref = MarketRevisionRef(
-            scope=effective_scope,
-            symbol=state.symbol,
-            interval="15s",
-            bucket_start=state.bucket_start,
-            bucket_end=state.bucket_end,
-            revision_id=f"{effective_scope}:{state.symbol}:15s:{b_epoch}:{content_hash[:10]}",
-            content_hash=content_hash,
-            published_at=pub_time,
-            source_epoch=effective_source_epoch,
-            visibility_mode=MarketVisibilityMode.DECISION_VISIBLE,
-            observed_at=state.first_received_at or pub_time,
-        )
-
-    if market_envelope is None:
-        market_envelope = MarketEnvelope(ref=market_ref, state=state)
-
-    clock_event = ClockEvent(timestamp=state.bucket_end, sequence=clock_sequence)
-    if frame is None:
-        p_code = (
-            f"policy_{policy.strategy_name}_{frozen.policy_state.policy_version}"
-            if policy is not None
-            else f"policy_{frozen.policy_state.policy_version}"
-        )
-        p_params = (
-            compute_policy_parameters_digest(policy)
-            if policy is not None
-            else f"param_{frozen.policy_state.policy_version}"
-        )
-        frame = DecisionFrame(
-            scope=effective_scope,
-            symbol=state.symbol,
-            market_refs=(market_ref,),
-            position_view_token=frozen.position_view.projection_version,
-            universe_version=frozen.universe_version,
-            risk_config_version=frozen.risk_config_version,
-            policy_code_digest=p_code,
-            policy_parameters_digest=p_params,
-            policy_state_digest=compute_policy_state_digest(frozen.policy_state),
-            risk_plan_digest=frozen.risk_config_version,
-            clock_event=clock_event,
-            cash_balance=frozen.cash_balance,
-        )
-
-    return DecisionInput(
-        symbol=state.symbol,
-        market_ref=market_ref,
-        market_envelope=market_envelope,
-        position_view=frozen.position_view,
-        universe_version=frozen.universe_version,
-        clock_event=clock_event,
-        cash_balance=frozen.cash_balance,
-        risk_config_version=frozen.risk_config_version,
-        frame=frame,
-        closed_candles=closed_candles,
-    )
-
-
 def decision_trace_from_result(
     result: DecisionResult,
     decision_input: DecisionInput,
@@ -810,168 +694,3 @@ def _serialize_intent_candidate(candidate: OrderIntentCandidate) -> dict[str, An
         "reason": candidate.reason,
         "features": features,
     }
-
-
-class DecisionReplayReceipt(Protocol):
-    """Commit result required to suppress repeated decision effects."""
-
-    @property
-    def is_replay(self) -> bool: ...
-
-
-def create_authoritative_async_decision_filter(
-    strategy_name: str,
-    *,
-    fact_provider: Callable[
-        [MarketState15s, StrategySide | None], Awaitable[FrozenDecisionInputs | None]
-    ],
-    durable_decision_commit: Callable[
-        [DecisionTrace, DecisionResult, DecisionInput], Awaitable[DecisionReplayReceipt]
-    ],
-    effective_policy_provider: Callable[[MarketState15s], EffectivePolicy],
-    clock_sequence_provider: Callable[[MarketState15s], int] | None = None,
-    source_epoch_provider: Callable[[MarketState15s], str] | None = None,
-) -> Callable[[StrategyDecision, MarketState15s], Awaitable[StrategyDecision]]:
-    """Evaluate each candidate against fresh facts and commit its result directly."""
-
-    def reject(
-        decision: StrategyDecision,
-        state: MarketState15s,
-        reason: str,
-    ) -> StrategyDecision:
-        return replace(
-            decision,
-            candidates=(),
-            rejections=decision.rejections
-            + tuple(
-                StrategyRejection(
-                    reason=RejectionReason.NO_SIGNAL,
-                    symbol=state.symbol,
-                    bucket_start=state.bucket_start,
-                    details={
-                        "raw_reason": reason,
-                        "strategy_name": strategy_name,
-                        "candidate_id": candidate.candidate_id,
-                    },
-                )
-                for candidate in decision.candidates
-            ),
-        )
-
-    async def evaluate_one(
-        decision: StrategyDecision,
-        state: MarketState15s,
-        candidate: OrderIntentCandidate | None,
-    ) -> StrategyDecision:
-        frozen = await fact_provider(
-            state, None if candidate is None else candidate.side
-        )
-        if frozen is None:
-            return reject(decision, state, "frozen_decision_inputs_unavailable")
-        view = frozen.position_view
-        if view.key.symbol != state.symbol:
-            return reject(decision, state, "frozen_inputs_symbol_mismatch")
-        if candidate is None and view.total_quantity <= 0:
-            return decision
-        if not state.environment:
-            raise ValueError("MarketState15s requires an explicit environment")
-        sequence = (
-            1 if clock_sequence_provider is None else clock_sequence_provider(state)
-        )
-        if sequence <= 0:
-            raise ValueError("decision clock sequence must be positive")
-        epoch = (
-            f"ep_{state.environment}"
-            if source_epoch_provider is None
-            else source_epoch_provider(state)
-        )
-        if not epoch:
-            raise ValueError("decision source epoch must be explicit")
-        if candidate is not None:
-            candidate = replace(
-                candidate,
-                features={
-                    **candidate.features,
-                    "projection_version": view.projection_version,
-                    "position_side": view.key.position_side.value,
-                },
-            )
-        policy = replace(
-            effective_policy_provider(state),
-            candidate_generator=lambda _input, _state: candidate,
-        )
-        if policy.target_notional <= 0:
-            raise ValueError(
-                "target_notional must be explicitly configured and positive"
-            )
-        decision_input = build_decision_input(
-            state=state,
-            frozen=frozen,
-            clock_sequence=sequence,
-            scope=state.environment,
-            source_epoch=epoch,
-            policy=policy,
-        )
-        result = decide(decision_input, frozen.policy_state, policy)
-        trace = decision_trace_from_result(
-            result,
-            decision_input,
-            strategy_name=strategy_name,
-            account_label=view.key.account_label,
-            prior_policy_state=frozen.policy_state,
-            policy=policy,
-            input_candidate=candidate,
-        )
-        receipt = await durable_decision_commit(trace, result, decision_input)
-        if candidate is None:
-            return decision
-        if receipt.is_replay:
-            return replace(decision, candidates=())
-        if result.intent is not None:
-            return replace(decision, candidates=(result.intent,))
-        reason = result.rejection_reason or "decision_engine_filtered"
-        rejection = StrategyRejection(
-            reason={
-                "cooldown_active": RejectionReason.COOLDOWN_ACTIVE,
-                "holding_position_no_exit": RejectionReason.HOLDING_POSITION,
-                "below_entry_threshold": RejectionReason.BELOW_ENTRY_THRESHOLD,
-            }.get(reason, RejectionReason.NO_SIGNAL),
-            symbol=state.symbol,
-            bucket_start=state.bucket_start,
-            details={
-                "decision_id": result.decision_id,
-                "raw_reason": reason,
-                "candidate_id": candidate.candidate_id,
-                "policy_state_version": frozen.policy_state.policy_version,
-            },
-        )
-        return replace(
-            decision, candidates=(), rejections=decision.rejections + (rejection,)
-        )
-
-    async def _filter(
-        decision: StrategyDecision,
-        state: MarketState15s,
-    ) -> StrategyDecision:
-        if not decision.candidates:
-            return await evaluate_one(decision, state, None)
-
-        filtered_candidates: list[OrderIntentCandidate] = []
-        rejections: list[StrategyRejection] = list(decision.rejections)
-        for candidate in decision.candidates:
-            single_candidate = replace(
-                decision,
-                candidates=(candidate,),
-                rejections=(),
-            )
-            filtered = await evaluate_one(single_candidate, state, candidate)
-            filtered_candidates.extend(filtered.candidates)
-            rejections.extend(filtered.rejections)
-        return StrategyDecision(
-            signals=decision.signals,
-            candidates=tuple(filtered_candidates),
-            rejections=tuple(rejections),
-            checkpoint=decision.checkpoint,
-        )
-
-    return _filter

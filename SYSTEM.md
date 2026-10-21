@@ -1101,3 +1101,5 @@ SSH使用已配置的密钥或--control-path指定的已登录会话，不在脚
 继续清理未接入 NextGen 的旧风险准入层：全仓仅旧风险单测引用 `RiskGateway`、`FixedLiveLimits` 和量化名义价值校验，NextGen 只读取共用的 `RiskConfigSnapshot`。删除旧 gateway/limits 实现、专用测试及仅被它们使用的风险决策、策略状态、评估模型；保留 NextGen 仍使用的风险配置快照。静态引用搜索、Python AST 与 diff 检查通过；未运行测试，未部署。
 
 继续移除另一套没有生产调用方的旧决策回放 service：`DecisionTraceService` 及其多模式回放 API 只被旧单测和包级导出引用；历史轨迹审计使用 `reproduce_decision` 的冻结输入验证流程，数据库读写与归档代码继续保留。删除该 service、专属测试及旧决策测试中对 service 的重复断言；保留决策轨迹生成和历史精确重放测试。静态引用搜索与 AST 检查通过；未运行测试，未部署。
+
+继续移除未被当前服务调用的旧异步决策接线层：`create_authoritative_async_decision_filter`、`FrozenDecisionInputs` 和 `build_decision_input` 只服务旧 runner，不参与历史轨迹验证。删除该过滤器、事实注入模型和专属事实过滤测试；保留历史审计所需的纯决策与 trace verifier。数据库 trace 读写及归档保持不变。静态引用搜索与 AST 检查通过；未运行测试，未部署。
