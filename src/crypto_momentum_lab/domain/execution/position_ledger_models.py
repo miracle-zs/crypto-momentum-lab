@@ -11,7 +11,6 @@ Provides strict identity types:
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -40,13 +39,6 @@ class PositionHealthStatus(StrEnum):
     CATCHING_UP = "CATCHING_UP"
     INCOMPLETE = "INCOMPLETE"
     CONFLICT = "CONFLICT"
-
-
-class PositionState(StrEnum):
-    """Canonical 2-state position dimension according to REFACTOR_SPEC §3."""
-
-    FLAT = "flat"
-    OPEN = "open"
 
 
 class FactCredibility(StrEnum):
@@ -114,14 +106,6 @@ class PositionKey:
         ):
             raise ValueError("position key fields must not contain ':'")
 
-    @property
-    def canonical_id(self) -> str:
-        return (
-            f"{self.environment}:{self.account_label}:{self.symbol}:"
-            f"{self.position_side.value}"
-        )
-
-
 @dataclass(frozen=True, slots=True)
 class AccountFactStreamScope:
     """Identity of the source stream that supplied account facts.
@@ -165,29 +149,6 @@ class AccountFactStreamScope:
             stream_id=stream_id,
             stream_epoch=stream_epoch,
         )
-
-    def matches(self, key: PositionKey) -> bool:
-        return (
-            self.environment == key.environment
-            and self.account_label == key.account_label
-            and self.symbol == key.symbol
-            and self.position_side == key.position_side
-        )
-
-    @property
-    def canonical_id(self) -> str:
-        return json.dumps(
-            [
-                self.environment,
-                self.account_label,
-                self.symbol,
-                self.position_side.value,
-                self.stream_id,
-                self.stream_epoch,
-            ],
-            separators=(",", ":"),
-        )
-
 
 @dataclass(frozen=True, slots=True)
 class AccountFillLoadProvenance:
@@ -435,10 +396,6 @@ class PositionView:
     @property
     def total_quantity(self) -> Decimal:
         return sum((b.quantity for b in self.batches), start=Decimal("0"))
-
-    @property
-    def position_state(self) -> PositionState:
-        return PositionState.OPEN if self.total_quantity > 0 else PositionState.FLAT
 
     @property
     def fact_credibility(self) -> FactCredibility:
