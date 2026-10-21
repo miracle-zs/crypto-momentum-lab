@@ -6,7 +6,6 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-import crypto_momentum_lab.domain.execution.projection_codec as projection_codec
 from crypto_momentum_lab.domain.account.models import (
     AccountFillEvent,
     AccountPositionSnapshot,
@@ -24,13 +23,17 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionHealthStatus,
     PositionKey,
     PositionLedgerBatch,
-    PositionLedgerProjection,
-)
-from crypto_momentum_lab.domain.execution.projection_codec import _datetime, _decimal
-from crypto_momentum_lab.domain.execution.snapshot_encoding import (
-    encode_position_snapshot,
 )
 from crypto_momentum_lab.domain.trading import TradeSide as StrategySide
+from . import (
+    execution_head_migration_projection as projection_codec,
+)
+from .execution_head_migration_projection import (
+    LegacyPositionProjection,
+    _datetime,
+    _decimal,
+)
+from .execution_head_migration_snapshot import encode_position_snapshot
 
 
 class RecoverySchemaError(ValueError):
@@ -585,7 +588,7 @@ class PositionRecoveryCodec:
     encode_projection = staticmethod(projection_codec.encode_projection)
 
     @classmethod
-    def decode_projection(cls, value: object) -> PositionLedgerProjection:
+    def decode_projection(cls, value: object) -> LegacyPositionProjection:
         data = _mapping(value, "projection")
         current_keys = {
             "position_key",
@@ -631,7 +634,7 @@ class PositionRecoveryCodec:
                 raise RecoverySchemaError(
                     "legacy projection derived fields disagree with active episode"
                 )
-        return PositionLedgerProjection(
+        return LegacyPositionProjection(
             position_key=cls.decode_position_key(data.get("position_key")),
             active_episode=active_episode,
             unallocated_quantity=_decimal_value(data, "unallocated_quantity"),

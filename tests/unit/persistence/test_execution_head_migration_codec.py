@@ -12,7 +12,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     FactCoverageStatus,
     PositionKey,
 )
-from crypto_momentum_lab.domain.execution.recovery_codec import (
+from crypto_momentum_lab.persistence.postgres.execution_head_migration_codec import (
     PositionRecoveryCodec,
     RecoverySchemaError,
 )

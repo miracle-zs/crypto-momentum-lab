@@ -10,14 +10,17 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
     PositionEpisode,
     PositionLedgerBatch,
-    PositionLedgerProjection,
     PositionKey,
 )
-from crypto_momentum_lab.domain.execution.projection_codec import encode_position_key
-from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
 from crypto_momentum_lab.domain.trading import TradeSide
+from crypto_momentum_lab.persistence.postgres import (
+    execution_head_migration_projection,
+)
 from crypto_momentum_lab.persistence.postgres.execution_head_migration import (
     convert_legacy_execution_head,
+)
+from crypto_momentum_lab.persistence.postgres.execution_head_migration_codec import (
+    PositionRecoveryCodec,
 )
 
 START = datetime(2026, 10, 1, tzinfo=UTC)
@@ -97,7 +100,7 @@ def test_legacy_head_migration_keeps_only_the_new_current_state() -> None:
             ),
         ),
     )
-    projection = PositionLedgerProjection(
+    projection = execution_head_migration_projection.LegacyPositionProjection(
         position_key=key,
         active_episode=active_episode,
         unallocated_quantity=Decimal("0"),
@@ -125,7 +128,9 @@ def test_legacy_head_migration_keeps_only_the_new_current_state() -> None:
     )
     legacy = {
         "schema_version": 1,
-        "position_key": encode_position_key(key),
+        "position_key": execution_head_migration_projection.encode_position_key(
+            key
+        ),
         "stream_scope": {
             "stream_id": scope.stream_id,
             "stream_epoch": scope.stream_epoch,

@@ -7,14 +7,12 @@ Provides strict identity types:
 - ``PositionLedgerBatch``: An entry lot within a specific position episode;
 - ``PositionEpisode``: A continuous non-zero holding lifecycle
   bounded by zero-crossings;
-- ``PositionLedgerProjection``: Point-in-time materialized ledger
-  state with unallocated lots.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
@@ -446,37 +444,6 @@ class PositionEpisode:
     @property
     def remaining_quantity(self) -> Decimal:
         return sum((b.quantity for b in self.batches), start=Decimal("0"))
-
-
-@dataclass(frozen=True, slots=True)
-class PositionLedgerProjection:
-    """Derived lot allocation at one point in time, built from exchange facts."""
-
-    position_key: PositionKey
-    active_episode: PositionEpisode | None
-    unallocated_quantity: Decimal
-    reconciliation_gap: Decimal
-    high_watermark_trade_at: datetime | None
-    archived_episodes: tuple[PositionEpisode, ...] = ()
-    diagnostics: tuple[str, ...] = ()
-    health_status: PositionHealthStatus = PositionHealthStatus.READY
-    event_cut: datetime | None = None
-    discrepancy: PositionDiscrepancy | None = None
-    is_comparable: bool = True
-    projection_version: str | None = None
-    stream_scope: AccountFactStreamScope | None = None
-    episode_sequence: int = field(default=0, compare=False)
-    batch_sequence: int = field(default=0, compare=False)
-
-    @property
-    def active_batches(self) -> tuple[PositionLedgerBatch, ...]:
-        return self.active_episode.active_batches if self.active_episode else ()
-
-    @property
-    def total_active_quantity(self) -> Decimal:
-        return sum(
-            (batch.quantity for batch in self.active_batches), start=Decimal("0")
-        )
 
 
 @dataclass(frozen=True, slots=True)

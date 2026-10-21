@@ -8,8 +8,10 @@ from pathlib import Path
 
 import pytest
 
-import crypto_momentum_lab.domain.execution.projection_codec as projection_codec
-from crypto_momentum_lab.domain.execution.recovery_codec import (
+from crypto_momentum_lab.persistence.postgres import (
+    execution_head_migration_projection as projection_codec,
+)
+from crypto_momentum_lab.persistence.postgres.execution_head_migration_codec import (
     PositionRecoveryCodec,
     RecoverySchemaError,
 )

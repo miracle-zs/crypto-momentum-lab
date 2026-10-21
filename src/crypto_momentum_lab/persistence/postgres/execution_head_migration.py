@@ -15,16 +15,16 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     ExitOrderSubmissionFact,
     FactCoverageInterval,
     PositionKey,
-    PositionLedgerProjection,
 )
-from crypto_momentum_lab.domain.execution.projection_codec import (
+from .execution_head_migration_codec import (
+    PositionRecoveryCodec,
+)
+from .execution_head_migration_projection import (
+    LegacyPositionProjection,
     encode_position_key,
     encode_projection,
 )
-from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
-from crypto_momentum_lab.domain.execution.snapshot_encoding import (
-    stable_snapshot_anchor_id,
-)
+from .execution_head_migration_snapshot import stable_snapshot_anchor_id
 
 _EPISODE_SUFFIX = re.compile(r"_(\d+)$")
 _BATCH_SUFFIX = re.compile(r"_b(\d+)$")
@@ -140,7 +140,7 @@ def _encode_current_position_state(
     *,
     position_key: PositionKey,
     stream_scope: AccountFactStreamScope,
-    projection: PositionLedgerProjection,
+    projection: LegacyPositionProjection,
     snapshots: tuple[AccountPositionSnapshot, ...],
     exit_boundaries: tuple[ExitOrderSubmissionFact, ...],
     coverage: FactCoverageInterval | None,
@@ -170,8 +170,6 @@ def _encode_current_position_state(
         projection,
         active_episode=active_episode,
         archived_episodes=(),
-        episode_sequence=episode_sequence,
-        batch_sequence=batch_sequence,
     )
     current_verification = _current_verification(
         position_key=position_key,

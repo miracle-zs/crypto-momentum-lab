@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
@@ -9,10 +10,39 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
     PositionDiscrepancy,
     PositionEpisode,
+    PositionHealthStatus,
     PositionKey,
     PositionLedgerBatch,
-    PositionLedgerProjection,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class LegacyPositionProjection:
+    """Schema-1 projection shape consumed only while migrating execution heads."""
+
+    position_key: PositionKey
+    active_episode: PositionEpisode | None
+    unallocated_quantity: Decimal
+    reconciliation_gap: Decimal
+    high_watermark_trade_at: datetime | None
+    archived_episodes: tuple[PositionEpisode, ...] = ()
+    diagnostics: tuple[str, ...] = ()
+    health_status: PositionHealthStatus = PositionHealthStatus.READY
+    event_cut: datetime | None = None
+    discrepancy: PositionDiscrepancy | None = None
+    is_comparable: bool = True
+    projection_version: str | None = None
+    stream_scope: AccountFactStreamScope | None = None
+
+    @property
+    def active_batches(self) -> tuple[PositionLedgerBatch, ...]:
+        return self.active_episode.active_batches if self.active_episode else ()
+
+    @property
+    def total_active_quantity(self) -> Decimal:
+        return sum(
+            (batch.quantity for batch in self.active_batches), start=Decimal("0")
+        )
 
 
 def encode_scope(scope: AccountFactStreamScope) -> dict[str, object]:
@@ -107,7 +137,7 @@ def encode_discrepancy(
 
 
 def encode_projection(
-    projection: PositionLedgerProjection,
+    projection: LegacyPositionProjection,
     *,
     include_derived: bool = True,
 ) -> dict[str, object]:

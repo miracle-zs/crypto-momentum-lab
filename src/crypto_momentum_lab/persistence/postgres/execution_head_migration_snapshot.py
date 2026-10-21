@@ -1,4 +1,4 @@
-"""Canonical position snapshot encoding and anchor identity without recovery codec."""
+"""Canonical position snapshot encoding for legacy head migration."""
 
 import hashlib
 import json
