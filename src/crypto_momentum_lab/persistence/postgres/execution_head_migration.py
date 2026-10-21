@@ -6,8 +6,14 @@ import re
 from dataclasses import replace
 from typing import Any
 
+from crypto_momentum_lab.domain.account.models import (
+    AccountFillEvent,
+    AccountPositionSnapshot,
+)
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
+    ExitOrderSubmissionFact,
+    FactCoverageInterval,
     PositionKey,
     PositionLedgerProjection,
 )
@@ -16,7 +22,6 @@ from crypto_momentum_lab.domain.execution.projection_codec import (
     encode_projection,
 )
 from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
-from crypto_momentum_lab.domain.execution.recovery_models import AccountFacts
 from crypto_momentum_lab.domain.execution.snapshot_encoding import (
     stable_snapshot_anchor_id,
 )
@@ -24,6 +29,7 @@ from crypto_momentum_lab.domain.execution.snapshot_encoding import (
 _EPISODE_SUFFIX = re.compile(r"_(\d+)$")
 _BATCH_SUFFIX = re.compile(r"_b(\d+)$")
 _EXECUTION_HEAD_SCHEMA_VERSION = 4
+_ACCOUNT_FACTS_SCHEMA_VERSION = 4
 
 
 def convert_legacy_execution_head(payload: object) -> dict[str, object]:
@@ -48,34 +54,29 @@ def convert_legacy_execution_head(payload: object) -> dict[str, object]:
     projection = PositionRecoveryCodec.decode_projection(payload.get("projection"))
     if projection.position_key != key or projection.stream_scope != scope:
         raise ValueError("legacy execution head projection identity mismatch")
-    active_fills = tuple(
+    active_fills: tuple[AccountFillEvent, ...] = tuple(
         PositionRecoveryCodec.decode_fill(item)
         for item in _array(payload, "active_fills")
     )
-    snapshots = tuple(
+    snapshots: tuple[AccountPositionSnapshot, ...] = tuple(
         PositionRecoveryCodec.decode_snapshot(item)
         for item in _array(payload, "active_snapshots")
     )
-    exit_boundaries = tuple(
+    exit_boundaries: tuple[ExitOrderSubmissionFact, ...] = tuple(
         PositionRecoveryCodec.decode_boundary(item)
         for item in _array(payload, "active_exit_boundaries")
     )
     raw_coverage = payload.get("coverage")
-    facts = AccountFacts(
-        position_key=key,
-        snapshots=snapshots,
-        exit_boundaries=exit_boundaries,
-        coverage=(
-            PositionRecoveryCodec.decode_coverage(raw_coverage)
-            if raw_coverage is not None
-            else None
-        ),
-        has_synthetic_fills=any(
-            bool(fill.raw_payload.get("synthetic_from_order", False))
-            for fill in active_fills
-        ),
-        stream_scope=scope,
-        prefix_facts_complete=False,
+    coverage = (
+        PositionRecoveryCodec.decode_coverage(raw_coverage)
+        if raw_coverage is not None
+        else None
+    )
+    if coverage is not None and coverage.stream_scope != scope:
+        raise ValueError("coverage scope does not match execution head")
+    has_synthetic_fills = any(
+        bool(fill.raw_payload.get("synthetic_from_order", False))
+        for fill in active_fills
     )
 
     active_episode = projection.active_episode
@@ -104,7 +105,10 @@ def convert_legacy_execution_head(payload: object) -> dict[str, object]:
         position_key=key,
         stream_scope=scope,
         projection=projection,
-        verification=facts,
+        snapshots=snapshots,
+        exit_boundaries=exit_boundaries,
+        coverage=coverage,
+        has_synthetic_fills=has_synthetic_fills,
         episode_sequence=episode_sequence,
         batch_sequence=batch_sequence,
     )
@@ -137,7 +141,10 @@ def _encode_current_position_state(
     position_key: PositionKey,
     stream_scope: AccountFactStreamScope,
     projection: PositionLedgerProjection,
-    verification: AccountFacts,
+    snapshots: tuple[AccountPositionSnapshot, ...],
+    exit_boundaries: tuple[ExitOrderSubmissionFact, ...],
+    coverage: FactCoverageInterval | None,
+    has_synthetic_fills: bool,
     episode_sequence: int,
     batch_sequence: int,
 ) -> dict[str, object]:
@@ -146,13 +153,6 @@ def _encode_current_position_state(
         or projection.stream_scope != stream_scope
     ):
         raise ValueError("projection identity does not match execution head")
-    if (
-        verification.position_key != position_key
-        or verification.stream_scope != stream_scope
-    ):
-        raise ValueError("verification identity does not match execution head")
-    if verification.fills or verification.late_fills:
-        raise ValueError("current position state must not contain fill history")
     if type(episode_sequence) is not int or episode_sequence < 0:
         raise ValueError("episode sequence must be a non-negative integer")
     if type(batch_sequence) is not int or batch_sequence < 0:
@@ -162,7 +162,9 @@ def _encode_current_position_state(
     if active_episode is not None:
         active_episode = replace(
             active_episode,
-            batches=tuple(batch for batch in active_episode.batches if batch.quantity > 0),
+            batches=tuple(
+                batch for batch in active_episode.batches if batch.quantity > 0
+            ),
             reductions=(),
         )
     current_projection = replace(
@@ -172,28 +174,43 @@ def _encode_current_position_state(
         episode_sequence=episode_sequence,
         batch_sequence=batch_sequence,
     )
-    current_verification = _current_verification(verification)
+    current_verification = _current_verification(
+        position_key=position_key,
+        stream_scope=stream_scope,
+        snapshots=snapshots,
+        exit_boundaries=exit_boundaries,
+        coverage=coverage,
+        has_synthetic_fills=has_synthetic_fills,
+    )
     return {
         "projection": encode_projection(current_projection, include_derived=False),
         "episode_sequence": episode_sequence,
         "batch_sequence": batch_sequence,
-        "verification": PositionRecoveryCodec.encode_facts(current_verification),
+        "verification": current_verification,
     }
 
 
-def _current_verification(facts: AccountFacts) -> AccountFacts:
+def _current_verification(
+    *,
+    position_key: PositionKey,
+    stream_scope: AccountFactStreamScope,
+    snapshots: tuple[AccountPositionSnapshot, ...],
+    exit_boundaries: tuple[ExitOrderSubmissionFact, ...],
+    coverage: FactCoverageInterval | None,
+    has_synthetic_fills: bool,
+) -> dict[str, object]:
     latest_snapshot = max(
-        facts.snapshots,
+        snapshots,
         key=lambda item: item.observed_at,
         default=None,
     )
     source_anchor_snapshot = None
-    provenance = facts.fill_load_provenance
+    provenance = coverage.load_provenance if coverage is not None else None
     if provenance is not None:
         source_anchor_snapshot = next(
             (
                 snapshot
-                for snapshot in facts.snapshots
+                for snapshot in snapshots
                 if snapshot.observed_at == provenance.source_anchor_event_cut
                 and stable_snapshot_anchor_id(snapshot) == provenance.source_anchor_id
             ),
@@ -209,22 +226,37 @@ def _current_verification(facts: AccountFacts) -> AccountFacts:
     else:
         snapshots = (source_anchor_snapshot, latest_snapshot)
 
-    exit_boundaries = {item.order_id: item for item in facts.exit_boundaries}
-    return AccountFacts(
-        position_key=facts.position_key,
-        snapshots=snapshots,
-        exit_boundaries=tuple(exit_boundaries.values()),
-        coverage=facts.coverage,
-        has_synthetic_fills=facts.has_synthetic_fills,
-        conflicting_fills=facts.conflicting_fills[-1:],
-        has_late_events=facts.has_late_events,
-        stream_scope=facts.stream_scope,
-        fact_conflicts=facts.fact_conflicts[-1:],
-        integrity_issues=facts.integrity_issues[-1:],
-        fill_cursor_provenance=facts.fill_cursor_provenance,
-        fill_load_provenance=provenance,
-        prefix_facts_complete=False,
-    )
+    deduplicated_boundaries = {item.order_id: item for item in exit_boundaries}
+    verification: dict[str, object] = {
+        "schema_version": _ACCOUNT_FACTS_SCHEMA_VERSION,
+        "position_key": encode_position_key(position_key),
+        "fills": [],
+        "snapshots": [
+            PositionRecoveryCodec.encode_snapshot(item) for item in snapshots
+        ],
+        "exit_boundaries": [
+            PositionRecoveryCodec.encode_boundary(item)
+            for item in deduplicated_boundaries.values()
+        ],
+        "coverage": (
+            PositionRecoveryCodec.encode_coverage(coverage)
+            if coverage is not None
+            else None
+        ),
+        "has_synthetic_fills": has_synthetic_fills,
+        "conflicting_fills": [],
+        "has_late_events": False,
+        "stream_scope": PositionRecoveryCodec.encode_scope(stream_scope),
+        "recovery_checkpoint": None,
+        "fact_conflicts": [],
+        "integrity_issues": [],
+        "late_fills": [],
+        "fill_cursor_provenance": None,
+        "prefix_facts_complete": False,
+    }
+    if provenance is None:
+        verification["fill_load_provenance"] = None
+    return verification
 
 
 def _validate_current_execution_head(
@@ -253,22 +285,88 @@ def _validate_current_execution_head(
     }:
         raise ValueError("converted execution head position state is malformed")
     projection = PositionRecoveryCodec.decode_projection(state.get("projection"))
-    verification = PositionRecoveryCodec.decode_facts(state.get("verification"))
+    _validate_current_verification(state.get("verification"), key=key, scope=scope)
     if (
         projection.position_key != key
         or projection.stream_scope != scope
         or projection.archived_episodes
     ):
         raise ValueError("converted execution head projection is invalid")
-    if (
-        verification.position_key != key
-        or verification.stream_scope != scope
-        or verification.fills
-        or verification.late_fills
-    ):
-        raise ValueError("converted execution head verification is invalid")
     _sequence(state, "episode_sequence")
     _sequence(state, "batch_sequence")
+
+
+def _validate_current_verification(
+    value: object,
+    *,
+    key: PositionKey,
+    scope: AccountFactStreamScope,
+) -> None:
+    if not isinstance(value, dict):
+        raise ValueError("converted execution head verification is malformed")
+    expected_keys = {
+        "schema_version",
+        "position_key",
+        "fills",
+        "snapshots",
+        "exit_boundaries",
+        "coverage",
+        "has_synthetic_fills",
+        "conflicting_fills",
+        "has_late_events",
+        "stream_scope",
+        "recovery_checkpoint",
+        "fact_conflicts",
+        "integrity_issues",
+        "late_fills",
+        "fill_cursor_provenance",
+        "prefix_facts_complete",
+    }
+    if set(value) not in (expected_keys, expected_keys | {"fill_load_provenance"}):
+        raise ValueError("converted execution head verification fields are malformed")
+    if (
+        type(value.get("schema_version")) is not int
+        or value["schema_version"] != _ACCOUNT_FACTS_SCHEMA_VERSION
+        or value.get("position_key") != encode_position_key(key)
+        or value.get("stream_scope") != PositionRecoveryCodec.encode_scope(scope)
+    ):
+        raise ValueError("converted execution head verification identity mismatch")
+    empty_fields = (
+        "fills",
+        "conflicting_fills",
+        "fact_conflicts",
+        "integrity_issues",
+        "late_fills",
+    )
+    if any(value.get(field) != [] for field in empty_fields):
+        raise ValueError("converted execution head verification contains history")
+    if (
+        type(value.get("has_synthetic_fills")) is not bool
+        or type(value.get("has_late_events")) is not bool
+        or value.get("has_late_events")
+        or value.get("recovery_checkpoint") is not None
+        or value.get("fill_cursor_provenance") is not None
+        or value.get("prefix_facts_complete") is not False
+    ):
+        raise ValueError("converted execution head verification state is invalid")
+    if not isinstance(value.get("snapshots"), list) or not isinstance(
+        value.get("exit_boundaries"), list
+    ):
+        raise ValueError("converted execution head verification facts are invalid")
+    coverage_payload = value.get("coverage")
+    coverage = (
+        PositionRecoveryCodec.decode_coverage(coverage_payload)
+        if coverage_payload is not None
+        else None
+    )
+    if coverage is not None and coverage.stream_scope != scope:
+        raise ValueError("converted execution head verification coverage is invalid")
+    if "fill_load_provenance" not in value and (
+        coverage is None or coverage.load_provenance is None
+    ):
+        raise ValueError("converted execution head verification provenance is missing")
+    if value.get("fill_load_provenance") is not None:
+        raise ValueError("converted execution head verification provenance is invalid")
 
 
 def _array(payload: dict[str, Any], field: str) -> list[object]:

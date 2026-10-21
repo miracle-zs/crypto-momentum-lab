@@ -145,9 +145,7 @@ def test_legacy_head_migration_keeps_only_the_new_current_state() -> None:
     migrated_projection = PositionRecoveryCodec.decode_projection(
         migrated["position_state"]["projection"]
     )
-    verification = PositionRecoveryCodec.decode_facts(
-        migrated["position_state"]["verification"]
-    )
+    verification = migrated["position_state"]["verification"]
 
     assert set(migrated) == {
         "schema_version",
@@ -166,7 +164,10 @@ def test_legacy_head_migration_keeps_only_the_new_current_state() -> None:
     assert migrated_projection.stream_scope == scope
     assert migrated["position_state"]["episode_sequence"] == 2
     assert migrated["position_state"]["batch_sequence"] == 1
-    assert verification.fills == ()
-    assert verification.snapshots == (snapshot,)
+    assert verification["fills"] == []
+    assert [
+        PositionRecoveryCodec.decode_snapshot(item)
+        for item in verification["snapshots"]
+    ] == [snapshot]
     assert migrated["active_reservation_ids"] == ["res-active"]
     assert "active_fills" not in migrated

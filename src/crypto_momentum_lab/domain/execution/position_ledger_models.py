@@ -279,24 +279,6 @@ class AccountFillLoadProvenance:
 
 
 @dataclass(frozen=True, slots=True)
-class AccountFactConflict:
-    """A persisted fact identity or payload conflict that blocks authority."""
-
-    event_kind: str
-    event_id: str
-    details: str
-    event_at: datetime | None = None
-
-    def __post_init__(self) -> None:
-        if not self.event_kind.strip():
-            raise ValueError("event_kind must not be empty")
-        if not self.event_id.strip():
-            raise ValueError("event_id must not be empty")
-        if self.event_at is not None and self.event_at.tzinfo is None:
-            raise ValueError("event_at must be timezone-aware")
-
-
-@dataclass(frozen=True, slots=True)
 class FactCoverageInterval:
     """Interval over which account facts are confirmed to be complete."""
 

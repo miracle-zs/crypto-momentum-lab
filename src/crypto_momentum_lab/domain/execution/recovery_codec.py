@@ -1,4 +1,4 @@
-"""Strict JSON codec for versioned account fact recovery values."""
+"""Strict JSON codec for records retained by the legacy head migration."""
 
 from __future__ import annotations
 
@@ -9,12 +9,10 @@ from typing import Any
 import crypto_momentum_lab.domain.execution.projection_codec as projection_codec
 from crypto_momentum_lab.domain.account.models import (
     AccountFillEvent,
-    AccountFillReconciliationCursor,
     AccountPositionSnapshot,
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    AccountFactConflict,
     AccountFactStreamScope,
     AccountFillLoadProvenance,
     BatchReductionAttribution,
@@ -31,21 +29,18 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionLedgerProjection,
 )
 from crypto_momentum_lab.domain.execution.projection_codec import _datetime, _decimal
-from crypto_momentum_lab.domain.execution.recovery_models import (
-    AccountFacts,
-    RecoverySchemaError,
-)
 from crypto_momentum_lab.domain.execution.snapshot_encoding import (
     encode_position_snapshot,
 )
 from crypto_momentum_lab.domain.trading import TradeSide as StrategySide
 
-ACCOUNT_FACTS_SCHEMA_VERSION = 4
-LEGACY_ACCOUNT_FACTS_SCHEMA_VERSION = 3
+
+class RecoverySchemaError(ValueError):
+    """Stored recovery data uses an unsupported or invalid schema."""
 
 
 class PositionRecoveryCodec:
-    """Encode and decode durable facts without permissive field fallbacks."""
+    """Encode and decode typed records used by the 0062 head migration."""
 
     encode_scope = staticmethod(projection_codec.encode_scope)
 
@@ -71,49 +66,6 @@ class PositionRecoveryCodec:
             position_side=FuturesPositionSide(_string(data, "position_side")),
             stream_id=_string(data, "stream_id"),
             stream_epoch=_string(data, "stream_epoch"),
-        )
-
-    @classmethod
-    def encode_cursor(
-        cls, cursor: AccountFillReconciliationCursor
-    ) -> dict[str, object]:
-        return {
-            "environment": cursor.environment,
-            "account_label": cursor.account_label,
-            "symbol": cursor.symbol,
-            "from_id": cursor.from_id,
-            "start_time_ms": cursor.start_time_ms,
-            "last_checked_at": _datetime(cursor.last_checked_at),
-        }
-
-    @classmethod
-    def decode_cursor(cls, value: object) -> AccountFillReconciliationCursor:
-        data = _mapping(value, "fill cursor")
-        _require_keys(
-            data,
-            {
-                "environment",
-                "account_label",
-                "symbol",
-                "from_id",
-                "start_time_ms",
-                "last_checked_at",
-            },
-            "fill cursor",
-        )
-        from_id = data.get("from_id")
-        start_time_ms = data.get("start_time_ms")
-        if from_id is not None and type(from_id) is not int:
-            raise RecoverySchemaError("from_id must be an integer or null")
-        if start_time_ms is not None and type(start_time_ms) is not int:
-            raise RecoverySchemaError("start_time_ms must be an integer or null")
-        return AccountFillReconciliationCursor(
-            environment=_string(data, "environment"),
-            account_label=_string(data, "account_label"),
-            symbol=_string(data, "symbol"),
-            from_id=from_id,
-            start_time_ms=start_time_ms,
-            last_checked_at=_datetime_value(data, "last_checked_at"),
         )
 
     @classmethod
@@ -753,186 +705,6 @@ class PositionRecoveryCodec:
             ),
         )
 
-    @classmethod
-    def encode_conflict(cls, conflict: AccountFactConflict) -> dict[str, object]:
-        return {
-            "event_kind": conflict.event_kind,
-            "event_id": conflict.event_id,
-            "details": conflict.details,
-            "event_at": (
-                _datetime(conflict.event_at) if conflict.event_at is not None else None
-            ),
-        }
-
-    @classmethod
-    def decode_conflict(cls, value: object) -> AccountFactConflict:
-        data = _mapping(value, "conflict")
-        _require_keys(
-            data, {"event_kind", "event_id", "details", "event_at"}, "conflict"
-        )
-        event_at = data.get("event_at")
-        return AccountFactConflict(
-            event_kind=_string(data, "event_kind"),
-            event_id=_string(data, "event_id"),
-            details=_string(data, "details"),
-            event_at=(
-                _datetime_value({"value": event_at}, "value")
-                if event_at is not None
-                else None
-            ),
-        )
-
-    @classmethod
-    def encode_facts(cls, facts: AccountFacts) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "schema_version": ACCOUNT_FACTS_SCHEMA_VERSION,
-            "position_key": cls.encode_position_key(facts.position_key),
-            "fills": [cls.encode_fill(item) for item in facts.fills],
-            "snapshots": [cls.encode_snapshot(item) for item in facts.snapshots],
-            "exit_boundaries": [
-                cls.encode_boundary(item) for item in facts.exit_boundaries
-            ],
-            "coverage": (
-                cls.encode_coverage(facts.coverage)
-                if facts.coverage is not None
-                else None
-            ),
-            "has_synthetic_fills": facts.has_synthetic_fills,
-            "conflicting_fills": [
-                cls.encode_fill(item) for item in facts.conflicting_fills
-            ],
-            "has_late_events": facts.has_late_events,
-            "stream_scope": (
-                cls.encode_scope(facts.stream_scope)
-                if facts.stream_scope is not None
-                else None
-            ),
-            "recovery_checkpoint": None,
-            "fact_conflicts": [
-                cls.encode_conflict(item) for item in facts.fact_conflicts
-            ],
-            "integrity_issues": list(facts.integrity_issues),
-            "late_fills": [cls.encode_fill(item) for item in facts.late_fills],
-            "fill_cursor_provenance": (
-                cls.encode_cursor(facts.fill_cursor_provenance)
-                if facts.fill_cursor_provenance is not None
-                else None
-            ),
-            "fill_load_provenance": (
-                cls.encode_fill_load_provenance(facts.fill_load_provenance)
-                if facts.fill_load_provenance is not None
-                else None
-            ),
-            "prefix_facts_complete": facts.prefix_facts_complete,
-        }
-        if (
-            facts.fill_load_provenance is not None
-            and facts.coverage is not None
-            and facts.coverage.load_provenance == facts.fill_load_provenance
-        ):
-            # Coverage already carries this exact scan proof. Keep a separate
-            # value only when the two facts are actually different.
-            del payload["fill_load_provenance"]
-        return payload
-
-    @classmethod
-    def decode_facts(cls, value: object) -> AccountFacts:
-        data = _mapping(value, "facts")
-        schema_version = data.get("schema_version")
-        if type(schema_version) is not int or schema_version not in {
-            LEGACY_ACCOUNT_FACTS_SCHEMA_VERSION,
-            ACCOUNT_FACTS_SCHEMA_VERSION,
-        }:
-            raise RecoverySchemaError(
-                f"unsupported account facts schema version {schema_version!r}; "
-                f"expected {LEGACY_ACCOUNT_FACTS_SCHEMA_VERSION} or "
-                f"{ACCOUNT_FACTS_SCHEMA_VERSION}"
-            )
-        expected_keys = {
-            "schema_version",
-            "position_key",
-            "fills",
-            "snapshots",
-            "exit_boundaries",
-            "coverage",
-            "has_synthetic_fills",
-            "conflicting_fills",
-            "has_late_events",
-            "stream_scope",
-            "recovery_checkpoint",
-            "fact_conflicts",
-            "integrity_issues",
-            "late_fills",
-            "fill_cursor_provenance",
-            "prefix_facts_complete",
-        }
-        if (
-            schema_version == LEGACY_ACCOUNT_FACTS_SCHEMA_VERSION
-            or "fill_load_provenance" in data
-        ):
-            expected_keys.add("fill_load_provenance")
-        _require_keys(data, expected_keys, "account facts")
-        has_synthetic_fills = data.get("has_synthetic_fills")
-        if type(has_synthetic_fills) is not bool:
-            raise RecoverySchemaError("has_synthetic_fills must be a boolean")
-        has_late_events = data.get("has_late_events")
-        if type(has_late_events) is not bool:
-            raise RecoverySchemaError("has_late_events must be a boolean")
-        coverage = data.get("coverage")
-        decoded_coverage = (
-            cls.decode_coverage(coverage) if coverage is not None else None
-        )
-        scope = data.get("stream_scope")
-        recovery = data.get("recovery_checkpoint")
-        if recovery is not None:
-            raise RecoverySchemaError(
-                "account facts recovery_checkpoint is no longer supported"
-            )
-        cursor = data.get("fill_cursor_provenance")
-        load_provenance = None
-        if "fill_load_provenance" not in data:
-            if decoded_coverage is None or decoded_coverage.load_provenance is None:
-                raise RecoverySchemaError(
-                    "account facts may omit fill_load_provenance only when "
-                    "coverage contains it"
-                )
-            load_provenance = decoded_coverage.load_provenance
-        elif data.get("fill_load_provenance") is not None:
-            load_provenance = cls.decode_fill_load_provenance(
-                data.get("fill_load_provenance")
-            )
-        prefix_facts_complete = data.get("prefix_facts_complete")
-        if type(prefix_facts_complete) is not bool:
-            raise RecoverySchemaError("prefix_facts_complete must be a boolean")
-        return AccountFacts(
-            position_key=cls.decode_position_key(data.get("position_key")),
-            fills=tuple(cls.decode_fill(item) for item in _array(data, "fills")),
-            snapshots=tuple(
-                cls.decode_snapshot(item) for item in _array(data, "snapshots")
-            ),
-            exit_boundaries=tuple(
-                cls.decode_boundary(item) for item in _array(data, "exit_boundaries")
-            ),
-            coverage=decoded_coverage,
-            has_synthetic_fills=has_synthetic_fills,
-            conflicting_fills=tuple(
-                cls.decode_fill(item) for item in _array(data, "conflicting_fills")
-            ),
-            has_late_events=has_late_events,
-            stream_scope=cls.decode_scope(scope) if scope is not None else None,
-            fact_conflicts=tuple(
-                cls.decode_conflict(item) for item in _array(data, "fact_conflicts")
-            ),
-            integrity_issues=_string_array(data, "integrity_issues"),
-            late_fills=tuple(
-                cls.decode_fill(item) for item in _array(data, "late_fills")
-            ),
-            fill_cursor_provenance=(
-                cls.decode_cursor(cursor) if cursor is not None else None
-            ),
-            fill_load_provenance=load_provenance,
-            prefix_facts_complete=prefix_facts_complete,
-        )
 
 def _mapping(value: object, label: str) -> dict[str, object]:
     if not isinstance(value, dict):
