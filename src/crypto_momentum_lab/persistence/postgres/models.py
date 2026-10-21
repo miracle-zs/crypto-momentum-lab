@@ -557,21 +557,6 @@ class PaperEquitySnapshotRow(Base):
     )
 
 
-class StrategyCheckpointRow(Base):
-    __tablename__ = "strategy_checkpoints"
-
-    run_id: Mapped[str] = mapped_column(
-        String(128),
-        ForeignKey("strategy_runs.run_id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    last_processed_at_by_symbol: Mapped[dict[str, object]] = mapped_column(JSONB)
-    warmup_buckets_by_symbol: Mapped[dict[str, int]] = mapped_column(JSONB)
-    cooldown_buckets_remaining_by_symbol: Mapped[dict[str, int]] = mapped_column(JSONB)
-    payload: Mapped[dict[str, object]] = mapped_column(JSONB)
-    saved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-
-
 class StrategyRuntimeEventRow(Base):
     __tablename__ = "strategy_runtime_events"
 

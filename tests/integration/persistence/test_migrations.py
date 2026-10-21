@@ -39,7 +39,6 @@ def test_initial_migration_creates_universe_tables(database_url: str) -> None:
         "risk_halts",
         "runtime_market_states_15s",
         "runtime_market_state_gaps",
-        "strategy_checkpoints",
         "strategy_runs",
         "strategy_signals",
         "universe_snapshots",
@@ -48,6 +47,7 @@ def test_initial_migration_creates_universe_tables(database_url: str) -> None:
     } <= table_names
     assert "trading_leases" not in table_names
     retired_tables = {
+        "strategy_checkpoints": "20261021_0069",
         "account_reconciliation_heads": "20261015_0063",
         "account_user_data_journal": "20261015_0064",
         "position_fact_journal_events": "20261015_0065",
