@@ -115,7 +115,7 @@ class _ResponseCache:
         self,
         ttl_seconds: float,
         max_entries: int = 512,
-        max_refresh_tasks: int = 16,
+        max_refresh_tasks: int = 4,
     ) -> None:
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be positive")
