@@ -116,7 +116,6 @@ class PositionEpisode:
     cumulative_bought: Decimal = Decimal("0")
     cumulative_sold: Decimal = Decimal("0")
     peak_quantity: Decimal = Decimal("0")
-    batches: tuple[PositionLedgerBatch, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.episode_id.strip():

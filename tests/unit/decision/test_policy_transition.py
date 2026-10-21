@@ -136,7 +136,6 @@ def _make_position_view(
             position_key=pos_key,
             side=side,
             opened_at=opened_at or datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC),
-            batches=batches,
         )
     return PositionView(
         key=pos_key,

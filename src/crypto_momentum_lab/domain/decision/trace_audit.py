@@ -557,7 +557,6 @@ def verify_decision_trace(
                 cumulative_bought=Decimal(str(episode_data["cumulative_bought"])),
                 cumulative_sold=Decimal(str(episode_data["cumulative_sold"])),
                 peak_quantity=Decimal(str(episode_data["peak_quantity"])),
-                batches=tuple(batches_list),
             )
         pos_view = PositionView(
             key=pos_key,

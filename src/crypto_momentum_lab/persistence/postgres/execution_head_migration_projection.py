@@ -9,11 +9,11 @@ from enum import StrEnum
 
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    PositionEpisode,
     PositionHealthStatus,
     PositionKey,
     PositionLedgerBatch,
 )
+from crypto_momentum_lab.domain.trading import TradeSide as StrategySide
 
 
 class FactCoverageStatus(StrEnum):
@@ -187,16 +187,41 @@ class FactCoverageInterval:
             ):
                 raise ValueError("coverage predates its load provenance")
 
+
+@dataclass(frozen=True, slots=True)
+class LegacyPositionEpisode:
+    """Schema-1 episode shape, including its nested batch copy."""
+
+    episode_id: str
+    position_key: PositionKey
+    side: StrategySide
+    opened_at: datetime
+    closed_at: datetime | None = None
+    is_active: bool = True
+    cumulative_bought: Decimal = Decimal("0")
+    cumulative_sold: Decimal = Decimal("0")
+    peak_quantity: Decimal = Decimal("0")
+    batches: tuple[PositionLedgerBatch, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.episode_id.strip():
+            raise ValueError("episode_id must not be empty")
+        if self.opened_at.tzinfo is None:
+            raise ValueError("opened_at must be timezone-aware")
+        if self.closed_at is not None and self.closed_at.tzinfo is None:
+            raise ValueError("closed_at must be timezone-aware")
+
+
 @dataclass(frozen=True, slots=True)
 class LegacyPositionProjection:
     """Schema-1 projection shape consumed only while migrating execution heads."""
 
     position_key: PositionKey
-    active_episode: PositionEpisode | None
+    active_episode: LegacyPositionEpisode | None
     unallocated_quantity: Decimal
     reconciliation_gap: Decimal
     high_watermark_trade_at: datetime | None
-    archived_episodes: tuple[PositionEpisode, ...] = ()
+    archived_episodes: tuple[LegacyPositionEpisode, ...] = ()
     diagnostics: tuple[str, ...] = ()
     health_status: PositionHealthStatus = PositionHealthStatus.READY
     event_cut: datetime | None = None
@@ -261,7 +286,7 @@ def encode_batch(batch: PositionLedgerBatch) -> dict[str, object]:
     }
 
 
-def encode_episode(episode: PositionEpisode | None) -> object:
+def encode_episode(episode: LegacyPositionEpisode | None) -> object:
     if episode is None:
         return None
     return {

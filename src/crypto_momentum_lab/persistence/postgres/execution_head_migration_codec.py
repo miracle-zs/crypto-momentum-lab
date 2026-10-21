@@ -13,7 +13,6 @@ from crypto_momentum_lab.domain.account.models import (
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    PositionEpisode,
     PositionHealthStatus,
     PositionKey,
     PositionLedgerBatch,
@@ -28,6 +27,7 @@ from .execution_head_migration_projection import (
     DiscrepancyKind,
     FactCoverageInterval,
     FactCoverageStatus,
+    LegacyPositionEpisode,
     LegacyPositionProjection,
     PositionDiscrepancy,
     _datetime,
@@ -500,7 +500,7 @@ class PositionRecoveryCodec:
     encode_episode = staticmethod(projection_codec.encode_episode)
 
     @classmethod
-    def decode_episode(cls, value: object) -> PositionEpisode | None:
+    def decode_episode(cls, value: object) -> LegacyPositionEpisode | None:
         if value is None:
             return None
         data = _mapping(value, "episode")
@@ -527,7 +527,7 @@ class PositionRecoveryCodec:
             raise RecoverySchemaError("is_active must be a boolean")
         # The schema-1 to schema-4 head migration drops historical reductions.
         _array(data, "reductions")
-        return PositionEpisode(
+        return LegacyPositionEpisode(
             episode_id=_string(data, "episode_id"),
             position_key=cls.decode_position_key(data.get("position_key")),
             side=StrategySide(_string(data, "side")),

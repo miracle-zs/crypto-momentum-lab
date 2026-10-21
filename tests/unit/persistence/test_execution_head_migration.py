@@ -7,7 +7,6 @@ from crypto_momentum_lab.domain.account.models import (
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    PositionEpisode,
     PositionLedgerBatch,
     PositionKey,
 )
@@ -17,6 +16,7 @@ from crypto_momentum_lab.persistence.postgres import (
 )
 from crypto_momentum_lab.persistence.postgres.execution_head_migration_projection import (
     AccountFactStreamScope,
+    LegacyPositionEpisode,
 )
 from crypto_momentum_lab.persistence.postgres.execution_head_migration import (
     convert_legacy_execution_head,
@@ -61,7 +61,7 @@ def test_legacy_head_migration_keeps_only_the_new_current_state() -> None:
         _fill("exit-1", "SELL", 2),
         _fill("entry-2", "BUY", 3),
     )
-    archived_episode = PositionEpisode(
+    archived_episode = LegacyPositionEpisode(
         episode_id="episode_1",
         position_key=key,
         side=TradeSide.LONG,
@@ -82,7 +82,7 @@ def test_legacy_head_migration_keeps_only_the_new_current_state() -> None:
             ),
         ),
     )
-    active_episode = PositionEpisode(
+    active_episode = LegacyPositionEpisode(
         episode_id="episode_2",
         position_key=key,
         side=TradeSide.LONG,
@@ -110,8 +110,6 @@ def test_legacy_head_migration_keeps_only_the_new_current_state() -> None:
         high_watermark_trade_at=START + timedelta(seconds=3),
         archived_episodes=(archived_episode,),
         stream_scope=scope,
-        episode_sequence=2,
-        batch_sequence=1,
     )
     snapshot = AccountPositionSnapshot(
         environment="live",

@@ -1095,3 +1095,5 @@ SSH使用已配置的密钥或--control-path指定的已登录会话，不在脚
 随后将只被 0062 旧 head 转换使用的 `AccountFactStreamScope`、成交扫描 provenance、coverage interval 和 discrepancy 类型移入现有迁移 projection 模块；运行时执行领域模型不再承载这些旧 payload 类型。迁移只需解码和验证字段，因此同时删除没有迁移调用方的 coverage 判定及 provenance 派生方法；字段校验和序列化内容保持不变。迁移专属测试已改从迁移模块导入这些类型。静态语法与 diff 检查通过；未运行测试，未部署。
 
 另删除全仓无调用方的旧 `ExchangeOrderState`、`OrderExecutionPlan`、`ExchangeOrderSnapshot`，以及空置的 `exchange_contract.py` / `order_submission.py` 异常定义模块。保留被离线决策回放和迁移使用的 `FuturesPositionSide` 与 `ExitAllocation`。静态语法与 diff 检查通过；未运行测试，未部署。
+
+继续将 `PositionEpisode.batches` 从决策追踪模型移除：回放输入的批次本就在 `PositionView.batches`，episode 内嵌批次只为旧 schema 1 head 的重复 payload 服务。该嵌套副本现由迁移专用 `LegacyPositionEpisode` 解码与编码，迁移校验和输出保持原样；回放模型保留 episode 摘要字段。迁移夹具同步使用迁移模型，并移除传给 projection 的无效 sequence 参数。静态语法与 diff 检查通过；未运行测试，未部署。
