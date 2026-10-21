@@ -403,15 +403,6 @@ class PositionEpisode:
         if self.closed_at is not None and self.closed_at.tzinfo is None:
             raise ValueError("closed_at must be timezone-aware")
 
-    @property
-    def active_batches(self) -> tuple[PositionLedgerBatch, ...]:
-        return tuple(b for b in self.batches if b.quantity > 0)
-
-    @property
-    def remaining_quantity(self) -> Decimal:
-        return sum((b.quantity for b in self.batches), start=Decimal("0"))
-
-
 @dataclass(frozen=True, slots=True)
 class PositionView:
     """Derived lot-level read model consumed by strategy and execution.

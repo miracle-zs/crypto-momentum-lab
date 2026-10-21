@@ -635,7 +635,11 @@ class PositionRecoveryCodec:
         if version is not None and not isinstance(version, str):
             raise RecoverySchemaError("projection_version must be a string or null")
         active_episode = cls.decode_episode(data.get("active_episode"))
-        active_batches = active_episode.active_batches if active_episode else ()
+        active_batches = (
+            tuple(batch for batch in active_episode.batches if batch.quantity > 0)
+            if active_episode
+            else ()
+        )
         total_active_quantity = sum(
             (batch.quantity for batch in active_batches), start=Decimal("0")
         )

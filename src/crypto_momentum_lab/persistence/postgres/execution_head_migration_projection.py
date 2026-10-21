@@ -36,7 +36,11 @@ class LegacyPositionProjection:
 
     @property
     def active_batches(self) -> tuple[PositionLedgerBatch, ...]:
-        return self.active_episode.active_batches if self.active_episode else ()
+        if self.active_episode is None:
+            return ()
+        return tuple(
+            batch for batch in self.active_episode.batches if batch.quantity > 0
+        )
 
     @property
     def total_active_quantity(self) -> Decimal:
