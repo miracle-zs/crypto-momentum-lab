@@ -2,7 +2,7 @@
 
 状态：业务决策 Q1–Q9 沿用已确认契约；T1–T3 已完成源码收敛，核心运行版本已部署。T4 的代码简化已部分完成；同负载生产性能对比仍未完成。生产先于 2026-10-15 通过 §8.25 的统一部署迁移到 `20261015_0066`，NextGen 的 `20261018_0067` 再新增 `live_position_batches`/`live_orders` 两张表；2026-10-18 现场版本为 `8403838d`、迁移版本为 `20261018_0067`。2026-10-21，提交 `0614e222` 已在四账户空仓、无挂单时全量部署，迁移至 `20261021_0068` 并删除 20 张退役表；归档校验和部署记录见本文件末尾。8 个 Compose 容器均通过健康检查。监控脚本热修复 `8a02f4ca` 已同步到服务器，`cml-ops-monitor` 完成一个 60 秒周期后仍 active/running。真实成交闭环仍无新样本，同负载生产性能对比未完成。
 
-**当前源码说明（2026-10-21）**：NextGen 是唯一部署的交易运行时。本文 §8 及后续章节保存了旧 `live_rollout`/`ExecutionBook` 的决策与历史验收记录；其中测试名、源码行号和运行时描述不代表当前代码清单。旧 `ExecutionBook` 领域编排、证据/命令写入与恢复流程、PostgreSQL 写入适配器及其专属测试已从工作树移除；没有运行时调用方的成交恢复来源查询和订单身份查询也已删除。决策模拟仍使用的 `PositionBook`/账本模型，以及看板、诊断、归档和独立运维工具读取的共享表模型与查询逻辑继续保留。孤立的 PostgreSQL runtime-context 辅助函数、账户进程状态写入适配器及其领域类型已删除；看板当前权益查询改从 NextGen 运行清单枚举实盘账户。`execution_account_process_states` 和 `strategy_live_states` 已无当前 ORM 或查询调用方；旧表由 0068 归档校验后删除，历史内容保留在服务器归档目录。
+**当前源码说明（2026-10-21）**：NextGen 是唯一部署的交易运行时。本文 §8 及后续章节保存了旧 `live_rollout`/`ExecutionBook` 的决策与历史验收记录；其中测试名、源码行号和运行时描述不代表当前代码清单。旧 `ExecutionBook` 领域编排、证据/命令写入与恢复流程、PostgreSQL 写入适配器及其专属测试已从工作树移除；没有运行时调用方的成交恢复来源查询和订单身份查询也已删除。决策模拟仍使用的 `PositionBook`/账本模型，以及看板、诊断、归档和独立运维工具读取的共享表模型与查询逻辑继续保留。孤立的 PostgreSQL runtime-context 辅助函数、账户进程状态写入适配器及其领域类型已删除；看板当前权益查询改从 NextGen 运行清单枚举实盘账户。`execution_account_process_states` 和 `strategy_live_states` 已无当前 ORM 或查询调用方；旧表由 0068 归档校验后删除，历史内容保留在服务器归档目录。依赖已删除执行栈的历史诊断和性能探针仍有本机副本，但这些脚本位于 Git 忽略的归档目录，未纳入版本库，且不能在当前源码上运行；报告正文与采样输出继续保留。
 
 第一轮本地已修复的阻塞项（§8.6，含机制删除；第 5 项已被 §8.8 收敛取代）：
 
@@ -441,7 +441,7 @@ rtk proxy .venv/bin/ruff check src tests
 - 静态检查：变更文件 `ruff check --select F` 0 errors；`git diff --check` clean。
 - 前端未改动，仍沿用上一轮 67 passed。
 
-**同负载基准（实测，脚本 `scratch/benchmark_account_and_recovery_paths.py`）**
+**同负载基准（历史实测；原探针在本机忽略目录中，依赖已删除执行栈，当前不能运行）**
 
 |项目|实测值|
 |---|---|
@@ -493,7 +493,7 @@ rtk proxy .venv/bin/ruff check src tests
   - `test_head_active_fills_must_match_named_trade_identities`（缺失/未命名/重复身份）、`test_late_fill_across_restart_preserves_quantity_cost_and_batches`（checkpoint 前后真实迟到成交后下一笔成交不破坏数量、成本、批次）。
 - 静态检查：变更文件 `ruff check --select F` 0 errors；`git diff --check` clean。前端未改动（沿用上一轮 67 passed）。
 
-**同负载基准（实测，`scratch/benchmark_account_and_recovery_paths.py`）**
+**同负载基准（历史实测；原探针在本机忽略目录中，依赖已删除执行栈，当前不能运行）**
 
 |项目|实测值|
 |---|---|
@@ -567,7 +567,7 @@ rtk proxy .venv/bin/ruff check src tests
 - `rtk proxy .venv/bin/python -m pytest tests/unit tests/smoke tests/e2e tests/integration tests/acceptance -q` → **3674 passed / 9 skipped / 0 failed**（78.43s，连续两次运行一致）。
 - 迁移：`alembic upgrade head` → `20261013_0059`（先 0057/0058 由兼容迁移撤回 holder 列与 claim 表）；本地测试库已升级验证。
 - 静态检查：`ruff check src tests --select F` 0 errors；`git diff --check` clean；前端未改动。
-- 同负载基准（`scratch/benchmark_account_and_recovery_paths.py`）：合并账户投影 N=200 → mean 38.06 µs / p50 36.79 µs / p99 58.00 µs；直接 head 恢复（2 标的 × 30 成交，含完整责任审计）48.98 ms / 17 条 SQL；退役历史重建（同负载 120 行）8.32 ms。
+- 同负载历史基准（原探针在本机忽略目录中，依赖已删除执行栈，当前不能运行；结果保留于本文）：合并账户投影 N=200 → mean 38.06 µs / p50 36.79 µs / p99 58.00 µs；直接 head 恢复（2 标的 × 30 成交，含完整责任审计）48.98 ms / 17 条 SQL；退役历史重建（同负载 120 行）8.32 ms。
 - 保留未动的既有修复：范围隔离（符号级 gap 只隔离该范围）、重连游标（基线重锚 epoch/sequence）、读取凭证角色（无 read→trade 回退）、成交完整性（`active_fills` 与 `active_trade_ids` 一致 + 持久成交身份交叉校验）。
 
 **覆盖边界与剩余项**
