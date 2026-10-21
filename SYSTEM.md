@@ -1087,3 +1087,5 @@ SSH使用已配置的密钥或--control-path指定的已登录会话，不在脚
 提交 `0614e222` 已推送并于 2026-10-21 全量部署。停服前与停服后分别向交易所查询四账户，均确认无持仓、无挂单；迁移后数据库为 `20261021_0068`，20 张旧表已移除。dashboard 健康接口返回 `UP`，8 个 Compose 容器通过健康检查，重启后四账户仍为空仓无挂单。部署期间 PostgreSQL 有旧连接因 `idle-in-transaction timeout` 被终止；之后连接状态为正常的 idle/active，应用容器在启动日志扫描中没有 error、critical 或 traceback。
 
 部署暴露了运维监控脚本的回归：三个已删除数据类留下孤立的 `@dataclass` 装饰器，导致 systemd 服务导入失败。修复提交 `8a02f4ca` 已推送并同步服务器工作树，仅重启 `cml-ops-monitor`，没有重启交易账户；服务在一个 60 秒周期后仍 active/running，重启计数未增加，近 60 秒无异常日志。该次清理的测试套件未运行；静态检查、监控 CLI 启动检查及部署后的服务/迁移/账户核验通过。
+
+2026-10-21 本地继续清理已退役执行栈：移除了旧 `PositionLedger` 批次计算、checkpoint 和 `PositionBook` 事件更新测试，删除仅服务旧恢复测试的 `CoverageEvidence` / `compose_fact_coverage`，并移除无调用方的 `decode_current_facts`。保留事实编码、投影 codec 和 `20261015_0062` head 转换测试。`PositionBook` / `PositionLedger` 的剩余实现目前只由 0062 历史迁移链引用；`PositionLedgerBatch` 仍供当前决策追踪使用，因此本轮没有删除这些共享模型或迁移转换逻辑。静态语法与 diff 检查通过；未运行测试，未部署。
