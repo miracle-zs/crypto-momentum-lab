@@ -21,7 +21,6 @@ from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     FactCoverageInterval,
     FactCoverageStatus,
-    FactCredibility,
     PositionHealthStatus,
     PositionKey,
     PositionLedgerBatch,
@@ -498,9 +497,6 @@ async def test_filter_admits_flat_stream_position_without_coverage() -> None:
         stream_scope=stream_scope,
         diagnostics=("No durable coverage evidence exists for stream scope",),
     )
-    assert view.is_ready_for_trade is False
-    assert view.fact_credibility == FactCredibility.PENDING
-
     frozen = FrozenDecisionInputs(
         position_view=view,
         cash_balance=Decimal("1000"),
@@ -606,8 +602,6 @@ async def test_filter_preserves_candidate_while_position_is_catching_up() -> Non
         stream_scope=stream_scope,
         diagnostics=("Sequence gap detected",),
     )
-    assert view.is_ready_for_trade is False
-
     frozen = FrozenDecisionInputs(
         position_view=view,
         cash_balance=Decimal("1000"),

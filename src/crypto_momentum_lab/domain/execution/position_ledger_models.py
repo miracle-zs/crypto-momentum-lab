@@ -41,14 +41,6 @@ class PositionHealthStatus(StrEnum):
     CONFLICT = "CONFLICT"
 
 
-class FactCredibility(StrEnum):
-    """Canonical 3-state fact credibility dimension according to REFACTOR_SPEC §3."""
-
-    READY = "ready"
-    PENDING = "pending"
-    CONFLICT = "conflict"
-
-
 class DiscrepancyKind(StrEnum):
     """Classification of divergences across models, observations, and fact journals."""
 
@@ -397,41 +389,3 @@ class PositionView:
     def total_quantity(self) -> Decimal:
         return sum((b.quantity for b in self.batches), start=Decimal("0"))
 
-    @property
-    def fact_credibility(self) -> FactCredibility:
-        if (
-            self.health_status == PositionHealthStatus.CONFLICT
-            or self.discrepancy is not None
-        ):
-            return FactCredibility.CONFLICT
-        has_confirmed_coverage = (
-            self.coverage is not None
-            and self.coverage.is_authoritative
-            and self.coverage.status == FactCoverageStatus.CONFIRMED
-            and (
-                self.stream_scope is None
-                or self.coverage.stream_scope == self.stream_scope
-            )
-            and (
-                self.stream_scope is None
-                or self.coverage.evidence_observed_at is not None
-            )
-        )
-        has_clean_non_live = self.coverage is None and self.key.environment != "live"
-        has_zero_snapshot = self.zero_position_snapshot_confirmed
-        if (
-            self.health_status == PositionHealthStatus.READY
-            and self.is_comparable
-            and (has_confirmed_coverage or has_clean_non_live or has_zero_snapshot)
-            and (
-                self.reconciliation_gap is None
-                or self.reconciliation_gap == Decimal("0")
-            )
-            and self.unallocated_quantity == Decimal("0")
-        ):
-            return FactCredibility.READY
-        return FactCredibility.PENDING
-
-    @property
-    def is_ready_for_trade(self) -> bool:
-        return self.fact_credibility == FactCredibility.READY
