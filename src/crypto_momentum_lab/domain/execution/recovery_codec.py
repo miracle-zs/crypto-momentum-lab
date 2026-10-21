@@ -32,9 +32,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
 )
 from crypto_momentum_lab.domain.execution.projection_codec import _datetime, _decimal
 from crypto_momentum_lab.domain.execution.recovery_models import (
-    POSITION_RECOVERY_CHECKPOINT_SCHEMA_VERSION,
     AccountFacts,
-    PositionRecoveryCheckpoint,
     RecoverySchemaError,
 )
 from crypto_momentum_lab.domain.execution.snapshot_encoding import (
@@ -809,11 +807,7 @@ class PositionRecoveryCodec:
                 if facts.stream_scope is not None
                 else None
             ),
-            "recovery_checkpoint": (
-                cls.encode_checkpoint(facts.recovery_checkpoint)
-                if facts.recovery_checkpoint is not None
-                else None
-            ),
+            "recovery_checkpoint": None,
             "fact_conflicts": [
                 cls.encode_conflict(item) for item in facts.fact_conflicts
             ],
@@ -890,6 +884,10 @@ class PositionRecoveryCodec:
         )
         scope = data.get("stream_scope")
         recovery = data.get("recovery_checkpoint")
+        if recovery is not None:
+            raise RecoverySchemaError(
+                "account facts recovery_checkpoint is no longer supported"
+            )
         cursor = data.get("fill_cursor_provenance")
         load_provenance = None
         if "fill_load_provenance" not in data:
@@ -922,9 +920,6 @@ class PositionRecoveryCodec:
             ),
             has_late_events=has_late_events,
             stream_scope=cls.decode_scope(scope) if scope is not None else None,
-            recovery_checkpoint=(
-                cls.decode_checkpoint(recovery) if recovery is not None else None
-            ),
             fact_conflicts=tuple(
                 cls.decode_conflict(item) for item in _array(data, "fact_conflicts")
             ),
@@ -937,136 +932,6 @@ class PositionRecoveryCodec:
             ),
             fill_load_provenance=load_provenance,
             prefix_facts_complete=prefix_facts_complete,
-        )
-
-    @classmethod
-    def encode_checkpoint(
-        cls,
-        checkpoint: PositionRecoveryCheckpoint,
-    ) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "schema_version": checkpoint.schema_version,
-            "checkpoint_id": checkpoint.checkpoint_id,
-            "key": cls.encode_position_key(checkpoint.key),
-            "stream_scope": cls.encode_scope(checkpoint.stream_scope),
-            "event_cut": _datetime(checkpoint.event_cut),
-            "projection": cls.encode_projection(checkpoint.projection),
-            "facts_hash": checkpoint.facts_hash,
-            "source_revision": checkpoint.source_revision,
-            "coverage": (
-                cls.encode_coverage(checkpoint.coverage)
-                if checkpoint.coverage is not None
-                else None
-            ),
-            "has_conflicts": checkpoint.has_conflicts,
-            "has_synthetic_fills": checkpoint.has_synthetic_fills,
-            "has_late_events": checkpoint.has_late_events,
-            "integrity_issues": list(checkpoint.integrity_issues),
-            "projection_digest": checkpoint.projection_digest,
-            "parent_checkpoint_id": checkpoint.parent_checkpoint_id,
-            "parent_facts_hash": checkpoint.parent_facts_hash,
-            "parent_projection_digest": checkpoint.parent_projection_digest,
-            "parent_event_cut": (
-                _datetime(checkpoint.parent_event_cut)
-                if checkpoint.parent_event_cut is not None
-                else None
-            ),
-            "suffix_facts_hash": checkpoint.suffix_facts_hash,
-        }
-        if checkpoint.schema_version >= 3:
-            payload["parent_stream_scope"] = (
-                cls.encode_scope(checkpoint.parent_stream_scope)
-                if checkpoint.parent_stream_scope is not None
-                else None
-            )
-        return payload
-
-    @classmethod
-    def decode_checkpoint(cls, value: object) -> PositionRecoveryCheckpoint:
-        data = _mapping(value, "checkpoint")
-        version = _integer_value(data, "schema_version")
-        common_keys = {
-            "schema_version",
-            "checkpoint_id",
-            "key",
-            "stream_scope",
-            "event_cut",
-            "projection",
-            "facts_hash",
-            "source_revision",
-            "coverage",
-            "has_conflicts",
-            "has_synthetic_fills",
-            "has_late_events",
-            "integrity_issues",
-            "projection_digest",
-            "parent_checkpoint_id",
-            "parent_facts_hash",
-            "parent_projection_digest",
-            "parent_event_cut",
-            "suffix_facts_hash",
-        }
-        required_keys = common_keys | (
-            {"parent_stream_scope"} if version >= 3 else set()
-        )
-        _require_keys(
-            data,
-            required_keys,
-            "checkpoint",
-        )
-        if version != POSITION_RECOVERY_CHECKPOINT_SCHEMA_VERSION:
-            raise RecoverySchemaError(
-                f"unsupported position recovery checkpoint schema {version}"
-            )
-        elif "parent_stream_scope" not in data:
-            raise RecoverySchemaError(
-                "checkpoint schema 4 requires parent_stream_scope"
-            )
-        coverage = data.get("coverage")
-        parent_checkpoint_id = data.get("parent_checkpoint_id")
-        parent_facts_hash = data.get("parent_facts_hash")
-        parent_projection_digest = data.get("parent_projection_digest")
-        parent_event_cut = data.get("parent_event_cut")
-        suffix_facts_hash = data.get("suffix_facts_hash")
-        parsed_parent: dict[str, str | None] = {}
-        for name, value in (
-            ("parent_checkpoint_id", parent_checkpoint_id),
-            ("parent_facts_hash", parent_facts_hash),
-            ("parent_projection_digest", parent_projection_digest),
-            ("suffix_facts_hash", suffix_facts_hash),
-        ):
-            if value is not None and not isinstance(value, str):
-                raise RecoverySchemaError(f"{name} must be a string or null")
-            parsed_parent[name] = value
-        return PositionRecoveryCheckpoint(
-            schema_version=version,
-            checkpoint_id=_string(data, "checkpoint_id"),
-            key=cls.decode_position_key(data.get("key")),
-            stream_scope=cls.decode_scope(data.get("stream_scope")),
-            event_cut=_datetime_value(data, "event_cut"),
-            projection=cls.decode_projection(data.get("projection")),
-            facts_hash=_string(data, "facts_hash"),
-            source_revision=_integer_value(data, "source_revision"),
-            coverage=cls.decode_coverage(coverage) if coverage is not None else None,
-            has_conflicts=_boolean_value(data, "has_conflicts"),
-            has_synthetic_fills=_boolean_value(data, "has_synthetic_fills"),
-            has_late_events=_boolean_value(data, "has_late_events"),
-            integrity_issues=_string_array(data, "integrity_issues"),
-            projection_digest=_string(data, "projection_digest"),
-            parent_checkpoint_id=parsed_parent["parent_checkpoint_id"],
-            parent_facts_hash=parsed_parent["parent_facts_hash"],
-            parent_projection_digest=parsed_parent["parent_projection_digest"],
-            parent_event_cut=(
-                _datetime_value({"value": parent_event_cut}, "value")
-                if parent_event_cut is not None
-                else None
-            ),
-            suffix_facts_hash=parsed_parent["suffix_facts_hash"],
-            parent_stream_scope=(
-                cls.decode_scope(data.get("parent_stream_scope"))
-                if data.get("parent_stream_scope") is not None
-                else None
-            ),
         )
 
     compute_projection_digest = staticmethod(projection_codec.compute_projection_digest)

@@ -219,7 +219,6 @@ def _current_verification(facts: AccountFacts) -> AccountFacts:
         conflicting_fills=facts.conflicting_fills[-1:],
         has_late_events=facts.has_late_events,
         stream_scope=facts.stream_scope,
-        recovery_checkpoint=facts.recovery_checkpoint,
         fact_conflicts=facts.fact_conflicts[-1:],
         integrity_issues=facts.integrity_issues[-1:],
         fill_cursor_provenance=facts.fill_cursor_provenance,
