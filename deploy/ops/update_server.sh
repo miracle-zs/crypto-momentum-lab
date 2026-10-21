@@ -128,14 +128,6 @@ set_maintenance_image() {
   set_env_value CML_MAINTENANCE_IMAGE "$image"
 }
 
-if [[ "$deploy_scope" == dashboard ]]; then
-  current_code="$(sed -n 's/^CML_CODE_COMMIT=//p' .env.server | tail -n 1)"
-  if [[ -z "$current_code" ]] || ! git diff --quiet "$current_code" "$target_commit" -- alembic alembic.ini; then
-    echo "Dashboard-only deployment requires unchanged database migrations; use full deployment" >&2
-    exit 1
-  fi
-fi
-
 # Build the target image in the background while checking whether all accounts
 # are flat. The outage then covers only service stop, migration, and restart.
 build_parent="$(mktemp -d "${TMPDIR:-/tmp}/cml-deploy-build.XXXXXX")"
@@ -193,6 +185,27 @@ check_target_build() {
 
 if [[ "$deploy_scope" == dashboard ]]; then
   finish_target_build
+  if ! target_head_output="$(env CML_CODE_COMMIT="$target_commit" \
+      "${build_compose[@]}" run -T --rm --no-deps migrate heads --verbose 2>&1)"; then
+    echo "Dashboard-only deployment could not read the target migration heads" >&2
+    exit 1
+  fi
+  target_heads="$(
+    printf '%s\n' "$target_head_output" | awk '$1 == "Rev:" {print $2}' | sort -u
+  )"
+  if ! current_revision_output="$(env CML_CODE_COMMIT="$target_commit" \
+      "${build_compose[@]}" run -T --rm --no-deps migrate current --verbose 2>&1)"; then
+    echo "Dashboard-only deployment could not read the database migration revision" >&2
+    exit 1
+  fi
+  current_revisions="$(
+    printf '%s\n' "$current_revision_output" | awk '$1 == "Rev:" {print $2}' | sort -u
+  )"
+  if [[ -z "$target_heads" || "$current_revisions" != "$target_heads" ]]; then
+    echo "Dashboard-only deployment requires database revisions to match " \
+      "target heads; current=${current_revisions:-none} target=${target_heads:-none}" >&2
+    exit 1
+  fi
   # Explicit service plus --no-deps avoids migrations and all trading services.
   CML_DASHBOARD_IMAGE="$target_image" "${compose[@]}" up -d --no-deps \
     --force-recreate --wait --wait-timeout 180 dashboard
