@@ -5,7 +5,6 @@ Obeys Astra Architecture Blueprint 2026-09-25:
 - read(ref) -> immutable MarketEnvelope
 - build_dataset(scope, interval, visibility_mode, cut) -> DatasetManifest
 - open_dataset(manifest_id) -> verified ordered stream
-- DecisionTrace pins exact input revisions;
 - Refuses to fake missing decision_visible revisions with canonical data.
 """
 
@@ -21,7 +20,6 @@ from typing import Any, Protocol
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.revision_models import (
     DatasetManifest,
-    DecisionTrace,
     MarketEnvelope,
     MarketRevisionRef,
     MarketVisibilityMode,
@@ -80,8 +78,6 @@ class MarketBookRepository(Protocol):
     ) -> tuple[MarketRevisionRef, ...]: ...
     def save_manifest(self, manifest: DatasetManifest) -> None: ...
     def load_manifest(self, manifest_id: str) -> DatasetManifest | None: ...
-    def save_decision_trace(self, trace: DecisionTrace) -> None: ...
-    def load_decision_trace(self, decision_id: str) -> DecisionTrace | None: ...
     def get_canonical_refs_in_range(
         self,
         scope: str,
@@ -111,7 +107,6 @@ class InMemoryMarketBookRepository:
             tuple[str, str, str, datetime], list[MarketRevisionRef]
         ] = {}
         self.manifests: dict[str, DatasetManifest] = {}
-        self.decision_traces: dict[str, DecisionTrace] = {}
 
     def save_envelope(self, envelope: MarketEnvelope) -> None:
         self.envelopes[envelope.ref.revision_id] = envelope
@@ -194,12 +189,6 @@ class InMemoryMarketBookRepository:
                 d = b_start.date()
                 date_to_symbols.setdefault(d, set()).add(sym)
         return [(d, tuple(sorted(syms))) for d, syms in sorted(date_to_symbols.items())]
-
-    def save_decision_trace(self, trace: DecisionTrace) -> None:
-        self.decision_traces[trace.decision_id] = trace
-
-    def load_decision_trace(self, decision_id: str) -> DecisionTrace | None:
-        return self.decision_traces.get(decision_id)
 
     def verify_manifest(self, manifest_id: str) -> dict[str, Any]:
         """Cryptographically verifies a DatasetManifest and its referenced revisions."""

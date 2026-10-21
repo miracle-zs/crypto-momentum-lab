@@ -292,18 +292,15 @@ def test_decision_visible_ref_strict_isolation_and_no_leakage() -> None:
     )
 
 
-def test_postgres_market_book_repository_fails_closed_on_missing_revision() -> None:
-    """Regression test: repo must raise UnreproducibleError when revision missing."""
+def test_postgres_market_book_repository_rejects_missing_manifest_revision() -> None:
+    """A dataset manifest must not expose a revision missing from storage."""
     from unittest.mock import MagicMock
 
     from crypto_momentum_lab.domain.market.market_book import UnreproducibleError
     from crypto_momentum_lab.persistence.postgres.market_book_repository import (
         PostgresMarketBookRepository,
     )
-    from crypto_momentum_lab.persistence.postgres.models import (
-        DatasetManifestRow,
-        DecisionTraceRow,
-    )
+    from crypto_momentum_lab.persistence.postgres.models import DatasetManifestRow
 
     mock_session = MagicMock()
     mock_session.__enter__.return_value = mock_session
@@ -311,27 +308,7 @@ def test_postgres_market_book_repository_fails_closed_on_missing_revision() -> N
 
     repo = PostgresMarketBookRepository(mock_session_factory)
 
-    # 1. DecisionTraceRow references a missing revision
-    mock_trace_row = DecisionTraceRow(
-        decision_id="dec_missing_rev_1",
-        strategy_name="orderflow_impulse",
-        account_label="primary",
-        decision_time=datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC),
-        intent_produced=True,
-        intent_id="intent_1",
-        rejection_reason=None,
-        evaluated_revision_ids=["rev_exists", "rev_missing_999"],
-        trace_payload={},
-        created_at=datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC),
-    )
-    mock_session.get.return_value = mock_trace_row
-    # Simulate DB returning empty list of revisions
-    mock_session.execute.return_value.scalars.return_value.all.return_value = []
-
-    with pytest.raises(UnreproducibleError, match="missing revision rev_exists"):
-        repo.load_decision_trace("dec_missing_rev_1")
-
-    # 2. DatasetManifestRow references a missing revision
+    # DatasetManifestRow references a missing revision.
     mock_manifest_row = DatasetManifestRow(
         manifest_id="mf_missing_rev_1",
         scope="live",
