@@ -28,10 +28,6 @@ from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.trading import TradeSide as StrategySide
 
 
-class PositionStreamMismatchError(ValueError):
-    """The requested stream is not yet adopted by the durable position."""
-
-
 class FactCoverageStatus(StrEnum):
     """Integrity and completeness status of a fact coverage interval."""
 
@@ -549,15 +545,6 @@ class PositionLedgerProjection:
         return sum(
             (batch.quantity for batch in self.active_batches), start=Decimal("0")
         )
-
-
-@dataclass(frozen=True, slots=True)
-class FreshnessRequirement:
-    """Freshness constraints for reading the derived position view."""
-
-    max_staleness: timedelta = timedelta(seconds=15)
-    min_event_cut: datetime | None = None
-    require_comparable: bool = True
 
 
 @dataclass(frozen=True, slots=True)

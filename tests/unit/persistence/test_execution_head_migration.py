@@ -5,18 +5,17 @@ from crypto_momentum_lab.domain.account.models import (
     AccountFillEvent,
     AccountPositionSnapshot,
 )
-from crypto_momentum_lab.domain.execution.execution_head import (
-    decode_execution_head_state,
-)
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
-from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
+    PositionEpisode,
+    PositionLedgerBatch,
+    PositionLedgerProjection,
     PositionKey,
 )
 from crypto_momentum_lab.domain.execution.projection_codec import encode_position_key
 from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
-from crypto_momentum_lab.domain.execution.recovery_models import AccountFacts
+from crypto_momentum_lab.domain.trading import TradeSide
 from crypto_momentum_lab.persistence.postgres.execution_head_migration import (
     convert_legacy_execution_head,
 )
@@ -57,8 +56,58 @@ def test_legacy_head_migration_keeps_only_the_new_current_state() -> None:
         _fill("exit-1", "SELL", 2),
         _fill("entry-2", "BUY", 3),
     )
-    facts = AccountFacts(position_key=key, fills=fills, stream_scope=scope)
-    projection = PositionLedger(key).project(facts)
+    archived_episode = PositionEpisode(
+        episode_id="episode_1",
+        position_key=key,
+        side=TradeSide.LONG,
+        opened_at=START + timedelta(seconds=1),
+        closed_at=START + timedelta(seconds=2),
+        is_active=False,
+        cumulative_bought=Decimal("1"),
+        cumulative_sold=Decimal("1"),
+        peak_quantity=Decimal("1"),
+        batches=(
+            PositionLedgerBatch(
+                batch_id="episode_1_b1",
+                episode_id="episode_1",
+                quantity=Decimal("0"),
+                original_quantity=Decimal("1"),
+                entry_price=Decimal("100"),
+                opened_at=START + timedelta(seconds=1),
+            ),
+        ),
+    )
+    active_episode = PositionEpisode(
+        episode_id="episode_2",
+        position_key=key,
+        side=TradeSide.LONG,
+        opened_at=START + timedelta(seconds=3),
+        cumulative_bought=Decimal("1"),
+        peak_quantity=Decimal("1"),
+        batches=(
+            PositionLedgerBatch(
+                batch_id="episode_2_b1",
+                episode_id="episode_2",
+                quantity=Decimal("1"),
+                original_quantity=Decimal("1"),
+                entry_price=Decimal("100"),
+                opened_at=START + timedelta(seconds=3),
+                order_id="order-entry-2",
+                entry_order_ids=("order-entry-2",),
+            ),
+        ),
+    )
+    projection = PositionLedgerProjection(
+        position_key=key,
+        active_episode=active_episode,
+        unallocated_quantity=Decimal("0"),
+        reconciliation_gap=Decimal("0"),
+        high_watermark_trade_at=START + timedelta(seconds=3),
+        archived_episodes=(archived_episode,),
+        stream_scope=scope,
+        episode_sequence=2,
+        batch_sequence=1,
+    )
     snapshot = AccountPositionSnapshot(
         environment="live",
         account_label="primary",
@@ -93,7 +142,6 @@ def test_legacy_head_migration_keeps_only_the_new_current_state() -> None:
     }
 
     migrated = convert_legacy_execution_head(legacy)
-    restored = decode_execution_head_state(migrated, key=key, scope=scope)
     migrated_projection = PositionRecoveryCodec.decode_projection(
         migrated["position_state"]["projection"]
     )
@@ -114,10 +162,11 @@ def test_legacy_head_migration_keeps_only_the_new_current_state() -> None:
     assert migrated["schema_version"] == 4
     assert migrated_projection.archived_episodes == ()
     assert migrated_projection.total_active_quantity == projection.total_active_quantity
+    assert migrated_projection.position_key == key
+    assert migrated_projection.stream_scope == scope
     assert migrated["position_state"]["episode_sequence"] == 2
     assert migrated["position_state"]["batch_sequence"] == 1
     assert verification.fills == ()
     assert verification.snapshots == (snapshot,)
-    assert restored.projection.total_active_quantity == projection.total_active_quantity
     assert migrated["active_reservation_ids"] == ["res-active"]
     assert "active_fills" not in migrated

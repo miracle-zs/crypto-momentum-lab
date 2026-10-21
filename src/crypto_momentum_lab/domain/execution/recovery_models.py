@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field, fields, is_dataclass
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
-from enum import StrEnum
 from uuid import uuid4
 
 from crypto_momentum_lab.domain.account.models import (
@@ -27,36 +26,6 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
 from crypto_momentum_lab.domain.execution.projection_codec import (
     compute_projection_digest,
 )
-
-
-def _canonical_value(value: object) -> object:
-    """Canonical, JSON-ready projection of a facts field value."""
-    if isinstance(value, StrEnum):
-        return value.value
-    if isinstance(value, Decimal):
-        exact = format(value, "f")
-        if "." in exact:
-            exact = exact.rstrip("0").rstrip(".")
-        return "0" if exact in {"", "-0"} else exact
-    if isinstance(value, datetime):
-        return value.astimezone(UTC).isoformat()
-    if is_dataclass(value):
-        return {
-            item.name: _canonical_value(getattr(value, item.name))
-            for item in fields(value)
-        }
-    if isinstance(value, dict):
-        return {
-            str(key): _canonical_value(item)
-            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
-        }
-    if isinstance(value, tuple | list):
-        return [_canonical_value(item) for item in value]
-    return value
-
-
-def _canonical_sort_key(element: object) -> str:
-    return json.dumps(element, sort_keys=True, separators=(",", ":"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,9 +48,7 @@ class AccountFacts:
     fill_cursor_provenance: AccountFillReconciliationCursor | None = None
     fill_load_provenance: AccountFillLoadProvenance | None = None
     prefix_facts_complete: bool = True
-    _cached_facts_hash: str | None = field(
-        default=None, init=False, repr=False, compare=False, hash=False
-    )
+
     def __post_init__(self) -> None:
         if type(self.prefix_facts_complete) is not bool:
             raise ValueError("prefix_facts_complete must be a boolean")
@@ -103,50 +70,6 @@ class AccountFacts:
                 and self.coverage.stream_scope != self.stream_scope
             ):
                 raise ValueError("coverage scope does not match account facts")
-
-    def compute_facts_hash(self) -> str:
-        """Hash every input field that can change identity or projection."""
-        cached = self._cached_facts_hash
-        if cached is not None:
-            return cached
-
-        def canonical(value: object) -> object:
-            return _canonical_value(value)
-
-        def unordered(values: tuple[object, ...]) -> list[object]:
-            encoded: list[tuple[object, str]] = []
-            for item in values:
-                element = _canonical_value(item)
-                encoded.append((element, _canonical_sort_key(element)))
-            return [element for element, _ in sorted(encoded, key=lambda pair: pair[1])]
-
-        fact_material = {
-            "position_key": canonical(self.position_key),
-            "stream_scope": canonical(self.stream_scope),
-            "fills": unordered(self.fills),
-            "conflicting_fills": unordered(self.conflicting_fills),
-            "snapshots": unordered(self.snapshots),
-            "exit_boundaries": unordered(self.exit_boundaries),
-            "coverage": canonical(self.coverage),
-            "recovery_checkpoint": canonical(self.recovery_checkpoint),
-            "has_synthetic_fills": self.has_synthetic_fills,
-            "has_late_events": self.has_late_events,
-            "fact_conflicts": unordered(self.fact_conflicts),
-            "integrity_issues": sorted(self.integrity_issues),
-            "late_fills": unordered(self.late_fills),
-            "fill_cursor_provenance": canonical(self.fill_cursor_provenance),
-            "fill_load_provenance": canonical(self.fill_load_provenance),
-            "prefix_facts_complete": self.prefix_facts_complete,
-        }
-        encoded = json.dumps(
-            fact_material,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-        computed = hashlib.sha256(encoded).hexdigest()
-        object.__setattr__(self, "_cached_facts_hash", computed)
-        return computed
-
 
 POSITION_RECOVERY_CHECKPOINT_SCHEMA_VERSION = 4
 
