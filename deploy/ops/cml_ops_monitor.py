@@ -476,15 +476,6 @@ def evaluate_log_signals(signals: LogSignals) -> tuple[Alert, ...]:
     return tuple(alerts)
 
 
-@dataclass(frozen=True, slots=True)
-
-
-@dataclass(frozen=True, slots=True)
-
-
-@dataclass(frozen=True, slots=True)
-
-
 def rss_warning_fraction_for(service: str, default: float) -> float:
     """Return the memory warning threshold that applies to one service."""
 
