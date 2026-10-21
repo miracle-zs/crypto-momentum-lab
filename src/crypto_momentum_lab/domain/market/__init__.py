@@ -1,7 +1,3 @@
-from crypto_momentum_lab.domain.market.decision_trace_service import (
-    DecisionTraceService,
-    ReplayResult,
-)
 from crypto_momentum_lab.domain.market.market_book import (
     DatasetCatalog,
     InMemoryMarketBookRepository,
@@ -47,7 +43,6 @@ __all__ = [
     "DatasetCatalog",
     "DatasetManifest",
     "DecisionTrace",
-    "DecisionTraceService",
     "DurableArchiveAcknowledgement",
     "InMemoryMarketBookRepository",
     "JsonScalar",
@@ -63,7 +58,6 @@ __all__ = [
     "QualityEvent",
     "RawArchive",
     "RawEnvelope",
-    "ReplayResult",
     "RevisionConflictError",
     "RevisionNotFoundError",
     "RunManifest",

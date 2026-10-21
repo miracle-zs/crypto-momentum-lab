@@ -31,15 +31,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionLedgerBatch,
     PositionView,
 )
-from crypto_momentum_lab.domain.market.decision_trace_service import (
-    DecisionTraceService,
-    ReplayEvaluation,
-)
-from crypto_momentum_lab.domain.market.market_book import (
-    InMemoryMarketBookRepository,
-    MarketBook,
-    compute_market_state_hash,
-)
+from crypto_momentum_lab.domain.market.market_book import compute_market_state_hash
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.revision_models import (
     MarketEnvelope,
@@ -551,8 +543,8 @@ async def test_replay_requires_policy_and_prior_state_evidence() -> None:
     assert audit["reproduced"] is False
 
 
-def test_decision_trace_from_result_and_replay() -> None:
-    """Verifies decision trace payload capture and semantic replay divergence checks."""
+def test_decision_trace_from_result() -> None:
+    """Decision traces capture their output payload for exact historical replay."""
     t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
     mref, menv = _make_market_envelope("BTCUSDT", t0, Decimal("65500.00"))
     pview = _make_flat_position_view("BTCUSDT")
@@ -590,44 +582,6 @@ def test_decision_trace_from_result_and_replay() -> None:
     assert trace.intent_produced is True
     assert trace.trace_payload is not None
     assert trace.trace_payload["output_intent"]["desired_notional"] == "500"
-
-    repo = InMemoryMarketBookRepository()
-    book = MarketBook(repo)
-    # Save the envelope so DecisionTraceService can read it
-    repo.save_envelope(menv)
-    trace_service = DecisionTraceService(book)
-    repo.save_decision_trace(trace)
-
-    # 1. Exact replay matches completely
-    replay_pass = trace_service.replay_decision(
-        trace.decision_id,
-        replay_mode=MarketVisibilityMode.DECISION_VISIBLE,
-        policy_evaluator=lambda envs: _replay_evaluation(decide(inp, state, policy)),
-    )
-    assert replay_pass.reproduced is True
-    assert replay_pass.divergence_explanation is None
-
-    # 2. Semantic divergence: policy target_notional changed
-    policy_changed = replace(policy, target_notional=Decimal("800.00"))
-    replay_fail_notional = trace_service.replay_decision(
-        trace.decision_id,
-        replay_mode=MarketVisibilityMode.DECISION_VISIBLE,
-        policy_evaluator=lambda envs: _replay_evaluation(decide(inp, state, policy_changed)),
-    )
-    assert replay_fail_notional.reproduced is False
-    assert replay_fail_notional.divergence_explanation is not None
-    assert "target notional mismatch" in replay_fail_notional.divergence_explanation
-
-    # 3. Next policy version mismatch
-    state_diff_v = replace(state, policy_version=99)
-    replay_fail_version = trace_service.replay_decision(
-        trace.decision_id,
-        replay_mode=MarketVisibilityMode.DECISION_VISIBLE,
-        policy_evaluator=lambda envs: _replay_evaluation(decide(inp, state_diff_v, policy)),
-    )
-    assert replay_fail_version.reproduced is False
-    assert replay_fail_version.divergence_explanation is not None
-    assert "next policy version mismatch" in replay_fail_version.divergence_explanation
 
 
 def test_decision_parameters_digest_divergence() -> None:
@@ -841,13 +795,3 @@ async def test_reproduce_decision_with_batches_and_sizing() -> None:
             trace.decision_id, trace_override=tampered_trace
         )
         assert audit_tampered["status"] == "UNREPRODUCIBLE"
-
-
-def _replay_evaluation(result) -> ReplayEvaluation:
-    return ReplayEvaluation(
-        intent_produced=result.intent is not None,
-        rejection_reason=result.rejection_reason,
-        notional=result.intent.desired_notional if result.intent is not None else None,
-        input_hash=result.input_hash,
-        next_policy_version=result.next_policy_state.policy_version,
-    )
