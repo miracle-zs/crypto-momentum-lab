@@ -68,9 +68,6 @@ class PositionLedgerBatch:
     original_quantity: Decimal
     entry_price: Decimal
     opened_at: datetime
-    order_id: str | None = None
-    client_order_id: str | None = None
-    is_external: bool = False
     exit_order_submitted_at: datetime | None = None
     # Ordered distinct opening identities; empty means count evidence is absent.
     entry_order_ids: tuple[str, ...] = ()

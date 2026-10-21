@@ -15,7 +15,6 @@ from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionHealthStatus,
     PositionKey,
-    PositionLedgerBatch,
 )
 from crypto_momentum_lab.domain.trading import TradeSide as StrategySide
 from . import (
@@ -27,6 +26,7 @@ from .execution_head_migration_projection import (
     DiscrepancyKind,
     FactCoverageInterval,
     FactCoverageStatus,
+    LegacyPositionBatch,
     LegacyPositionEpisode,
     LegacyPositionProjection,
     PositionDiscrepancy,
@@ -444,7 +444,7 @@ class PositionRecoveryCodec:
     encode_batch = staticmethod(projection_codec.encode_batch)
 
     @classmethod
-    def decode_batch(cls, value: object) -> PositionLedgerBatch:
+    def decode_batch(cls, value: object) -> LegacyPositionBatch:
         data = _mapping(value, "batch")
         _require_keys(
             data,
@@ -478,7 +478,7 @@ class PositionRecoveryCodec:
         is_external = data.get("is_external")
         if type(is_external) is not bool:
             raise RecoverySchemaError("is_external must be a boolean")
-        return PositionLedgerBatch(
+        return LegacyPositionBatch(
             batch_id=_string(data, "batch_id"),
             episode_id=_string(data, "episode_id"),
             quantity=_decimal_value(data, "quantity"),

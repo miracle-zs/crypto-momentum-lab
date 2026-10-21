@@ -7,7 +7,6 @@ from crypto_momentum_lab.domain.account.models import (
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    PositionLedgerBatch,
     PositionKey,
 )
 from crypto_momentum_lab.domain.trading import TradeSide
@@ -16,6 +15,7 @@ from crypto_momentum_lab.persistence.postgres import (
 )
 from crypto_momentum_lab.persistence.postgres.execution_head_migration_projection import (
     AccountFactStreamScope,
+    LegacyPositionBatch,
     LegacyPositionEpisode,
 )
 from crypto_momentum_lab.persistence.postgres.execution_head_migration import (
@@ -72,7 +72,7 @@ def test_legacy_head_migration_keeps_only_the_new_current_state() -> None:
         cumulative_sold=Decimal("1"),
         peak_quantity=Decimal("1"),
         batches=(
-            PositionLedgerBatch(
+            LegacyPositionBatch(
                 batch_id="episode_1_b1",
                 episode_id="episode_1",
                 quantity=Decimal("0"),
@@ -90,7 +90,7 @@ def test_legacy_head_migration_keeps_only_the_new_current_state() -> None:
         cumulative_bought=Decimal("1"),
         peak_quantity=Decimal("1"),
         batches=(
-            PositionLedgerBatch(
+            LegacyPositionBatch(
                 batch_id="episode_2_b1",
                 episode_id="episode_2",
                 quantity=Decimal("1"),

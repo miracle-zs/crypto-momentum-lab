@@ -189,6 +189,15 @@ class FactCoverageInterval:
 
 
 @dataclass(frozen=True, slots=True)
+class LegacyPositionBatch(PositionLedgerBatch):
+    """Legacy batch metadata retained only while converting old heads."""
+
+    order_id: str | None = None
+    client_order_id: str | None = None
+    is_external: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class LegacyPositionEpisode:
     """Schema-1 episode shape, including its nested batch copy."""
 
@@ -201,7 +210,7 @@ class LegacyPositionEpisode:
     cumulative_bought: Decimal = Decimal("0")
     cumulative_sold: Decimal = Decimal("0")
     peak_quantity: Decimal = Decimal("0")
-    batches: tuple[PositionLedgerBatch, ...] = ()
+    batches: tuple[LegacyPositionBatch, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.episode_id.strip():
@@ -231,7 +240,7 @@ class LegacyPositionProjection:
     stream_scope: AccountFactStreamScope | None = None
 
     @property
-    def active_batches(self) -> tuple[PositionLedgerBatch, ...]:
+    def active_batches(self) -> tuple[LegacyPositionBatch, ...]:
         if self.active_episode is None:
             return ()
         return tuple(
@@ -265,7 +274,7 @@ def encode_position_key(key: PositionKey) -> dict[str, object]:
     }
 
 
-def encode_batch(batch: PositionLedgerBatch) -> dict[str, object]:
+def encode_batch(batch: LegacyPositionBatch) -> dict[str, object]:
     return {
         "batch_id": batch.batch_id,
         "episode_id": batch.episode_id,
