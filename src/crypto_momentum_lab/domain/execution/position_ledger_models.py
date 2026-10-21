@@ -211,15 +211,12 @@ class AccountFillLoadProvenance:
     observed_at: datetime
     source_anchor_id: str
     source_anchor_event_cut: datetime
-    source_anchor_kind: str
 
     def __post_init__(self) -> None:
         if not self.load_id.strip():
             raise ValueError("fill load id must not be empty")
         if not self.source_anchor_id.strip():
             raise ValueError("fill scan requires a source anchor")
-        if self.source_anchor_kind not in {"zero_snapshot", "recovery_checkpoint"}:
-            raise ValueError("unsupported fill scan source anchor kind")
         if (self.scan_origin_from_id is None) == (
             self.scan_origin_start_time_ms is None
         ):
@@ -284,8 +281,6 @@ class FactCoverageInterval:
     confirmed_revision: int | None = None
     stream_scope: AccountFactStreamScope | None = None
     evidence_observed_at: datetime | None = None
-    checkpoint_id: str | None = None
-    checkpoint_event_cut: datetime | None = None
     load_provenance: AccountFillLoadProvenance | None = None
 
     def __post_init__(self) -> None:
@@ -300,17 +295,6 @@ class FactCoverageInterval:
             or self.evidence_observed_at.utcoffset() is None
         ):
             raise ValueError("evidence_observed_at must be timezone-aware")
-        if (self.checkpoint_id is None) != (self.checkpoint_event_cut is None):
-            raise ValueError(
-                "coverage checkpoint id and event cut must appear together"
-            )
-        if self.checkpoint_id is not None and not self.checkpoint_id.strip():
-            raise ValueError("coverage checkpoint id must not be empty")
-        if self.checkpoint_event_cut is not None and (
-            self.checkpoint_event_cut.tzinfo is None
-            or self.checkpoint_event_cut.utcoffset() is None
-        ):
-            raise ValueError("coverage checkpoint cut must be timezone-aware")
         if self.load_provenance is not None:
             if self.stream_scope != self.load_provenance.stream_scope:
                 raise ValueError("coverage load provenance scope mismatch")

@@ -40,7 +40,6 @@ def test_coverage_codec_accepts_compact_and_legacy_fields() -> None:
         observed_at=cut,
         source_anchor_id="flat-bootstrap-1",
         source_anchor_event_cut=cut,
-        source_anchor_kind="zero_snapshot",
     )
     coverage = FactCoverageInterval(
         start_at=cut,
@@ -48,18 +47,32 @@ def test_coverage_codec_accepts_compact_and_legacy_fields() -> None:
         status=FactCoverageStatus.CONFIRMED,
         stream_scope=scope,
         evidence_observed_at=cut,
-        checkpoint_id="flat-bootstrap-1",
-        checkpoint_event_cut=cut,
         load_provenance=provenance,
     )
 
     encoded = PositionRecoveryCodec.encode_coverage(coverage)
     assert "page_exhausted" not in encoded
     assert "not_truncated" not in encoded
+    assert "checkpoint_id" not in encoded
+    assert "checkpoint_event_cut" not in encoded
+    assert "source_anchor_kind" not in encoded["load_provenance"]
     assert PositionRecoveryCodec.decode_coverage(encoded) == coverage
 
-    legacy = {**encoded, "page_exhausted": True, "not_truncated": True}
-    assert PositionRecoveryCodec.decode_coverage(legacy) == coverage
+    legacy_provenance = {
+        **encoded["load_provenance"],
+        "source_anchor_kind": "recovery_checkpoint",
+    }
+    legacy = {
+        **encoded,
+        "page_exhausted": True,
+        "not_truncated": True,
+        "checkpoint_id": "legacy-checkpoint",
+        "checkpoint_event_cut": cut.isoformat(),
+        "load_provenance": legacy_provenance,
+    }
+    decoded_legacy = PositionRecoveryCodec.decode_coverage(legacy)
+    assert decoded_legacy == coverage
+    assert PositionRecoveryCodec.encode_coverage(decoded_legacy) == encoded
 
     malformed = dict(encoded)
     malformed.pop("status")

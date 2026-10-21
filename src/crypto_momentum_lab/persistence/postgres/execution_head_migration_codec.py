@@ -91,32 +91,36 @@ class PositionRecoveryCodec:
             "observed_at": _datetime(provenance.observed_at),
             "source_anchor_id": provenance.source_anchor_id,
             "source_anchor_event_cut": _datetime(provenance.source_anchor_event_cut),
-            "source_anchor_kind": provenance.source_anchor_kind,
         }
 
     @classmethod
     def decode_fill_load_provenance(cls, value: object) -> AccountFillLoadProvenance:
         data = _mapping(value, "fill load provenance")
-        _require_keys(
-            data,
-            {
-                "stream_scope",
-                "load_id",
-                "scan_origin_from_id",
-                "scan_origin_start_time_ms",
-                "request_from_id",
-                "next_from_id",
-                "page_count",
-                "page_exhausted",
-                "truncated",
-                "checked_through",
-                "observed_at",
-                "source_anchor_id",
-                "source_anchor_event_cut",
-                "source_anchor_kind",
-            },
-            "fill load provenance",
-        )
+        keys = {
+            "stream_scope",
+            "load_id",
+            "scan_origin_from_id",
+            "scan_origin_start_time_ms",
+            "request_from_id",
+            "next_from_id",
+            "page_count",
+            "page_exhausted",
+            "truncated",
+            "checked_through",
+            "observed_at",
+            "source_anchor_id",
+            "source_anchor_event_cut",
+        }
+        legacy_keys = keys | {"source_anchor_kind"}
+        if set(data) not in (keys, legacy_keys):
+            _require_keys(data, keys, "fill load provenance")
+        if "source_anchor_kind" in data:
+            anchor_kind = data["source_anchor_kind"]
+            if not isinstance(anchor_kind, str) or anchor_kind not in {
+                "zero_snapshot",
+                "recovery_checkpoint",
+            }:
+                raise RecoverySchemaError("source_anchor_kind is unsupported")
         nullable_ints = (
             "scan_origin_from_id",
             "scan_origin_start_time_ms",
@@ -159,7 +163,6 @@ class PositionRecoveryCodec:
             observed_at=_datetime_value(data, "observed_at"),
             source_anchor_id=_string(data, "source_anchor_id"),
             source_anchor_event_cut=_datetime_value(data, "source_anchor_event_cut"),
-            source_anchor_kind=_string(data, "source_anchor_kind"),
         )
 
     encode_position_key = staticmethod(projection_codec.encode_position_key)
@@ -335,12 +338,6 @@ class PositionRecoveryCodec:
             "source_cursor": coverage.source_cursor,
             "status": coverage.status.value,
             "confirmed_revision": coverage.confirmed_revision,
-            "checkpoint_id": coverage.checkpoint_id,
-            "checkpoint_event_cut": (
-                _datetime(coverage.checkpoint_event_cut)
-                if coverage.checkpoint_event_cut is not None
-                else None
-            ),
             "stream_scope": (
                 cls.encode_scope(coverage.stream_scope)
                 if coverage.stream_scope is not None
@@ -368,14 +365,14 @@ class PositionRecoveryCodec:
             "source_cursor",
             "status",
             "confirmed_revision",
-            "checkpoint_id",
-            "checkpoint_event_cut",
             "stream_scope",
             "evidence_observed_at",
             "load_provenance",
         }
-        legacy_keys = keys | {"page_exhausted", "not_truncated"}
-        if set(data) not in (keys, legacy_keys):
+        checkpoint_keys = {"checkpoint_id", "checkpoint_event_cut"}
+        legacy_keys = keys | checkpoint_keys
+        paginated_legacy_keys = legacy_keys | {"page_exhausted", "not_truncated"}
+        if set(data) not in (keys, legacy_keys, paginated_legacy_keys):
             _require_keys(data, keys, "coverage")
         revision = data.get("confirmed_revision")
         checkpoint_id = data.get("checkpoint_id")
@@ -388,8 +385,12 @@ class PositionRecoveryCodec:
             raise RecoverySchemaError("has_known_gaps must be a boolean")
         if revision is not None and type(revision) is not int:
             raise RecoverySchemaError("confirmed_revision must be an integer or null")
+        if (checkpoint_id is None) != (checkpoint_event_cut is None):
+            raise RecoverySchemaError("legacy coverage checkpoint fields must pair")
         if checkpoint_id is not None and not isinstance(checkpoint_id, str):
             raise RecoverySchemaError("checkpoint_id must be a string or null")
+        if checkpoint_id is not None and not checkpoint_id.strip():
+            raise RecoverySchemaError("checkpoint_id must not be empty")
         if checkpoint_event_cut is not None and not isinstance(
             checkpoint_event_cut, str
         ):
@@ -398,6 +399,8 @@ class PositionRecoveryCodec:
             )
         if source_cursor is not None and not isinstance(source_cursor, str):
             raise RecoverySchemaError("source_cursor must be a string or null")
+        if checkpoint_event_cut is not None:
+            _datetime_value({"value": checkpoint_event_cut}, "value")
         return FactCoverageInterval(
             start_at=_datetime_value(data, "start_at"),
             end_at=_datetime_value(data, "end_at"),
@@ -405,12 +408,6 @@ class PositionRecoveryCodec:
             source_cursor=source_cursor,
             status=FactCoverageStatus(_string(data, "status")),
             confirmed_revision=revision,
-            checkpoint_id=checkpoint_id,
-            checkpoint_event_cut=(
-                _datetime_value({"value": checkpoint_event_cut}, "value")
-                if checkpoint_event_cut is not None
-                else None
-            ),
             stream_scope=(cls.decode_scope(scope) if scope is not None else None),
             evidence_observed_at=(
                 _datetime_value({"value": observed_at}, "value")

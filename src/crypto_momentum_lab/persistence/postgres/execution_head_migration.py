@@ -244,7 +244,6 @@ def _current_verification(
         "conflicting_fills": [],
         "has_late_events": False,
         "stream_scope": PositionRecoveryCodec.encode_scope(stream_scope),
-        "recovery_checkpoint": None,
         "fact_conflicts": [],
         "integrity_issues": [],
         "late_fills": [],
@@ -312,7 +311,6 @@ def _validate_current_verification(
         "conflicting_fills",
         "has_late_events",
         "stream_scope",
-        "recovery_checkpoint",
         "fact_conflicts",
         "integrity_issues",
         "late_fills",
@@ -341,7 +339,6 @@ def _validate_current_verification(
         type(value.get("has_synthetic_fills")) is not bool
         or type(value.get("has_late_events")) is not bool
         or value.get("has_late_events")
-        or value.get("recovery_checkpoint") is not None
         or value.get("fill_cursor_provenance") is not None
         or value.get("prefix_facts_complete") is not False
     ):
