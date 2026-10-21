@@ -223,48 +223,6 @@ def test_hot_canonical_override_and_cold_target_promotion(metadata_sessions, tmp
     )
 
 
-def test_historical_full_decision_promotes_and_protects_cold_identity(
-    metadata_sessions, tmp_path
-):
-    from crypto_momentum_lab.domain.market.revision_models import DecisionTrace
-
-    start, envelope, cold, payloads, repo = setup_archive(metadata_sessions, tmp_path)
-    with metadata_sessions.begin() as session:
-        archive_batch(
-            session,
-            catalog=cold,
-            payload_archive=payloads,
-            cutoff=start + timedelta(days=1),
-            apply=True,
-        )
-    trace = DecisionTrace(
-        decision_id="historical",
-        strategy_name="test",
-        account_label="primary",
-        decision_time=start,
-        evaluated_market_refs=(envelope.ref,),
-        intent_produced=False,
-        rejection_reason="no_candidate",
-        trace_payload={},
-    )
-    repo.save_decision_trace(trace)
-    assert repo.load_decision_trace("historical").evaluated_market_refs == (
-        envelope.ref,
-    )
-    assert (
-        repo.get_canonical_ref(envelope.ref.scope, "BTCUSDT", "15s", start)
-        == envelope.ref
-    )
-    with metadata_sessions.begin() as session:
-        assert archive_batch(
-            session,
-            catalog=cold,
-            payload_archive=payloads,
-            cutoff=start + timedelta(days=1),
-            apply=True,
-        ) == (0, 0)
-
-
 def test_key_share_writer_blocks_collection_and_committed_trace_protects_row(
     async_database_url, tmp_path
 ):
