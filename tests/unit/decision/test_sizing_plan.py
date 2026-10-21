@@ -112,7 +112,6 @@ def _make_position_view(symbol: str) -> PositionView:
         event_cut=None,
         policy_version="v1",
         schema_version="v1",
-        coverage=None,
         active_episode=None,
         batches=(),
         unallocated_quantity=Decimal("0"),

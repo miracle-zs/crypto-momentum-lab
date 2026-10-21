@@ -19,8 +19,6 @@ from crypto_momentum_lab.domain.decision.decision_engine import (
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    FactCoverageInterval,
-    FactCoverageStatus,
     PositionHealthStatus,
     PositionKey,
     PositionLedgerBatch,
@@ -187,7 +185,6 @@ async def test_filter_rejects_symbol_mismatch() -> None:
         event_cut=datetime(2026, 9, 25, 8, 0, tzinfo=UTC),
         policy_version="v1",
         schema_version="v1",
-        coverage=None,
         active_episode=None,
         batches=(),
         unallocated_quantity=Decimal("0"),
@@ -231,7 +228,6 @@ def test_frozen_inputs_reject_negative_cash() -> None:
         event_cut=datetime(2026, 9, 25, 8, 0, tzinfo=UTC),
         policy_version="v1",
         schema_version="v1",
-        coverage=None,
         active_episode=None,
         batches=(),
         unallocated_quantity=Decimal("0"),
@@ -281,11 +277,6 @@ async def test_filter_commits_sized_result_and_complete_replay_inputs() -> None:
         event_cut=datetime(2026, 9, 25, 8, 0, tzinfo=UTC),
         policy_version="v1",
         schema_version="v1",
-        coverage=FactCoverageInterval(
-            start_at=datetime(2026, 9, 25, 7, 0, tzinfo=UTC),
-            end_at=datetime(2026, 9, 25, 8, 0, tzinfo=UTC),
-            status=FactCoverageStatus.CONFIRMED,
-        ),
         active_episode=None,
         batches=(),
         unallocated_quantity=Decimal("0"),
@@ -420,11 +411,6 @@ async def test_filter_evaluates_open_position_exit_when_candidates_empty() -> No
         event_cut=datetime(2026, 9, 25, 8, 0, tzinfo=UTC),
         policy_version="v1",
         schema_version="v1",
-        coverage=FactCoverageInterval(
-            start_at=datetime(2026, 9, 25, 6, 0, tzinfo=UTC),
-            end_at=datetime(2026, 9, 25, 8, 0, tzinfo=UTC),
-            status=FactCoverageStatus.CONFIRMED,
-        ),
         active_episode=None,
         batches=(batch,),
         unallocated_quantity=Decimal("0"),
@@ -466,20 +452,14 @@ async def test_filter_evaluates_open_position_exit_when_candidates_empty() -> No
     )
 
 
-async def test_filter_admits_flat_stream_position_without_coverage() -> None:
+async def test_filter_admits_flat_position_while_catching_up() -> None:
     commit = AsyncMock(return_value=SimpleNamespace(is_replay=False))
-    from crypto_momentum_lab.domain.execution.position_ledger_models import (
-        AccountFactStreamScope,
-    )
 
     key = PositionKey(
         environment="live",
         account_label="primary",
         symbol="ALGOUSDT",
         position_side=FuturesPositionSide.BOTH,
-    )
-    stream_scope = AccountFactStreamScope.for_position_key(
-        key, stream_id="account_event_hub", stream_epoch="live_ep1"
     )
     view = PositionView(
         key=key,
@@ -488,14 +468,11 @@ async def test_filter_admits_flat_stream_position_without_coverage() -> None:
         event_cut=datetime(2026, 9, 28, 10, 0, tzinfo=UTC),
         policy_version="v1",
         schema_version="v1",
-        coverage=None,
         active_episode=None,
         batches=(),
         unallocated_quantity=Decimal("0"),
         reconciliation_gap=Decimal("0"),
         health_status=PositionHealthStatus.CATCHING_UP,
-        stream_scope=stream_scope,
-        diagnostics=("No durable coverage evidence exists for stream scope",),
     )
     frozen = FrozenDecisionInputs(
         position_view=view,
@@ -566,9 +543,6 @@ async def test_filter_admits_flat_stream_position_without_coverage() -> None:
 
 async def test_filter_preserves_candidate_while_position_is_catching_up() -> None:
     commit = AsyncMock(return_value=SimpleNamespace(is_replay=False))
-    from crypto_momentum_lab.domain.execution.position_ledger_models import (
-        AccountFactStreamScope,
-    )
     from crypto_momentum_lab.domain.strategy import (
         EntryType,
         OrderIntentCandidate,
@@ -583,9 +557,6 @@ async def test_filter_preserves_candidate_while_position_is_catching_up() -> Non
         symbol="ALGOUSDT",
         position_side=FuturesPositionSide.BOTH,
     )
-    stream_scope = AccountFactStreamScope.for_position_key(
-        key, stream_id="account_event_hub", stream_epoch="live_ep1"
-    )
     view = PositionView(
         key=key,
         projection_version="pv1",
@@ -593,14 +564,11 @@ async def test_filter_preserves_candidate_while_position_is_catching_up() -> Non
         event_cut=datetime(2026, 9, 28, 10, 0, tzinfo=UTC),
         policy_version="v1",
         schema_version="v1",
-        coverage=None,
         active_episode=None,
         batches=(),
         unallocated_quantity=Decimal("0"),
         reconciliation_gap=Decimal("0"),
         health_status=PositionHealthStatus.CATCHING_UP,
-        stream_scope=stream_scope,
-        diagnostics=("Sequence gap detected",),
     )
     frozen = FrozenDecisionInputs(
         position_view=view,

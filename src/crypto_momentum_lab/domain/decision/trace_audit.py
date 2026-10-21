@@ -570,7 +570,6 @@ def verify_decision_trace(
             ),
             policy_version=pos_view_data["policy_version"],
             schema_version=pos_view_data["schema_version"],
-            coverage=None,
             active_episode=active_episode,
             batches=tuple(batches_list),
             unallocated_quantity=Decimal(str(pos_view_data["unallocated_quantity"])),

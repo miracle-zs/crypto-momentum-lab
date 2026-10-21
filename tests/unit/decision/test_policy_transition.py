@@ -145,7 +145,6 @@ def _make_position_view(
         event_cut=None,
         policy_version="v1",
         schema_version="v1",
-        coverage=None,
         active_episode=active_episode,
         batches=batches,
         unallocated_quantity=Decimal("0"),

@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
 
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.trading import TradeSide as StrategySide
@@ -97,6 +96,7 @@ class PositionKey:
             for value in (self.environment, self.account_label, self.symbol)
         ):
             raise ValueError("position key fields must not contain ':'")
+
 
 @dataclass(frozen=True, slots=True)
 class AccountFactStreamScope:
@@ -356,13 +356,13 @@ class PositionEpisode:
         if self.closed_at is not None and self.closed_at.tzinfo is None:
             raise ValueError("closed_at must be timezone-aware")
 
+
 @dataclass(frozen=True, slots=True)
 class PositionView:
-    """Derived lot-level read model consumed by strategy and execution.
+    """Compact position context for deterministic decision evaluation and replay.
 
-    Exchange snapshots and fills are the source facts. This view groups those
-    facts into the batches needed for targeted exits; it is not a second source
-    of account position truth.
+    The live NextGen runtime maintains its own position batches. This view keeps
+    the position inputs needed by the decision trace and its replay.
     """
 
     key: PositionKey
@@ -371,20 +371,13 @@ class PositionView:
     event_cut: datetime | None
     policy_version: str
     schema_version: str
-    coverage: FactCoverageInterval | None
     active_episode: PositionEpisode | None
     batches: tuple[PositionLedgerBatch, ...]
     unallocated_quantity: Decimal
-    reservations: tuple[Any, ...] = ()
-    observation_id: str | None = None
-    reconciliation_status: str = "OK"
     reconciliation_gap: Decimal | None = None
     health_status: PositionHealthStatus = PositionHealthStatus.READY
-    diagnostics: tuple[str, ...] = ()
-    discrepancy: PositionDiscrepancy | None = None
     is_comparable: bool = True
-    zero_position_snapshot_confirmed: bool = False
-    stream_scope: AccountFactStreamScope | None = None
+
     @property
     def total_quantity(self) -> Decimal:
         return sum((b.quantity for b in self.batches), start=Decimal("0"))

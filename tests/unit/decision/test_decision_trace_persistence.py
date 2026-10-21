@@ -21,8 +21,6 @@ from crypto_momentum_lab.domain.decision.decision_engine import (
 from crypto_momentum_lab.domain.decision.trace_audit import verify_decision_trace
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    FactCoverageInterval,
-    FactCoverageStatus,
     PositionHealthStatus,
     PositionKey,
     PositionView,
@@ -512,7 +510,6 @@ async def test_async_decision_filter_awaits_durable_commit_callback(
         symbol="BTCUSDT",
         position_side=FuturesPositionSide.BOTH,
     )
-    opened_at = datetime(2026, 9, 25, 6, 0, tzinfo=UTC)
     view = PositionView(
         key=key,
         projection_version="pv1",
@@ -520,11 +517,6 @@ async def test_async_decision_filter_awaits_durable_commit_callback(
         event_cut=state.bucket_end,
         policy_version="v1",
         schema_version="v1",
-        coverage=FactCoverageInterval(
-            start_at=opened_at,
-            end_at=state.bucket_end,
-            status=FactCoverageStatus.CONFIRMED,
-        ),
         active_episode=None,
         batches=(),
         unallocated_quantity=Decimal("0"),
@@ -667,7 +659,6 @@ async def test_audit_decision_trace_reproducibility(
         event_cut=None,
         policy_version="v1",
         schema_version="v1",
-        coverage=None,
         active_episode=None,
         batches=(),
         unallocated_quantity=Decimal("0"),
