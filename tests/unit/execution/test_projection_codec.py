@@ -22,12 +22,17 @@ def baseline():
     )
 
 
-def test_projection_encoding_matches_order_identity_baseline(baseline):
+def test_projection_encoding_discards_historical_reductions(baseline):
     projection = PositionRecoveryCodec.decode_projection(baseline["payload"])
-    assert projection_codec.encode_projection(projection) == baseline["payload"]
+    expected = json.loads(json.dumps(baseline["payload"]))
+    expected["active_episode"]["reductions"] = []
+    for episode in expected["archived_episodes"]:
+        episode["reductions"] = []
+
+    assert projection_codec.encode_projection(projection) == expected
     assert projection.active_batches
-    assert projection.archived_episodes[0].reductions
-    assert projection.active_episode.reductions
+    assert projection.archived_episodes
+    assert projection.active_episode is not None
 
 
 def test_legacy_projection_without_order_count_evidence_is_rejected():

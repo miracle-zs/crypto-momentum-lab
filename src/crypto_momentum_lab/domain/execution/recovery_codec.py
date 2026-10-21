@@ -15,10 +15,8 @@ from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
     AccountFillLoadProvenance,
-    BatchReductionAttribution,
     DiscrepancyKind,
     ExitOrderSubmissionFact,
-    ExternalReductionFact,
     FactCoverageInterval,
     FactCoverageStatus,
     PositionDiscrepancy,
@@ -507,6 +505,8 @@ class PositionRecoveryCodec:
         is_active = data.get("is_active")
         if type(is_active) is not bool:
             raise RecoverySchemaError("is_active must be a boolean")
+        # The schema-1 to schema-4 head migration drops historical reductions.
+        _array(data, "reductions")
         return PositionEpisode(
             episode_id=_string(data, "episode_id"),
             position_key=cls.decode_position_key(data.get("position_key")),
@@ -522,50 +522,6 @@ class PositionRecoveryCodec:
             cumulative_sold=_decimal_value(data, "cumulative_sold"),
             peak_quantity=_decimal_value(data, "peak_quantity"),
             batches=tuple(cls.decode_batch(item) for item in _array(data, "batches")),
-            reductions=tuple(
-                cls.decode_reduction(item) for item in _array(data, "reductions")
-            ),
-        )
-
-    encode_reduction = staticmethod(projection_codec.encode_reduction)
-
-    @classmethod
-    def decode_reduction(cls, value: object) -> ExternalReductionFact:
-        data = _mapping(value, "reduction")
-        _require_keys(
-            data,
-            {
-                "trade_id",
-                "order_id",
-                "quantity",
-                "price",
-                "reduced_at",
-                "is_system",
-                "attributions",
-            },
-            "reduction",
-        )
-        is_system = data.get("is_system")
-        if type(is_system) is not bool:
-            raise RecoverySchemaError("is_system must be a boolean")
-        attributions: list[BatchReductionAttribution] = []
-        for item in _array(data, "attributions"):
-            item_data = _mapping(item, "attribution")
-            _require_keys(item_data, {"batch_id", "quantity"}, "attribution")
-            attributions.append(
-                BatchReductionAttribution(
-                    batch_id=_string(item_data, "batch_id"),
-                    quantity=_decimal_value(item_data, "quantity"),
-                )
-            )
-        return ExternalReductionFact(
-            trade_id=_string(data, "trade_id"),
-            order_id=_string(data, "order_id"),
-            quantity=_decimal_value(data, "quantity"),
-            price=_decimal_value(data, "price"),
-            reduced_at=_datetime_value(data, "reduced_at"),
-            is_system=is_system,
-            attributions=tuple(attributions),
         )
 
     encode_discrepancy = staticmethod(projection_codec.encode_discrepancy)

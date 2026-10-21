@@ -7,7 +7,6 @@ from decimal import Decimal
 
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
-    ExternalReductionFact,
     PositionDiscrepancy,
     PositionEpisode,
     PositionKey,
@@ -73,22 +72,7 @@ def encode_episode(episode: PositionEpisode | None) -> object:
         "cumulative_sold": _decimal(episode.cumulative_sold),
         "peak_quantity": _decimal(episode.peak_quantity),
         "batches": [encode_batch(batch) for batch in episode.batches],
-        "reductions": [encode_reduction(reduction) for reduction in episode.reductions],
-    }
-
-
-def encode_reduction(reduction: ExternalReductionFact) -> dict[str, object]:
-    return {
-        "trade_id": reduction.trade_id,
-        "order_id": reduction.order_id,
-        "quantity": _decimal(reduction.quantity),
-        "price": _decimal(reduction.price),
-        "reduced_at": _datetime(reduction.reduced_at),
-        "is_system": reduction.is_system,
-        "attributions": [
-            {"batch_id": item.batch_id, "quantity": _decimal(item.quantity)}
-            for item in reduction.attributions
-        ],
+        "reductions": [],
     }
 
 

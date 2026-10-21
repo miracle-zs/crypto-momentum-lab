@@ -20,10 +20,6 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
-from crypto_momentum_lab.domain.account.models import (
-    AccountFillEvent,
-    AccountPositionSnapshot,
-)
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.trading import TradeSide as StrategySide
 
@@ -376,51 +372,6 @@ class ExitOrderSubmissionFact:
 
 
 @dataclass(frozen=True, slots=True)
-class JournalFactDelta:
-    """Append-only fact events recorded since the last durable persist.
-
-    Only append-only categories live here. Fills, snapshots and exit boundaries
-    cannot change after they are recorded, so re-sending the whole history on
-    every observation was duplicated client work. Coverage, checkpoints,
-    cursor/load provenance, conflicts and integrity issues keep the full history
-    because their rows carry current state.
-    """
-
-    fills: tuple[AccountFillEvent, ...] = ()
-    snapshots: tuple[AccountPositionSnapshot, ...] = ()
-    exit_boundaries: tuple[ExitOrderSubmissionFact, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class BatchReductionAttribution:
-    """Attribution of a reduction (exit/close) to a specific lot."""
-
-    batch_id: str
-    quantity: Decimal
-
-
-@dataclass(frozen=True, slots=True)
-class ExternalReductionFact:
-    """A position reduction fact (exit trade) with explicit lot attribution."""
-
-    trade_id: str
-    order_id: str
-    quantity: Decimal
-    price: Decimal
-    reduced_at: datetime
-    is_system: bool = False
-    attributions: tuple[BatchReductionAttribution, ...] = ()
-
-    def __post_init__(self) -> None:
-        if self.quantity <= 0:
-            raise ValueError("quantity must be positive")
-        if self.price <= 0:
-            raise ValueError("price must be positive")
-        if self.reduced_at.tzinfo is None:
-            raise ValueError("reduced_at must be timezone-aware")
-
-
-@dataclass(frozen=True, slots=True)
 class PositionLedgerBatch:
     """One discrete entry lot inside a position episode."""
 
@@ -479,7 +430,6 @@ class PositionEpisode:
     cumulative_sold: Decimal = Decimal("0")
     peak_quantity: Decimal = Decimal("0")
     batches: tuple[PositionLedgerBatch, ...] = ()
-    reductions: tuple[ExternalReductionFact, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.episode_id.strip():

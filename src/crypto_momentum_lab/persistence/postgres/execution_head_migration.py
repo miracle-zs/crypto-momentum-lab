@@ -165,7 +165,6 @@ def _encode_current_position_state(
             batches=tuple(
                 batch for batch in active_episode.batches if batch.quantity > 0
             ),
-            reductions=(),
         )
     current_projection = replace(
         projection,
