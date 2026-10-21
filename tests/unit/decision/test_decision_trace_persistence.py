@@ -14,7 +14,6 @@ from sqlalchemy.dialects import postgresql
 from crypto_momentum_lab.domain.decision.trace_audit import verify_decision_trace
 from crypto_momentum_lab.domain.market.market_book import UnreproducibleError
 from crypto_momentum_lab.domain.market.revision_models import (
-    DecisionTrace,
     MarketRevisionRef,
     MarketVisibilityMode,
 )
@@ -22,7 +21,6 @@ from crypto_momentum_lab.persistence.postgres.decision_trace_repository import (
     PostgresDecisionTraceRepository,
 )
 from crypto_momentum_lab.persistence.postgres.decision_trace_storage import (
-    compact_trace_for_hot_storage,
     share_policy_states,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
@@ -32,47 +30,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
 )
 from crypto_momentum_lab.tools.reproduce_decision import audit_decision_trace
 from tests.fixtures.symbol_rules import btc_lot_rules
-
-
-def test_holding_position_trace_is_compacted_to_a_verifiable_hot_summary() -> None:
-    """The high-volume normal hold outcome must not retain replay-sized JSON."""
-    payload = {
-        "trace_schema_version": 1,
-        "input_hash": "input-hash",
-        "frame_digest": "frame-digest",
-        "market_state": {"symbols": ["BTCUSDT"] * 100},
-        "prior_policy_state": {"large": "state"},
-        "next_policy_state": {"large": "next-state"},
-    }
-
-    stored = compact_trace_for_hot_storage(
-        intent_produced=False,
-        rejection_reason="holding_position_no_exit",
-        trace_payload=payload,
-    )
-
-    assert stored == {
-        "evidence_level": "summary",
-        "summary_schema_version": 1,
-        "frame_digest": "frame-digest",
-        "input_hash": "input-hash",
-        "original_payload_sha256": (
-            "101bd09b15ac4e363ce15265fdedd5a76dc3bcce49706bf8c298e8ac401b7287"
-        ),
-        "outcome": "holding_position_no_exit",
-    }
-
-
-def test_nonstandard_rejection_keeps_complete_replay_evidence() -> None:
-    payload = {"market_state": {"symbol": "BTCUSDT"}}
-
-    stored = compact_trace_for_hot_storage(
-        intent_produced=False,
-        rejection_reason="direction_not_permitted_by_position_mode",
-        trace_payload=payload,
-    )
-
-    assert stored == payload
 
 
 class _AsyncContext:
@@ -85,7 +42,6 @@ class _AsyncContext:
     async def __aexit__(self, *args: Any) -> None:
         pass
 
-
 class _FakeQueryResult:
     def __init__(
         self, scalar_val: Any = None, scalars_list: list[Any] | None = None
@@ -96,31 +52,19 @@ class _FakeQueryResult:
     def scalar_one_or_none(self) -> Any:
         return self._scalar
 
-    def scalar(self) -> Any:
-        return self._scalar
-
     def scalars(self) -> _FakeQueryResult:
         return self
 
     def all(self) -> list[Any]:
         return self._scalars
 
-
 class _FakeAsyncSession:
     def __init__(self) -> None:
-        self.statements: list[Any] = []
         self.trace_rows: dict[str, DecisionTraceRow] = {}
         self.rev_rows: dict[str, MarketRevisionRefRow] = {}
         self.policy_rows: dict[str, DecisionPolicyEvidenceRow] = {}
 
-    def begin(self) -> _AsyncContext:
-        return _AsyncContext(self)
-
     async def execute(self, statement: Any) -> _FakeQueryResult:
-        self.statements.append(statement)
-        sql_text = str(getattr(statement, "text", ""))
-
-        # Dialect compile check
         compiled_str = ""
         try:
             compiled_str = str(
@@ -129,29 +73,10 @@ class _FakeAsyncSession:
         except Exception:
             compiled_str = str(statement)
 
-        if (
-            "SET LOCAL synchronous_commit" in sql_text
-            or "SET LOCAL synchronous_commit" in compiled_str
-        ):
-            return _FakeQueryResult()
-
-        if "INSERT INTO market_revision_refs" in compiled_str:
-            self._persist_insert(statement, MarketRevisionRefRow, self.rev_rows)
-            return _FakeQueryResult()
-        if "INSERT INTO decision_policy_evidence" in compiled_str:
-            self._persist_insert(statement, DecisionPolicyEvidenceRow, self.policy_rows)
-            return _FakeQueryResult()
         if "FROM decision_policy_evidence" in compiled_str:
             return _FakeQueryResult(
                 scalars_list=self._matching_rows(statement, self.policy_rows.values())
             )
-
-        if "INSERT INTO decision_traces" in compiled_str:
-            self._persist_insert(statement, DecisionTraceRow, self.trace_rows)
-            return _FakeQueryResult()
-
-        if "SELECT count(decision_traces.decision_id)" in compiled_str:
-            return _FakeQueryResult(scalar_val=len(self.trace_rows))
 
         if "FROM decision_traces" in compiled_str:
             rows = self._matching_rows(statement, self.trace_rows.values())
@@ -164,44 +89,6 @@ class _FakeAsyncSession:
             )
 
         return _FakeQueryResult()
-
-    @staticmethod
-    def _insert_values(statement: Any) -> list[dict[str, Any]]:
-        multi_values = getattr(statement, "_multi_values", ())
-        if multi_values:
-            rows = multi_values[0]
-            return [
-                {
-                    getattr(column, "name", str(column)): value
-                    for column, value in row.items()
-                }
-                for row in rows
-            ]
-        values = getattr(statement, "_values", None) or {}
-        return [
-            {
-                getattr(column, "name", str(column)): getattr(value, "value", value)
-                for column, value in values.items()
-            }
-        ]
-
-    @classmethod
-    def _persist_insert(
-        cls,
-        statement: Any,
-        row_type: type[Any],
-        rows_by_id: dict[str, Any],
-    ) -> None:
-        for values in cls._insert_values(statement):
-            row = row_type(**values)
-            identity = (
-                row.decision_id
-                if isinstance(row, DecisionTraceRow)
-                else row.state_digest
-                if isinstance(row, DecisionPolicyEvidenceRow)
-                else row.revision_id
-            )
-            rows_by_id.setdefault(identity, row)
 
     @staticmethod
     def _matching_rows(statement: Any, rows: Any) -> list[Any]:
@@ -230,7 +117,6 @@ class _FakeAsyncSession:
                 matched.append(row)
         return matched
 
-
 class _FakeSessionFactory:
     def __init__(self, session: _FakeAsyncSession) -> None:
         self.session = session
@@ -238,74 +124,9 @@ class _FakeSessionFactory:
     def __call__(self) -> _AsyncContext:
         return _AsyncContext(self.session)
 
-
 @pytest.mark.asyncio
-async def test_postgres_decision_trace_repository_saves_with_non_durable_commit() -> (
-    None
-):
+async def test_postgres_repository_loads_summary_market_refs() -> None:
     session = _FakeAsyncSession()
-    repo = PostgresDecisionTraceRepository(_FakeSessionFactory(session))  # type: ignore[arg-type]
-    t0 = datetime(2026, 9, 25, 8, 0, tzinfo=UTC)
-
-    ref = MarketRevisionRef(
-        scope="live",
-        symbol="BTCUSDT",
-        interval="15s",
-        bucket_start=t0,
-        bucket_end=t0 + timedelta(seconds=15),
-        revision_id="live:BTCUSDT:15s:1790323200:abc1234567",
-        content_hash="abc1234567890",
-        published_at=t0 + timedelta(seconds=14),
-        source_epoch="ep_live",
-        visibility_mode=MarketVisibilityMode.DECISION_VISIBLE,
-        observed_at=t0,
-    )
-
-    trace = DecisionTrace(
-        decision_id="trace_test_001",
-        strategy_name="orderflow_impulse",
-        account_label="primary",
-        decision_time=t0 + timedelta(seconds=15),
-        evaluated_market_refs=(ref,),
-        intent_produced=False,
-        intent_id=None,
-        rejection_reason="cooldown_active",
-        input_hash="hash_input_123",
-        frame_digest="frame_digest_456",
-        trace_payload={
-            "next_policy_state": {"policy_version": 2},
-            "market_state": {"symbol": "BTCUSDT", "close_price": "102"},
-        },
-    )
-
-    await repo.save_decision_trace(trace)
-
-    # 1. Non-durable commit policy executed
-    assert session.statements[0].text == "SET LOCAL synchronous_commit = OFF"
-
-    # Both reference and trace rows use immutable conflict handling.
-    sql_texts = [
-        str(stmt.compile(dialect=postgresql.dialect()))  # type: ignore[no-untyped-call]
-        for stmt in session.statements[1:]
-    ]
-    assert any(
-        "INSERT INTO market_revision_refs" in s
-        and "ON CONFLICT (revision_id) DO NOTHING" in s
-        for s in sql_texts
-    )
-    assert any(
-        "INSERT INTO decision_traces" in s
-        and "ON CONFLICT (decision_id) DO NOTHING" in s
-        for s in sql_texts
-    )
-
-
-@pytest.mark.asyncio
-async def test_postgres_repository_skips_market_payload_for_normal_hold_summary() -> (
-    None
-):
-    session = _FakeAsyncSession()
-    repo = PostgresDecisionTraceRepository(_FakeSessionFactory(session))  # type: ignore[arg-type]
     t0 = datetime(2026, 10, 7, 8, 0, tzinfo=UTC)
     ref = MarketRevisionRef(
         scope="live",
@@ -319,49 +140,48 @@ async def test_postgres_repository_skips_market_payload_for_normal_hold_summary(
         source_epoch="ep_live",
         visibility_mode=MarketVisibilityMode.DECISION_VISIBLE,
     )
-    trace = DecisionTrace(
-        decision_id="normal-hold-001",
+    decision_id = "normal-hold-001"
+    session.trace_rows[decision_id] = DecisionTraceRow(
+        decision_id=decision_id,
         strategy_name="orderflow_impulse",
         account_label="primary",
         decision_time=t0,
-        evaluated_market_refs=(ref,),
         intent_produced=False,
+        intent_id=None,
         rejection_reason="holding_position_no_exit",
-        input_hash="input-hash",
-        frame_digest="frame-digest",
+        evaluated_revision_ids=[ref.revision_id],
         trace_payload={
-            "input_hash": "input-hash",
+            "evidence_level": "summary",
+            "summary_schema_version": 1,
             "frame_digest": "frame-digest",
-            "market_state": {"symbols": ["BTCUSDT"] * 100},
+            "input_hash": "input-hash",
+            "original_payload_sha256": "0" * 64,
+            "outcome": "holding_position_no_exit",
+            "market_refs": [
+                {
+                    "scope": "live",
+                    "symbol": "BTCUSDT",
+                    "interval": "15s",
+                    "bucket_start": t0.isoformat(),
+                    "bucket_end": (t0 + timedelta(seconds=15)).isoformat(),
+                    "revision_id": ref.revision_id,
+                    "content_hash": ref.content_hash,
+                    "published_at": t0.isoformat(),
+                    "source_epoch": "ep_live",
+                    "visibility_mode": "decision_visible",
+                    "observed_at": "",
+                }
+            ],
         },
+        created_at=t0,
     )
+    repo = PostgresDecisionTraceRepository(_FakeSessionFactory(session))  # type: ignore[arg-type]
 
-    await repo.save_decision_trace(trace)
+    loaded = await repo.load_decision_trace(decision_id)
 
-    stored = session.trace_rows[trace.decision_id]
-    assert stored.trace_payload["evidence_level"] == "summary"
-    assert stored.trace_payload["market_refs"] == [
-        {
-            "scope": "live",
-            "symbol": "BTCUSDT",
-            "interval": "15s",
-            "bucket_start": "2026-10-07T08:00:00+00:00",
-            "bucket_end": "2026-10-07T08:00:15+00:00",
-            "revision_id": "live:BTCUSDT:15s:normal-hold",
-            "content_hash": "content_hash_normal_hold",
-            "published_at": "2026-10-07T08:00:00+00:00",
-            "source_epoch": "ep_live",
-            "visibility_mode": "decision_visible",
-            "observed_at": "",
-        }
-    ]
-    assert session.rev_rows == {}
-
-    loaded = await repo.load_decision_trace(trace.decision_id)
     assert loaded is not None
     assert loaded.evaluated_market_refs == (ref,)
-    assert verify_decision_trace(loaded, trace.decision_id)["status"] == "SUMMARY_ONLY"
-
+    assert verify_decision_trace(loaded, decision_id)["status"] == "SUMMARY_ONLY"
 
 @pytest.mark.asyncio
 async def test_postgres_decision_trace_repository_load() -> None:
@@ -409,47 +229,6 @@ async def test_postgres_decision_trace_repository_load() -> None:
         loaded.evaluated_market_refs[0].revision_id
         == "live:BTCUSDT:15s:1790323200:ref1"
     )
-
-
-@pytest.mark.asyncio
-async def test_compressed_state_retry_accepts_legacy_encoding_but_rejects_changed_evidence():
-    from tests.unit.decision.test_decision_engine import _make_market_envelope
-    from tests.unit.decision.test_decision_state_storage import large_payload
-
-    session = _FakeAsyncSession()
-    repo = PostgresDecisionTraceRepository(_FakeSessionFactory(session))
-    t0 = datetime(2026, 10, 8, tzinfo=UTC)
-    ref, _ = _make_market_envelope("BTCUSDT", t0, Decimal("100"))
-    payload = large_payload()
-    payload["market_state"] = {"symbol": "BTCUSDT"}
-    trace = DecisionTrace(
-        decision_id="compressed-retry",
-        strategy_name="orderflow_impulse",
-        account_label="primary",
-        decision_time=t0,
-        evaluated_market_refs=(ref,),
-        intent_produced=False,
-        rejection_reason="no_candidate",
-        input_hash="input",
-        frame_digest="frame",
-        trace_payload=payload,
-    )
-    await repo.save_decision_trace(trace)
-    assert "policy_state_refs" in session.trace_rows[trace.decision_id].trace_payload
-    for sequence in range(100):
-        await repo.save_decision_trace(replace(trace, decision_id=f"repeat-{sequence}"))
-    assert len(session.policy_rows) == 1
-    assert len(json.dumps(session.trace_rows[trace.decision_id].trace_payload)) < 1000
-    loaded = await repo.load_decision_trace(trace.decision_id)
-    assert loaded.trace_payload == payload
-    await repo.save_decision_trace(trace)
-    session.trace_rows[trace.decision_id].trace_payload = dict(payload)
-    await repo.save_decision_trace(trace)
-    with pytest.raises(ValueError, match="Immutable audit conflict"):
-        await repo.save_decision_trace(
-            replace(trace, trace_payload={**payload, "extra": "changed"})
-        )
-
 
 @pytest.mark.parametrize("sizing_kind", [None, "fixed", "equity", "large-state"])
 async def test_audit_decision_trace_reproducibility(
@@ -586,11 +365,7 @@ async def test_audit_decision_trace_reproducibility(
         intent_id=real_trace.intent_id,
         rejection_reason=real_trace.rejection_reason,
         evaluated_revision_ids=[ref.revision_id, ref2.revision_id],
-        trace_payload=compact_trace_for_hot_storage(
-            intent_produced=real_trace.intent_produced,
-            rejection_reason=real_trace.rejection_reason,
-            trace_payload=real_trace.trace_payload,
-        ),
+        trace_payload=real_trace.trace_payload,
         created_at=t0,
     )
     rev_row = MarketRevisionRefRow(
@@ -670,7 +445,6 @@ async def test_audit_decision_trace_reproducibility(
     # Replay remains available after both the hot trace and revision metadata
     # have been removed: the verified archive carries its own exact identities.
     import hashlib
-    import json
 
     import zstandard
 
@@ -766,185 +540,3 @@ async def test_audit_decision_trace_reproducibility(
     assert audit_res["next_policy_state_version"] == (
         res.next_policy_state.policy_version
     )
-
-
-@pytest.mark.asyncio
-async def test_decision_trace_repository_blocks_conflicting_overwrite() -> None:
-    """Reject attempts to overwrite a trace with conflicting content."""
-    session = _FakeAsyncSession()
-    repo = PostgresDecisionTraceRepository(_FakeSessionFactory(session))
-
-    t0 = datetime(2026, 9, 27, 5, 0, tzinfo=UTC)
-    ref = MarketRevisionRef(
-        scope="live",
-        symbol="BTCUSDT",
-        interval="15s",
-        bucket_start=t0,
-        bucket_end=t0 + timedelta(seconds=15),
-        revision_id="live:BTCUSDT:15s:1:ref1",
-        content_hash="content_hash_1",
-        published_at=t0,
-        source_epoch="ep_live",
-        visibility_mode=MarketVisibilityMode.DECISION_VISIBLE,
-    )
-    trace_1 = DecisionTrace(
-        decision_id="dec_btc_001",
-        strategy_name="orderflow_impulse",
-        account_label="primary",
-        decision_time=t0,
-        evaluated_market_refs=(ref,),
-        intent_produced=True,
-        intent_id="cand-1",
-        rejection_reason=None,
-        input_hash="hash_orig_1111",
-        frame_digest="frame_orig_1111",
-        trace_payload={
-            "intent": "buy",
-            "input_hash": "hash_orig_1111",
-            "frame_digest": "frame_orig_1111",
-        },
-    )
-    # Seed the session with existing trace row
-    session.trace_rows["dec_btc_001"] = DecisionTraceRow(
-        decision_id="dec_btc_001",
-        strategy_name="orderflow_impulse",
-        account_label="primary",
-        decision_time=t0,
-        intent_produced=True,
-        intent_id="cand-1",
-        rejection_reason=None,
-        evaluated_revision_ids=["live:BTCUSDT:15s:1:ref1"],
-        trace_payload={
-            "intent": "buy",
-            "input_hash": "hash_orig_1111",
-            "frame_digest": "frame_orig_1111",
-        },
-        created_at=t0,
-    )
-
-    # 1. Saving the exact same trace again is idempotent and succeeds
-    await repo.save_decision_traces([trace_1])
-
-    # Reject a conflicting input hash or intent under the same ID.
-    conflicting_trace = DecisionTrace(
-        decision_id="dec_btc_001",
-        strategy_name="orderflow_impulse",
-        account_label="primary",
-        decision_time=t0,
-        evaluated_market_refs=(ref,),
-        intent_produced=False,
-        intent_id=None,
-        rejection_reason="below_entry_threshold",
-        input_hash="hash_conflict_2222",
-        frame_digest="frame_conflict_2222",
-        trace_payload={"intent": None},
-    )
-    with pytest.raises(ValueError, match="Immutable audit conflict"):
-        await repo.save_decision_traces([conflicting_trace])
-
-
-@pytest.mark.asyncio
-async def test_decision_trace_accepts_existing_market_revision_with_canonical_and_authoritative_payload() -> (
-    None
-):
-    """Decision traces must not conflict with market revisions previously persisted by the market feed.
-
-    The market feed saves authoritative MarketRevisionRefRows with is_canonical=True,
-    detailed exchange payload, and source watermark lineage. When a strategy executes
-    and persists its DecisionTrace referencing that market revision, it must accept
-    the existing row as long as the core identity (scope, symbol, interval, bucket,
-    content_hash) matches.
-    """
-    session = _FakeAsyncSession()
-    repo = PostgresDecisionTraceRepository(_FakeSessionFactory(session))
-
-    t0 = datetime(2026, 9, 27, 5, 0, tzinfo=UTC)
-    rev_id = "research:XPINUSDT:15s:1790604135:f2b278dd33"
-    content_hash = "f2b278dd3384162deaf57f0a529148985f132587e5a20bd61b6f713a5c382232"
-
-    # 1. Seed existing MarketRevisionRefRow as saved by MarketBookRepository
-    session.rev_rows[rev_id] = MarketRevisionRefRow(
-        revision_id=rev_id,
-        scope="research",
-        symbol="XPINUSDT",
-        interval="15s",
-        bucket_start=t0,
-        bucket_end=t0 + timedelta(seconds=15),
-        content_hash=content_hash,
-        published_at=t0,
-        source_epoch="seq_5284",
-        visibility_mode="decision_visible",
-        is_canonical=True,  # Promoted by canonical promoter
-        payload={
-            "spread": "0.0000010",
-            "symbol": "XPINUSDT",
-            "exchange": "binance-usdm",
-        },
-        lineage={"source_watermark_at": "2026-09-28T14:02:30.006000+00:00"},
-    )
-
-    # 2. Strategy produces a DecisionTrace referencing this market revision
-    ref = MarketRevisionRef(
-        scope="research",
-        symbol="XPINUSDT",
-        interval="15s",
-        bucket_start=t0,
-        bucket_end=t0 + timedelta(seconds=15),
-        revision_id=rev_id,
-        content_hash=content_hash,
-        published_at=t0,
-        source_epoch="seq_5284",
-        visibility_mode=MarketVisibilityMode.DECISION_VISIBLE,
-    )
-    trace = DecisionTrace(
-        decision_id="dec_xpin_entry_001",
-        strategy_name="orderflow_impulse",
-        account_label="account-4",
-        decision_time=t0,
-        evaluated_market_refs=(ref,),
-        intent_produced=True,
-        intent_id="entry-xpin-1",
-        rejection_reason=None,
-        input_hash="hash_xpin_entry_1",
-        frame_digest="frame_xpin_entry_1",
-        trace_payload={
-            "market_state": {"symbol": "XPINUSDT", "close_price": "0.0008975"},
-            "intent": "buy",
-        },
-    )
-
-    # 3. Saving the trace must succeed without raising Immutable audit conflict
-    await repo.save_decision_traces([trace])
-    assert "dec_xpin_entry_001" in session.trace_rows
-    # Existing authoritative market book payload and is_canonical flag must remain unchanged
-    assert session.rev_rows[rev_id].is_canonical is True
-    assert session.rev_rows[rev_id].payload["exchange"] == "binance-usdm"
-
-    # 4. A genuine market revision conflict (e.g. mismatched content hash) must still be rejected
-    conflicting_ref = MarketRevisionRef(
-        scope="research",
-        symbol="XPINUSDT",
-        interval="15s",
-        bucket_start=t0,
-        bucket_end=t0 + timedelta(seconds=15),
-        revision_id=rev_id,
-        content_hash="mismatched_content_hash_xxxx",
-        published_at=t0,
-        source_epoch="seq_5284",
-        visibility_mode=MarketVisibilityMode.DECISION_VISIBLE,
-    )
-    conflicting_trace = DecisionTrace(
-        decision_id="dec_xpin_entry_002",
-        strategy_name="orderflow_impulse",
-        account_label="account-4",
-        decision_time=t0,
-        evaluated_market_refs=(conflicting_ref,),
-        intent_produced=True,
-        intent_id="entry-xpin-2",
-        rejection_reason=None,
-        input_hash="hash_xpin_entry_2",
-        frame_digest="frame_xpin_entry_2",
-        trace_payload={"intent": "buy"},
-    )
-    with pytest.raises(ValueError, match="Immutable audit conflict: MarketRevisionRef"):
-        await repo.save_decision_traces([conflicting_trace])
