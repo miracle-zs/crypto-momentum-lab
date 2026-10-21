@@ -31,7 +31,7 @@ class AdapterGuard(MetaPathFinder):
         forbidden = (
             'sqlalchemy', 'httpx', 'websockets',
             'crypto_momentum_lab.persistence',
-            'crypto_momentum_lab.execution_account',
+            'crypto_momentum_lab.next_gen',
             'crypto_momentum_lab.live_rollout',
             'crypto_momentum_lab.operator_dashboard',
         )
