@@ -1109,3 +1109,5 @@ SSH使用已配置的密钥或--control-path指定的已登录会话，不在脚
 随后删除仍调用已退役 `PostgresMarketBookRepository` trace 接口的归档集成用例。摘要 trace 的保存与读取由独立 `PostgresDecisionTraceRepository` 现有单测覆盖，完整 trace 对市场修订的归档保护仍由现有归档用例覆盖。静态引用搜索、AST 与 diff 检查通过；未运行测试，未部署。
 
 继续核查后确认，当前应用源码没有新增 DecisionTrace 的调用方；`reproduce_decision` 只读历史记录，共享 policy evidence、压缩摘要和市场修订归档工具仅维护已有数据。删除无调用方的 trace 写入仓储及仅测试该写入 API 的测试；保留历史 trace 读取、旧压缩格式解码、共享 evidence 回填/回收、摘要轨迹读取及归档保护。决策 trace 表和现存历史不变。静态引用搜索、Ruff、Python AST 与 diff 检查通过；未运行测试，未部署。
+
+删除未接入任何生产路径的 REST 15m K 线/EMA 缓存模块 `market_data.candle_source` 及其专属单测。NextGen 的退出 K 线来自独立 WebSocket feed；启用 EMA 入场配置时当前引擎会明确拒绝启动，因此该 REST provider 不参与现行交易或历史回放。保留共享的 `ClosedCandle15m` 值模型、WebSocket feed 和配置契约。引用搜索、AST 与 diff 检查通过；未运行测试，未部署。
