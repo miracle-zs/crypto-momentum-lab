@@ -51,20 +51,6 @@ _MAINTENANCE_PGOPTIONS = "-c work_mem=4MB -c temp_file_limit=256MB"
 _DECISION_ARCHIVE_CSV_FIELD_LIMIT = 64 * 1024 * 1024
 
 
-def retention_row_predicate(table: str, *, alias: str | None = None) -> str:
-    """Protect individual current checkpoints and unfinished exits."""
-    if table != "decision_traces":
-        return ""
-    relation = alias or table
-    return (
-        " AND NOT EXISTS (SELECT 1 FROM durable_policy_states s "
-        f"WHERE s.last_decision_id = {relation}.decision_id) "
-        "AND NOT EXISTS (SELECT 1 FROM durable_decision_exits e "
-        f"WHERE e.decision_id = {relation}.decision_id "
-        "AND e.status NOT IN ('DISPATCHED', 'SUPERSEDED'))"
-    )
-
-
 def _run(argv: list[str]) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(  # noqa: S603 - argv is built here, never a shell string
         argv,
@@ -140,7 +126,6 @@ def count_rows(
     sql = (
         f'SELECT count(*) FROM "{table}" '
         f"WHERE \"{column}\" >= '{start}+00' AND \"{column}\" < '{end}+00'"
-        + retention_row_predicate(table)
     )
     result = _run([*_psql(prefix, container, user, database), "-At", "-c", sql])
     if result.returncode != 0:
@@ -171,7 +156,6 @@ def compute_range_fingerprint(
         "SELECT row_to_json(t)::text "
         f'FROM "{table}" t '
         f"WHERE \"{column}\" >= '{start}+00' AND \"{column}\" < '{end}+00'"
-        + retention_row_predicate(table, alias="t")
     )
     sql = f"COPY ({select_sql}) TO STDOUT WITH (FORMAT csv)"
     process = subprocess.Popen(  # noqa: S603 - argv and SQL are built here
@@ -252,7 +236,6 @@ def export_range(
             "SELECT row_to_json(t)::text FROM ("
             f'SELECT {projection} FROM "{table}" '
             f"WHERE \"{column}\" >= '{start}+00' AND \"{column}\" < '{end}+00' "
-            f"{retention_row_predicate(table)} "
             f'ORDER BY "{column}") t'
         )
         # COPY text escapes JSON backslashes again. CSV lets us stream each

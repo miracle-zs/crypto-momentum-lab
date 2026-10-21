@@ -3,9 +3,9 @@
 Every deploy recreates containers.  A container that is booting -- or one that
 is being stopped -- is unhealthy and has no heartbeat by definition, and Docker
 exposes no "stopping" state, so from the monitor's side a deploy is
-indistinguishable from a crash: it produced four alerts per deploy
-(container_unhealthy, live_heartbeat_stale, live_crash_log_archive_failed,
-live_heartbeat_auto_restarted) for a container whose restart count never moved.
+indistinguishable from a crash and can produce lifecycle alerts such as
+container_missing, container_unhealthy, live_heartbeat_stale, and
+live_crash_log_archive_failed.
 
 Only the deploy knows the change is planned, so the deploy declares a
 maintenance window and the monitor honours it.

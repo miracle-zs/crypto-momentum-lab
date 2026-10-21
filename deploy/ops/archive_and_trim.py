@@ -36,7 +36,6 @@ if str(_HERE) not in sys.path:
 
 from archive_table import (  # noqa: E402
     _DECISION_ARCHIVE_CSV_FIELD_LIMIT,
-    retention_row_predicate,
 )
 from stream_digest import StreamingContentDigest  # noqa: E402
 
@@ -77,10 +76,6 @@ TABLES: tuple[tuple[str, str], ...] = (
     # to 17 days / 144 MB (89 MB of that is TOAST holding six jsonb columns,
     # so archiving it stays on the JSONL path).
     ("live_strategy_signals", "recorded_at"),
-    # State transitions for live account runtimes.  Only the latest row per
-    # account is load-bearing; history is audit and had no
-    # retention (~12k rows/day, 24 MB and growing).
-    ("execution_account_process_states", "occurred_at"),
     # Market-data quality diagnostics (jsonb -> JSONL archive).  Volume
     # spikes with connection churn; without a window this table grows
     # without bound.
@@ -556,8 +551,7 @@ def build_freeze_targets_sql(
         "CREATE TEMP TABLE prune_targets AS\n"
         f"SELECT ctid AS id FROM {table}\n"
         f"WHERE \"{column}\" >= '{from_dt}+00'\n"
-        f"AND \"{column}\" < '{to_dt}+00'"
-        f"{retention_row_predicate(table)};"
+        f"AND \"{column}\" < '{to_dt}+00';"
     )
 
 
@@ -578,7 +572,7 @@ def build_batch_delete_sql(table: str, batch_limit: int) -> str:
         "), del AS (\n"
         f"  DELETE FROM {table} WHERE ctid IN (\n"
         "    SELECT id FROM picked\n"
-        f"  ){retention_row_predicate(table)} RETURNING 1\n"
+        "  ) RETURNING 1\n"
         "), cleaned AS (\n"
         "  DELETE FROM prune_targets WHERE id IN (\n"
         "    SELECT id FROM picked\n"
@@ -774,8 +768,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{table}: hot retention {table_days}d   requested cutoff: {cutoff}")
 
         oldest_raw = _scalar(
-            f"SELECT coalesce(min(\"{column}\")::date::text, '') FROM {table} "
-            f"WHERE true {retention_row_predicate(table)}",
+            f"SELECT coalesce(min(\"{column}\")::date::text, '') FROM {table}",
             **db,
         )
         if not oldest_raw:
@@ -842,7 +835,7 @@ def main(argv: list[str] | None = None) -> int:
         pending = int(
             _scalar(
                 f'SELECT count(*) FROM {table} WHERE "{column}" < '
-                f"'{effective_cutoff}+00'{retention_row_predicate(table)}",
+                f"'{effective_cutoff}+00'",
                 # Same row set as the exporter and frozen prune targets.
                 **db,
             )

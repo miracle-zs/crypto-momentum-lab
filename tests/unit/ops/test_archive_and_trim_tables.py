@@ -26,9 +26,9 @@ def test_archive_and_trim_covers_unbounded_growth_tables() -> None:
     tables = _load_tables()
     names = {name for name, _column in tables}
 
-    # Phase-0 additions: process-state history, quality diagnostics, and the
-    # universe parent whose CASCADE drops monitoring_memberships.
-    assert "execution_account_process_states" in names
+    # Quality diagnostics and the universe parent whose CASCADE drops
+    # monitoring_memberships.
+    assert "execution_account_process_states" not in names
     assert "market_data_quality_events" in names
     assert "universe_snapshots" in names
     assert ("decision_traces", "created_at") in tables

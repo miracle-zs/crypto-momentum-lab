@@ -46,7 +46,6 @@ class DatasetId(StrEnum):
     EXCHANGE_ORDERS = "exchange_orders"
     PAPER_EQUITY = "paper_equity"
     STRATEGY_SIGNALS = "strategy_signals"
-    EXECUTION_PROCESS_STATES = "execution_process_states"
     UNIVERSE_ENTRIES = "universe_entries"
     CONTRACT_METADATA = "contract_metadata"
     GENERIC = "generic"
@@ -72,7 +71,6 @@ DATASET_PHYSICAL_TABLES: dict[DatasetId, tuple[str, ...]] = {
     DatasetId.EXCHANGE_ORDERS: ("exchange_order_events",),
     DatasetId.PAPER_EQUITY: ("paper_equity_snapshots",),
     DatasetId.STRATEGY_SIGNALS: ("live_strategy_signals",),
-    DatasetId.EXECUTION_PROCESS_STATES: ("execution_account_process_states",),
     DatasetId.UNIVERSE_ENTRIES: (
         "monitoring_memberships",
         "universe_entries",
@@ -92,7 +90,6 @@ TABLE_TO_DATASET: dict[str, DatasetId] = {
     "exchange_order_events": DatasetId.EXCHANGE_ORDERS,
     "paper_equity_snapshots": DatasetId.PAPER_EQUITY,
     "live_strategy_signals": DatasetId.STRATEGY_SIGNALS,
-    "execution_account_process_states": DatasetId.EXECUTION_PROCESS_STATES,
     "universe_entries": DatasetId.UNIVERSE_ENTRIES,
     "universe_snapshots": DatasetId.UNIVERSE_ENTRIES,
     "monitoring_memberships": DatasetId.UNIVERSE_ENTRIES,

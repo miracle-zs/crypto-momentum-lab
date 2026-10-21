@@ -20,9 +20,6 @@ from crypto_momentum_lab.operator_dashboard.common_equity import (
     live_aggregated_equity_observations as _live_aggregated_equity_observations,
 )
 from crypto_momentum_lab.operator_dashboard.overview_queries import (
-    latest_live_account_process_statement as _latest_live_account_process_statement,
-)
-from crypto_momentum_lab.operator_dashboard.overview_queries import (
     universe_membership as _universe_membership,
 )
 from crypto_momentum_lab.operator_dashboard.paper_account_queries import (
@@ -49,18 +46,6 @@ from crypto_momentum_lab.operator_dashboard.telemetry_queries import (
     _decision_slo_response,
 )
 from crypto_momentum_lab.persistence.postgres.models import PaperEquitySnapshotRow
-
-def test_latest_live_account_process_query_excludes_non_live_states() -> None:
-    statement = _latest_live_account_process_statement()
-    sql = str(
-        statement.compile(
-            dialect=postgresql_dialect(),
-            compile_kwargs={"literal_binds": True},
-        )
-    ).lower()
-
-    assert "environment = 'live'" in sql
-    assert "group by execution_account_process_states.account_label" in sql
 
 def test_downsample_equity_snapshots_keeps_latest_row_in_each_utc_bucket() -> None:
     start = datetime(2026, 7, 28, tzinfo=UTC)

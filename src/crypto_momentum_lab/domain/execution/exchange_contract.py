@@ -1,13 +1,4 @@
-"""Exchange submission contracts shared by adapters and order orchestration."""
-
-from collections.abc import Awaitable, Callable
-from datetime import datetime
-from typing import Protocol
-
-from crypto_momentum_lab.domain.execution.order_state import (
-    ExchangeOrderSnapshot,
-    OrderExecutionPlan,
-)
+"""Exchange submission errors shared by Binance adapters and callers."""
 
 
 class LiveSubmissionDisabledError(RuntimeError):
@@ -65,35 +56,3 @@ class ExchangeCancellationUnknownError(RuntimeError):
     ) -> None:
         super().__init__(message)
         self.retry_after_seconds = retry_after_seconds
-
-
-ExchangeBoundaryCallback = Callable[
-    [OrderExecutionPlan, str, datetime],
-    Awaitable[None],
-]
-
-
-class OrderExchangeClient(Protocol):
-    def set_exchange_boundary_callbacks(
-        self,
-        *,
-        on_request: ExchangeBoundaryCallback | None = None,
-        on_response: ExchangeBoundaryCallback | None = None,
-    ) -> None: ...
-
-    async def submit_order(self, plan: OrderExecutionPlan) -> ExchangeOrderSnapshot:
-        pass
-
-    async def query_order_by_client_id(
-        self,
-        symbol: str,
-        client_order_id: str,
-    ) -> ExchangeOrderSnapshot | None:
-        pass
-
-    async def cancel_order_by_client_id(
-        self,
-        symbol: str,
-        client_order_id: str,
-    ) -> ExchangeOrderSnapshot:
-        pass

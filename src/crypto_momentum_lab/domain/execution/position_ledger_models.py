@@ -729,11 +729,6 @@ class PositionView:
     is_comparable: bool = True
     zero_position_snapshot_confirmed: bool = False
     stream_scope: AccountFactStreamScope | None = None
-    # Operational dispatch state is attached by ExecutionBook, not projected
-    # from fills or included in the durable projection digest.
-    pending_command_ids: tuple[str, ...] = ()
-    active_entry_command_ids: tuple[str, ...] = ()
-
     @property
     def total_quantity(self) -> Decimal:
         return sum((b.quantity for b in self.batches), start=Decimal("0"))
@@ -779,6 +774,4 @@ class PositionView:
 
     @property
     def is_ready_for_trade(self) -> bool:
-        if self.pending_command_ids:
-            return False
         return self.fact_credibility == FactCredibility.READY

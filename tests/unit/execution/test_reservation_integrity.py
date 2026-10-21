@@ -1,4 +1,4 @@
-"""Capacity fail-closed, conflict identity, and partial-fill attribution."""
+"""In-memory reservation identity, capacity, and ordering rules."""
 
 from __future__ import annotations
 
@@ -14,10 +14,6 @@ from crypto_momentum_lab.domain.execution.reservation_registry import (
     ReservationConflictError,
 )
 from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
-from crypto_momentum_lab.persistence.postgres.position_reservation_repository import (
-    _adopt_or_reject_existing,
-    _require_capacity,
-)
 
 
 def _key() -> PositionKey:
@@ -44,61 +40,6 @@ def _res(
         reserved_quantity=Decimal(qty),
         created_at=created_at or datetime.now(UTC),
     )
-
-
-def test_require_capacity_fails_closed_on_missing_snapshot() -> None:
-    with pytest.raises(ReservationConflictError, match="snapshot missing"):
-        _require_capacity(
-            reserved_quantity=Decimal("1"),
-            total_active=Decimal("0"),
-            pos_amt=None,
-        )
-
-
-def test_require_capacity_fails_closed_on_zero_position() -> None:
-    with pytest.raises(ReservationConflictError, match="zero quantity"):
-        _require_capacity(
-            reserved_quantity=Decimal("1"),
-            total_active=Decimal("0"),
-            pos_amt=Decimal("0"),
-        )
-
-
-def test_require_capacity_rejects_over_reserving() -> None:
-    with pytest.raises(ValueError, match="exceeded"):
-        _require_capacity(
-            reserved_quantity=Decimal("5"),
-            total_active=Decimal("6"),
-            pos_amt=Decimal("10"),
-        )
-
-
-def test_require_capacity_allows_within_limit() -> None:
-    _require_capacity(
-        reserved_quantity=Decimal("5"),
-        total_active=Decimal("4"),
-        pos_amt=Decimal("10"),
-    )
-
-
-def test_adopt_or_reject_rejects_batch_mismatch() -> None:
-    existing = _res("r1", batch_id="batch_1", qty="10")
-    requested = _res("r1", batch_id="batch_2", qty="10")
-    with pytest.raises(ReservationConflictError, match="already exists"):
-        _adopt_or_reject_existing(existing, requested)
-
-
-def test_adopt_or_reject_rejects_qty_mismatch() -> None:
-    existing = _res("r1", batch_id="batch_1", qty="10")
-    requested = _res("r1", batch_id="batch_1", qty="5")
-    with pytest.raises(ReservationConflictError, match="already exists"):
-        _adopt_or_reject_existing(existing, requested)
-
-
-def test_adopt_or_reject_accepts_matching_identity() -> None:
-    existing = _res("r1", batch_id="batch_1", qty="10")
-    requested = _res("r1", batch_id="batch_1", qty="10")
-    _adopt_or_reject_existing(existing, requested)
 
 
 def test_inmemory_save_conflict_on_same_id_different_identity() -> None:

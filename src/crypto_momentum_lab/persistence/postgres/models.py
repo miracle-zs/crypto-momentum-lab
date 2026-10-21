@@ -14,7 +14,6 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
-    UniqueConstraint,
     desc,
     text,
 )
@@ -22,32 +21,13 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from crypto_momentum_lab.persistence.postgres.base import Base
-from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
-    DurableDecisionExitRow as DurableDecisionExitRow,
-)
-from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
-    DurablePolicyCommitRow as DurablePolicyCommitRow,
-)
-from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
-    DurablePolicyStateRow as DurablePolicyStateRow,
-)
-from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
-    ExecutionBookHeadRow as ExecutionBookHeadRow,
-)
-from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
-    ExecutionEvidenceReceiptRow as ExecutionEvidenceReceiptRow,
-)
-from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
-    ExecutionOrderWatermarkRow as ExecutionOrderWatermarkRow,
-)
-from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
-    ExecutionTradeIdentityRow as ExecutionTradeIdentityRow,
-)
 from crypto_momentum_lab.next_gen.db_models import (
     LiveOrderRow as LiveOrderRow,
+)
+from crypto_momentum_lab.next_gen.db_models import (
     LivePositionBatchRow as LivePositionBatchRow,
 )
+from crypto_momentum_lab.persistence.postgres.base import Base
 
 
 class ContractMetadataRow(Base):
@@ -865,27 +845,6 @@ class AccountReconciliationRunRow(Base):
     )
 
 
-class ExecutionAccountProcessStateRow(Base):
-    __tablename__ = "execution_account_process_states"
-
-    state_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
-    environment: Mapped[str] = mapped_column(String(32))
-    account_label: Mapped[str] = mapped_column(String(64))
-    state: Mapped[str] = mapped_column(String(32))
-    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    reason: Mapped[str | None] = mapped_column(Text)
-
-    __table_args__ = (
-        Index(
-            "ix_execution_account_state_latest",
-            "environment",
-            "account_label",
-            "occurred_at",
-        ),
-        Index("ix_execution_account_process_states_latest", "occurred_at"),
-    )
-
-
 class RiskConfigSnapshotRow(Base):
     __tablename__ = "risk_config_snapshots"
 
@@ -909,37 +868,6 @@ class RiskConfigSnapshotRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
-class RiskEvaluationRow(Base):
-    __tablename__ = "risk_evaluations"
-
-    evaluation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    candidate_id: Mapped[str] = mapped_column(String(128))
-    decision: Mapped[str] = mapped_column(String(16))
-    reason: Mapped[str] = mapped_column(String(128))
-    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    details: Mapped[dict[str, object]] = mapped_column(JSONB)
-
-    __table_args__ = (
-        Index(
-            "ix_risk_evaluations_candidate_time",
-            "candidate_id",
-            "evaluated_at",
-        ),
-    )
-
-
-class RiskRejectionRow(Base):
-    __tablename__ = "risk_rejections"
-
-    evaluation_id: Mapped[str] = mapped_column(
-        String(128),
-        ForeignKey("risk_evaluations.evaluation_id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    reason: Mapped[str] = mapped_column(String(128))
-    details: Mapped[dict[str, object]] = mapped_column(JSONB)
-
-
 class RiskHaltRow(Base):
     __tablename__ = "risk_halts"
 
@@ -961,17 +889,6 @@ class RiskHaltRow(Base):
     )
 
 
-class StrategyLiveStateRow(Base):
-    __tablename__ = "strategy_live_states"
-
-    environment: Mapped[str] = mapped_column(String(32), primary_key=True)
-    account_label: Mapped[str] = mapped_column(String(64), primary_key=True)
-    strategy_name: Mapped[str] = mapped_column(String(64), primary_key=True)
-    state: Mapped[str] = mapped_column(String(16))
-    changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    reason: Mapped[str | None] = mapped_column(Text)
-
-
 class OrderIntentExecutionRow(Base):
     __tablename__ = "order_intents"
 
@@ -984,92 +901,6 @@ class OrderIntentExecutionRow(Base):
     state: Mapped[str] = mapped_column(String(32))
     approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     details: Mapped[dict[str, object]] = mapped_column(JSONB)
-
-
-class OrderIntentClaimRow(Base):
-    __tablename__ = "order_intent_claims"
-
-    intent_id: Mapped[str] = mapped_column(
-        String(128),
-        ForeignKey("order_intents.intent_id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    worker_id: Mapped[str] = mapped_column(String(128))
-    claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-
-
-class ExitEpisodeReservationRow(Base):
-    """Durable single-owner reservation for one live position episode."""
-
-    __tablename__ = "exit_episode_reservations"
-
-    environment: Mapped[str] = mapped_column(String(32), primary_key=True)
-    account_label: Mapped[str] = mapped_column(String(64), primary_key=True)
-    strategy_name: Mapped[str] = mapped_column(String(64), primary_key=True)
-    symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
-    position_side: Mapped[str] = mapped_column(String(8), primary_key=True)
-    episode_key: Mapped[str] = mapped_column(String(256), primary_key=True)
-    intent_id: Mapped[str] = mapped_column(
-        String(128),
-        ForeignKey("order_intents.intent_id", ondelete="CASCADE"),
-    )
-    client_order_id: Mapped[str] = mapped_column(String(36))
-    active: Mapped[bool] = mapped_column(Boolean)
-    state: Mapped[str] = mapped_column(String(48))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-
-    __table_args__ = (
-        UniqueConstraint("intent_id", name="uq_exit_episode_intent"),
-        UniqueConstraint("client_order_id", name="uq_exit_episode_client_order"),
-        Index(
-            "ix_exit_episode_reservations_active",
-            "environment",
-            "account_label",
-            "strategy_name",
-            "active",
-        ),
-    )
-
-
-class LiveExposureClaimRow(Base):
-    """Durable entry exposure reservation shared by rolling workers."""
-
-    __tablename__ = "live_exposure_claims"
-
-    intent_id: Mapped[str] = mapped_column(
-        String(128),
-        ForeignKey("order_intents.intent_id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    environment: Mapped[str] = mapped_column(String(32))
-    account_label: Mapped[str] = mapped_column(String(64))
-    strategy_name: Mapped[str] = mapped_column(String(64))
-    symbol: Mapped[str] = mapped_column(String(32))
-    position_side: Mapped[str] = mapped_column(String(8))
-    notional: Mapped[Decimal] = mapped_column(Numeric(38, 18))
-    active: Mapped[bool] = mapped_column(Boolean)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-
-    __table_args__ = (
-        Index(
-            "ix_live_exposure_claims_scope_active",
-            "environment",
-            "account_label",
-            "strategy_name",
-            "active",
-        ),
-        Index(
-            "ix_live_exposure_claims_scope_symbol_active",
-            "environment",
-            "account_label",
-            "strategy_name",
-            "symbol",
-            "active",
-        ),
-    )
 
 
 class ExchangeOrderRow(Base):
@@ -1175,67 +1006,6 @@ class ExchangeFillRow(Base):
     )
 
 
-class ExecutionCommandRow(Base):
-    __tablename__ = "execution_commands"
-
-    command_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    client_order_id: Mapped[str | None] = mapped_column(String(36))
-    command: Mapped[str] = mapped_column(String(32))
-    status: Mapped[str] = mapped_column(String(32))
-    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    details: Mapped[dict[str, object]] = mapped_column(JSONB)
-
-
-class ExecutionReconciliationEventRow(Base):
-    __tablename__ = "execution_reconciliation_events"
-
-    reconciliation_event_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    client_order_id: Mapped[str] = mapped_column(String(36))
-    outcome: Mapped[str] = mapped_column(String(64))
-    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    details: Mapped[dict[str, object]] = mapped_column(JSONB)
-
-
-class LiveOperatorApprovalRow(Base):
-    __tablename__ = "live_operator_approvals"
-
-    approval_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    account_label: Mapped[str] = mapped_column(String(64))
-    strategy_name: Mapped[str] = mapped_column(String(64))
-    strategy_config_hash: Mapped[str] = mapped_column(String(64))
-    risk_config_hash: Mapped[str] = mapped_column(String(64))
-    git_commit_hash: Mapped[str] = mapped_column(String(64))
-    database_migration_revision: Mapped[str] = mapped_column(String(32))
-    approved_notional_cap: Mapped[Decimal | None] = mapped_column(
-        Numeric(38, 18),
-        nullable=True,
-    )
-    approved_max_open_positions: Mapped[int | None] = mapped_column(
-        Integer,
-        nullable=True,
-    )
-    approved_max_daily_loss: Mapped[Decimal | None] = mapped_column(
-        Numeric(38, 18),
-        nullable=True,
-    )
-    approver_name: Mapped[str] = mapped_column(String(128))
-    approval_text: Mapped[str] = mapped_column(String(128))
-    expires_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-    )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-
-    __table_args__ = (
-        Index(
-            "ix_live_approvals_account_strategy_expiry",
-            "account_label",
-            "strategy_name",
-            "expires_at",
-        ),
-    )
-
-
 class LiveSessionTransitionRow(Base):
     __tablename__ = "live_session_transitions"
 
@@ -1256,72 +1026,6 @@ class LiveSessionTransitionRow(Base):
             "occurred_at",
         ),
         Index("ix_live_session_transitions_latest", "occurred_at"),
-    )
-
-
-class LiveRollbackCommandRow(Base):
-    __tablename__ = "live_rollback_commands"
-
-    command_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    command_type: Mapped[str] = mapped_column(String(64))
-    requested_by: Mapped[str] = mapped_column(String(128))
-    confirmation_text: Mapped[str] = mapped_column(String(128))
-    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    idempotency_key: Mapped[str] = mapped_column(String(128), unique=True)
-    account_label: Mapped[str] = mapped_column(String(64))
-    strategy_name: Mapped[str] = mapped_column(String(64))
-    session_id: Mapped[str] = mapped_column(String(128))
-    status: Mapped[str] = mapped_column(String(32))
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    failure_reason: Mapped[str | None] = mapped_column(Text)
-
-
-class PositionReservationRow(Base):
-    """Durable single-owner lot reservation for batch-level exit allocation."""
-
-    __tablename__ = "position_reservations"
-
-    reservation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    environment: Mapped[str] = mapped_column(String(32), nullable=False)
-    account_label: Mapped[str] = mapped_column(String(64), nullable=False)
-    strategy_name: Mapped[str] = mapped_column(String(64), nullable=False)
-    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
-    position_side: Mapped[str] = mapped_column(String(8), nullable=False)
-    batch_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    command_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    client_order_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    reserved_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
-    consumed_quantity: Mapped[Decimal] = mapped_column(
-        Numeric(38, 18), nullable=False, default=Decimal("0")
-    )
-    released_quantity: Mapped[Decimal] = mapped_column(
-        Numeric(38, 18), nullable=False, default=Decimal("0")
-    )
-    status: Mapped[str] = mapped_column(String(32), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    released_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    release_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
-
-    __table_args__ = (
-        Index(
-            "ix_position_reservations_batch_active",
-            "environment",
-            "account_label",
-            "symbol",
-            "batch_id",
-            "status",
-        ),
-        Index(
-            "ix_position_reservations_command",
-            "command_id",
-        ),
     )
 
 

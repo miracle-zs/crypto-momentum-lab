@@ -1,9 +1,11 @@
-# `crypto-momentum-lab` 核心系统架构与运行机制全景白皮书
+# `crypto-momentum-lab` 旧版执行栈架构手册（历史参考）
 > **文档版本**: 2026.10-T2-Production-Audit
 > **设计基准**: Git 仓库真实源码（Alembic 迁移 `20261018_0067_next_gen_execution_tables` 已合并；执行 Head schema 仍为 4，NextGen 另用两张独立关系表）
 > **编写角色**: 首席系统架构师
-> **模型演进**: NextGen 是当前唯一部署的交易执行栈；旧版运行入口和 Compose 服务已退役。NextGen 仍复用 `live_rollout` 与 `execution_account` 中的运行组件；历史数据读取代码按需保留。
-> **部署现状**: 线上 4 个 NextGen 账户（`primary`、`account-2`、`account-3`、`account-4`）共用同一个 PostgreSQL 数据库，由 [`compose.next_gen.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.next_gen.yaml) 的 `nextgen` Profile 启动。
+> **模型演进**: NextGen 是当前唯一部署的交易执行栈；旧版主运行时和 Compose 服务已退役。NextGen 仍复用 `live_rollout` 中少量配置、行情与风险窗口模块；交易账户运行时不依赖 `execution_account`，该包中的 Binance 客户端仍供独立运维恢复工具使用。旧 `ExecutionBook` 领域编排、证据/命令写入与恢复流程、PostgreSQL 写入适配器及专属验收已移除；无运行时调用方的成交恢复来源和订单身份查询也已删除。`PositionBook`/账本仍用于决策模拟。`execution_book_heads` 已完整归档，待 0068 迁移移除在线表；离线历史工具继续读取归档副本。
+> **部署现状**: 线上 4 个 NextGen 账户（`primary`、`account-2`、`account-3`、`account-4`）共用同一个 PostgreSQL 数据库，由 [`compose.next_gen.yaml`](../../compose.next_gen.yaml) 的 `nextgen` Profile 启动。
+
+> **适用范围**：本文主体记录已退役的旧 `live_rollout` 执行运行时，不是当前实盘实现规范。当前实现入口见 [NextGen CLI](../../src/crypto_momentum_lab/apps/next_gen/cli.py)、[daemon](../../src/crypto_momentum_lab/next_gen/daemon.py)、[engine](../../src/crypto_momentum_lab/next_gen/engine.py) 和 [exit manager](../../src/crypto_momentum_lab/next_gen/exit_manager.py)。文中的旧源码路径仅供历史追溯，相关文件可从 Git 历史查看。
 
 ---
 

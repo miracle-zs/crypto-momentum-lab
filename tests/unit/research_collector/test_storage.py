@@ -122,3 +122,50 @@ def test_parquet_sink_backfill_supersedes_hub_row(tmp_path) -> None:
     assert rejected.conflicting_rows == 1
     assert rejected.upgraded_rows == 0
     assert len(pq.ParquetFile(paths[0]).read().to_pylist()) == 1
+
+
+def test_research_collector_state_conflicts_aggregated(monkeypatch, tmp_path) -> None:
+    sink = ParquetWindowSink(
+        tmp_path / "parquet",
+        window_seconds=15,
+        late_tolerance_seconds=0,
+    )
+    warnings: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        "crypto_momentum_lab.research_collector.storage.log.warning",
+        lambda event, **fields: warnings.append((event, fields)),
+    )
+
+    state = fixture_state("BTCUSDT", 0)
+    selection = _selection(state.symbol, state.bucket_start)
+    sink.append(_batch(state, 1), selection)
+    sink.flush_all()
+
+    conflicting_states = tuple(
+        replace(state, close_price=Decimal(str(100 + i + 1))) for i in range(5)
+    )
+    batch = CollectionBatch(
+        batch=MarketStateBatch(
+            sequence=2,
+            published_at=state.bucket_end,
+            environment=state.environment,
+            states=conflicting_states,
+            stream_id="test-stream",
+        ),
+        source_kind=SourceKind.HUB,
+    )
+    result = sink.append(batch, selection)
+
+    assert result.conflicting_rows == 5
+    conflict_warnings = [
+        warning
+        for warning in warnings
+        if warning[0] == "research_collector_state_conflict_kept_existing"
+    ]
+    aggregated_warnings = [
+        warning
+        for warning in warnings
+        if warning[0] == "research_collector_state_conflicts_aggregated"
+    ]
+    assert len(conflict_warnings) == 3
+    assert len(aggregated_warnings) == 1

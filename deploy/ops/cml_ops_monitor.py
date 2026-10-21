@@ -22,7 +22,6 @@ import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta, timezone
-from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -93,9 +92,6 @@ _DEFAULT_STORAGE_GROWTH_RECOVERY_SECONDS = 30.0 * 60.0
 # recreates containers, and a booting container is unhealthy and silent by
 # definition; without this each deploy reports a fake crash.
 _DEFAULT_START_GRACE_SECONDS = 180.0
-_DEFAULT_POSITION_STALE_AFTER_SECONDS = 120.0
-_DEFAULT_POSITION_QUANTITY_TOLERANCE = Decimal("0.00000001")
-_DEFAULT_CONSISTENCY_WINDOW_SECONDS = 120.0
 _BEIJING_TIMEZONE = timezone(timedelta(hours=8), "Asia/Shanghai")
 _SEVERITY_LABELS = {
     "critical": "严重",
@@ -119,35 +115,19 @@ _ALERT_LABELS = {
     "container_memory_high": "服务内存占用过高",
     "container_memory_growth": "服务内存趋势异常",
     "container_memory_pressure": "服务匿名内存被换出",
-    "live_position_intent_divergence": "账户下单意图发生分叉",
     "rss_growth": "服务内存持续增长",
     "telemetry_persist_failure": "运行时遥测写入失败",
     "live_exit_processing_degraded": "平仓处理降级",
     "market_task_not_alive": "行情连接任务无响应",
-    "binance_avg_price_schema_drift": "Binance 下单回包字段类型漂移",
-    "live_session_not_ready": "实时会话未就绪",
-    "live_checkpoint_stale": "策略检查点过期",
-    "live_account_lifecycle_not_ready": "账户生命周期未就绪",
-    "live_account_reconciliation_stale": "账户对账状态失步",
-    "live_market_state_stale": "行情桶推进中断",
-    "live_market_state_delay": "行情延迟过高",
-    "live_signal_divergence": "账户信号发生分叉",
-    "live_position_divergence": "账户持仓发生差异",
-    "live_unknown_orders": "存在未确认在途订单",
-    "live_consistency_check_failed": "跨账户一致性检查失败",
     "database_check_failed": "数据库健康检查失败",
     "database_query_stats_unavailable": "数据库查询统计不可用",
     "database_io_timing_disabled": "数据库 I/O 耗时监控未开启",
     "database_parallel_maintenance_enabled": "数据库并行维护超限",
     "live_heartbeat_stale": "实时策略心跳过期",
-    "live_heartbeat_auto_restarted": "实时策略已自动重启",
-    "live_heartbeat_restart_failed": "实时策略自动重启失败",
-    "live_heartbeat_restart_suppressed": "策略自愈超限熔断",
     "live_crash_log_archive_failed": "worker 崩溃日志归档失败",
     "live_local_fact_inconsistency": "局部事实或投影不一致",
     "live_exit_evaluation_deferred": "平仓评估多次延后",
     "live_candidate_expired": "候选执行前已超期",
-    "live_order_command_terminal_mismatch": "订单命令终态失步",
     "ops_monitor_failed": "运维监控自身异常",
 }
 _ALERT_IMPACTS = {
@@ -192,26 +172,6 @@ _ALERT_IMPACTS = {
         "退出流程反复失败，持仓无法按策略平掉，浮亏可能持续扩大。"
     ),
     "market_task_not_alive": "策略可能无法持续接收行情，开平仓判断可能受影响。",
-    "binance_avg_price_schema_drift": (
-        "交易所下单回包的 avgPrice 不符合既定字符串契约；订单已进入结果未知和对账路径。"
-    ),
-    "live_session_not_ready": "该实时账户未处于可安全运行状态。",
-    "live_checkpoint_stale": "策略状态可能没有及时持久化，重启恢复风险增加。",
-    "live_account_lifecycle_not_ready": "该账户没有处于可安全交易的生命周期状态。",
-    "live_account_reconciliation_stale": (
-        "该账户的交易所快照或对账结果不新鲜，持仓和订单归属无法确认。"
-    ),
-    "live_market_state_stale": "该账户没有持续推进完整行情桶，策略已进入风险状态。",
-    "live_market_state_delay": (
-        "该账户收到的行情相对桶结束时间明显滞后，信号时点可能失真。"
-    ),
-    "live_signal_divergence": "相同策略配置的账户对同一行情桶产生了不同输出。",
-    "live_position_divergence": "可比账户的交易所持仓快照不一致，存在分叉风险。",
-    "live_position_intent_divergence": (
-        "相同策略配置的账户向交易所下达了不同的订单意图，执行与风控路径可能已经分叉。"
-    ),
-    "live_unknown_orders": "交易所订单状态未能与本地订单安全对齐。",
-    "live_consistency_check_failed": "无法确认账户之间的信号和持仓是否一致。",
     "database_check_failed": "暂时无法确认实时会话、租约和 checkpoint 是否健康。",
     "database_query_stats_unavailable": (
         "不影响交易本身，但会降低数据库问题的定位能力。"
@@ -219,11 +179,6 @@ _ALERT_IMPACTS = {
     "database_io_timing_disabled": "无法准确判断数据库 I/O 延迟对交易服务的影响。",
     "database_parallel_maintenance_enabled": "维护任务可能与交易查询争用数据库资源。",
     "live_heartbeat_stale": "该账户的行情处理和开平仓任务可能已经停止。",
-    "live_heartbeat_auto_restarted": "该账户可能经历了短暂中断，正在等待健康检查恢复。",
-    "live_heartbeat_restart_failed": "该账户仍可能无法处理行情和订单，需要人工介入。",
-    "live_heartbeat_restart_suppressed": (
-        "该账户仍处于异常状态，监控已停止继续自动重启。"
-    ),
     "live_crash_log_archive_failed": (
         "worker 重启前的日志没有可靠留存，故障根因可能无法复盘。"
     ),
@@ -234,9 +189,6 @@ _ALERT_IMPACTS = {
         "该标的退出评估延后等待事实同步，其他标的正常交易不受影响。"
     ),
     "live_candidate_expired": ("候选超期已放弃（零 POST），避免以旧信号成交。"),
-    "live_order_command_terminal_mismatch": (
-        "订单终态已确认但执行命令未收敛，可能残留调度占用或无效预留。"
-    ),
     "ops_monitor_failed": "监控自身可能无法继续发现新的异常。",
 }
 _ALERT_ACTIONS = {
@@ -290,36 +242,6 @@ _ALERT_ACTIONS = {
         "退出委托受阻；紧急核对交易所实际持仓，必要时在交易所后台手动干预平仓。"
     ),
     "market_task_not_alive": "排查对应币种 WebSocket 任务心跳、宿主机网络延迟及交易所接口连通性。",
-    "binance_avg_price_schema_drift": (
-        "按 client_order_id 查交易所确认订单状态；保留告警中的字段类型证据，并排查交易所接口或网络出口。"
-    ),
-    "live_session_not_ready": (
-        "暂停交易推进；排查分布式租约有效性、会话初始化状态及检查点完整性。"
-    ),
-    "live_checkpoint_stale": "排查策略持久化任务阻塞、数据库写入延迟或事务死锁等待。",
-    "live_account_lifecycle_not_ready": (
-        "检查账户状态机流转、API 凭据有效性及 strategy worker 启动状态。"
-    ),
-    "live_account_reconciliation_stale": (
-        "排查交易所 REST API 限频、成交回报 WebSocket 回调及对账记录表。"
-    ),
-    "live_market_state_stale": "检查行情是否断流、是否存在缺桶及 durable rewarm 推进进度。",
-    "live_market_state_delay": "检查交易所网络往返延迟（RTT）、事件循环调度耗时及数据库写入排队。",
-    "live_signal_divergence": (
-        "暂停扩仓；核对各账户策略配置差异、K 线数据新鲜度及近期事件循环日志。"
-    ),
-    "live_position_divergence": (
-        "核对各账户交易所实际持仓快照，确认是否存在漏平仓；确认仓位前暂停扩仓。"
-    ),
-    "live_position_intent_divergence": (
-        "暂停扩仓；逐账户核对 exchange_orders 的委托方向、数量与价格是否一致。"
-    ),
-    "live_unknown_orders": (
-        "严禁重发相同订单；立即按 client_order_id 查交易所确认真实状态并对齐账目。"
-    ),
-    "live_consistency_check_failed": (
-        "检查监控查询连接、一致性比对 SQL 耗时及数据库并发负载。"
-    ),
     "database_check_failed": "检查 PostgreSQL 进程存活、磁盘剩余空间及监控用户只读查询权限。",
     "database_query_stats_unavailable": "在非交易活跃窗口于 postgresql.conf 启用 shared_preload_libraries='pg_stat_statements'。",
     "database_io_timing_disabled": "在数据库配置中启用 track_io_timing = on，以支持磁盘 I/O 延迟定位。",
@@ -337,9 +259,6 @@ _ALERT_ACTIONS = {
     ),
     "live_candidate_expired": (
         "系统已放弃超期候选并等待下一个行情周期重新评估，检查行情与决策循环延迟。"
-    ),
-    "live_order_command_terminal_mismatch": (
-        "系统调度对账任务自动收敛终态；核对 exchange_orders 与 execution_commands 表记录。"
     ),
     "live_heartbeat_stale": "账户进程心跳已过期；检查进程日志和交易所实际仓位，再按运维流程恢复。",
     "ops_monitor_failed": "检查 cml-ops-monitor 自身运行日志与未捕获异常堆栈，必要时重启监控服务。",
@@ -361,83 +280,6 @@ class Alert:
     severity: str
     summary: str
     details: Mapping[str, object] = field(default_factory=dict)
-
-
-_SHARED_MARKET_STATE_ALERTS = frozenset(
-    {"live_market_state_stale", "live_market_state_delay"}
-)
-
-
-def coalesce_shared_market_state_alerts(
-    alerts: Sequence[Alert],
-    *,
-    account_labels: Sequence[str],
-) -> tuple[Alert, ...]:
-    """Collapse a market-wide fault without hiding account-specific faults.
-
-    Each strategy records its own consumed market cursor, so the database
-    query produces one alert per account. When every configured account has
-    the same kind of market-progress failure, the actionable cause is shared
-    market data, not four independent strategy incidents. A subset remains
-    account-scoped and is left untouched.
-    """
-    expected = frozenset(account_labels)
-    if len(expected) < 2:
-        return tuple(alerts)
-
-    grouped: dict[str, list[tuple[int, Alert, str]]] = {}
-    for index, alert in enumerate(alerts):
-        base_name, separator, account_label = alert.name.partition(":")
-        if (
-            base_name in _SHARED_MARKET_STATE_ALERTS
-            and separator
-            and account_label in expected
-            and str(alert.details.get("account_label", "")) == account_label
-        ):
-            grouped.setdefault(base_name, []).append((index, alert, account_label))
-
-    replacements: dict[int, Alert] = {}
-    skipped_indices: set[int] = set()
-    for base_name, members in grouped.items():
-        labels = frozenset(account_label for _index, _alert, account_label in members)
-        if labels != expected:
-            continue
-        first_index, first_alert, _first_account = members[0]
-        metric_key = "age_seconds" if base_name.endswith("_stale") else "delay_ms"
-        numeric_values = [
-            value
-            for _index, alert, _account in members
-            if isinstance((value := alert.details.get(metric_key)), (int, float))
-        ]
-        details = {
-            key: value
-            for key, value in first_alert.details.items()
-            if key != "account_label"
-        }
-        if numeric_values:
-            details[metric_key] = max(numeric_values)
-        details["account_labels"] = tuple(sorted(labels))
-        details["affected_account_count"] = len(labels)
-        details["scope"] = "shared_market_data"
-        replacements[first_index] = Alert(
-            base_name,
-            (
-                "critical"
-                if any(alert.severity == "critical" for _i, alert, _a in members)
-                else "warning"
-            ),
-            "Shared market-state failure affects every live account",
-            details,
-        )
-        skipped_indices.update(index for index, _alert, _account in members)
-
-    if not replacements:
-        return tuple(alerts)
-    return tuple(
-        replacements[index] if index in replacements else alert
-        for index, alert in enumerate(alerts)
-        if index not in skipped_indices or index in replacements
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -498,7 +340,6 @@ class LogSignals:
     telemetry_persist_failures: int = 0
     exit_processing_degraded_symbols: tuple[str, ...] = ()
     dead_connection_tasks: tuple[str, ...] = ()
-    avg_price_schema_drifts: tuple[tuple[str, str, str], ...] = ()
     latest_rss_bytes: int | None = None
     rss_observed_at: datetime | None = None
     fact_inconsistencies: tuple[tuple[str, str, str], ...] = ()
@@ -520,10 +361,6 @@ def _merge_log_signals(left: LogSignals, right: LogSignals) -> LogSignals:
         dead_connection_tasks=(
             *left.dead_connection_tasks,
             *right.dead_connection_tasks,
-        ),
-        avg_price_schema_drifts=(
-            *left.avg_price_schema_drifts,
-            *right.avg_price_schema_drifts,
         ),
         latest_rss_bytes=(
             right.latest_rss_bytes
@@ -574,28 +411,6 @@ def evaluate_log_signals(signals: LogSignals) -> tuple[Alert, ...]:
                 "critical",
                 "A market-data connection task reported not alive",
                 {"group_ids": signals.dead_connection_tasks},
-            )
-        )
-
-    schema_drift_counts: dict[tuple[str, str, str], int] = {}
-    for account_label, symbol, avg_price_json_type in signals.avg_price_schema_drifts:
-        key = (account_label, symbol, avg_price_json_type)
-        schema_drift_counts[key] = schema_drift_counts.get(key, 0) + 1
-    for (account_label, symbol, avg_price_json_type), count in sorted(
-        schema_drift_counts.items()
-    ):
-        scope = f":{account_label}:{symbol}" if account_label else f":{symbol}"
-        alerts.append(
-            Alert(
-                f"binance_avg_price_schema_drift{scope}",
-                "warning",
-                "Binance order response avgPrice has an unexpected JSON type",
-                {
-                    "account_label": account_label,
-                    "symbol": symbol,
-                    "avg_price_json_type": avg_price_json_type,
-                    "count": count,
-                },
             )
         )
 
@@ -662,291 +477,12 @@ def evaluate_log_signals(signals: LogSignals) -> tuple[Alert, ...]:
 
 
 @dataclass(frozen=True, slots=True)
-class SignalObservation:
-    """One account's durable output for one market bucket."""
-
-    account_label: str
-    symbol: str
-    bucket_start: str
-    strategy_config_hash: str
-    signal_count: int
-    candidate_count: int
-    fingerprint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class PositionObservation:
-    """One row from the latest authoritative account reconciliation snapshot."""
-
-    account_label: str
-    status: str
-    age_seconds: float | None
-    symbol: str = ""
-    position_side: str = ""
-    position_amt: Decimal = Decimal("0")
-    # Accounts are only comparable when they run the same strategy config; an
-    # empty hash means "unknown" and keeps the row in its own group.
-    strategy_config_hash: str = ""
 
 
 @dataclass(frozen=True, slots=True)
-class OrderIntentObservation:
-    """One account's order intent for one symbol inside the comparison window.
-
-    Intent -- what an account asked the exchange to do -- is what comparable
-    accounts must agree on.  How much of that intent filled is execution: a
-    partially filled limit order legitimately leaves two correct accounts
-    holding different positions, so quantity held is the wrong thing to
-    compare.
-    """
-
-    account_label: str
-    symbol: str
-    order_count: int
-    # Borrowed from the same account's signal rows: the order table carries a
-    # run id, not a strategy config, and accounts running different strategies
-    # must never be compared.
-    strategy_config_hash: str = ""
-    fingerprint: str | None = None
-    intent_summary: str | None = None
-
-
-def evaluate_signal_divergence(
-    observations: Sequence[SignalObservation],
-) -> tuple[Alert, ...]:
-    """Detect different outputs for the same symbol/bucket/config group.
-
-    A configuration hash is part of the comparison key. Accounts with
-    intentionally different strategy parameters therefore do not create a
-    false positive; accounts claiming the same config must agree on the signal
-    count and durable content fingerprint. Candidate persistence is checked
-    asynchronously and is deliberately excluded from this alert.
-
-    The durable fingerprint covers the decision -- signal kind, side, reason,
-    reference prices, and the account-stable features named in
-    ``_SIGNAL_FINGERPRINT_FEATURE_KEYS`` -- not every recorded feature. Rolling
-    ratios such as ``notional_5m_vs_30m`` are recomputed per run from that
-    run's own market-state window, so two correct accounts sharing a config
-    disagree on them by a rounding-level amount and must not alert.
-
-    Opening signals only.  ``reduce_only_candidate`` carries the position into
-    the comparison -- it exists because the account *holds* the symbol -- so
-    including it would make this alert fire whenever the two accounts' fills
-    differed, which is execution, not decision.  Where an account *asked the
-    exchange* to close is compared by ``evaluate_position_intent_divergence``,
-    which compares order intent and deliberately ignores the closing quantity.
-    """
-
-    groups: dict[tuple[str, str, str], dict[str, SignalObservation]] = {}
-    for observation in observations:
-        if not observation.account_label.strip() or not observation.symbol.strip():
-            continue
-        key = (
-            observation.symbol,
-            observation.bucket_start,
-            observation.strategy_config_hash,
-        )
-        groups.setdefault(key, {})[observation.account_label] = observation
-
-    differences: list[dict[str, object]] = []
-    for (symbol, bucket_start, config_hash), account_values in sorted(groups.items()):
-        if len(account_values) < 2:
-            continue
-        outputs = tuple(account_values.values())
-        signal_outputs = {(value.signal_count, value.fingerprint) for value in outputs}
-        if len(signal_outputs) <= 1:
-            continue
-        differences.append(
-            {
-                "symbol": symbol,
-                "bucket_start": bucket_start,
-                "strategy_config_hash": config_hash,
-                "accounts": [
-                    {
-                        "account_label": value.account_label,
-                        "signal_count": value.signal_count,
-                        "candidate_count": value.candidate_count,
-                        "fingerprint": value.fingerprint,
-                    }
-                    for value in sorted(outputs, key=lambda item: item.account_label)
-                ],
-            }
-        )
-
-    if not differences:
-        return ()
-    return (
-        Alert(
-            "live_signal_divergence",
-            "critical",
-            "Comparable live accounts produced divergent strategy output",
-            {
-                "group_count": len(differences),
-                "differences": differences[:20],
-            },
-        ),
-    )
-
-
-def evaluate_position_divergence(
-    observations: Sequence[PositionObservation],
-    *,
-    stale_after_seconds: float,
-    quantity_tolerance: Decimal = _DEFAULT_POSITION_QUANTITY_TOLERANCE,
-) -> tuple[Alert, ...]:
-    """Compare the latest ready account snapshots without trusting stale rows."""
-
-    if stale_after_seconds <= 0:
-        raise ValueError("stale_after_seconds must be positive")
-    if quantity_tolerance < 0:
-        raise ValueError("quantity_tolerance must not be negative")
-
-    positions_by_account: dict[tuple[str, str], dict[tuple[str, str], Decimal]] = {}
-    freshness_by_account: dict[str, tuple[str, float | None]] = {}
-    for observation in observations:
-        if not observation.account_label.strip():
-            continue
-        freshness_by_account[observation.account_label] = (
-            observation.status,
-            observation.age_seconds,
-        )
-        if observation.status != "ready":
-            continue
-        if (
-            observation.age_seconds is None
-            or observation.age_seconds < 0
-            or observation.age_seconds > stale_after_seconds
-        ):
-            continue
-        account_positions = positions_by_account.setdefault(
-            (observation.account_label, observation.strategy_config_hash),
-            {},
-        )
-        if not observation.symbol.strip() or not observation.position_side.strip():
-            continue
-        if observation.position_amt == 0:
-            continue
-        key = (observation.symbol, observation.position_side)
-        account_positions[key] = (
-            account_positions.get(key, Decimal("0")) + observation.position_amt
-        )
-
-    account_groups = tuple(sorted(positions_by_account))
-    differences: list[dict[str, object]] = []
-    for index, left_group in enumerate(account_groups):
-        for right_group in account_groups[index + 1 :]:
-            # Only accounts running the SAME strategy config are comparable;
-            # comparing across configs produces false divergence.
-            if left_group[1] != right_group[1]:
-                continue
-            left = positions_by_account[left_group]
-            right = positions_by_account[right_group]
-            keys = sorted(set(left) | set(right))
-            quantity_differences = []
-            for symbol, position_side in keys:
-                left_quantity = left.get((symbol, position_side), Decimal("0"))
-                right_quantity = right.get((symbol, position_side), Decimal("0"))
-                if abs(left_quantity - right_quantity) <= quantity_tolerance:
-                    continue
-                quantity_differences.append(
-                    {
-                        "symbol": symbol,
-                        "position_side": position_side,
-                        "left_quantity": str(left_quantity),
-                        "right_quantity": str(right_quantity),
-                    }
-                )
-            if quantity_differences:
-                differences.append(
-                    {
-                        "accounts": [left_group[0], right_group[0]],
-                        "strategy_config_hash": left_group[1],
-                        "quantity_differences": quantity_differences[:50],
-                    }
-                )
-
-    if not differences:
-        return ()
-    return (
-        Alert(
-            "live_position_divergence",
-            "critical",
-            "Comparable live account position snapshots diverged",
-            {
-                "pair_count": len(differences),
-                "differences": differences[:20],
-                "freshness": {
-                    account: {
-                        "status": status,
-                        "age_seconds": age,
-                    }
-                    for account, (status, age) in sorted(freshness_by_account.items())
-                },
-            },
-        ),
-    )
-
-
-def evaluate_position_intent_divergence(
-    observations: Sequence[OrderIntentObservation],
-) -> tuple[Alert, ...]:
-    """Detect divergent *order intent* for one symbol/config group.
-
-    Accounts sharing a strategy config must have the same *entry* intent.
-    Exit execution is account-local: entry price, residual quantity, and an
-    existing limit order determine whether an individual account exits by
-    market or limit. Treating those safe execution differences as a strategy
-    split creates an unactionable critical alert.
-    """
-
-    groups: dict[tuple[str, str], dict[str, OrderIntentObservation]] = {}
-    for observation in observations:
-        if not observation.account_label.strip() or not observation.symbol.strip():
-            continue
-        key = (observation.symbol, observation.strategy_config_hash)
-        groups.setdefault(key, {})[observation.account_label] = observation
-
-    differences: list[dict[str, object]] = []
-    for (symbol, config_hash), by_account in sorted(groups.items()):
-        if len(by_account) < 2:
-            continue
-        intents = {
-            (value.order_count, value.fingerprint) for value in by_account.values()
-        }
-        if len(intents) <= 1:
-            continue
-        differences.append(
-            {
-                "symbol": symbol,
-                "strategy_config_hash": config_hash,
-                "accounts": [
-                    {
-                        "account_label": value.account_label,
-                        "order_count": value.order_count,
-                        "fingerprint": value.fingerprint,
-                        "intent_summary": value.intent_summary,
-                    }
-                    for value in sorted(
-                        by_account.values(),
-                        key=lambda item: item.account_label,
-                    )
-                ],
-            }
-        )
-
-    if not differences:
-        return ()
-    return (
-        Alert(
-            "live_position_intent_divergence",
-            "critical",
-            "Comparable live accounts sent divergent order intent",
-            {
-                "group_count": len(differences),
-                "differences": differences[:20],
-            },
-        ),
-    )
 
 
 def rss_warning_fraction_for(service: str, default: float) -> float:
@@ -1198,12 +734,7 @@ _MAINTENANCE_SILENCED_PREFIXES = (
     "container_missing",
     "container_unhealthy",
     "live_heartbeat_stale",
-    "live_heartbeat_auto_restarted",
     "live_crash_log_archive_failed",
-    "live_account_lifecycle_not_ready",
-    "live_session_not_ready",
-    "live_market_state_stale",
-    "live_market_state_delay",
     "market_task_not_alive",
 )
 
@@ -1565,9 +1096,7 @@ class MonitorConfig:
     compose_profiles: tuple[str, ...] = ("nextgen",)
     compose_env_file: Path | None = Path("/opt/crypto-momentum-lab/.env.server")
     services: tuple[str, ...] = _DEFAULT_SERVICES
-    live_accounts: tuple[tuple[str, str], ...] = (("primary", "live-primary-v1"),)
-    live_run_id: str = "live-primary-v1"
-    live_account_label: str = "primary"
+    live_account_labels: tuple[str, ...] = ("primary",)
     interval_seconds: float = _DEFAULT_INTERVAL_SECONDS
     log_window_seconds: float = _DEFAULT_LOG_WINDOW_SECONDS
     rss_warning_fraction: float = _DEFAULT_RSS_WARNING_FRACTION
@@ -1633,9 +1162,6 @@ class MonitorConfig:
     external_heartbeat_url: str | None = None
     external_heartbeat_token: str | None = None
     external_heartbeat_timeout_seconds: float = 5.0
-    position_stale_after_seconds: float = _DEFAULT_POSITION_STALE_AFTER_SECONDS
-    position_quantity_tolerance: Decimal = _DEFAULT_POSITION_QUANTITY_TOLERANCE
-    consistency_window_seconds: float = _DEFAULT_CONSISTENCY_WINDOW_SECONDS
 
 
 class OpsMonitor:
@@ -1665,12 +1191,6 @@ class OpsMonitor:
                 raise ValueError("external heartbeat URL must be an HTTPS URL")
         if config.external_heartbeat_timeout_seconds <= 0:
             raise ValueError("external heartbeat timeout must be positive")
-        if config.position_stale_after_seconds <= 0:
-            raise ValueError("position_stale_after_seconds must be positive")
-        if config.position_quantity_tolerance < 0:
-            raise ValueError("position_quantity_tolerance must not be negative")
-        if config.consistency_window_seconds <= 0:
-            raise ValueError("consistency_window_seconds must be positive")
         if config.consecutive_alerts_required <= 0:
             raise ValueError("consecutive_alerts_required must be positive")
         if config.consecutive_resolutions_required <= 0:
@@ -2189,12 +1709,12 @@ SELECT json_build_object(
 
     def _evaluate_once(self) -> tuple[Alert, ...]:
         now = self._clock()
-        live_accounts = self._config.live_accounts
+        live_account_labels = self._config.live_account_labels
         alerts: list[Alert] = []
         containers = self._container_snapshots()
         live_strategy_accounts = {
             _nextgen_strategy_service(account_label): account_label
-            for account_label, _run_id in live_accounts
+            for account_label in live_account_labels
         }
         seen_services = {snapshot.service for snapshot in containers}
         for service in self._config.services:
@@ -2252,7 +1772,7 @@ SELECT json_build_object(
         market_id = self._container_id("market-data")
         strategy_services = tuple(
             _nextgen_strategy_service(account_label)
-            for account_label, _run_id in live_accounts
+            for account_label in live_account_labels
         )
         combined_signals = self._log_signals(
             market_id,
@@ -2336,14 +1856,6 @@ SELECT json_build_object(
                         self._database_storage_growth_alerts(footprint, now=now)
                     )
 
-        alerts = list(
-            coalesce_shared_market_state_alerts(
-                alerts,
-                account_labels=tuple(
-                    account_label for account_label, _run_id in live_accounts
-                ),
-            )
-        )
         window = read_maintenance_window(default_maintenance_path())
         maintenance_active = window is not None and window.is_active(now=now_utc())
         if maintenance_active:
@@ -2726,7 +2238,6 @@ SELECT json_build_object(
         telemetry_failures = 0
         degraded_exit_symbols: set[str] = set()
         dead_tasks: list[str] = []
-        avg_price_schema_drifts: list[tuple[str, str, str]] = []
         latest_rss: int | None = None
         latest_rss_at: datetime | None = None
         fact_inconsistencies: list[tuple[str, str, str]] = []
@@ -2766,16 +2277,6 @@ SELECT json_build_object(
                         dead_tasks.extend(value for value in values.split(",") if value)
                     elif values:
                         dead_tasks.append(str(values))
-                elif event == "binance_order_submit_avg_price_schema_drift":
-                    account_label = str(record.get("account_label") or "")
-                    symbol = str(record.get("symbol") or "")
-                    avg_price_json_type = str(
-                        record.get("avg_price_json_type") or "unknown"
-                    )
-                    if symbol:
-                        avg_price_schema_drifts.append(
-                            (account_label, symbol, avg_price_json_type)
-                        )
                 elif event == "market_data_health_snapshot":
                     value = record.get("rss_bytes")
                     if isinstance(value, int) and (
@@ -2813,7 +2314,6 @@ SELECT json_build_object(
             telemetry_persist_failures=telemetry_failures,
             exit_processing_degraded_symbols=tuple(sorted(degraded_exit_symbols)),
             dead_connection_tasks=tuple(sorted(set(dead_tasks))),
-            avg_price_schema_drifts=tuple(avg_price_schema_drifts),
             latest_rss_bytes=latest_rss,
             rss_observed_at=latest_rss_at,
             fact_inconsistencies=tuple(fact_inconsistencies),
@@ -2912,309 +2412,6 @@ FROM activity CROSS JOIN checkpoint CROSS JOIN temp_queries;
             }
         return payload if isinstance(payload, dict) else {"capture_error": "bad_json"}
 
-    def _consistency_observations(
-        self,
-        container_id: str,
-    ) -> tuple[
-        tuple[SignalObservation, ...],
-        tuple[PositionObservation, ...],
-        tuple[OrderIntentObservation, ...],
-    ]:
-        """Read a bounded cross-account consistency window from PostgreSQL."""
-
-        accounts = tuple(self._config.live_accounts)
-        account_labels = tuple(account_label for account_label, _ in accounts)
-        run_ids = tuple(run_id for _, run_id in accounts)
-        account_sql = _sql_list(account_labels)
-        run_sql = _sql_list(run_ids)
-        window_seconds = _sql_numeric(self._config.consistency_window_seconds)
-        # Fingerprint only the decision-relevant features: the full ``features``
-        # blob carries rolling ratios that differ between two correct accounts
-        # on the same configuration (see _SIGNAL_FINGERPRINT_FEATURE_KEYS).
-        features_sql = _fingerprint_features_sql()
-        prices_sql = _fingerprint_reference_prices_sql()
-        sql = f"""
-SELECT 'signal' || E'\\t' || account_label || E'\\t' || symbol || E'\\t'
-  || source_state_at::text || E'\\t' || config_hash || E'\\t'
-  || count(*)::text || E'\\t'
-  || md5(string_agg(
-    signal_kind || ':' || side || ':' || reason || ':'
-      || {features_sql} || ':' || {prices_sql},
-    E'\\x1f'
-    ORDER BY signal_kind, side, reason, {features_sql}, {prices_sql}
-  ))
-FROM live_strategy_signals
-WHERE account_label IN ({account_sql})
-  AND run_id IN ({run_sql})
-  -- reduce_only_candidate is not a strategy decision: it means "this account
-  -- holds the symbol and a close condition fired", so its presence depends on
-  -- what filled -- and fills legitimately differ between two correct accounts.
-  -- Requiring it to match reports the position difference through the signal
-  -- table, the same way comparing a closing order's quantity would.
-  AND signal_kind <> {_sql_literal(_REDUCE_ONLY_SIGNAL_KIND)}
-  AND source_state_at >= now()
-    - ({window_seconds} * interval '1 second')
-GROUP BY account_label, symbol, source_state_at, config_hash;
-SELECT 'output' || E'\\t' || run_id || E'\\t' || symbol || E'\\t'
-  || bucket_start::text || E'\\t'
-  || COALESCE(details->>'strategy_config_hash', '') || E'\\t'
-  || COALESCE(details->>'signal_count', '0') || E'\\t'
-  || COALESCE(details->>'candidate_count', '0')
-FROM (
-  SELECT DISTINCT ON (run_id, symbol, bucket_start)
-    run_id, symbol, bucket_start, details, occurred_at
-  FROM strategy_runtime_events
-  WHERE event_type = 'strategy_output_observed'
-    AND run_id IN ({run_sql})
-    AND bucket_start IS NOT NULL
-    -- now() rather than clock_timestamp(): the planner can fold a stable value
-    -- into an index range condition, but clock_timestamp() is re-evaluated per
-    -- row, so it cannot -- the result is a sequential scan.  Measured on this
-    -- table: 3721 ms / 74,825 pages read with clock_timestamp(), 9 ms / 0
-    -- pages with now().  These queries are single autocommit statements, so
-    -- the two timestamps differ by well under a millisecond.
-    AND occurred_at >= now()
-      - ({window_seconds} * interval '1 second')
-  ORDER BY run_id, symbol, bucket_start, occurred_at DESC
-) latest_output;
-WITH latest_reconciliation AS (
-  SELECT DISTINCT ON (account_label)
-    account_label, status, observed_at
-  FROM account_reconciliation_runs
-  WHERE environment = 'live' AND account_label IN ({account_sql})
-  ORDER BY account_label, observed_at DESC
-), position_cutoff AS (
-  SELECT
-    r.account_label,
-    r.status,
-    r.observed_at,
-    max(p.observed_at) AS position_observed_at
-  FROM latest_reconciliation r
-  LEFT JOIN account_position_snapshots p
-    ON p.environment = 'live'
-   AND p.account_label = r.account_label
-   AND p.observed_at <= r.observed_at
-  GROUP BY r.account_label, r.status, r.observed_at
-)
-SELECT 'position' || E'\\t' || r.account_label || E'\\t' || r.status
-  || E'\\t' || EXTRACT(EPOCH FROM (clock_timestamp() - r.observed_at))::text
-  || E'\\t' || COALESCE(p.symbol, '') || E'\\t'
-  || COALESCE(p.position_side, '') || E'\\t'
-  || COALESCE(p.position_amt::text, '0')
-FROM position_cutoff r
-LEFT JOIN account_position_snapshots p
-  ON p.environment = 'live'
- AND p.account_label = r.account_label
- AND p.observed_at = r.position_observed_at
-WHERE p.position_amt IS NULL OR p.position_amt <> 0;
-SELECT 'order' || E'\\t' || s.account_label || E'\\t' || s.symbol || E'\\t'
-  || s.config_hash || E'\\t' || COALESCE(o.order_count, 0)::text || E'\\t'
-  || COALESCE(o.fingerprint, '') || E'\\t' || COALESCE(o.intent_summary, '')
-FROM (
-  SELECT DISTINCT account_label, run_id, symbol, config_hash
-  FROM live_strategy_signals
-  WHERE account_label IN ({account_sql})
-    AND run_id IN ({run_sql})
-    AND source_state_at >= now()
-      - ({window_seconds} * interval '1 second')
-) s
-LEFT JOIN (
-  SELECT run_id, symbol,
-    count(*) AS order_count,
-    string_agg(
-      (CASE WHEN upper(side) = 'BUY' THEN '买入' WHEN upper(side) = 'SELL' THEN '卖出' ELSE side END)
-      || ' '
-      || CASE
-           WHEN reduce_only THEN '平仓'
-           ELSE trim_scale(quantity)::text || ' @ ' || COALESCE(trim_scale(price)::text, '市价')
-         END
-      || '（' || (CASE WHEN upper(order_type) = 'LIMIT' THEN '限价' WHEN upper(order_type) = 'MARKET' THEN '市价' ELSE order_type END) || '）',
-      E'\\x1e'
-      ORDER BY side, order_type, reduce_only, quantity, price
-    ) AS intent_summary,
-    -- Only entries express the common strategy decision. Exit execution is
-    -- account-local because holdings and recovery state legitimately differ.
-    md5(string_agg(
-      side || ':' || order_type || ':'
-        || quantity::text || ':' || COALESCE(price::text, ''),
-      E'\\x1f'
-      ORDER BY side, order_type, quantity::text, price::text
-    )) AS fingerprint
-  FROM exchange_orders
-  WHERE run_id IN ({run_sql})
-    AND NOT reduce_only
-    AND created_at >= now()
-      - ({window_seconds} * interval '1 second')
-  GROUP BY run_id, symbol
-) o ON o.run_id = s.run_id AND o.symbol = s.symbol;
-"""
-        output = self._runner.run(
-            [
-                "docker",
-                "exec",
-                container_id,
-                "psql",
-                "-At",
-                "-q",
-                "-U",
-                "cml",
-                "-d",
-                "cml",
-                "-c",
-                sql,
-            ],
-            timeout_seconds=self._config.command_timeout_seconds,
-        )
-        account_by_run_id = {
-            run_id: account_label for account_label, run_id in accounts
-        }
-        signals_by_key: dict[tuple[str, str, str, str], SignalObservation] = {}
-        positions: list[PositionObservation] = []
-        order_intents: list[OrderIntentObservation] = []
-        config_by_account: dict[str, str] = {}
-        for line in output.splitlines():
-            parts = line.split("\t")
-            if not parts:
-                continue
-            if parts[0] == "signal" and len(parts) == 7:
-                key = (parts[1], parts[2], parts[3], parts[4])
-                previous = signals_by_key.get(key)
-                signals_by_key[key] = SignalObservation(
-                    account_label=parts[1],
-                    symbol=parts[2],
-                    bucket_start=parts[3],
-                    strategy_config_hash=parts[4],
-                    signal_count=int(parts[5]),
-                    candidate_count=(
-                        0 if previous is None else previous.candidate_count
-                    ),
-                    fingerprint=parts[6] or None,
-                )
-                continue
-            if parts[0] == "output" and len(parts) == 7:
-                account_label = account_by_run_id.get(parts[1])
-                if account_label is None:
-                    continue
-                config_by_account.setdefault(account_label, parts[4])
-                key = (account_label, parts[2], parts[3], parts[4])
-                previous = signals_by_key.get(key)
-                # Only the candidate count is taken from the observed event.
-                # Its ``signal_count`` is not trustworthy: the same
-                # (run, bucket) writes it repeatedly with a value that
-                # disagrees with the durable signal rows, so borrowing it made
-                # two accounts look divergent when both had exactly one signal.
-                signals_by_key[key] = SignalObservation(
-                    account_label=account_label,
-                    symbol=parts[2],
-                    bucket_start=parts[3],
-                    strategy_config_hash=parts[4],
-                    signal_count=(0 if previous is None else previous.signal_count),
-                    candidate_count=int(parts[6]),
-                    fingerprint=(None if previous is None else previous.fingerprint),
-                )
-                continue
-            if parts[0] == "position" and len(parts) == 7:
-                positions.append(
-                    PositionObservation(
-                        account_label=parts[1],
-                        status=parts[2],
-                        age_seconds=_parse_float(parts[3]),
-                        symbol=parts[4],
-                        position_side=parts[5],
-                        position_amt=Decimal(parts[6]),
-                    )
-                )
-                continue
-            if parts[0] == "order" and len(parts) >= 6:
-                order_intents.append(
-                    OrderIntentObservation(
-                        account_label=parts[1],
-                        symbol=parts[2],
-                        strategy_config_hash=parts[3],
-                        order_count=int(parts[4]),
-                        fingerprint=parts[5] or None,
-                        intent_summary=(
-                            parts[6] if len(parts) >= 7 and parts[6] else None
-                        ),
-                    )
-                )
-        # Position rows carry no strategy config hash of their own (the
-        # snapshot table has no such column), so borrow it from the same
-        # account's signal rows.  Without this, accounts running different
-        # strategies would be compared against each other.
-        if config_by_account:
-            positions = [
-                replace(
-                    observation,
-                    strategy_config_hash=config_by_account.get(
-                        observation.account_label,
-                        "",
-                    ),
-                )
-                for observation in positions
-            ]
-        return (
-            tuple(signals_by_key.values()),
-            tuple(positions),
-            tuple(order_intents),
-        )
-
-    def _record_position_spread(
-        self,
-        observations: Sequence[PositionObservation],
-    ) -> None:
-        """Record the cross-account position spread without alerting on it.
-
-        What an account *holds* is the result of execution, so a difference
-        between two accounts with identical intent is the expected outcome of a
-        limit order that only partially filled.  The operator cannot act on it,
-        so it is kept as state for inspection rather than raised as alert.
-        """
-
-        by_group: dict[str, dict[str, Decimal]] = {}
-        for observation in observations:
-            if observation.status != "ready":
-                continue
-            if (
-                observation.age_seconds is None
-                or observation.age_seconds < 0
-                or observation.age_seconds > self._config.position_stale_after_seconds
-            ):
-                continue
-            if not observation.symbol.strip() or not observation.position_side.strip():
-                continue
-            if observation.position_amt == 0:
-                continue
-            account_positions = by_group.setdefault(
-                f"{observation.symbol}|{observation.strategy_config_hash}",
-                {},
-            )
-            label = f"{observation.account_label}:{observation.position_side}"
-            account_positions[label] = (
-                account_positions.get(label, Decimal("0")) + observation.position_amt
-            )
-
-        spread: list[dict[str, object]] = []
-        for group, by_account in sorted(by_group.items()):
-            if len(by_account) < 2:
-                continue
-            quantities = sorted(set(by_account.values()))
-            if len(quantities) < 2:
-                continue
-            symbol, _, config_hash = group.partition("|")
-            spread.append(
-                {
-                    "symbol": symbol,
-                    "strategy_config_hash": config_hash,
-                    "min_quantity": str(quantities[0]),
-                    "max_quantity": str(quantities[-1]),
-                    "accounts": {
-                        label: str(quantity)
-                        for label, quantity in sorted(by_account.items())
-                    },
-                }
-            )
-        self._state["position_spread"] = spread[:20]
 
     def _current_oom(self, snapshot: ContainerSnapshot) -> bool:
         """Separate a new cgroup kill from Docker's retained OOM flag."""
@@ -3807,15 +3004,6 @@ def _parse_size(value: str) -> int | None:
     return None if multiplier is None else int(number * multiplier)
 
 
-def _parse_float(value: str | None) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except ValueError:
-        return None
-
-
 def _parse_int(value: str | None) -> int | None:
     if value is None:
         return None
@@ -3838,23 +3026,6 @@ def _parse_env_bool(value: str | None, *, default: bool) -> bool:
     raise ValueError(f"invalid boolean value: {value!r}")
 
 
-def _sql_literal(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
-
-
-def _sql_list(values: Sequence[str]) -> str:
-    normalized = tuple(value.strip() for value in values if value.strip())
-    if not normalized:
-        raise ValueError("SQL IN list must not be empty")
-    return ", ".join(_sql_literal(value) for value in normalized)
-
-
-def _sql_numeric(value: float) -> str:
-    if value <= 0 or value != value or value in {float("inf"), float("-inf")}:
-        raise ValueError("SQL numeric value must be finite and positive")
-    return format(value, ".6f")
-
-
 # Only decision-relevant, account-stable features take part in the durable
 # signal fingerprint.  Rolling ratio features (``notional_5m_vs_30m``) are
 # recomputed per run from that run's own local market-state window, so two
@@ -3863,25 +3034,6 @@ def _sql_numeric(value: float) -> str:
 # list of exceptions keeps a future feature from quietly reintroducing that
 # noise.  The keys mirror ``_features`` in
 # ``strategies/order_flow_impulse/runtime.py``.
-_SIGNAL_FINGERPRINT_FEATURE_KEYS: tuple[str, ...] = (
-    "direction",
-    "impulse_start",
-    "impulse_end",
-    "impulse_start_price",
-    "impulse_end_price",
-    "impulse_return_pct",
-    "breakout_level",
-    "breakout_distance_pct",
-    "impulse_trade_count",
-    "impulse_trade_notional",
-    "aggressive_buy_notional",
-    "aggressive_sell_notional",
-    "aggressive_imbalance",
-    "baseline_notional",
-    "notional_intensity",
-    "liquidation_count",
-    "liquidation_notional",
-)
 
 
 # A reduce-only signal reports how much to *close*, which is a function of how
@@ -3889,8 +3041,6 @@ _SIGNAL_FINGERPRINT_FEATURE_KEYS: tuple[str, ...] = (
 # batch_id is account-local by construction: no two accounts ever share one.
 # Both therefore describe the position, not the decision, and would report the
 # fill difference again through the signal table.
-_POSITION_DERIVED_FEATURE_KEYS: tuple[str, ...] = ("quantity", "batch_id")
-_REDUCE_ONLY_SIGNAL_KIND = "reduce_only_candidate"
 
 # Features that carry a number.  They are stored as JSON *strings*, and two
 # correct accounts do not always render the same value with the same trailing
@@ -3899,84 +3049,6 @@ _REDUCE_ONLY_SIGNAL_KIND = "reduce_only_candidate"
 # The numbers are equal, so comparing the raw text reports a divergence that
 # is not there.  trim_scale drops trailing zeros while keeping the significant
 # digits, and leaves integers alone.
-_SIGNAL_FINGERPRINT_NUMERIC_KEYS: frozenset[str] = frozenset(
-    {
-        "impulse_start_price",
-        "impulse_end_price",
-        "impulse_return_pct",
-        "breakout_level",
-        "breakout_distance_pct",
-        "impulse_trade_count",
-        "impulse_trade_notional",
-        "aggressive_buy_notional",
-        "aggressive_sell_notional",
-        "aggressive_imbalance",
-        "baseline_notional",
-        "notional_intensity",
-        "liquidation_count",
-        "liquidation_notional",
-    }
-)
-
-
-def _fingerprint_feature_value_sql(key: str) -> str:
-    """Render one feature for the fingerprint, normalising numeric ones.
-
-    Numeric features are stored as JSON strings and the same value can carry
-    different trailing zeros between two accounts.  Those are equal numbers, so
-    the raw text must not be compared.  ``->>`` is used (not ``->``) because
-    the JSON string still carries its quotes and would not cast to numeric.
-    """
-
-    if key in _SIGNAL_FINGERPRINT_NUMERIC_KEYS:
-        return f"trim_scale((features->>{_sql_literal(key)})::numeric)"
-    return f"features->{_sql_literal(key)}"
-
-
-def _fingerprint_features_sql() -> str:
-    """Render the ``features`` subset that feeds the durable signal fingerprint.
-
-    ``jsonb`` normalises key order, so the rendered text is deterministic for a
-    given set of values even though the stored column's key order is not.  A
-    reduce-only signal drops the keys that describe the position it came from.
-    Numeric features go through ``trim_scale`` so that equal values written with
-    different trailing zeros compare equal.
-    """
-
-    pairs = ", ".join(
-        f"{_sql_literal(key)}, {_fingerprint_feature_value_sql(key)}"
-        for key in _SIGNAL_FINGERPRINT_FEATURE_KEYS
-    )
-    built = f"jsonb_build_object({pairs})"
-    dropped = "".join(
-        f" - {_sql_literal(key)}" for key in _POSITION_DERIVED_FEATURE_KEYS
-    )
-    return (
-        f"(CASE WHEN signal_kind = {_sql_literal(_REDUCE_ONLY_SIGNAL_KIND)} "
-        f"THEN {built}{dropped} ELSE {built} END)::text"
-    )
-
-
-def _fingerprint_reference_prices_sql() -> str:
-    """Render ``reference_prices`` for the durable fingerprint.
-
-    ``desired_notional`` is quantity times price, so it follows the position
-    exactly as ``quantity`` does and is dropped for reduce-only signals.
-    Numeric values are normalized through ``trim_scale`` so that equal values
-    with different trailing zeros compare equal.
-    """
-
-    filtered = (
-        f"CASE WHEN signal_kind = {_sql_literal(_REDUCE_ONLY_SIGNAL_KIND)} "
-        "THEN reference_prices - 'desired_notional' "
-        "ELSE reference_prices END"
-    )
-    return (
-        f"(SELECT COALESCE(jsonb_object_agg(k, "
-        "CASE WHEN v ~ '^-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$' "
-        "THEN trim_scale(v::numeric)::text ELSE v END), '{}'::jsonb) "
-        f"FROM jsonb_each_text({filtered}) t(k, v))::text"
-    )
 
 
 def _load_state(path: Path) -> dict[str, Any]:
@@ -4191,20 +3263,6 @@ def _alert_scope(alert_name: str, details: Mapping[str, object]) -> str | None:
     service_scope = _service_scope(details.get("service"))
     if service_scope:
         return service_scope
-    differences = details.get("differences")
-    if isinstance(differences, Sequence) and differences:
-        first_diff = differences[0]
-        if isinstance(first_diff, Mapping):
-            if first_diff.get("symbol"):
-                return str(first_diff["symbol"])
-            qd = first_diff.get("quantity_differences")
-            if (
-                isinstance(qd, Sequence)
-                and qd
-                and isinstance(qd[0], Mapping)
-                and qd[0].get("symbol")
-            ):
-                return str(qd[0]["symbol"])
     if details.get("symbol"):
         return str(details["symbol"])
     _base_name, suffix = _split_alert_name(alert_name)
@@ -4266,48 +3324,6 @@ def _alert_impact(alert_name: str, details: Mapping[str, object]) -> str:
 
 def _alert_action(alert_name: str, details: Mapping[str, object]) -> str:
     base_name, _scope = _split_alert_name(alert_name)
-    if base_name == "live_heartbeat_stale":
-        attempt = details.get("attempt")
-        if attempt:
-            return f"已触发定向重启（第 {attempt} 次），等待健康检查与行情连接恢复。"
-        restart_attempts = details.get("restart_attempts")
-        if restart_attempts:
-            return "已触发过自动重启，正在等待冷却或健康检查恢复。"
-    if base_name == "live_heartbeat_auto_restarted":
-        attempt = details.get("attempt")
-        attempt_str = f"（第 {attempt} 次）" if attempt else ""
-        return f"已执行定向重启{attempt_str}，等待健康检查与行情连接恢复。"
-    if base_name == "live_heartbeat_restart_failed":
-        return "自愈重启执行异常；紧急检查 Compose 权限、端口占用或数据库连接状态。"
-    if base_name == "live_heartbeat_restart_suppressed":
-        return "连续自愈失败已触发熔断保护；必须立即登录主机排查崩溃根因后手动恢复。"
-    if base_name == "live_position_intent_divergence":
-        differences = details.get("differences")
-        if isinstance(differences, Sequence) and differences:
-            zero_accounts: list[str] = []
-            for diff in differences:
-                if isinstance(diff, Mapping):
-                    accounts = diff.get("accounts")
-                    if isinstance(accounts, Sequence):
-                        for acc in accounts:
-                            if isinstance(acc, Mapping) and acc.get("order_count") == 0:
-                                label = str(acc.get("account_label", ""))
-                                if label and label not in zero_accounts:
-                                    zero_accounts.append(label)
-            if zero_accounts:
-                zero_str = f"（如 {', '.join(zero_accounts)}）"
-                return (
-                    f"检测到单边未下单，请优先排查未下单账户{zero_str}的可用保证金、"
-                    "持仓上限、对账状态或风控阻断原因；确认前暂停扩大仓位。"
-                )
-        return (
-            "同配置账户下单参数分歧，请核对各账户委托方向、"
-            "数量与价格；排查完毕前暂停扩仓。"
-        )
-    if base_name == "live_position_divergence":
-        return "核对各账户交易所实际持仓快照，确认是否存在漏平仓；确认仓位前暂停扩仓。"
-    if base_name == "live_signal_divergence":
-        return "暂停扩仓；核对各账户策略配置差异、K 线数据新鲜度及近期事件循环日志。"
     if base_name == "container_memory_pressure":
         curr_mb = details.get("memory_current_mb")
         limit_mb = details.get("memory_limit_mb")
@@ -4319,25 +3335,14 @@ def _alert_action(alert_name: str, details: Mapping[str, object]) -> str:
         ):
             return "物理内存充足，属于系统冷页置换入 Swap，无需重启服务，建议继续观察。"
         return "请检查该容器近期查询占用与堆缓存，必要时调大容器内存限额。"
-    if base_name == "live_market_state_delay":
-        delay = details.get("delay_ms")
-        delay_str = f"（当前 {delay:.0f}ms）" if isinstance(delay, (int, float)) else ""
-        return (
-            f"行情延迟过高{delay_str}，检查交易所网络往返延迟（RTT）及数据库写入排队。"
-        )
-    if base_name == "live_unknown_orders":
-        return (
-            "严禁重发相同订单；立即按 client_order_id 查交易所确认真实状态并对齐账目。"
-        )
     return _ALERT_ACTIONS.get(
         base_name,
         "已记录告警，建议结合技术详情检查相关服务。",
     )
 
 
-# The notification title is capped, and a truncated Chinese label loses its
-# meaning -- "实时状态 checkpoint 已过" says nothing.  The scope is dropped
-# first instead: it is repeated on the body's first line, so nothing is lost.
+# The notification title is capped, so the scope is dropped before the label.
+# The scope is repeated on the body's first line.
 _SERVERCHAN_TITLE_LIMIT = 32
 
 
@@ -4358,56 +3363,6 @@ def _serverchan_title(severity: str, scope: str | None, label: str) -> str:
     return f"{head} | {label}"[:_SERVERCHAN_TITLE_LIMIT]
 
 
-def _trim_decimal(val: object) -> str:
-    """Trim trailing zeros from decimal strings or numbers."""
-    if val is None:
-        return "0"
-    s = str(val).strip()
-    s = re.sub(r"(\.\d*?[1-9])0+$", r"\1", s)
-    s = re.sub(r"\.0+$", r"", s)
-    return s
-
-
-def _format_order_intent_items(raw_summary: str | None) -> list[str]:
-    """Parse and normalize order intent items into clean Chinese strings."""
-    if not raw_summary:
-        return []
-    items = [x.strip() for x in re.split(r"[\x1e,]", raw_summary) if x.strip()]
-    formatted: list[str] = []
-    for item in items:
-        # Strip trailing zeros from decimals (e.g. 684.000000000000000000 -> 684, 0.146040000000000000 -> 0.14604)
-        normalized = re.sub(r"(\.\d*?[1-9])0+(?=[^\d]|$)", r"\1", item)
-        normalized = re.sub(r"\.0+(?=[^\d]|$)", r"", normalized)
-        if re.search(r"（(限价|市价)）$", normalized):
-            formatted.append(normalized)
-            continue
-        m = re.match(
-            r"^(BUY|SELL|买入|卖出)\s+(LIMIT|MARKET|限价|市价)?\s*(.*?)$",
-            normalized,
-            re.IGNORECASE,
-        )
-        if m:
-            side_raw, type_raw, rest = m.groups()
-            side = "买入" if side_raw.upper() in ("BUY", "买入") else "卖出"
-            order_type = (
-                "限价"
-                if (type_raw and type_raw.upper() in ("LIMIT", "限价"))
-                else "市价"
-            )
-            if "close" in rest.lower() or "平仓" in rest:
-                formatted.append(f"{side} 平仓（{order_type}）")
-            elif "@" in rest:
-                parts = rest.split("@", 1)
-                formatted.append(
-                    f"{side} {parts[0].strip()} @ {parts[1].strip()}（{order_type}）"
-                )
-            else:
-                formatted.append(f"{side} {rest.strip()}（{order_type}）")
-        else:
-            formatted.append(normalized)
-    return formatted
-
-
 def _format_alert_human_details(
     alert_name: str, details: Mapping[str, object]
 ) -> list[str]:
@@ -4416,123 +3371,8 @@ def _format_alert_human_details(
     base_name, _scope = _split_alert_name(alert_name)
     lines: list[str] = []
 
-    # 1. Intent divergence
-    if base_name == "live_position_intent_divergence":
-        differences = details.get("differences")
-        if isinstance(differences, Sequence):
-            for diff in differences:
-                if not isinstance(diff, Mapping):
-                    continue
-                sym = diff.get("symbol", "")
-                cfg_hash = str(diff.get("strategy_config_hash", ""))
-                short_cfg = cfg_hash[:8] if cfg_hash else "未知"
-                lines.append(f"- **分叉标的**：`{sym}`（策略配置: `{short_cfg}`）")
-                accs = diff.get("accounts")
-                if isinstance(accs, Sequence) and accs:
-                    lines.append("")
-                    lines.append("| 账户 | 委托状态 | 委托详情 |")
-                    lines.append("| :--- | :---: | :--- |")
-                    for acc in accs:
-                        if not isinstance(acc, Mapping):
-                            continue
-                        acc_lbl = acc.get("account_label", "")
-                        cnt = acc.get("order_count", 0)
-                        summary = acc.get("intent_summary")
-                        if cnt == 0:
-                            lines.append(
-                                f"| `{acc_lbl}` | **未下单** (0 笔) | *(无委托)* |"
-                            )
-                        else:
-                            order_items = _format_order_intent_items(summary)
-                            order_str = (
-                                "<br>".join(order_items) if order_items else "未知"
-                            )
-                            lines.append(
-                                f"| `{acc_lbl}` | 已下单 (**{cnt}** 笔) | {order_str} |"
-                            )
-                    lines.append("")
-
-    # 2. Position divergence
-    elif base_name == "live_position_divergence":
-        differences = details.get("differences")
-        if isinstance(differences, Sequence):
-            for diff in differences:
-                if not isinstance(diff, Mapping):
-                    continue
-                accs = diff.get("accounts")
-                cfg_hash = str(diff.get("strategy_config_hash", ""))
-                short_cfg = cfg_hash[:8] if cfg_hash else "未知"
-                qds = diff.get("quantity_differences")
-                if isinstance(qds, Sequence):
-                    for qd in qds:
-                        if not isinstance(qd, Mapping):
-                            continue
-                        sym = qd.get("symbol", "")
-                        side = str(qd.get("position_side", "")).upper()
-                        side_label = (
-                            "多头 (LONG)"
-                            if side == "LONG"
-                            else ("空头 (SHORT)" if side == "SHORT" else side)
-                        )
-                        left_q = _trim_decimal(qd.get("left_quantity", "0"))
-                        right_q = _trim_decimal(qd.get("right_quantity", "0"))
-                        left_acc = (
-                            accs[0]
-                            if isinstance(accs, Sequence) and len(accs) > 0
-                            else "账户1"
-                        )
-                        right_acc = (
-                            accs[1]
-                            if isinstance(accs, Sequence) and len(accs) > 1
-                            else "账户2"
-                        )
-                        lines.append(
-                            f"- **分叉标的**：`{sym}`（方向: {side_label}，策略配置: `{short_cfg}`）"
-                        )
-                        lines.append("")
-                        lines.append("| 账户 | 方向 | 实际持仓 |")
-                        lines.append("| :--- | :---: | :---: |")
-                        lines.append(f"| `{left_acc}` | {side} | **{left_q}** |")
-                        lines.append(f"| `{right_acc}` | {side} | **{right_q}** |")
-                        lines.append("")
-
-    # 3. Signal divergence
-    elif base_name == "live_signal_divergence":
-        differences = details.get("differences")
-        if isinstance(differences, Sequence):
-            for diff in differences:
-                if not isinstance(diff, Mapping):
-                    continue
-                sym = diff.get("symbol", "")
-                raw_bucket = diff.get("bucket_start", "")
-                formatted_bucket = (
-                    _format_alert_time(raw_bucket) if raw_bucket else "未知"
-                )
-                cfg_hash = str(diff.get("strategy_config_hash", ""))
-                short_cfg = cfg_hash[:8] if cfg_hash else "未知"
-                lines.append(
-                    f"- **分叉标的**：`{sym}`（时间桶: `{formatted_bucket}`，策略配置: `{short_cfg}`）"
-                )
-                accs = diff.get("accounts")
-                if isinstance(accs, Sequence) and accs:
-                    lines.append("")
-                    lines.append("| 账户 | 信号 / 候选 | 决策指纹 |")
-                    lines.append("| :--- | :---: | :---: |")
-                    for acc in accs:
-                        if not isinstance(acc, Mapping):
-                            continue
-                        acc_lbl = acc.get("account_label", "")
-                        sig_cnt = acc.get("signal_count", 0)
-                        cand_cnt = acc.get("candidate_count", 0)
-                        fp = acc.get("fingerprint")
-                        fp_str = f"`{str(fp)[:8]}`" if fp else "-"
-                        lines.append(
-                            f"| `{acc_lbl}` | **{sig_cnt}** / {cand_cnt} | {fp_str} |"
-                        )
-                    lines.append("")
-
-    # 4. Container memory pressure (swap)
-    elif base_name == "container_memory_pressure":
+    # Container memory pressure (swap)
+    if base_name == "container_memory_pressure":
         curr_mb = details.get("memory_current_mb")
         limit_mb = details.get("memory_limit_mb")
         swap_mb = details.get("memory_swap_current_mb")
@@ -4561,7 +3401,7 @@ def _format_alert_human_details(
                 f"- **Swap 换出情况**：当前换出 `{swap_mb:.1f} MB` {growth_str}"
             )
 
-    # 5. Container memory high / growth / rss_growth
+    # Container memory high / growth / RSS growth
     elif base_name in (
         "container_memory_high",
         "container_memory_growth",
@@ -4588,51 +3428,16 @@ def _format_alert_human_details(
         if isinstance(growth_mb, (int, float)):
             lines.append(f"- **增长幅度**：窗口内持续增长 `+{growth_mb:.1f} MB`")
 
-    # 6. Heartbeat & Live session
-    elif base_name in (
-        "live_heartbeat_stale",
-        "live_heartbeat_auto_restarted",
-        "live_heartbeat_restart_failed",
-        "live_heartbeat_restart_suppressed",
-    ):
+    # Heartbeat
+    elif base_name == "live_heartbeat_stale":
         acc = details.get("account_label", "")
         age = details.get("heartbeat_age_seconds")
-        attempt = details.get("attempt")
         if acc:
             lines.append(f"- **责任账户**：`{acc}`")
         if isinstance(age, (int, float)):
             lines.append(f"- **心跳中断时长**：已失联 **{age:.0f} 秒**")
-        if attempt:
-            lines.append(f"- **自愈进度**：已执行定向自动重启（第 **{attempt}** 次）")
 
-    # 7. Market delay & stale
-    elif base_name == "live_market_state_delay":
-        acc = _alert_account_scope(details)
-        delay = details.get("delay_ms")
-        warn_th = details.get("warning_threshold_ms")
-        if acc:
-            lines.append(f"- **受影响账户**：`{acc}`")
-        if isinstance(delay, (int, float)):
-            warn_str = (
-                f"（警戒阈值: {warn_th:.0f} ms）"
-                if isinstance(warn_th, (int, float))
-                else ""
-            )
-            lines.append(f"- **行情滞后延迟**：**{delay:.0f} ms**{warn_str}")
-
-    # 8. Unknown orders
-    elif base_name == "live_unknown_orders":
-        acc = details.get("account_label", "")
-        cnt = details.get("unknown_order_count")
-        oldest = details.get("oldest_unknown_order_age_seconds")
-        if acc:
-            lines.append(f"- **异常账户**：`{acc}`")
-        if isinstance(cnt, (int, float)):
-            lines.append(f"- **在途失步订单**：共 **{cnt}** 笔")
-        if isinstance(oldest, (int, float)):
-            lines.append(f"- **最长挂起时间**：**{oldest:.0f} 秒**")
-
-    # 9. Container unhealthy / missing / oom
+    # Container unhealthy / missing / OOM
     elif base_name in (
         "container_unhealthy",
         "container_missing",
@@ -4651,74 +3456,7 @@ def _format_alert_human_details(
         if restart_cnt is not None:
             lines.append(f"- **已重启次数**：**{restart_cnt}** 次")
 
-    # 10. Account lifecycle & reconciliation
-    elif base_name == "live_account_lifecycle_not_ready":
-        acc = details.get("account_label", "")
-        state = details.get("state", "")
-        age_human = details.get("age_human", "")
-        thresh_human = details.get("threshold_human", "")
-        if acc:
-            lines.append(f"- **责任账户**：`{acc}`")
-        if state:
-            lines.append(f"- **生命周期状态**：`{state}`")
-        if age_human:
-            thresh_str = f"（安全阈值: {thresh_human}）" if thresh_human else ""
-            lines.append(f"- **异常停滞时间**：已停滞 **{age_human}**{thresh_str}")
-
-    elif base_name == "live_account_reconciliation_stale":
-        acc = details.get("account_label", "")
-        status = details.get("status", "")
-        age_human = details.get("age_human", "")
-        thresh_human = details.get("threshold_human", "")
-        if acc:
-            lines.append(f"- **责任账户**：`{acc}`")
-        if status:
-            lines.append(f"- **对账状态**：`{status}`")
-        if age_human:
-            thresh_str = f"（安全阈值: {thresh_human}）" if thresh_human else ""
-            lines.append(
-                f"- **对账停滞时长**：距上次对账已 **{age_human}**{thresh_str}"
-            )
-
-    # 11. Market state stale & checkpoint stale
-    elif base_name == "live_market_state_stale":
-        acc = _alert_account_scope(details)
-        age_human = details.get("age_human", "")
-        thresh_human = details.get("threshold_human", "")
-        if acc:
-            lines.append(f"- **责任账户**：`{acc}`")
-        if age_human:
-            thresh_str = f"（安全阈值: {thresh_human}）" if thresh_human else ""
-            lines.append(f"- **行情停滞时长**：已中断 **{age_human}**{thresh_str}")
-
-    elif base_name == "live_checkpoint_stale":
-        acc = details.get("account_label", "")
-        age_human = details.get("age_human", "")
-        thresh_human = details.get("threshold_human", "")
-        if acc:
-            lines.append(f"- **责任账户**：`{acc}`")
-        if age_human:
-            thresh_str = f"（安全阈值: {thresh_human}）" if thresh_human else ""
-            lines.append(
-                f"- **状态停滞时长**：距上次写入已 **{age_human}**{thresh_str}"
-            )
-
-    # 12. Live session not ready
-    elif base_name == "live_session_not_ready":
-        acc = details.get("account_label", "")
-        s_ready = details.get("session_state_ready")
-        l_active = details.get("lease_active")
-        c_present = details.get("checkpoint_present")
-        if acc:
-            lines.append(f"- **责任账户**：`{acc}`")
-        if s_ready is not None:
-            lines.append(f"- **会话状态**：{'就绪' if s_ready else '未就绪（异常）'}")
-        if l_active is not None:
-            lines.append(f"- **分布式租约**：{'有效' if l_active else '失效（异常）'}")
-        if c_present is not None:
-            lines.append(f"- **策略检查点**：{'存在' if c_present else '缺失（异常）'}")
-
-    # 13. Telemetry and market tasks
+    # Telemetry and market tasks
     elif base_name == "telemetry_persist_failure":
         failures = details.get("failure_count")
         if failures:
@@ -4730,10 +3468,9 @@ def _format_alert_human_details(
             tasks_str = ", ".join(f"`{g}`" for g in group_ids)
             lines.append(f"- **异常连接任务**：{tasks_str}")
 
-    # 14. Operational errors & database failures
+    # Operational errors and database failures
     elif base_name in (
         "database_check_failed",
-        "live_consistency_check_failed",
         "ops_monitor_failed",
     ):
         acc = details.get("account_label")
@@ -4747,13 +3484,13 @@ def _format_alert_human_details(
             clean_err = " ".join(err_msg.split())[:120]
             lines.append(f"- **异常摘要**：`{clean_err}`")
 
-    # 15. Database advisory warnings
+    # Database advisory warnings
     elif base_name == "database_parallel_maintenance_enabled":
         workers = details.get("max_parallel_maintenance_workers")
         if workers is not None:
             lines.append(f"- **当前工作进程数**：`{workers}`（建议配置为 0 或 1）")
 
-    # 16. Local fact inconsistency
+    # Local fact inconsistency
     elif base_name == "live_local_fact_inconsistency":
         acc = details.get("account_label")
         sym = details.get("symbol")
@@ -4772,7 +3509,7 @@ def _format_alert_human_details(
         lines.append("- **持续交易**：其他标的与账户交易正常进行")
         lines.append("- **人工关注**：核对交易所真实持仓，切勿手动清空预留")
 
-    # 17. Deferred exit evaluation
+    # Deferred exit evaluation
     elif base_name == "live_exit_evaluation_deferred":
         acc = details.get("account_label")
         sym = details.get("symbol")
@@ -4790,7 +3527,7 @@ def _format_alert_human_details(
         lines.append("- **持续交易**：其他标的正常交易不受影响")
         lines.append("- **人工关注**：关注该标的 Book 与行情推进，避免超期挂起")
 
-    # 18. Candidate expired before execution
+    # 13. Candidate expired before execution
     elif base_name == "live_candidate_expired":
         acc = details.get("account_label")
         sym = details.get("symbol")
@@ -4804,21 +3541,6 @@ def _format_alert_human_details(
         lines.append("- **已做处理**：超期候选已安全放弃（零 POST），避免旧信号成交")
         lines.append("- **持续交易**：策略在下一行情周期重新评估")
         lines.append("- **人工关注**：排查行情接收及事件循环延迟")
-
-    # 19. Order vs command terminal state mismatch
-    elif base_name == "live_order_command_terminal_mismatch":
-        acc = details.get("account_label")
-        mismatch_cnt = details.get("mismatch_count")
-        oldest_age = details.get("oldest_age_seconds")
-        if acc:
-            lines.append(f"- **责任账户**：`{acc}`")
-        if mismatch_cnt:
-            lines.append(f"- **失步命令数**：共 **{mismatch_cnt}** 笔")
-        if isinstance(oldest_age, (int, float)):
-            lines.append(f"- **最长失步时间**：**{oldest_age:.0f} 秒**")
-        lines.append("- **已做处理**：调度单元对账任务进行终态收敛")
-        lines.append("- **持续交易**：其他订单与标的正常执行")
-        lines.append("- **人工关注**：核对订单与命令表的最新对账状态")
 
     elif base_name == "disk_usage_high":
         fraction = details.get("used_fraction")
@@ -5000,23 +3722,6 @@ def _alert_conclusion(alert_name: str, details: Mapping[str, object]) -> str | N
                 "**需排查内存泄漏或缓存积压**。"
             )
         return "容器内存呈现持续增长趋势，**需排查内存泄漏或缓存积压**。"
-    if base_name == "live_position_intent_divergence":
-        differences = details.get("differences")
-        if isinstance(differences, Sequence) and differences:
-            for diff in differences:
-                if isinstance(diff, Mapping):
-                    accounts = diff.get("accounts")
-                    if isinstance(accounts, Sequence):
-                        for acc in accounts:
-                            if isinstance(acc, Mapping) and acc.get("order_count") == 0:
-                                return "检测到单边漏单（主/从账户下单意图分叉），**执行与风控路径已失步**。"
-        return "同配置账户向交易所下达了不同的订单参数，**下单意图已分叉**。"
-    if base_name == "live_position_divergence":
-        return (
-            "可比账户在交易所的实际持仓数量不一致，**存在单边未平仓或对账失步风险**。"
-        )
-    if base_name == "live_signal_divergence":
-        return "同配置账户信号指纹不一致，**策略计算已失步**。"
     if base_name in ("container_oom_killed",):
         return (
             "容器发生新的 OOM 杀进程事件，或 OOM 退出后仍未运行，"
@@ -5026,28 +3731,6 @@ def _alert_conclusion(alert_name: str, details: Mapping[str, object]) -> str | N
         return "核心服务容器未运行或已异常退出，**相关功能已中断**。"
     if base_name in ("container_unhealthy",):
         return "容器健康检查持续失败，**服务可能处于假死或死锁状态**。"
-    if base_name == "live_market_state_delay":
-        delay = details.get("delay_ms")
-        delay_str = f"（当前 {delay:.0f}ms）" if isinstance(delay, (int, float)) else ""
-        return f"行情接收严重滞后{delay_str}，**存在信号失效与成交滑点风险**。"
-    if base_name == "live_market_state_stale":
-        return "行情数据推进中断，**策略已暂停基于实时 K 线的交易计算**。"
-    if base_name == "live_checkpoint_stale":
-        return "策略持久化状态已过期，**若发生异常退出可能丢失最新运行时状态**。"
-    if base_name == "live_session_not_ready":
-        return "实时交易会话、租约或状态未就绪，**策略无法进入安全交易状态**。"
-    if base_name == "live_account_lifecycle_not_ready":
-        state = details.get("state", "")
-        state_str = f"（状态: {state}）" if state else ""
-        return f"账户进程生命周期未就绪{state_str}，**交易执行已挂起**。"
-    if base_name == "live_account_reconciliation_stale":
-        status = details.get("status", "")
-        status_str = f"（状态: {status}）" if status else ""
-        return f"交易所对账快照已失步{status_str}，**持仓和订单真实性暂无法核实**。"
-    if base_name == "live_unknown_orders":
-        cnt = details.get("unknown_order_count", 0)
-        cnt_str = f"（共 {cnt} 笔）" if cnt else ""
-        return f"发现未确认在途订单{cnt_str}，**本地与交易所订单失步，严禁盲目重发**。"
     if base_name == "market_task_not_alive":
         return "行情 WebSocket 连接任务挂死，**部分币种实时行情已中断**。"
     if base_name == "telemetry_persist_failure":
@@ -5056,14 +3739,6 @@ def _alert_conclusion(alert_name: str, details: Mapping[str, object]) -> str | N
         age = details.get("heartbeat_age_seconds")
         age_str = f"（已失联 {age:.0f} 秒）" if isinstance(age, (int, float)) else ""
         return f"策略主循环心跳停滞{age_str}，**交易与行情推进可能已挂死**。"
-    if base_name == "live_heartbeat_auto_restarted":
-        attempt = details.get("attempt")
-        attempt_str = f"（第 {attempt} 次）" if attempt else ""
-        return f"策略心跳超时，**已自动执行定向重启自愈{attempt_str}**。"
-    if base_name == "live_heartbeat_restart_failed":
-        return "策略自动重启自愈执行失败，**需要紧急人工介入排查**。"
-    if base_name == "live_heartbeat_restart_suppressed":
-        return "策略连续自动重启已达上限，**自愈保护熔断，交易已挂起**。"
     if base_name == "live_crash_log_archive_failed":
         return "策略崩溃日志转储失败，**重启前现场日志可能未完整留存**。"
     if base_name == "database_check_failed":
@@ -5076,8 +3751,6 @@ def _alert_conclusion(alert_name: str, details: Mapping[str, object]) -> str | N
         return "PostgreSQL I/O 耗时跟踪未开启，**数据库磁盘 I/O 延迟定位能力受限**。"
     if base_name == "database_parallel_maintenance_enabled":
         return "数据库并行维护工作进程超过护栏，**高并发时可能争用交易资源**。"
-    if base_name == "live_consistency_check_failed":
-        return "跨账户一致性校验查询超时或失败，**多账户运行状态暂无法比对**。"
     if base_name == "live_local_fact_inconsistency":
         sym = details.get("symbol", "")
         sym_str = f"（{sym}）" if sym else ""
@@ -5097,13 +3770,6 @@ def _alert_conclusion(alert_name: str, details: Mapping[str, object]) -> str | N
         return (
             f"候选指令执行前已超期并放弃{sym_str}（零 POST），"
             "**下一周期重评，账户资金安全**。"
-        )
-    if base_name == "live_order_command_terminal_mismatch":
-        cnt = details.get("mismatch_count", 0)
-        cnt_str = f"（共 {cnt} 笔）" if cnt else ""
-        return (
-            f"订单已达终态但命令仍为活跃状态{cnt_str}，"
-            "**调度正在自动收敛，请关注对账进展**。"
         )
     if base_name == "ops_monitor_failed":
         return "运维监控自身主循环发生未捕获异常，**请检查监控进程日志**。"
@@ -5175,44 +3841,6 @@ def _env_path(name: str, default: Path | None) -> Path | None:
     return Path(value) if value else None
 
 
-def _read_env_value(path: Path | None, name: str) -> str | None:
-    """Read one non-secret value from a Compose-style environment file."""
-
-    if path is None:
-        return None
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return None
-    for line in lines:
-        candidate = line.strip()
-        if not candidate or candidate.startswith("#"):
-            continue
-        if candidate.startswith("export "):
-            candidate = candidate[7:].lstrip()
-        key, separator, value = candidate.partition("=")
-        if separator and key.strip() == name:
-            value = value.strip()
-            if value[:1] == value[-1:] and value[:1] in {"'", '"'}:
-                value = value[1:-1]
-            return value
-    return None
-
-
-def _parse_live_accounts(raw_value: str | None) -> tuple[tuple[str, str], ...]:
-    if raw_value is None or not raw_value.strip():
-        return (("primary", "live-primary-v1"),)
-    accounts: list[tuple[str, str]] = []
-    for item in raw_value.split(","):
-        parts = tuple(part.strip() for part in item.split("|"))
-        if len(parts) != 2 or any(not part for part in parts):
-            raise ValueError(
-                "CML_MONITOR_LIVE_ACCOUNTS must use label|session-id entries"
-            )
-        accounts.append((parts[0], parts[1]))
-    return tuple(accounts)
-
-
 def _compose_service_names(compose_files: Sequence[Path]) -> tuple[str, ...]:
     """Read top-level service names without interpolating Compose secrets."""
 
@@ -5260,48 +3888,11 @@ def _discover_live_account_labels(
     return tuple(labels) or ("primary",)
 
 
-def _live_account_env_suffix(account_label: str) -> str:
-    if account_label == "primary":
-        return ""
-    normalized = re.sub(r"[^A-Za-z0-9]+", "_", account_label).strip("_")
-    return f"_{normalized.upper()}"
-
-
-def _configured_env_value(
-    compose_env_file: Path | None,
-    name: str,
-) -> str | None:
-    return os.environ.get(name) or _read_env_value(compose_env_file, name)
-
-
-def _discover_live_accounts(
-    compose_files: Sequence[Path],
-    compose_env_file: Path | None,
-) -> tuple[tuple[str, str], ...]:
-    accounts: list[tuple[str, str]] = []
-    for account_label in _discover_live_account_labels(compose_files):
-        suffix = _live_account_env_suffix(account_label)
-        default_session = (
-            "live-primary-v1"
-            if account_label == "primary"
-            else f"live-{account_label}-v1"
-        )
-        session_id = (
-            _configured_env_value(
-                compose_env_file,
-                f"CML_LIVE_SESSION_ID{suffix}",
-            )
-            or default_session
-        )
-        accounts.append((account_label, session_id))
-    return tuple(accounts)
-
-
 def _monitor_services_for_accounts(
-    live_accounts: Sequence[tuple[str, str]],
+    live_account_labels: Sequence[str],
 ) -> tuple[str, ...]:
     services = ["postgres", "market-data", "research-collector"]
-    for account_label, _run_id in live_accounts:
+    for account_label in live_account_labels:
         services.append(_nextgen_strategy_service(account_label))
     return tuple(dict.fromkeys(services))
 
@@ -5313,30 +3904,13 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
         "crash_log_directory",
         os.environ.get("CML_CRASH_LOG_DIRECTORY"),
     )
-    live_run_id = (
-        args.live_run_id
-        or os.environ.get("CML_LIVE_SESSION_ID")
-        or _read_env_value(compose_env_file, "CML_LIVE_SESSION_ID")
-        or "live-primary-v1"
-    )
-    live_account_label = (
-        getattr(args, "live_account_label", None)
-        or os.environ.get("CML_LIVE_ACCOUNT_LABEL")
-        or _read_env_value(compose_env_file, "CML_LIVE_ACCOUNT_LABEL")
-        or "primary"
-    )
     project_directory = Path(args.project_directory)
     compose_files = (
         project_directory / "compose.server.yaml",
         project_directory / "compose.next_gen.yaml",
     )
     profile_values = ("nextgen",)
-    configured_live_accounts = os.environ.get("CML_MONITOR_LIVE_ACCOUNTS")
-    live_accounts = (
-        _parse_live_accounts(configured_live_accounts)
-        if configured_live_accounts is not None
-        else _discover_live_accounts(compose_files, compose_env_file)
-    )
+    live_account_labels = _discover_live_account_labels(compose_files)
     configured_services = getattr(args, "services", None)
     if configured_services is None:
         configured_services = os.environ.get("CML_MONITOR_SERVICES")
@@ -5345,7 +3919,7 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
             item.strip() for item in configured_services.split(",") if item.strip()
         )
     else:
-        services = _monitor_services_for_accounts(live_accounts)
+        services = _monitor_services_for_accounts(live_account_labels)
     if any(
         name.startswith(("live-strategy", "execution-account-live"))
         for name in services
@@ -5358,9 +3932,7 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
         compose_profiles=profile_values,
         compose_env_file=compose_env_file,
         services=services or _DEFAULT_SERVICES,
-        live_accounts=live_accounts,
-        live_run_id=live_run_id,
-        live_account_label=live_account_label,
+        live_account_labels=live_account_labels,
         interval_seconds=args.interval_seconds,
         log_window_seconds=args.log_window_seconds,
         rss_warning_fraction=args.rss_warning_fraction,
@@ -5508,38 +4080,6 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
             )
         ),
         command_timeout_seconds=args.command_timeout_seconds,
-        position_stale_after_seconds=float(
-            getattr(
-                args,
-                "position_stale_after_seconds",
-                os.environ.get(
-                    "CML_POSITION_STALE_AFTER_SECONDS",
-                    _DEFAULT_POSITION_STALE_AFTER_SECONDS,
-                ),
-            )
-        ),
-        position_quantity_tolerance=Decimal(
-            str(
-                getattr(
-                    args,
-                    "position_quantity_tolerance",
-                    os.environ.get(
-                        "CML_POSITION_QUANTITY_TOLERANCE",
-                        _DEFAULT_POSITION_QUANTITY_TOLERANCE,
-                    ),
-                )
-            )
-        ),
-        consistency_window_seconds=float(
-            getattr(
-                args,
-                "consistency_window_seconds",
-                os.environ.get(
-                    "CML_CONSISTENCY_WINDOW_SECONDS",
-                    _DEFAULT_CONSISTENCY_WINDOW_SECONDS,
-                ),
-            )
-        ),
         state_path=Path(args.state_path),
         crash_log_directory=(
             Path(crash_log_directory_value) if crash_log_directory_value else None
@@ -5573,14 +4113,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
     )
     parser.add_argument(
-        "--live-run-id",
-        default=None,
-    )
-    parser.add_argument(
-        "--live-account-label",
-        default=None,
-    )
-    parser.add_argument(
         "--interval-seconds",
         type=float,
         default=_DEFAULT_INTERVAL_SECONDS,
@@ -5589,33 +4121,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--log-window-seconds",
         type=float,
         default=_DEFAULT_LOG_WINDOW_SECONDS,
-    )
-    parser.add_argument(
-        "--position-stale-after-seconds",
-        type=float,
-        default=float(
-            os.environ.get(
-                "CML_POSITION_STALE_AFTER_SECONDS",
-                _DEFAULT_POSITION_STALE_AFTER_SECONDS,
-            )
-        ),
-    )
-    parser.add_argument(
-        "--position-quantity-tolerance",
-        default=os.environ.get(
-            "CML_POSITION_QUANTITY_TOLERANCE",
-            str(_DEFAULT_POSITION_QUANTITY_TOLERANCE),
-        ),
-    )
-    parser.add_argument(
-        "--consistency-window-seconds",
-        type=float,
-        default=float(
-            os.environ.get(
-                "CML_CONSISTENCY_WINDOW_SECONDS",
-                _DEFAULT_CONSISTENCY_WINDOW_SECONDS,
-            )
-        ),
     )
     parser.add_argument(
         "--rss-warning-fraction",

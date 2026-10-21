@@ -41,6 +41,8 @@ TABLE_KEYS = {
     "live_session_transitions": ["transition_id"],
 }
 ARCHIVE_ROOT = "/var/lib/crypto-momentum-lab/table-archive"
+# These retired tables are retained as verified archives, not live hot rows.
+ARCHIVE_ONLY_TABLES = {"execution_book_heads"}
 
 
 def literal(value: str) -> str:
@@ -140,6 +142,8 @@ print(json.dumps(result))
     print(f"preserved {len(logs)} container log streams and host journals", flush=True)
     # Export JSON without converting numeric source values to binary floats.
     for table in TABLE_KEYS:
+        if table in ARCHIVE_ONLY_TABLES:
+            continue
         target = root / "hot" / (table + ".jsonl.gz")
         target.parent.mkdir(parents=True, exist_ok=True)
         pending = target.with_suffix(".partial")

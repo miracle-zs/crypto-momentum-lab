@@ -1,16 +1,13 @@
-"""Pure Binance REST value and bounded userTrades parsing."""
+"""Strict Binance REST parsing for position, order, and open-order data."""
 
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from typing import cast
 
 from crypto_momentum_lab.domain.account.models import (
-    AccountBalanceSnapshot,
-    AccountFillEvent,
     AccountOpenOrderSnapshot,
     AccountPositionSnapshot,
-    compact_fill_metadata,
 )
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderSnapshot,
@@ -23,36 +20,6 @@ from crypto_momentum_lab.execution_account.binance.order_status import (
 
 def decimal_value(value: object) -> Decimal:
     return Decimal(str(value))
-
-
-def account_fill_from_trade_item(
-    item: Mapping[str, object],
-    *,
-    environment: str,
-    account_label: str,
-    expected_symbol: str,
-) -> AccountFillEvent:
-    symbol = rest_require_string(item, "symbol").strip().upper()
-    if symbol != expected_symbol:
-        raise ValueError("Binance userTrades response contained another symbol")
-    return AccountFillEvent(
-        environment=environment,
-        account_label=account_label,
-        symbol=symbol,
-        trade_id=str(rest_require_int(item, "id")),
-        order_id=str(rest_require_int(item, "orderId")),
-        side=rest_require_string(item, "side"),
-        price=Decimal(rest_require_string(item, "price")),
-        quantity=Decimal(rest_require_string(item, "qty")),
-        realized_pnl=Decimal(rest_require_string(item, "realizedPnl")),
-        fee=Decimal(rest_require_string(item, "commission")),
-        fee_asset=rest_require_string(item, "commissionAsset"),
-        trade_at=datetime.fromtimestamp(
-            rest_require_int(item, "time") / 1000,
-            tz=UTC,
-        ),
-        raw_payload=compact_fill_metadata(item),
-    )
 
 
 def account_open_order_from_item(
@@ -157,7 +124,6 @@ def order_snapshot_from_response(
     data: dict[str, object],
     *,
     observed_at: datetime,
-    entry_leverage: int | None = None,
     fill_price_optional: bool = False,
 ) -> ExchangeOrderSnapshot:
     state = exchange_order_state(rest_require_string(data, "status"))
@@ -197,37 +163,6 @@ def order_snapshot_from_response(
         observed_at=observed_at,
         executed_quantity=executed_quantity,
         average_price=average_price,
-        entry_leverage=entry_leverage,
-    )
-
-
-def balances_from_response(
-    payload: object,
-    *,
-    environment: str,
-    account_label: str,
-    observed_at: datetime,
-) -> tuple[AccountBalanceSnapshot, ...]:
-    return tuple(
-        AccountBalanceSnapshot(
-            environment=environment,
-            account_label=account_label,
-            asset=rest_require_string(item, "asset"),
-            wallet_balance=decimal_value(rest_require_string(item, "balance")),
-            available_balance=decimal_value(
-                rest_require_string(item, "availableBalance")
-            ),
-            unrealized_pnl=decimal_value(rest_require_string(item, "crossUnPnl")),
-            observed_at=observed_at,
-            raw_payload=json_mapping(
-                {
-                    key: item[key]
-                    for key in ("updateTime", "crossUnPnl")
-                    if key in item
-                }
-            ),
-        )
-        for item in rest_require_sequence_of_mappings(payload)
     )
 
 

@@ -7,8 +7,6 @@ from crypto_momentum_lab.domain.account.models import (
     AccountBalanceSnapshot,
     AccountPositionSnapshot,
     AccountPositionStateSnapshot,
-    ExecutionAccountProcessState,
-    ExecutionAccountStatus,
 )
 from crypto_momentum_lab.persistence.postgres.account_repository import (
     position_snapshot_row,
@@ -46,41 +44,6 @@ def test_account_position_snapshot_rejects_empty_symbol() -> None:
             observed_at=datetime.now().astimezone(),
             raw_payload={},
         )
-
-
-def test_account_sync_state_rejects_unknown_state() -> None:
-    with pytest.raises(ValueError, match="state must be an ExecutionAccountStatus"):
-        ExecutionAccountProcessState(
-            environment="live",
-            account_label="primary",
-            state="READY",
-            occurred_at=datetime.now().astimezone(),
-            reason=None,
-        )
-
-
-def test_account_sync_state_accepts_ready_readonly() -> None:
-    state = ExecutionAccountProcessState(
-        environment="live",
-        account_label="primary",
-        state=ExecutionAccountStatus.READY_READONLY,
-        occurred_at=datetime.now().astimezone(),
-        reason=None,
-    )
-
-    assert state.state is ExecutionAccountStatus.READY_READONLY
-
-
-def test_account_sync_state_accepts_running() -> None:
-    state = ExecutionAccountProcessState(
-        environment="live",
-        account_label="primary",
-        state=ExecutionAccountStatus.RUNNING,
-        occurred_at=datetime.now().astimezone(),
-        reason=None,
-    )
-
-    assert state.state is ExecutionAccountStatus.RUNNING
 
 
 def test_hedge_position_snapshots_have_distinct_ids() -> None:

@@ -16,9 +16,8 @@ Environment=CML_MARKET_REVISION_PURGE_TIMER_UNIT=cml-market-revision-purge.timer
 Environment=CML_MARKET_REVISION_ARCHIVE_TIMER_UNIT=cml-market-revision-archive.timer
 Environment=CML_STORAGE_PATH=/var/lib/docker
 Environment=CML_DATABASE_STORAGE_MONITORING=true
-# cml_ops_monitor always watches the NextGen services; account sessions are
-# loaded from the runtime settings in .env.server. Explicit service/account
-# overrides remain available in /etc/crypto-momentum-lab/ops-monitor.env.
+# NextGen account services are discovered from Compose. Optional monitor
+# settings and service overrides can be set in the host-specific env file.
 EnvironmentFile=-/etc/crypto-momentum-lab/ops-monitor.env
 # Keep host and Docker probes bounded; account recovery remains operator-controlled.
 ExecStart=/usr/bin/python3 /opt/crypto-momentum-lab/deploy/ops/cml_ops_monitor.py --command-timeout-seconds 120

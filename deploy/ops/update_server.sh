@@ -220,32 +220,31 @@ accounts=(
 )
 flat_check_python=$(cat <<'PY'
 import asyncio, json, os, sys
-from crypto_momentum_lab.execution_account.binance.client import BinanceUsdMPrivateReadClient
+from crypto_momentum_lab.next_gen.client import BinanceRestClient
 
 async def main():
     account = sys.argv[1]
-    client = BinanceUsdMPrivateReadClient(
+    client = BinanceRestClient(
         api_key=os.environ["BINANCE_READ_API_KEY"],
         api_secret=os.environ["BINANCE_READ_API_SECRET"],
         environment="live",
-        account_label=account,
     )
     try:
-        positions, orders = await asyncio.gather(
-            client.fetch_positions(), client.fetch_open_orders()
+        account_snapshot, orders = await asyncio.gather(
+            client.fetch_account_information(), client.fetch_open_orders()
         )
         open_positions = [
             {"symbol": p.symbol, "side": p.position_side, "quantity": str(p.position_amt)}
-            for p in positions if p.position_amt != 0
+            for p in account_snapshot.positions if p.position_amt != 0
         ]
-        open_orders = [{"symbol": order.symbol} for order in orders]
+        open_orders = [{"symbol": order["symbol"]} for order in orders]
         print(json.dumps({"account": account, "positions": open_positions, "orders": open_orders}))
         return 0 if not open_positions and not open_orders else 3
     except Exception as error:
         print(json.dumps({"account": account, "query_error": type(error).__name__}))
         return 4
     finally:
-        await client.aclose()
+        await client.close()
 
 raise SystemExit(asyncio.run(main()))
 PY
@@ -333,6 +332,25 @@ for item in "${accounts[@]}"; do
     exit 1
   fi
 done
+
+if command -v systemctl >/dev/null 2>&1; then
+  timer_unit="cml-execution-receipt-retention.timer"
+  service_unit="cml-execution-receipt-retention.service"
+  timer_path="/etc/systemd/system/$timer_unit"
+  service_path="/etc/systemd/system/$service_unit"
+  if systemctl cat "$timer_unit" >/dev/null 2>&1; then
+    systemctl disable --now "$timer_unit"
+  fi
+  if systemctl cat "$service_unit" >/dev/null 2>&1; then
+    systemctl stop "$service_unit"
+    systemctl reset-failed "$service_unit" >/dev/null 2>&1 || true
+  fi
+  if [[ -e "$timer_path" || -L "$timer_path" || -e "$service_path" || -L "$service_path" ]]; then
+    rm -f "$timer_path" "$service_path"
+    systemctl daemon-reload
+    systemctl reset-failed "$timer_unit" "$service_unit" >/dev/null 2>&1 || true
+  fi
+fi
 
 if [[ "$target_commit" != "$previous_commit" ]]; then
   git merge --ff-only "$target_commit"

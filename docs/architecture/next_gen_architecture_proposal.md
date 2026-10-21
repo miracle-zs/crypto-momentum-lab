@@ -2,13 +2,15 @@
 > **设计版本**: 2026.10-NextGen-Proposal-v2-Streamlined  
 > **设计基准**: Git 仓库真实源码（Alembic 迁移 `20261018_0067_next_gen_execution_tables` 已合并，Schema Version 4，包含生产发单安全门、错误分类、WS 撤单成交核对与 Compose 部署定义）  
 > **架构定位**: 现代 Python 3.12+ 结构化异步、内存权威、低认知负荷的中低频量化交易执行引擎  
-> **多账户部署现状**: 线上 4 个 NextGen 账户（`primary`、`account-2`、`account-3`、`account-4`）共用同一个 PostgreSQL 数据库实例（[`compose.next_gen.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.next_gen.yaml)）
+> **多账户部署现状**: 线上 4 个 NextGen 账户（`primary`、`account-2`、`account-3`、`account-4`）共用同一个 PostgreSQL 数据库实例（[`compose.next_gen.yaml`](../../compose.next_gen.yaml)）
+
+> **文档范围**：本文是 NextGen 架构提案与演进记录，不保证每条设计都与当前实现逐项一致；实现行为以当前代码为准。文中对旧 `runtime_orchestrator.py` 的引用是历史比较材料，旧源码请从 Git 历史查看。当前入口见 [NextGen CLI](../../src/crypto_momentum_lab/apps/next_gen/cli.py)、[daemon](../../src/crypto_momentum_lab/next_gen/daemon.py)、[engine](../../src/crypto_momentum_lab/next_gen/engine.py) 和 [exit manager](../../src/crypto_momentum_lab/next_gen/exit_manager.py)。
 
 ---
 
 ## 1. 架构重构核心设计宣言 (Design Manifesto)
 
-当前系统为了服务一个 **15 秒周期行情、15 分钟 K 线调仓** 的中低频动量策略，引入了 10 张执行/决策持久化表、两阶段分离的成交流水双事务写入、基于全表前缀扫描的 Head 恢复以及复杂的局部 Fact Gap 隔离状态机，产生了巨大的认知负荷与运维复杂度。
+旧版执行栈为了服务一个 **15 秒周期行情、15 分钟 K 线调仓** 的中低频动量策略，引入了 10 张执行/决策持久化表、两阶段分离的成交流水双事务写入、基于全表前缀扫描的 Head 恢复以及复杂的局部 Fact Gap 隔离状态机，产生了较高的认知负荷与运维复杂度。本提案记录了当时的重构目标；当前实现以 NextGen 源码为准。
 
 下一代架构遵循以下五大原则：
 
@@ -1021,38 +1023,9 @@ flowchart TD
 ### 附录 A：数据库平迁与旧表归档实施指南（Database Migration Runbook）
 
 > [!NOTE] **实施状态说明（Implementation Status）**
-> Alembic 迁移 [`20261018_0067_next_gen_execution_tables.py`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/alembic/versions/20261018_0067_next_gen_execution_tables.py) 创建了全新的两张 NextGen 执行表（`live_position_batches`、`live_orders`），**只新增、不归档或重命名旧表**。旧表继续作为历史审计数据保留，不再作为运行时回退路径；旧版执行服务、入口和部署选择已退役。当前更新固定使用 [`compose.next_gen.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.next_gen.yaml) 的 `nextgen` Profile，并确保 `migrate` 与 `market-data` 就绪。对应的 SQLAlchemy 2.0 ORM 模型与仓储层已在 [`db_models.py`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/next_gen/db_models.py) 和 [`PostgresTradingRepository`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/next_gen/persistence.py) 中实现。
+> Alembic 迁移 [`20261018_0067_next_gen_execution_tables.py`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/alembic/versions/20261018_0067_next_gen_execution_tables.py) 创建了两张 NextGen 执行表（`live_position_batches`、`live_orders`）。后续迁移 [`20261021_0068_drop_retired_execution_tables.py`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/alembic/versions/20261021_0068_drop_retired_execution_tables.py) 计划删除 20 张无运行时消费者的旧表：有数据的表已导出并校验，另有两张表确认为空；该迁移尚未部署，降级需要显式从归档恢复数据。旧版执行服务、入口和部署选择已退役。当前更新固定使用 [`compose.next_gen.yaml`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.next_gen.yaml) 的 `nextgen` Profile，并确保 `migrate` 与 `market-data` 就绪。对应的 SQLAlchemy 2.0 ORM 模型与仓储层已在 [`db_models.py`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/next_gen/db_models.py) 和 [`PostgresTradingRepository`](file:///Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/next_gen/persistence.py) 中实现。
 >
-> **关于旧表清理**：下面的 Flat-State 归档步骤是可选的历史清理 Runbook，不是 0067 迁移的一部分，也不是 NextGen 启动的前置条件；执行前应确认归档范围和备份可读。
-
-如决定物理归档当前 10 张执行/决策持久化表，可采用**一次性干净停机平迁（Flat-State Cutover，可选）**：
-
-#### Step 1: 停机与 4 账户扁平确认
-- 在 15m K线收盘时下发 `operator_drain`，等待 4 个账户在持批次全部平仓完毕；
-- 确认交易所 4 个账户当前持仓均为 0（`LONG = 0` 且 `SHORT = 0`，即 Flat State），且无任何活跃挂单（Open Orders = 0）。
-
-#### Step 2: 建立全新 2 张目标表
-- 在数据库中直接执行 4.2 节的 DDL，创建带 `environment` 与 `account_label` 的 `live_position_batches` 与 `live_orders`。
-
-#### Step 3: 真实 10 张历史表一键安全归档
-```sql
--- 创建归档专用 Schema，隔离旧版本 10 张核心执行与决策持久化表
-CREATE SCHEMA IF NOT EXISTS cml_legacy_execution_0066;
-
-ALTER TABLE IF EXISTS execution_book_heads SET SCHEMA cml_legacy_execution_0066;
-ALTER TABLE IF EXISTS execution_commands SET SCHEMA cml_legacy_execution_0066;
-ALTER TABLE IF EXISTS execution_order_watermarks SET SCHEMA cml_legacy_execution_0066;
-ALTER TABLE IF EXISTS execution_trade_identities SET SCHEMA cml_legacy_execution_0066;
-ALTER TABLE IF EXISTS execution_evidence_receipts SET SCHEMA cml_legacy_execution_0066;
-ALTER TABLE IF EXISTS execution_retired_streams SET SCHEMA cml_legacy_execution_0066;
-ALTER TABLE IF EXISTS position_reservations SET SCHEMA cml_legacy_execution_0066;
-ALTER TABLE IF EXISTS durable_decision_exits SET SCHEMA cml_legacy_execution_0066;
-ALTER TABLE IF EXISTS durable_policy_states SET SCHEMA cml_legacy_execution_0066;
-ALTER TABLE IF EXISTS durable_policy_commits SET SCHEMA cml_legacy_execution_0066;
-```
-
-#### Step 4: 运维看板与风控校验一键对齐
-- 修改 `operator_dashboard/fact_integrity_queries.py` 与 `decision_facts.py`，直接单表查询 `live_position_batches` 与 `live_orders`。
+> 旧版 Flat-State / `ALTER TABLE ... SET SCHEMA` 清理 Runbook 已由 0068 迁移取代；不要再按旧步骤手工移动或删除表。
 
 ---
 

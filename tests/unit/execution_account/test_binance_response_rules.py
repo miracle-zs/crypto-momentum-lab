@@ -4,7 +4,6 @@ import pytest
 from crypto_momentum_lab.execution_account.binance.response_rules import (
     exchange_error_code,
     exchange_error_message,
-    is_invalid_leverage_rejection,
     retry_after_seconds,
 )
 
@@ -82,10 +81,3 @@ def test_malformed_present_error_code_keeps_conversion_exception(code):
 )
 def test_error_message_preserves_truthy_text_and_status_fallback(payload, expected):
     assert exchange_error_message(error(payload)) == expected
-
-
-@pytest.mark.parametrize(
-    "code,expected", [(-4028, True), ("-4028", True), (-4046, False), (None, False)]
-)
-def test_only_invalid_leverage_code_allows_leverage_fallback(code, expected):
-    assert is_invalid_leverage_rejection(error({"code": code})) is expected

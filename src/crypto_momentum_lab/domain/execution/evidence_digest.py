@@ -2,13 +2,12 @@
 
 import hashlib
 import json
-from dataclasses import asdict, replace
-from datetime import UTC, datetime, timedelta
+from dataclasses import asdict
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 
 from crypto_momentum_lab.domain.account.models import AccountFillEvent
-from crypto_momentum_lab.domain.execution.position_ledger_models import PositionView
 
 
 def digest_json_payload(payload: object) -> str:
@@ -46,22 +45,4 @@ def trade_payload_digest(fill: AccountFillEvent) -> str:
             if "." in rendered
             else rendered
         )
-    return digest_json_payload(payload)
-
-
-def trade_payload_digest_aliases(fill: AccountFillEvent) -> tuple[str, ...]:
-    """Return hashes for the exchange's millisecond timestamp rounding edge."""
-    return tuple(
-        trade_payload_digest(
-            replace(fill, trade_at=fill.trade_at + timedelta(milliseconds=offset))
-        )
-        for offset in (-1, 1)
-    )
-
-
-def view_projection_digest(view: PositionView) -> str:
-    payload = asdict(view)
-    payload.pop("projection_version", None)
-    payload.pop("pending_command_ids", None)
-    payload.pop("active_entry_command_ids", None)
     return digest_json_payload(payload)

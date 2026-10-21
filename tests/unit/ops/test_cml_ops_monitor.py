@@ -4,7 +4,6 @@ import json
 import urllib.parse
 import urllib.request
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 
 import pytest
 
@@ -15,11 +14,6 @@ from deploy.ops.cml_ops_monitor import (
     LogSignals,
     MonitorConfig,
     OpsMonitor,
-    OrderIntentObservation,
-    PositionObservation,
-    SignalObservation,
-    _alert_action,
-    _alert_scope,
     _deliver_external_heartbeat,
     _deliver_serverchan,
     _human_seconds,
@@ -33,13 +27,9 @@ from deploy.ops.cml_ops_monitor import (
     _serverchan_title,
     build_config,
     build_deadman_heartbeat_payload,
-    coalesce_shared_market_state_alerts,
     evaluate_container,
     evaluate_container_memory_growth,
     evaluate_log_signals,
-    evaluate_position_divergence,
-    evaluate_position_intent_divergence,
-    evaluate_signal_divergence,
     rss_warning_fraction_for,
 )
 
@@ -119,7 +109,6 @@ def test_merge_log_signals_keeps_every_field() -> None:
         telemetry_persist_failures=3,
         exit_processing_degraded_symbols=("BTWUSDT",),
         dead_connection_tasks=("grp-b",),
-        avg_price_schema_drifts=(("account-4", "BTCUSDT", "number"),),
         fact_inconsistencies=(("primary", "BTCUSDT", "repair_blocked"),),
         deferred_exits=(("primary", "ETHUSDT", "deferred_until_ready"),),
         expired_candidates=(("primary", "SOLUSDT"),),
@@ -130,7 +119,6 @@ def test_merge_log_signals_keeps_every_field() -> None:
     assert merged.telemetry_persist_failures == 4
     assert merged.exit_processing_degraded_symbols == ("龙虾USDT", "BTWUSDT")
     assert merged.dead_connection_tasks == ("grp-a", "grp-b")
-    assert merged.avg_price_schema_drifts == (("account-4", "BTCUSDT", "number"),)
     assert merged.latest_rss_bytes == 100
     assert merged.rss_observed_at is not None
     assert merged.fact_inconsistencies == (("primary", "BTCUSDT", "repair_blocked"),)
@@ -142,7 +130,6 @@ def test_merge_log_signals_keeps_every_field() -> None:
         "telemetry_persist_failures",
         "exit_processing_degraded_symbols",
         "dead_connection_tasks",
-        "avg_price_schema_drifts",
         "latest_rss_bytes",
         "rss_observed_at",
         "fact_inconsistencies",
@@ -253,31 +240,6 @@ def test_log_signals_preserve_each_dead_market_group_from_console_output(
     )
 
 
-def test_log_signals_collect_avg_price_schema_drift_from_console_output(
-    tmp_path,
-) -> None:
-    class Runner:
-        def run(self, args, *, timeout_seconds):
-            del timeout_seconds
-            if args[:2] == ["docker", "logs"]:
-                return (
-                    "2026-10-06 08:05:34 [warning  ] "
-                    "binance_order_submit_avg_price_schema_drift "
-                    "account_label=account-4 avg_price_json_type=number "
-                    "symbol=BTCUSDT\n"
-                )
-            return ""
-
-    monitor = OpsMonitor(
-        MonitorConfig(state_path=tmp_path / "state.json"),
-        runner=Runner(),
-    )
-
-    signals = monitor._log_signals(None, "live-4", since_seconds=60)
-
-    assert signals.avg_price_schema_drifts == (("account-4", "BTCUSDT", "number"),)
-
-
 def test_log_signals_reads_console_output_and_ignores_re_enable(tmp_path) -> None:
     """A stuck exit must alert; a lane coming back up must not."""
 
@@ -329,46 +291,24 @@ def test_log_signals_alert_on_persist_failure_and_dead_task() -> None:
     assert all(isinstance(alert, Alert) for alert in alerts)
 
 
-def test_log_signals_alert_on_binance_avg_price_schema_drift() -> None:
-    alerts = evaluate_log_signals(
-        LogSignals(avg_price_schema_drifts=(("account-4", "BTCUSDT", "number"),))
-    )
-
-    assert len(alerts) == 1
-    alert = alerts[0]
-    assert alert.name == "binance_avg_price_schema_drift:account-4:BTCUSDT"
-    assert alert.severity == "warning"
-    assert alert.details == {
-        "account_label": "account-4",
-        "symbol": "BTCUSDT",
-        "avg_price_json_type": "number",
-        "count": 1,
-    }
-
-
 def test_monitor_reads_market_data_logs_once_for_all_accounts(
     tmp_path,
     monkeypatch,
 ) -> None:
     from deploy.ops import cml_ops_monitor
 
-    accounts = (
-        ("primary", "live-primary-v1"),
-        ("account-2", "live-account-2-v1"),
-        ("account-3", "live-account-3-v1"),
-        ("account-4", "live-account-4-v1"),
-    )
+    accounts = ("primary", "account-2", "account-3", "account-4")
     container_ids = {
         "market-data": "market-container",
         **{
             f"nextgen-strategy-{account}": f"{account}-container"
-            for account, _run_id in accounts
+            for account in accounts
         },
     }
     monitor = OpsMonitor(
         MonitorConfig(
             services=(),
-            live_accounts=accounts,
+            live_account_labels=accounts,
             state_path=tmp_path / "state.json",
             retention_timer_unit="",
         )
@@ -977,575 +917,31 @@ def test_memory_details_carry_readable_companions() -> None:
 
 
 def test_push_title_drops_the_scope_before_truncating_the_label() -> None:
-    """A truncated Chinese label says nothing useful.
-
-    "实时状态 checkpoint 已过" is not a shorter version of the real label, it
-    is a different, meaningless one.  The scope is repeated on the body's
-    first line, so it is the safer thing to give up.
-    """
+    """The scope is repeated in the body, so preserve the full alert label."""
 
     assert _serverchan_title("严重", "account-3", "行情延迟过高") == (
         "CML | 严重 | account-3 | 行情延迟过高"
     )
 
     # Too long for the cap: the scope goes, the label survives intact.
-    title = _serverchan_title("严重", "account-4", "实时状态 checkpoint 已过期")
-    assert title == "CML | 严重 | 实时状态 checkpoint 已过期"
-    assert "已过期" in title
+    title = _serverchan_title("严重", "account-4", "实时策略心跳过期")
+    assert title == "CML | 严重 | 实时策略心跳过期"
+    assert "过期" in title
 
     # Same rule on the resolution side.
-    assert _serverchan_title("恢复", "account-4", "实时状态 checkpoint 已过期") == (
-        "CML | 恢复 | 实时状态 checkpoint 已过期"
+    assert _serverchan_title("恢复", "account-4", "实时策略心跳过期") == (
+        "CML | 恢复 | 实时策略心跳过期"
     )
 
     # No scope at all still renders.
     assert _serverchan_title("恢复", "", "行情延迟过高") == "CML | 恢复 | 行情延迟过高"
 
 
-def test_coalesce_shared_market_state_alerts_reports_one_root_cause() -> None:
-    alerts = (
-        Alert(
-            "live_market_state_delay:primary",
-            "warning",
-            "delay",
-            {"account_label": "primary", "delay_ms": 31_000},
-        ),
-        Alert(
-            "live_market_state_delay:account-2",
-            "critical",
-            "delay",
-            {"account_label": "account-2", "delay_ms": 121_000},
-        ),
-        Alert(
-            "live_unknown_orders:primary",
-            "warning",
-            "orders",
-            {"account_label": "primary"},
-        ),
-    )
-
-    result = coalesce_shared_market_state_alerts(
-        alerts,
-        account_labels=("primary", "account-2"),
-    )
-
-    assert [alert.name for alert in result] == [
-        "live_market_state_delay",
-        "live_unknown_orders:primary",
-    ]
-    assert result[0].severity == "critical"
-    assert result[0].details == {
-        "delay_ms": 121_000,
-        "account_labels": ("account-2", "primary"),
-        "affected_account_count": 2,
-        "scope": "shared_market_data",
-    }
-
-
-def test_coalesce_shared_market_state_alerts_keeps_partial_failure_scoped() -> None:
-    alerts = (
-        Alert(
-            "live_market_state_stale:primary",
-            "critical",
-            "stale",
-            {"account_label": "primary", "age_seconds": 180},
-        ),
-    )
-
-    assert (
-        coalesce_shared_market_state_alerts(
-            alerts,
-            account_labels=("primary", "account-2"),
-        )
-        == alerts
-    )
-
-
-def test_signal_divergence_compares_only_same_strategy_configuration() -> None:
-    common = {
-        "symbol": "BTCUSDT",
-        "bucket_start": "2026-09-01T00:00:00+00:00",
-        "strategy_config_hash": "same-config",
-        "signal_count": 1,
-        "candidate_count": 1,
-    }
-    assert (
-        evaluate_signal_divergence(
-            (
-                SignalObservation("primary", fingerprint="same", **common),
-                SignalObservation("account-2", fingerprint="same", **common),
-            )
-        )
-        == ()
-    )
-
-    alerts = evaluate_signal_divergence(
-        (
-            SignalObservation("primary", fingerprint="long", **common),
-            SignalObservation("account-2", fingerprint="short", **common),
-            SignalObservation(
-                "account-3",
-                fingerprint="different-config",
-                strategy_config_hash="other-config",
-                **{
-                    key: value
-                    for key, value in common.items()
-                    if key != "strategy_config_hash"
-                },
-            ),
-        )
-    )
-
-    assert [alert.name for alert in alerts] == ["live_signal_divergence"]
-    assert alerts[0].details["group_count"] == 1
-
-
-def test_signal_divergence_ignores_async_candidate_count_difference() -> None:
-    common = {
-        "symbol": "XPINUSDT",
-        "bucket_start": "2026-09-13T05:39:15+00:00",
-        "strategy_config_hash": "same-config",
-        "signal_count": 1,
-        "fingerprint": "same-signal",
-    }
-
-    assert (
-        evaluate_signal_divergence(
-            (
-                SignalObservation("primary", candidate_count=1, **common),
-                SignalObservation("account-2", candidate_count=0, **common),
-            )
-        )
-        == ()
-    )
-
-
-def test_signal_fingerprint_covers_only_account_stable_features(tmp_path) -> None:
-    """The durable fingerprint must not cover per-run rolling ratios.
-
-    Two accounts on one config recompute ``notional_5m_vs_30m`` from their own
-    local market-state window, so that value differs between them by a
-    rounding-level amount; fingerprinting the whole ``features`` blob would
-    report a divergence for every shared bucket.
-    """
-
-    class Runner:
-        last_args = None
-
-        def run(self, args, *, timeout_seconds):
-            del timeout_seconds
-            self.last_args = args
-            return ""
-
-    runner = Runner()
-    monitor = OpsMonitor(
-        MonitorConfig(state_path=tmp_path / "state.json"),
-        runner=runner,
-    )
-
-    monitor._consistency_observations("postgres-container")
-    sql = str(runner.last_args[-1])
-
-    assert "features::text" not in sql
-    assert "'notional_5m_vs_30m'" not in sql
-    assert "'aggressive_imbalance'" in sql
-    assert "'impulse_return_pct'" in sql
-    assert "reference_prices" in sql
-
-
-def test_signal_fingerprint_drops_position_derived_keys_for_reduce_only(
-    tmp_path,
-) -> None:
-    """A close signal states a size that follows the position, not the choice.
-
-    On 2026-09-14 05:14:45 all four accounts produced the same
-    reduce_only_candidate with the same side and reason, yet their fingerprints
-    differed on `quantity`, `batch_id` and `desired_notional` -- three values
-    that describe what each account happened to hold.
-    """
-
-    class Runner:
-        last_args = None
-
-        def run(self, args, *, timeout_seconds):
-            del timeout_seconds
-            self.last_args = args
-            return ""
-
-    runner = Runner()
-    monitor = OpsMonitor(
-        MonitorConfig(state_path=tmp_path / "state.json"),
-        runner=runner,
-    )
-
-    monitor._consistency_observations("postgres-container")
-    sql = str(runner.last_args[-1])
-
-    assert "WHEN signal_kind = 'reduce_only_candidate'" in sql
-    assert "'quantity'" in sql and "'batch_id'" in sql
-    assert "reference_prices - 'desired_notional'" in sql
-
-
-def test_fingerprint_normalises_numeric_feature_rendering(tmp_path) -> None:
-    """Equal numbers written with different trailing zeros must compare equal.
-
-    On 2026-09-15 04:04 two accounts on the same config, same symbol and same
-    bucket both reported breakout_level = 0.1469 -- one rendered as
-    "0.1469000" and the other as "0.146900000000000000" (Decimal(float)
-    expands to the full IEEE value).  Every other feature matched digit for
-    digit, yet the raw-text fingerprint differed, so the alert fired on a
-    rendering difference rather than a decision difference.
-    """
-
-    class Runner:
-        last_args = None
-
-        def run(self, args, *, timeout_seconds):
-            del timeout_seconds
-            self.last_args = args
-            return ""
-
-    runner = Runner()
-    monitor = OpsMonitor(
-        MonitorConfig(state_path=tmp_path / "state.json"),
-        runner=runner,
-    )
-
-    monitor._consistency_observations("postgres-container")
-    sql = str(runner.last_args[-1])
-
-    # Numeric features are cast through trim_scale, and read with ->> so the
-    # JSON string's quotes do not break the cast.
-    assert "trim_scale((features->>'breakout_level')::numeric)" in sql
-    assert "trim_scale((features->>'impulse_return_pct')::numeric)" in sql
-    # Non-numeric features keep their raw JSON value.
-    assert "trim_scale((features->>'direction')" not in sql
-    assert "trim_scale((features->>'impulse_start')" not in sql
-
-
-def test_signal_divergence_sql_excludes_close_candidates(tmp_path) -> None:
-    """A close candidate exists because the account holds the symbol.
-
-    Whether one appears at all follows the position, and positions diverge
-    between two correct accounts as soon as their fills differ -- so requiring
-    close candidates to match compares execution through the signal table.
-    That the account *asked the exchange* to close is covered separately by
-    ``evaluate_position_intent_divergence``, which ignores the closing
-    quantity.  On 2026-09-14 the same four accounts produced matching close
-    candidates whose only difference was what each happened to hold; this
-    filter removes the other half of that comparison.
-    """
-
-    class Runner:
-        last_args = None
-
-        def run(self, args, *, timeout_seconds):
-            del timeout_seconds
-            self.last_args = args
-            return ""
-
-    runner = Runner()
-    monitor = OpsMonitor(
-        MonitorConfig(state_path=tmp_path / "state.json"),
-        runner=runner,
-    )
-
-    monitor._consistency_observations("postgres-container")
-    sql = str(runner.last_args[-1])
-
-    assert "signal_kind <> 'reduce_only_candidate'" in sql
-
-
-def test_output_event_does_not_override_the_durable_signal_count(tmp_path) -> None:
-    """The observed event repeats itself; only its candidate count is used.
-
-    The same (run, bucket) writes strategy_output_observed up to thirty times
-    with a signal_count that disagrees with the durable rows, so borrowing it
-    made two accounts look divergent when each had exactly one signal.
-    """
-
-    class Runner:
-        def run(self, args, *, timeout_seconds):
-            del timeout_seconds
-            if args[:2] == ["docker", "exec"]:
-                return (
-                    "signal\tprimary\tMTLUSDT\t2026-09-14 05:14:45+00\tcfg\t1\tfp-a\n"
-                    "output\tlive-primary-v1\tMTLUSDT\t2026-09-14 05:14:45+00"
-                    "\tcfg\t7\t3\n"
-                )
-            if args and args[0] == "systemctl":
-                # The retention-schedule check reads systemd on the host; this
-                # runner stubs only the container and database probes.
-                return ""
-            raise AssertionError(f"unexpected command: {args}")
-
-    monitor = OpsMonitor(
-        MonitorConfig(state_path=tmp_path / "state.json"),
-        runner=Runner(),
-    )
-
-    signals, _positions, _orders = monitor._consistency_observations("postgres")
-
-    assert len(signals) == 1
-    # The durable row's count wins; the event's own count is ignored.
-    assert signals[0].signal_count == 1
-    # The candidate count is the one thing the event is trusted for.
-    assert signals[0].candidate_count == 3
-
-
-def test_order_intent_comparison_excludes_account_local_closing_orders(
-    tmp_path,
-) -> None:
-    """Closing execution follows account facts, not the common strategy intent.
-
-    After the 04:26 partial fill, account-4 held 198 while its peers held 262.
-    Their 05:15 exit orders therefore carried different quantities and were
-    reported as divergent intent -- the same fill difference, re-raised through
-    the order table.
-    """
-
-    class Runner:
-        last_args = None
-
-        def run(self, args, *, timeout_seconds):
-            del timeout_seconds
-            self.last_args = args
-            return ""
-
-    runner = Runner()
-    monitor = OpsMonitor(
-        MonitorConfig(state_path=tmp_path / "state.json"),
-        runner=runner,
-    )
-
-    monitor._consistency_observations("postgres-container")
-    sql = str(runner.last_args[-1])
-
-    assert "FROM exchange_orders" in sql
-    # All closing orders are excluded: their type, price, and quantity derive
-    # from each account's own holdings and recovery state.
-    assert "AND NOT reduce_only" in sql
-    assert "WHEN reduce_only THEN 'close'" not in sql
-    # An opening order still contributes the quantity and price it chose.
-    assert "quantity::text || ':' || COALESCE(price::text, '')" in sql
-    # Orders are read against the signals that should have produced them, so
-    # an account that never sent one still appears (with order_count = 0).
-    assert "LEFT JOIN (" in sql
-
-
-def test_position_intent_divergence_compares_intent_not_fills() -> None:
-    """Accounts must agree on what they asked for, not on what filled.
-
-    The live failure this encodes: four accounts sent the same 262-lot limit
-    order, one of them only filled 198, and the position comparison reported
-    the fill difference as a critical divergence.
-    """
-
-    def intent(
-        account: str,
-        count: int,
-        fingerprint: str | None,
-    ) -> OrderIntentObservation:
-        return OrderIntentObservation(
-            account_label=account,
-            symbol="MTLUSDT",
-            order_count=count,
-            strategy_config_hash="cfg",
-            fingerprint=fingerprint,
-        )
-
-    # Identical orders everywhere -- only the fills differed, so no alert.
-    assert (
-        evaluate_position_intent_divergence(
-            (
-                intent("primary", 1, "buy-limit-262"),
-                intent("account-2", 1, "buy-limit-262"),
-                intent("account-3", 1, "buy-limit-262"),
-                intent("account-4", 1, "buy-limit-262"),
-            )
-        )
-        == ()
-    )
-
-    # A different quantity is a different intent.
-    alerts = evaluate_position_intent_divergence(
-        (
-            intent("account-3", 1, "buy-limit-262"),
-            intent("account-4", 1, "buy-limit-198"),
-        )
-    )
-    assert [alert.name for alert in alerts] == ["live_position_intent_divergence"]
-    assert alerts[0].severity == "critical"
-    assert alerts[0].details["group_count"] == 1
-
-    # An account that never sent anything is the worst case, not a missing row.
-    assert [
-        alert.name
-        for alert in evaluate_position_intent_divergence(
-            (intent("account-3", 1, "buy-limit-262"), intent("account-4", 0, None))
-        )
-    ] == ["live_position_intent_divergence"]
-
-    # Accounts on different configs are never comparable.
-    assert (
-        evaluate_position_intent_divergence(
-            (
-                OrderIntentObservation("primary", "MTLUSDT", 1, "cfg-a", "a"),
-                OrderIntentObservation("account-3", "MTLUSDT", 1, "cfg-b", "b"),
-            )
-        )
-        == ()
-    )
-
-
-def test_position_spread_is_recorded_as_state_not_raised(tmp_path) -> None:
-    """Holdings that differ because of a partial fill stay out of the alerts."""
-
-    monitor = OpsMonitor(
-        MonitorConfig(state_path=tmp_path / "state.json"),
-        runner=None,
-    )
-
-    monitor._record_position_spread(
-        (
-            PositionObservation(
-                "account-3", "ready", 5.0, "MTLUSDT", "LONG", Decimal("262"), "cfg"
-            ),
-            PositionObservation(
-                "account-4", "ready", 5.0, "MTLUSDT", "LONG", Decimal("198"), "cfg"
-            ),
-        )
-    )
-
-    spread = monitor._state["position_spread"]
-    assert [entry["symbol"] for entry in spread] == ["MTLUSDT"]
-    assert spread[0]["min_quantity"] == "198"
-    assert spread[0]["max_quantity"] == "262"
-    assert spread[0]["accounts"] == {
-        "account-3:LONG": "262",
-        "account-4:LONG": "198",
-    }
-
-
-def test_position_divergence_ignores_stale_reconciliation() -> None:
-    observations = (
-        PositionObservation(
-            "primary",
-            "ready",
-            10,
-            "BTCUSDT",
-            "BOTH",
-            Decimal("1"),
-        ),
-        PositionObservation(
-            "account-2",
-            "ready",
-            10,
-            "BTCUSDT",
-            "BOTH",
-            Decimal("2"),
-        ),
-        PositionObservation(
-            "account-3",
-            "ready",
-            999,
-            "BTCUSDT",
-            "BOTH",
-            Decimal("99"),
-        ),
-    )
-
-    alerts = evaluate_position_divergence(
-        observations,
-        stale_after_seconds=120,
-    )
-
-    assert [alert.name for alert in alerts] == ["live_position_divergence"]
-    assert alerts[0].details["pair_count"] == 1
-
-
-def test_build_config_reads_live_session_from_compose_env(
-    tmp_path, monkeypatch
-) -> None:
-    env_file = tmp_path / "compose.env"
-    env_file.write_text(
-        "CML_LIVE_SESSION_ID='live-b1-long-100u-5x-v1'\n"
-        "CML_LIVE_ACCOUNT_LABEL='primary-2'\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("CML_COMPOSE_ENV_FILE", str(env_file))
-    args = argparse.Namespace(
-        project_directory=str(tmp_path),
-        compose_file=str(tmp_path / "compose.yaml"),
-        services="postgres",
-        live_run_id=None,
-        interval_seconds=60.0,
-        log_window_seconds=120.0,
-        rss_warning_fraction=0.75,
-        rss_critical_fraction=0.90,
-        rss_growth_bytes=64 * 1024 * 1024,
-        rss_growth_window_seconds=1_800.0,
-        alert_cooldown_seconds=900.0,
-        command_timeout_seconds=15.0,
-        state_path=str(tmp_path / "state.json"),
-    )
-
-    config = build_config(args)
-
-    assert config.live_run_id == "live-b1-long-100u-5x-v1"
-    assert config.live_account_label == "primary-2"
-
-
-def test_build_config_supports_multiple_compose_files_and_live_accounts(
-    tmp_path, monkeypatch
-) -> None:
-    monkeypatch.delenv("CML_COMPOSE_PROFILES", raising=False)
-    monkeypatch.setenv(
-        "CML_MONITOR_LIVE_ACCOUNTS",
-        "primary|live-primary-v1,account-2|live-account-2-v1",
-    )
-    args = argparse.Namespace(
-        project_directory=str(tmp_path),
-        compose_file=str(tmp_path / "ignored-compose.yaml"),
-        services="postgres,nextgen-strategy-primary,nextgen-strategy-account-2",
-        live_run_id=None,
-        interval_seconds=60.0,
-        log_window_seconds=120.0,
-        rss_warning_fraction=0.75,
-        rss_critical_fraction=0.90,
-        rss_growth_bytes=64 * 1024 * 1024,
-        rss_growth_window_seconds=1_800.0,
-        alert_cooldown_seconds=900.0,
-        command_timeout_seconds=15.0,
-        state_path=str(tmp_path / "state.json"),
-    )
-
-    config = build_config(args)
-    monitor = OpsMonitor(config, runner=None)
-
-    assert config.compose_files == (
-        tmp_path / "compose.server.yaml",
-        tmp_path / "compose.next_gen.yaml",
-    )
-    assert config.compose_profiles == ("nextgen",)
-    assert config.live_accounts == (
-        ("primary", "live-primary-v1"),
-        ("account-2", "live-account-2-v1"),
-    )
-    assert monitor._compose_prefix()[-4:] == [
-        "-f",
-        str(tmp_path / "compose.next_gen.yaml"),
-        "--profile",
-        "nextgen",
-    ]
-
-
-def test_build_config_discovers_live_accounts_from_compose_files(
+def test_build_config_discovers_live_account_labels_from_compose_files(
     tmp_path, monkeypatch
 ) -> None:
     base_file = tmp_path / "compose.server.yaml"
     overlay_file = tmp_path / "compose.next_gen.yaml"
-    env_file = tmp_path / ".env.server"
     base_file.write_text(
         "services:\n"
         "  postgres:\n"
@@ -1561,18 +957,11 @@ def test_build_config_discovers_live_accounts_from_compose_files(
         "  nextgen-strategy-account-4:\n",
         encoding="utf-8",
     )
-    env_file.write_text(
-        "CML_LIVE_SESSION_ID_ACCOUNT_2=custom-account-2\n",
-        encoding="utf-8",
-    )
-    monkeypatch.delenv("CML_MONITOR_LIVE_ACCOUNTS", raising=False)
     monkeypatch.delenv("CML_MONITOR_SERVICES", raising=False)
-    monkeypatch.setenv("CML_COMPOSE_ENV_FILE", str(env_file))
     args = argparse.Namespace(
         project_directory=str(tmp_path),
         compose_file=str(tmp_path / "ignored-compose.yaml"),
         services=None,
-        live_run_id=None,
         interval_seconds=60.0,
         log_window_seconds=120.0,
         rss_warning_fraction=0.75,
@@ -1586,11 +975,7 @@ def test_build_config_discovers_live_accounts_from_compose_files(
 
     config = build_config(args)
 
-    assert config.live_accounts == (
-        ("primary", "live-primary-v1"),
-        ("account-2", "custom-account-2"),
-        ("account-4", "live-account-4-v1"),
-    )
+    assert config.live_account_labels == ("primary", "account-2", "account-4")
     assert config.services == (
         "postgres",
         "market-data",
@@ -1599,6 +984,13 @@ def test_build_config_discovers_live_accounts_from_compose_files(
         "nextgen-strategy-account-2",
         "nextgen-strategy-account-4",
     )
+    monitor = OpsMonitor(config, runner=None)
+    assert monitor._compose_prefix()[-4:] == [
+        "-f",
+        str(overlay_file),
+        "--profile",
+        "nextgen",
+    ]
 
 
 def test_container_id_uses_docker_service_labels(tmp_path) -> None:
@@ -1633,7 +1025,6 @@ def test_serverchan_config_and_payload(monkeypatch, tmp_path) -> None:
         project_directory=str(tmp_path),
         compose_file=str(tmp_path / "compose.yaml"),
         services="postgres",
-        live_run_id="live-session",
         interval_seconds=60.0,
         log_window_seconds=120.0,
         rss_warning_fraction=0.75,
@@ -1690,9 +1081,9 @@ def test_serverchan_form_is_url_encoded_for_post() -> None:
     form = _serverchan_form(
         {
             "event": "ops_alert",
-            "alert_name": "live_checkpoint_stale",
+            "alert_name": "live_heartbeat_stale",
             "severity": "critical",
-            "summary": "检查失败：checkpoint stale",
+            "summary": "检查失败：heartbeat stale",
             "observed_at": "2026-09-01T12:00:00+00:00",
             "details": {},
         }
@@ -1759,10 +1150,10 @@ def test_alert_debounce_requires_consecutive_failures(monkeypatch, tmp_path) -> 
         ),
     )
     alert = Alert(
-        "live_market_state_delay:nextgen-strategy-account-2",
+        "database_check_failed:primary",
         "critical",
-        "Market state delay exceeded",
-        {"delay_ms": 150000},
+        "Database check failed",
+        {"account_label": "primary", "error_type": "TimeoutError"},
     )
 
     # 1st sample: pending (1 of 3), no alert emitted
@@ -1777,9 +1168,7 @@ def test_alert_debounce_requires_consecutive_failures(monkeypatch, tmp_path) -> 
     monitor._emit(alert, now=130.0)
     assert len(delivered) == 1
     assert delivered[0]["event"] == "ops_alert"
-    assert (
-        delivered[0]["alert_name"] == "live_market_state_delay:nextgen-strategy-account-2"
-    )
+    assert delivered[0]["alert_name"] == "database_check_failed:primary"
 
 
 def test_resolution_debounce_requires_consecutive_passes(monkeypatch, tmp_path) -> None:
@@ -1845,10 +1234,10 @@ def test_cooldown_persists_across_resolutions(monkeypatch, tmp_path) -> None:
         ),
     )
     alert = Alert(
-        "live_market_state_delay:nextgen-strategy-account-2",
+        "database_check_failed:primary",
         "critical",
-        "Market state delay exceeded",
-        {"delay_ms": 150000},
+        "Database check failed",
+        {"account_label": "primary", "error_type": "TimeoutError"},
     )
 
     # Fire at t=100s
@@ -1865,15 +1254,15 @@ def test_cooldown_persists_across_resolutions(monkeypatch, tmp_path) -> None:
     # Must NOT send another ops_alert notification!
     assert len(delivered) == 2
     assert (
-        "live_market_state_delay:nextgen-strategy-account-2"
+        "database_check_failed:primary"
         not in monitor._state["active_alerts"]
     )
     assert (
-        "live_market_state_delay:nextgen-strategy-account-2"
+        "database_check_failed:primary"
         not in monitor._state["active_alert_context"]
     )
     assert (
-        "live_market_state_delay:nextgen-strategy-account-2"
+        "database_check_failed:primary"
         not in monitor._state["alert_occurrences"]
     )
 
@@ -2032,7 +1421,7 @@ def test_unhealthy_nextgen_account_alerts_without_automatic_restart(
             compose_profiles=("nextgen",),
             compose_env_file=None,
             services=(expected_service,),
-            live_accounts=(("account-2", "live-account-2-v1"),),
+            live_account_labels=("account-2",),
             state_path=tmp_path / "state.json",
         ),
         runner=runner,
@@ -2066,174 +1455,6 @@ def test_unhealthy_nextgen_account_alerts_without_automatic_restart(
     )
 
 
-def test_position_divergence_ignores_accounts_on_different_configs() -> None:
-    """Accounts running different strategy configs are not comparable."""
-
-    left = PositionObservation(
-        "primary",
-        "ready",
-        10,
-        "BTCUSDT",
-        "BOTH",
-        Decimal("1"),
-        "config-a",
-    )
-    right = PositionObservation(
-        "account-2",
-        "ready",
-        10,
-        "BTCUSDT",
-        "BOTH",
-        Decimal("5"),
-        "config-b",
-    )
-
-    # Different configs: the quantity gap is expected, so no alert.
-    assert evaluate_position_divergence((left, right), stale_after_seconds=60) == ()
-
-    same_config = PositionObservation(
-        "account-2",
-        "ready",
-        10,
-        "BTCUSDT",
-        "BOTH",
-        Decimal("5"),
-        "config-a",
-    )
-    alerts = evaluate_position_divergence(
-        (left, same_config),
-        stale_after_seconds=60,
-    )
-    assert [alert.name for alert in alerts] == ["live_position_divergence"]
-    assert alerts[0].details["differences"][0]["strategy_config_hash"] == "config-a"
-
-
-def test_position_divergence_groups_unknown_configs_apart() -> None:
-    """An unknown (empty) config hash must not be compared with a known one."""
-
-    known = PositionObservation(
-        "primary",
-        "ready",
-        10,
-        "BTCUSDT",
-        "BOTH",
-        Decimal("1"),
-        "config-a",
-    )
-    unknown = PositionObservation(
-        "account-2",
-        "ready",
-        10,
-        "BTCUSDT",
-        "BOTH",
-        Decimal("9"),
-    )
-
-    assert evaluate_position_divergence((known, unknown), stale_after_seconds=60) == ()
-
-
-def test_position_intent_divergence_scope_action_and_serverchan() -> None:
-    intent_a = OrderIntentObservation(
-        account_label="primary",
-        symbol="BTWUSDT",
-        order_count=0,
-        strategy_config_hash="c223e6dbad4d588e2916b47fa303762c6241bc18346765786950e51b3cd5cbdd",
-        fingerprint=None,
-        intent_summary=None,
-    )
-    intent_b = OrderIntentObservation(
-        account_label="account-2",
-        symbol="BTWUSDT",
-        order_count=1,
-        strategy_config_hash="c223e6dbad4d588e2916b47fa303762c6241bc18346765786950e51b3cd5cbdd",
-        fingerprint="a7be2db0c92b62b91f58651c26b62f27",
-        intent_summary="BUY LIMIT 141@0.707",
-    )
-
-    alerts = evaluate_position_intent_divergence((intent_a, intent_b))
-    assert len(alerts) == 1
-    alert = alerts[0]
-    assert alert.name == "live_position_intent_divergence"
-
-    details = alert.details
-    # 1. Test scope extracts symbol
-    scope = _alert_scope(alert.name, details)
-    assert scope == "BTWUSDT"
-
-    # 2. Test dynamic action detects missing order (zero count)
-    action = _alert_action(alert.name, details)
-    assert "检测到单边未下单" in action
-    assert "primary" in action
-
-    # 3. Test serverchan form formatting
-    form = _serverchan_form(
-        {
-            "event": "ops_alert",
-            "alert_name": alert.name,
-            "severity": "critical",
-            "summary": alert.summary,
-            "observed_at": "2026-09-15T07:57:44+00:00",
-            "details": details,
-        }
-    )
-
-    assert form["title"] == "CML | 严重 | BTWUSDT | 账户下单意图发生分叉"
-    assert "BTWUSDT" in form["desp"]
-    assert "c223e6db" in form["desp"]
-    assert (
-        "| `account-2` | 已下单 (**1** 笔) | 买入 141 @ 0.707（限价） |" in form["desp"]
-    )
-    assert "| `primary` | **未下单** (0 笔) | *(无委托)* |" in form["desp"]
-    assert "检测到单边未下单" in form["desp"]
-    assert "- **影响**" not in form["desp"]
-
-
-def test_position_intent_divergence_multi_order_and_zero_trimming() -> None:
-    details = {
-        "differences": [
-            {
-                "symbol": "FFUSDT",
-                "strategy_config_hash": "c223e6dbad4d588e2916b47fa303762c6241bc18346765786950e51b3cd5cbdd",
-                "accounts": [
-                    {
-                        "account_label": "account-2",
-                        "order_count": 2,
-                        "intent_summary": "BUY LIMIT 684.000000000000000000@0.146040000000000000, BUY LIMIT 691.000000000000000000@0.144540000000000000",
-                    },
-                    {
-                        "account_label": "primary",
-                        "order_count": 1,
-                        "intent_summary": "买入 691 @ 0.14454（限价）",
-                    },
-                ],
-            }
-        ],
-        "group_count": 1,
-    }
-    form = _serverchan_form(
-        {
-            "event": "ops_alert",
-            "alert_name": "live_position_intent_divergence",
-            "severity": "critical",
-            "summary": "Live accounts diverged on order intent for identical strategy configs",
-            "observed_at": "2026-09-15T10:19:51+00:00",
-            "details": details,
-        }
-    )
-
-    expected_account2 = (
-        "| `account-2` | 已下单 (**2** 笔) | "
-        "买入 684 @ 0.14604（限价）<br>买入 691 @ 0.14454（限价） |"
-    )
-    expected_primary = "| `primary` | 已下单 (**1** 笔) | 买入 691 @ 0.14454（限价） |"
-
-    assert expected_account2 in form["desp"]
-    assert expected_primary in form["desp"]
-    assert "0000000000000000" not in form["desp"]
-    assert "指纹" not in form["desp"]
-    assert "- **影响**" not in form["desp"]
-
-
 def test_container_memory_pressure_human_formatting() -> None:
     details = {
         "service": "market-data",
@@ -2263,133 +1484,6 @@ def test_container_memory_pressure_human_formatting() -> None:
         "Swap 换出情况**：当前换出 `32.6 MB` （本次新增: `+32.6 MB`）" in form["desp"]
     )
     assert "物理内存充足" in form["desp"]
-
-
-def test_position_and_signal_divergence_human_formatting() -> None:
-    # 1. Position divergence
-    pos_details = {
-        "pair_count": 1,
-        "differences": [
-            {
-                "accounts": ["primary", "account-2"],
-                "strategy_config_hash": "c223e6dbad4d588e2916b47fa303762c6241bc18346765786950e51b3cd5cbdd",
-                "quantity_differences": [
-                    {
-                        "symbol": "BTWUSDT",
-                        "position_side": "BOTH",
-                        "left_quantity": "141",
-                        "right_quantity": "0",
-                    }
-                ],
-            }
-        ],
-    }
-    pos_form = _serverchan_form(
-        {
-            "event": "ops_alert",
-            "alert_name": "live_position_divergence",
-            "severity": "critical",
-            "summary": "Comparable live account position snapshots diverged",
-            "observed_at": "2026-09-15T07:57:44+00:00",
-            "details": pos_details,
-        }
-    )
-    assert pos_form["title"] == "CML | 严重 | BTWUSDT | 账户持仓发生差异"
-    assert (
-        "分叉标的**：`BTWUSDT`（方向: BOTH，策略配置: `c223e6db`）" in pos_form["desp"]
-    )
-    assert "| `primary` | BOTH | **141** |" in pos_form["desp"]
-    assert "| `account-2` | BOTH | **0** |" in pos_form["desp"]
-
-    # 2. Signal divergence
-    sig_details = {
-        "group_count": 1,
-        "differences": [
-            {
-                "symbol": "BTCUSDT",
-                "bucket_start": "2026-09-15 15:55:00",
-                "strategy_config_hash": "c223e6dbad4d588e2916b47fa303762c6241bc18346765786950e51b3cd5cbdd",
-                "accounts": [
-                    {
-                        "account_label": "primary",
-                        "signal_count": 1,
-                        "candidate_count": 3,
-                    },
-                    {
-                        "account_label": "account-2",
-                        "signal_count": 0,
-                        "candidate_count": 0,
-                    },
-                ],
-            }
-        ],
-    }
-    sig_form = _serverchan_form(
-        {
-            "event": "ops_alert",
-            "alert_name": "live_signal_divergence",
-            "severity": "critical",
-            "summary": "Comparable live accounts emitted divergent signals",
-            "observed_at": "2026-09-15T07:57:44+00:00",
-            "details": sig_details,
-        }
-    )
-    assert sig_form["title"] == "CML | 严重 | BTCUSDT | 账户信号发生分叉"
-    assert (
-        "分叉标的**：`BTCUSDT`（时间桶: `2026-09-15 23:55:00`，策略配置: `c223e6db`）"
-        in sig_form["desp"]
-    )
-    assert "| `primary` | **1** / 3 | - |" in sig_form["desp"]
-    assert "| `account-2` | **0** / 0 | - |" in sig_form["desp"]
-
-
-def test_signal_divergence_with_fingerprint_table_and_action() -> None:
-    details = {
-        "group_count": 1,
-        "differences": [
-            {
-                "symbol": "USELESSUSDT",
-                "bucket_start": "2026-09-16 12:56:00",
-                "strategy_config_hash": "c223e6dbad4d588e2916b47fa303762c6241bc18346765786950e51b3cd5cbdd",
-                "accounts": [
-                    {
-                        "account_label": "account-2",
-                        "signal_count": 1,
-                        "candidate_count": 1,
-                        "fingerprint": "b243168a12345678",
-                    },
-                    {
-                        "account_label": "primary",
-                        "signal_count": 1,
-                        "candidate_count": 1,
-                        "fingerprint": "3fb5a01687654321",
-                    },
-                ],
-            }
-        ],
-    }
-    form = _serverchan_form(
-        {
-            "event": "ops_alert",
-            "alert_name": "live_signal_divergence",
-            "severity": "critical",
-            "summary": "Comparable live accounts emitted divergent signals",
-            "observed_at": "2026-09-16T12:55:58+00:00",
-            "details": details,
-        }
-    )
-
-    # 1. Compact title preserves 11-char scope USELESSUSDT without truncation
-    assert form["title"] == "CML[严重] USELESSUSDT | 账户信号发生分叉"
-    assert len(form["title"]) <= 32
-
-    # 2. Markdown table properly compares fingerprints
-    assert "| `account-2` | **1** / 1 | `b243168a` |" in form["desp"]
-    assert "| `primary` | **1** / 1 | `3fb5a016` |" in form["desp"]
-
-    # 3. Action and conclusion are concise
-    assert "同配置账户信号指纹不一致" in form["desp"]
-    assert "暂停扩仓；核对各账户策略配置差异" in form["desp"]
 
 
 def test_serverchan_title_compact_preserves_long_symbol() -> None:
@@ -2528,10 +1622,10 @@ def test_severity_escalation_bypasses_cooldown_and_tracks_occurrences(
 
     # 1. First warning emission
     warn_alert = Alert(
-        "live_unknown_orders:primary",
+        "container_memory_high:primary",
         "warning",
-        "unknown orders pending",
-        {"unknown_order_count": 1},
+        "container memory high",
+        {"memory_current_mb": 1024},
     )
     monitor._emit(warn_alert, now=100.0)
     assert len(delivered) == 1
@@ -2544,10 +1638,10 @@ def test_severity_escalation_bypasses_cooldown_and_tracks_occurrences(
 
     # 3. Third emission at t=300: escalated to critical - bypasses cooldown!
     crit_alert = Alert(
-        "live_unknown_orders:primary",
+        "container_memory_high:primary",
         "critical",
-        "unknown orders pending timeout",
-        {"unknown_order_count": 1},
+        "container memory high",
+        {"memory_current_mb": 2048},
     )
     monitor._emit(crit_alert, now=300.0)
     assert len(delivered) == 2
@@ -2581,10 +1675,10 @@ def test_single_recovery_notification_emitted_when_stable(
     )
 
     alert = Alert(
-        "live_order_command_terminal_mismatch:primary",
+        "database_check_failed:primary",
         "critical",
-        "mismatch detected",
-        {"mismatch_count": 1},
+        "database check failed",
+        {"account_label": "primary"},
     )
     monitor._emit(alert, now=100.0)
     monitor._emit(alert, now=160.0)
@@ -2668,32 +1762,13 @@ def test_serverchan_formatting_new_alerts() -> None:
     assert "候选执行前已超期" in form_cand["title"]
     assert "零 POST" in form_cand["desp"]
 
-    # 4. Terminal mismatch
-    form_mismatch = _serverchan_form(
-        {
-            "event": "ops_alert",
-            "alert_name": "live_order_command_terminal_mismatch:primary",
-            "severity": "critical",
-            "summary": "Terminal mismatch",
-            "observed_at": "2026-10-03T10:00:00+00:00",
-            "details": {
-                "account_label": "primary",
-                "mismatch_count": 1,
-                "oldest_age_seconds": 90.0,
-            },
-        }
-    )
-    assert "订单命令终态失步" in form_mismatch["title"]
-    assert "共 1 笔" in form_mismatch["desp"]
-    assert "90 秒" in form_mismatch["desp"]
-
-    # 5. Recovery with cumulative count
+    # 4. Recovery with cumulative count
     form_res = _serverchan_form(
         {
             "event": "ops_alert_resolved",
-            "alert_name": "live_order_command_terminal_mismatch:primary",
+            "alert_name": "database_check_failed:primary",
             "severity": "critical",
-            "summary": "Terminal mismatch resolved",
+            "summary": "Database check resolved",
             "observed_at": "2026-10-03T10:15:00+00:00",
             "duration_seconds": 900.0,
             "occurrence_count": 5,
@@ -2759,13 +1834,11 @@ def test_monitor_is_pinned_to_nextgen_even_if_legacy_setting_remains(
     env_file = tmp_path / ".env.server"
     env_file.write_text("CML_TRADING_ENGINE=legacy\n")
     monkeypatch.setenv("CML_COMPOSE_ENV_FILE", str(env_file))
-    monkeypatch.delenv("CML_MONITOR_LIVE_ACCOUNTS", raising=False)
     monkeypatch.delenv("CML_MONITOR_SERVICES", raising=False)
     args = argparse.Namespace(
         project_directory=str(root),
         compose_file=str(root / "compose.server.yaml"),
         services=None,
-        live_run_id=None,
         interval_seconds=60,
         log_window_seconds=120,
         rss_warning_fraction=0.75,

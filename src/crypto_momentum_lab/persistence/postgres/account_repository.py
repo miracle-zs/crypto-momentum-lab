@@ -18,7 +18,6 @@ from crypto_momentum_lab.domain.account.models import (
     AccountPositionSnapshot,
     AccountPositionStateSnapshot,
     AccountReconciliationRun,
-    ExecutionAccountProcessState,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
     AccountBalanceSnapshotRow,
@@ -28,7 +27,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
     AccountOpenOrderRow,
     AccountPositionSnapshotRow,
     AccountReconciliationRunRow,
-    ExecutionAccountProcessStateRow,
 )
 from crypto_momentum_lab.persistence.postgres.serialization import jsonable
 
@@ -52,24 +50,6 @@ def balance_snapshot_row(snapshot: AccountBalanceSnapshot) -> dict[str, object]:
         "unrealized_pnl": snapshot.unrealized_pnl,
         "observed_at": snapshot.observed_at,
         "raw_payload": jsonable(snapshot.raw_payload),
-    }
-
-
-def process_state_row(state: ExecutionAccountProcessState) -> dict[str, object]:
-    return {
-        "state_id": _row_id(
-            "execution-account-state",
-            state.environment,
-            state.account_label,
-            state.state.value,
-            state.occurred_at.isoformat(),
-            state.reason or "",
-        ),
-        "environment": state.environment,
-        "account_label": state.account_label,
-        "state": state.state.value,
-        "occurred_at": state.occurred_at,
-        "reason": state.reason,
     }
 
 
@@ -197,9 +177,6 @@ class PostgresAccountRepository:
                     await self._save_fill_reconciliation_cursors_in_session(
                         session, cursors
                     )
-
-    async def save_process_state(self, state: ExecutionAccountProcessState) -> None:
-        await self._insert(ExecutionAccountProcessStateRow, process_state_row(state))
 
     async def load_historical_fill_symbols(
         self,

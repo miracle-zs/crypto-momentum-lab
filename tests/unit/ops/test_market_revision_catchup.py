@@ -59,7 +59,7 @@ def _healthy():
     "field,value,reason",
     [
         ("unhealthy", ["strategy:unhealthy"], "unhealthy"),
-        ("other_alerts", ["live_market_state_delay"], "other_alerts"),
+        ("other_alerts", ["database_check_failed"], "other_alerts"),
         ("lock_waiters", 1, "lock_waiters"),
         ("old_transactions", 1, "old_transactions"),
         ("free_bytes", 7 * 1024**3, "low_disk_space"),

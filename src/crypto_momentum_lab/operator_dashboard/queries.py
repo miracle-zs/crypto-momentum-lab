@@ -218,6 +218,7 @@ class DashboardQueries:
             clock=self._clock,
             select_paper_runs=self._paper_account_queries.selected_paper_runs,
             paper_exit_details=_paper_exit_details,
+            live_accounts=nextgen_accounts,
             live_cash_flow_adjustments=self._live_cash_flow_adjustments,
             common_equity_start_at=self._common_equity_start_at,
         )

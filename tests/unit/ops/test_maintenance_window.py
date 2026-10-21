@@ -89,7 +89,6 @@ def test_only_lifecycle_alerts_are_silenced() -> None:
     assert _is_maintenance_noise("container_unhealthy")
     assert _is_maintenance_noise("container_missing")
     assert _is_maintenance_noise("live_heartbeat_stale:account-2")
-    assert _is_maintenance_noise("live_heartbeat_auto_restarted:primary")
     assert _is_maintenance_noise("live_crash_log_archive_failed:account-2")
 
     # A deploy can genuinely cause these, so they keep firing.
@@ -98,8 +97,6 @@ def test_only_lifecycle_alerts_are_silenced() -> None:
     assert not _is_maintenance_noise("container_memory_pressure")
     assert not _is_maintenance_noise("database_connection_pressure")
     assert not _is_maintenance_noise("container_oom_killed")
-    assert _is_maintenance_noise("live_account_lifecycle_not_ready:primary")
-    assert _is_maintenance_noise("live_market_state_stale")
 
 
 def test_maintenance_filters_before_notification_and_deadman(monkeypatch, tmp_path):
@@ -121,7 +118,7 @@ def test_maintenance_filters_before_notification_and_deadman(monkeypatch, tmp_pa
     monitor = OpsMonitor(
         MonitorConfig(
             services=("nextgen-strategy-primary",),
-            live_accounts=(),
+            live_account_labels=(),
             state_path=tmp_path / "state.json",
             consecutive_alerts_required=1,
         ),
@@ -175,7 +172,7 @@ def test_maintenance_does_not_hide_missing_postgres(monkeypatch, tmp_path):
     monitor = OpsMonitor(
         MonitorConfig(
             services=("postgres",),
-            live_accounts=(),
+            live_account_labels=(),
             state_path=tmp_path / "state.json",
             consecutive_alerts_required=1,
         ),

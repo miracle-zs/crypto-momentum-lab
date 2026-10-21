@@ -16,6 +16,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql.selectable import Values
 
+from crypto_momentum_lab.live_rollout.runtime_manifest import LiveRuntimeAccount
+from crypto_momentum_lab.operator_dashboard.account_equity_history import (
+    AccountEquityPoint,
+    account_equity_statement,
+)
 from crypto_momentum_lab.operator_dashboard.common_equity import (
     LiveCashFlowAdjustment,
     build_common_equity_result,
@@ -33,13 +38,8 @@ from crypto_momentum_lab.operator_dashboard.common_equity import (
 from crypto_momentum_lab.operator_dashboard.common_equity import (
     relative_bucket_end as _relative_bucket_end,
 )
-from crypto_momentum_lab.operator_dashboard.account_equity_history import (
-    AccountEquityPoint,
-    account_equity_statement,
-)
 from crypto_momentum_lab.operator_dashboard.overview_queries import (
     account_label_sort_key,
-    latest_live_account_process_statement,
 )
 from crypto_momentum_lab.operator_dashboard.schemas import (
     PaperAccountEquityResponse,
@@ -49,9 +49,7 @@ from crypto_momentum_lab.operator_dashboard.status import OperationalStatus
 from crypto_momentum_lab.persistence.postgres.models import (
     AccountBalanceSnapshotRow,
     CashFlowCorrectionRow,
-    ExecutionAccountProcessStateRow,
     PaperEquitySnapshotRow,
-    StrategyLiveStateRow,
     StrategyRunRow,
 )
 
@@ -371,6 +369,7 @@ class PaperEquityQueries:
         clock: Callable[[], datetime],
         select_paper_runs: PaperRunSelector,
         paper_exit_details: PaperExitDetails,
+        live_accounts: Sequence[LiveRuntimeAccount],
         live_cash_flow_adjustments: Sequence[LiveCashFlowAdjustment],
         common_equity_start_at: datetime | None,
     ) -> None:
@@ -378,13 +377,13 @@ class PaperEquityQueries:
         self._clock = clock
         self._select_paper_runs = select_paper_runs
         self._paper_exit_details = paper_exit_details
+        self._live_accounts = tuple(live_accounts)
         self._live_cash_flow_adjustments = tuple(live_cash_flow_adjustments)
         self._common_equity_start_at = common_equity_start_at
 
     async def paper_account_equity(self) -> PaperAccountsEquityResponse:
         window_end = self._clock()
         window_start = window_end - _EQUITY_WINDOW
-        live_processes: Sequence[ExecutionAccountProcessStateRow] = ()
         live_balance_rows_by_account: dict[str, Sequence[AccountEquityPoint]] = {}
         common_paper_rows: Sequence[tuple[str, datetime, Decimal]] = ()
         common_live_equity_rows_by_account: dict[
@@ -420,30 +419,9 @@ class PaperEquityQueries:
                         )
                     ).all()
                 ]
-            live_processes = (
-                await session.scalars(latest_live_account_process_statement())
-            ).all()
-            strategy_states = (
-                await session.scalars(
-                    select(StrategyLiveStateRow).where(
-                        StrategyLiveStateRow.environment == "live"
-                    )
-                )
-            ).all()
-            strategy_by_account: dict[str, StrategyLiveStateRow] = {}
-            for state in sorted(
-                strategy_states,
-                key=lambda item: item.changed_at,
-                reverse=True,
-            ):
-                strategy_by_account.setdefault(state.account_label, state)
-            for process in live_processes:
-                account_label = process.account_label or "primary"
-                live_strategy_names_by_account[account_label] = (
-                    None
-                    if account_label not in strategy_by_account
-                    else strategy_by_account[account_label].strategy_name
-                )
+            for account in self._live_accounts:
+                account_label = account.label
+                live_strategy_names_by_account[account_label] = account.strategy
                 live_balance_rows_by_account[account_label] = [
                     AccountEquityPoint(
                         observed_at=row.observed_at,
@@ -454,7 +432,7 @@ class PaperEquityQueries:
                         await session.execute(
                             account_equity_statement(
                                 environment="live",
-                                account_label=process.account_label,
+                                account_label=account_label,
                                 asset="USDT",
                                 window_start=window_start,
                                 window_end=window_end,
@@ -471,13 +449,12 @@ class PaperEquityQueries:
                     run_id: first_at for run_id, first_at in paper_first_rows
                 }
 
-            for process in live_processes:
-                account_label = process.account_label or "primary"
+            for account in self._live_accounts:
+                account_label = account.label
                 live_first_at_by_account[account_label] = await session.scalar(
                     select(func.min(AccountBalanceSnapshotRow.observed_at)).where(
                         AccountBalanceSnapshotRow.environment == "live",
-                        AccountBalanceSnapshotRow.account_label
-                        == process.account_label,
+                        AccountBalanceSnapshotRow.account_label == account_label,
                     )
                 )
 
@@ -516,15 +493,15 @@ class PaperEquityQueries:
                             )
                         ).all()
                     ]
-                for process in live_processes:
-                    account_label = process.account_label or "primary"
+                for account in self._live_accounts:
+                    account_label = account.label
                     common_live_equity_rows_by_account[account_label] = [
                         (observed_at, equity)
                         for observed_at, equity in (
                             await session.execute(
                                 _live_common_equity_statement(
                                     environment="live",
-                                    account_label=process.account_label,
+                                    account_label=account_label,
                                     window_start=common_start_at,
                                     window_end=window_end,
                                     interval_seconds=common_equity_interval_seconds,

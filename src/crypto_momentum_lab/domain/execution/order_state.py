@@ -1,11 +1,8 @@
 import hashlib
-from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
-
-from crypto_momentum_lab.domain.market.models import JsonValue
 
 BINANCE_CLIENT_ORDER_ID_MAX_LENGTH = 36
 _CLIENT_ORDER_ID_PREFIX = "cml_"
@@ -75,110 +72,22 @@ class ExitAllocation:
 
 @dataclass(frozen=True, slots=True)
 class OrderExecutionPlan:
-    intent_id: str
-    run_id: str
     client_order_id: str
     symbol: str
     side: str
-    order_type: str
     quantity: Decimal
-    price: Decimal | None
     reduce_only: bool
-    created_at: datetime
     position_side: FuturesPositionSide = FuturesPositionSide.BOTH
-    quantized: bool = False
-    time_in_force: str | None = None
-    expires_at: datetime | None = None
-    batch_id: str | None = None
-    allocations: tuple[ExitAllocation, ...] = ()
-    projection_version: str | None = None
-    batch_quantities: Mapping[str, Decimal] | None = None
-    strategy_name: str | None = None
-    strategy_version: str | None = None
-    reference_price: Decimal | None = None
 
     def __post_init__(self) -> None:
         for value, field_name in (
-            (self.intent_id, "intent_id"),
-            (self.run_id, "run_id"),
             (self.client_order_id, "client_order_id"),
             (self.symbol, "symbol"),
             (self.side, "side"),
-            (self.order_type, "order_type"),
         ):
             _require_non_empty(value, field_name)
         if self.quantity <= 0:
             raise ValueError("quantity must be positive")
-        if self.price is not None and self.price <= 0:
-            raise ValueError("price must be positive when present")
-        if self.reference_price is not None and self.reference_price <= 0:
-            raise ValueError("reference_price must be positive when present")
-        _require_aware(self.created_at, "created_at")
-        if self.time_in_force is not None:
-            time_in_force = self.time_in_force.upper()
-            if time_in_force not in {"GTC", "IOC", "FOK", "GTX", "GTD", "RPI"}:
-                raise ValueError("unsupported time_in_force")
-            if self.order_type.upper() != "LIMIT":
-                raise ValueError("time_in_force requires a LIMIT order")
-            object.__setattr__(self, "time_in_force", time_in_force)
-        if self.expires_at is not None:
-            _require_aware(self.expires_at, "expires_at")
-            if self.expires_at <= self.created_at:
-                raise ValueError("expires_at must be after created_at")
-        if self.time_in_force == "GTD" and self.expires_at is None:
-            raise ValueError("GTD orders require expires_at")
-        if self.batch_quantities is not None:
-            object.__setattr__(
-                self,
-                "batch_quantities",
-                dict(self.batch_quantities),
-            )
-
-
-@dataclass(frozen=True, slots=True)
-class ExchangeOrderEvent:
-    event_id: str
-    client_order_id: str
-    state: ExchangeOrderState
-    occurred_at: datetime
-    exchange_order_id: str | None
-    details: dict[str, JsonValue]
-
-    def __post_init__(self) -> None:
-        _require_non_empty(self.event_id, "event_id")
-        _require_non_empty(self.client_order_id, "client_order_id")
-        if not isinstance(self.state, ExchangeOrderState):
-            raise ValueError("state must be an ExchangeOrderState")
-        _require_aware(self.occurred_at, "occurred_at")
-
-
-@dataclass(frozen=True, slots=True)
-class ExchangeOrderFill:
-    fill_id: str
-    client_order_id: str
-    exchange_trade_id: str
-    price: Decimal
-    quantity: Decimal
-    fee: Decimal
-    fee_asset: str
-    filled_at: datetime
-    details: dict[str, JsonValue]
-
-    def __post_init__(self) -> None:
-        for value, field_name in (
-            (self.fill_id, "fill_id"),
-            (self.client_order_id, "client_order_id"),
-            (self.exchange_trade_id, "exchange_trade_id"),
-            (self.fee_asset, "fee_asset"),
-        ):
-            _require_non_empty(value, field_name)
-        if self.price <= 0:
-            raise ValueError("price must be positive")
-        if self.quantity <= 0:
-            raise ValueError("quantity must be positive")
-        if self.fee < 0:
-            raise ValueError("fee must be non-negative")
-        _require_aware(self.filled_at, "filled_at")
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,8 +98,6 @@ class ExchangeOrderSnapshot:
     observed_at: datetime
     executed_quantity: Decimal
     average_price: Decimal
-    fills: tuple[ExchangeOrderFill, ...] = ()
-    entry_leverage: int | None = None
 
     def __post_init__(self) -> None:
         _require_non_empty(self.client_order_id, "client_order_id")
@@ -201,8 +108,6 @@ class ExchangeOrderSnapshot:
             raise ValueError("executed_quantity must be non-negative")
         if self.average_price < 0:
             raise ValueError("average_price must be non-negative")
-        if self.entry_leverage is not None and self.entry_leverage < 1:
-            raise ValueError("entry_leverage must be positive")
         _require_aware(self.observed_at, "observed_at")
 
 

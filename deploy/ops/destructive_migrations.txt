@@ -1,7 +1,8 @@
-# Alembic filenames that are unsafe while an older Live consumer is running.
-# Add the filename in the same commit as the migration. The deployment script
-# then rejects a --live rollout and requires an expand/contract release.
+# Migrations that remove schema used by a retired runtime or operational tool.
+# Apply these through the full deployment path, which stops app services before
+# migration and starts the target image only after migration succeeds.
 20261005_0047_drop_unused_risk_state_age_limits.py
 20261007_0053_execution_receipt_retirement.py
 20261014_0061_remove_trading_leases.py
 20261015_0062_convert_execution_heads.py
+20261021_0068_drop_retired_execution_tables.py

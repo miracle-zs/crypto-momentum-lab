@@ -1,25 +1,8 @@
-import asyncio
 import json
-from dataclasses import replace
-from datetime import UTC, datetime
 
 import pytest
 
-import crypto_momentum_lab.execution_account.hub as account_hub_module
 import crypto_momentum_lab.market_data.hub as market_hub_module
-from crypto_momentum_lab.domain.execution.order_state import (
-    ExchangeOrderSnapshot,
-    ExchangeOrderState,
-)
-from crypto_momentum_lab.execution_account.binance.user_data_parser import (
-    parse_user_data_event,
-)
-from crypto_momentum_lab.execution_account.hub import (
-    WebSocketAccountEventSource,
-)
-from crypto_momentum_lab.execution_account.user_data_sync import (
-    AccountUserDataState,
-)
 from crypto_momentum_lab.market_data.hub import (
     MarketStateHub,
     MarketStateHubConfig,
@@ -28,16 +11,6 @@ from crypto_momentum_lab.market_data.hub import (
     WebSocketMarketStateSource,
     encode_market_state_batch,
 )
-from tests.fixtures.prepared_submission import prepared_submission, submit_prepared
-from tests.unit.execution_account.orders.test_state_machine import (
-    FakeExchange,
-    FakeOrderRepository,
-    _machine,
-    _plan,
-    _snapshot,
-)
-from tests.unit.execution_account.test_hub import _event
-from tests.unit.execution_account.test_user_data import _initial_snapshot
 from tests.unit.market_data.test_hub import fixture_state
 
 pytestmark = pytest.mark.e2e
@@ -217,140 +190,3 @@ async def test_fault_injection_durable_market_hub_missing_epoch_fails_closed(
 
     assert len(sent_messages) == 1
     assert "stream_id" not in json.loads(sent_messages[0])
-
-
-class _InterruptibleSubmitExchange(FakeExchange):
-    def __init__(self) -> None:
-        super().__init__(
-            submit_result=_snapshot(ExchangeOrderState.FILLED),
-            query_result=_snapshot(ExchangeOrderState.FILLED),
-        )
-        self.submit_started = asyncio.Event()
-        self.release_submit = asyncio.Event()
-
-    async def submit_order(self, plan) -> ExchangeOrderSnapshot:
-        await self.emit_submit_boundary(plan, is_request=True)
-        try:
-            self.calls.append("submit")
-            self.submit_started.set()
-            await self.release_submit.wait()
-            result = self.submit_result
-            if isinstance(result, Exception):
-                raise result
-            return result
-        finally:
-            await self.emit_submit_boundary(plan, is_request=False)
-
-
-async def test_fault_injection_submitting_sigterm_is_reconciled_after_restart() -> None:
-    exchange = _InterruptibleSubmitExchange()
-    repository = FakeOrderRepository()
-    plan = _plan()
-    await repository.record_order_observation(
-        prepared_submission(plan).submitting_event
-    )
-    submitting_task = asyncio.create_task(
-        submit_prepared(_machine(exchange, repository), plan)
-    )
-
-    await asyncio.wait_for(exchange.submit_started.wait(), timeout=1)
-    submitting_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await submitting_task
-
-    assert [event.state for event in repository.events] == [
-        ExchangeOrderState.SUBMITTING
-    ]
-
-    restarted_result = await _machine(exchange, repository).reconcile_order(plan)
-
-    assert restarted_result.state is ExchangeOrderState.FILLED
-    assert exchange.calls == ["submit", "query"]
-    assert repository.events[-1].state is ExchangeOrderState.FILLED
-
-
-async def test_fault_injection_account_overflow_recovers_from_snapshot() -> None:
-    previous = _initial_snapshot()
-    source = WebSocketAccountEventSource(
-        url="ws://unused",
-        environment="live",
-        account_label="primary",
-        consumer_id="fault-gate-account",
-    )
-    receive_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=1)
-    source._enqueue_account_event(
-        receive_queue,
-        replace(_event(), sequence=1),
-    )
-    source._enqueue_account_event(
-        receive_queue,
-        replace(_event(), event_id="event-2", sequence=2),
-    )
-    overflow = receive_queue.get_nowait()
-    assert isinstance(overflow, account_hub_module._AccountEventQueueOverflow)
-    assert source.metrics.queue_overflow_count == 1
-
-    source._prepare_full_snapshot_recovery("account_event_queue_overflow")
-    full = replace(
-        _event(),
-        event_id="event-recovered",
-        sequence=100,
-        snapshot_kind="full",
-        account_snapshot=previous,
-    )
-    materialized = source._materialize_event(full)
-    assert materialized is not None
-    assert materialized.account_snapshot == previous
-    assert source.metrics.recovery_count == 1
-    assert source.metrics.last_recovery_reason == "account_event_queue_overflow"
-
-
-def test_fault_injection_exchange_clock_rollback_requires_reconciliation() -> None:
-    state = AccountUserDataState(_initial_snapshot())
-    first = {
-        "e": "ORDER_TRADE_UPDATE",
-        "E": 1783123203000,
-        "T": 1783123203000,
-        "o": {
-            "s": "BTCUSDT",
-            "c": "entry-1",
-            "S": "BUY",
-            "o": "LIMIT",
-            "x": "TRADE",
-            "X": "PARTIALLY_FILLED",
-            "i": 1001,
-            "t": 5002,
-            "q": "0.002",
-            "p": "50000",
-            "z": "0.001",
-            "l": "0.001",
-            "L": "50100",
-            "rp": "0.1",
-            "n": "0.01",
-            "N": "USDT",
-            "T": 1783123203000,
-            "R": False,
-        },
-    }
-    state.apply(
-        parse_user_data_event(
-            first,
-            received_at=datetime(2026, 7, 4, 0, 0, 3, tzinfo=UTC),
-        )
-    )
-
-    rollback = state.apply(
-        parse_user_data_event(
-            {
-                **first,
-                "E": 1783123202000,
-                "T": 1783123202000,
-                "o": {**first["o"], "x": "CANCELED", "X": "CANCELED"},
-            },
-            received_at=datetime(2026, 7, 4, 0, 0, 4, tzinfo=UTC),
-        )
-    )
-
-    assert rollback.needs_reconciliation is True
-    assert rollback.reason == "stale_exchange_event"
-    assert rollback.snapshot.open_orders[0].status == "PARTIALLY_FILLED"

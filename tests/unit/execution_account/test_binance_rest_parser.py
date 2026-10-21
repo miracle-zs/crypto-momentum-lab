@@ -1,13 +1,11 @@
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
 import pytest
 
 from crypto_momentum_lab.domain.account.models import compact_fill_metadata
 from crypto_momentum_lab.execution_account.binance.rest_parser import (
-    account_fill_from_trade_item,
     account_open_order_from_item,
-    balances_from_response,
     decimal_value,
     json_mapping,
     order_snapshot_from_response,
@@ -20,27 +18,6 @@ from crypto_momentum_lab.execution_account.binance.rest_parser import (
     rest_require_sequence_of_mappings,
     rest_require_string,
 )
-
-
-def trade_row():
-    return {
-        "symbol": " btcusdt ",
-        "id": 1,
-        "orderId": 10,
-        "side": "BUY",
-        "price": "50000.00",
-        "qty": "0.010",
-        "realizedPnl": "-0.2",
-        "commission": "0.1",
-        "commissionAsset": "USDT",
-        "time": 1790812800123,
-    }
-
-
-def parse(row):
-    return account_fill_from_trade_item(
-        row, environment="live", account_label="primary", expected_symbol="BTCUSDT"
-    )
 
 
 def open_order_row():
@@ -120,35 +97,6 @@ def test_open_order_parser_rejects_a_symbol_other_than_requested():
         parse_open_order(row)
 
 
-def test_bounded_trade_parser_preserves_fill_facts_and_compacts_metadata():
-    row = trade_row()
-    row.update(
-        {
-            "positionSide": "LONG",
-            "clientOrderId": "cml-entry-1",
-            "reduceOnly": True,
-            "is_system": True,
-            "transport_event_id": "discard-this",
-        }
-    )
-    result = parse(row)
-    assert result.symbol == "BTCUSDT"
-    assert result.trade_id == "1" and result.order_id == "10"
-    assert result.side == "BUY" and result.fee_asset == "USDT"
-    assert str(result.price) == "50000.00" and str(result.quantity) == "0.010"
-    assert result.realized_pnl == Decimal("-0.2") and result.fee == Decimal("0.1")
-    assert result.trade_at == datetime(2026, 10, 1, 0, 0, 0, 123000, tzinfo=UTC)
-    assert result.environment == "live" and result.account_label == "primary"
-    assert result.raw_payload == {
-        "positionSide": "LONG",
-        "client_order_id": "cml-entry-1",
-        "reduce_only": True,
-        "is_system": True,
-    }
-    assert result.raw_payload is not row
-    assert row["transport_event_id"] == "discard-this"
-
-
 def test_compact_fill_metadata_extracts_websocket_attribution_fields():
     row = {
         "cum_qty": "0.5",
@@ -169,53 +117,6 @@ def test_compact_fill_metadata_extracts_websocket_attribution_fields():
         "reduce_only": True,
         "is_cumulative": True,
     }
-
-
-@pytest.mark.parametrize(
-    "field",
-    [
-        "symbol",
-        "id",
-        "orderId",
-        "side",
-        "price",
-        "qty",
-        "realizedPnl",
-        "commission",
-        "commissionAsset",
-        "time",
-    ],
-)
-def test_user_trade_response_requires_every_fill_fact(field):
-    row = trade_row()
-    del row[field]
-
-    with pytest.raises(ValueError, match=field):
-        parse(row)
-
-
-@pytest.mark.parametrize("symbol", ["ETHUSDT", ""])
-def test_wrong_symbol_is_rejected_before_malformed_numeric_fields(symbol):
-    with pytest.raises(ValueError, match="contained another symbol"):
-        parse({"symbol": symbol, "price": "broken"})
-
-
-@pytest.mark.parametrize(
-    "field,value,error",
-    [
-        ("price", "broken", InvalidOperation),
-        ("qty", "broken", InvalidOperation),
-        ("time", "broken", ValueError),
-        ("commission", "-1", ValueError),
-        ("id", "", ValueError),
-        ("commissionAsset", "", ValueError),
-    ],
-)
-def test_trade_conversion_and_domain_validation_keep_errors(field, value, error):
-    row = trade_row()
-    row[field] = value
-    with pytest.raises(error):
-        parse(row)
 
 
 @pytest.mark.parametrize(
@@ -347,12 +248,12 @@ def test_order_response_uses_cumulative_quote_for_zero_average(
         "cumQuote": quote,
     }
     result = order_snapshot_from_response(
-        data, observed_at=observed_at, entry_leverage=5
+        data, observed_at=observed_at
     )
     assert result.average_price == Decimal(expected)
     assert result.executed_quantity == Decimal(quantity)
     assert result.client_order_id == "entry" and result.exchange_order_id == "42"
-    assert result.observed_at is observed_at and result.entry_leverage == 5
+    assert result.observed_at is observed_at
     assert data["avgPrice"] == average
 
 
@@ -542,37 +443,6 @@ def account_scope():
     }
 
 
-def test_balance_response_keeps_exchange_time_and_dashboard_valuation_marker():
-    rows = [
-        {
-            "asset": "USDT",
-            "balance": "100.00",
-            "availableBalance": "80",
-            "crossUnPnl": "-2",
-            "updateTime": 1790812800123,
-            "unusedTransportField": "discard",
-        },
-        {
-            "asset": "BTC",
-            "balance": "0",
-            "availableBalance": "0",
-            "crossUnPnl": "0",
-        },
-    ]
-    result = balances_from_response(rows, **account_scope())
-    assert [item.asset for item in result] == ["USDT", "BTC"]
-    assert str(result[0].wallet_balance) == "100.00"
-    assert result[0].available_balance == 80 and result[0].unrealized_pnl == -2
-    assert result[1].wallet_balance == result[1].available_balance == 0
-    assert result[1].unrealized_pnl == 0
-    assert result[0].raw_payload == {
-        "updateTime": 1790812800123,
-        "crossUnPnl": "-2",
-    }
-    assert result[0].observed_at == account_scope()["observed_at"]
-    assert result[0].environment == "live" and result[0].account_label == "primary"
-
-
 def test_position_response_keeps_flat_rows_order_and_exchange_time():
     rows = [
         {
@@ -618,22 +488,6 @@ def test_position_response_keeps_flat_rows_order_and_exchange_time():
 
 @pytest.mark.parametrize(
     "field",
-    ["asset", "balance", "availableBalance", "crossUnPnl"],
-)
-def test_balance_response_rejects_missing_exchange_facts(field):
-    row = {
-        "asset": "USDT",
-        "balance": "100",
-        "availableBalance": "80",
-        "crossUnPnl": "-2",
-    }
-    del row[field]
-    with pytest.raises(ValueError, match=field):
-        balances_from_response([row], **account_scope())
-
-
-@pytest.mark.parametrize(
-    "field",
     [
         "symbol",
         "positionSide",
@@ -659,44 +513,25 @@ def test_position_response_rejects_missing_exchange_facts(field):
         positions_from_response([row], **account_scope())
 
 
-@pytest.mark.parametrize("parse", [balances_from_response, positions_from_response])
-def test_account_response_empty_rows_stay_empty(parse):
-    assert parse([], **account_scope()) == ()
+def test_position_response_empty_rows_stay_empty():
+    assert positions_from_response([], **account_scope()) == ()
 
 
-@pytest.mark.parametrize("parse", [balances_from_response, positions_from_response])
-def test_account_response_shape_validation_is_shared(parse):
+def test_position_response_shape_is_array():
     with pytest.raises(ValueError, match="expected JSON array"):
-        parse({}, **account_scope())
+        positions_from_response({}, **account_scope())
 
 
-@pytest.mark.parametrize(
-    "parse,row",
-    [
-        (
-            balances_from_response,
-            {
-                "asset": "USDT",
-                "balance": "-1",
-                "availableBalance": "80",
-                "crossUnPnl": "0",
-            },
-        ),
-        (
-            positions_from_response,
-            {
-                "symbol": "BTCUSDT",
-                "positionSide": "BOTH",
-                "positionAmt": "0",
-                "entryPrice": "0",
-                "markPrice": "0",
-                "unRealizedProfit": "0",
-                "notional": "0",
-                "leverage": "-1",
-            },
-        ),
-    ],
-)
-def test_account_response_keeps_domain_validation(parse, row):
+def test_position_response_keeps_domain_validation():
+    row = {
+        "symbol": "BTCUSDT",
+        "positionSide": "BOTH",
+        "positionAmt": "0",
+        "entryPrice": "0",
+        "markPrice": "0",
+        "unRealizedProfit": "0",
+        "notional": "0",
+        "leverage": "-1",
+    }
     with pytest.raises(ValueError):
-        parse([row], **account_scope())
+        positions_from_response([row], **account_scope())

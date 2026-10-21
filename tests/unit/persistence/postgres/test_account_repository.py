@@ -4,16 +4,11 @@ from decimal import Decimal
 import pytest
 from sqlalchemy.dialects import postgresql
 
-from crypto_momentum_lab.domain.account import (
-    AccountBalanceSnapshot,
-    ExecutionAccountProcessState,
-    ExecutionAccountStatus,
-)
+from crypto_momentum_lab.domain.account import AccountBalanceSnapshot
 from crypto_momentum_lab.persistence.postgres.account_repository import (
     PostgresAccountRepository,
     _position_state_from_run,
     balance_snapshot_row,
-    process_state_row,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
     AccountReconciliationRunRow,
@@ -182,21 +177,6 @@ def test_balance_snapshot_row_preserves_numeric_values() -> None:
     assert row["wallet_balance"] == Decimal("100.5")
     assert row["available_balance"] == Decimal("80.25")
     assert row["unrealized_pnl"] == Decimal("1.5")
-
-
-def test_process_state_row_uses_state_value() -> None:
-    state = ExecutionAccountProcessState(
-        environment="live",
-        account_label="primary",
-        state=ExecutionAccountStatus.READY_READONLY,
-        occurred_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
-        reason=None,
-    )
-
-    row = process_state_row(state)
-
-    assert row["state"] == "ready_readonly"
-    assert row["reason"] is None
 
 
 def test_position_state_run_details_preserve_complete_empty_snapshot() -> None:

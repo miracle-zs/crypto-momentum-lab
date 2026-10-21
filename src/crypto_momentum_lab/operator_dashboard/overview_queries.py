@@ -4,9 +4,8 @@ import asyncio
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
-from sqlalchemy import Select, and_, func, select, text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.market.models import JsonValue
@@ -25,45 +24,11 @@ from crypto_momentum_lab.operator_dashboard.status import (
     freshness_status,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
-    ExecutionAccountProcessStateRow,
     MonitoringMembershipRow,
     RuntimeMarketState15sRow,
     UniverseEntryRow,
     UniverseSnapshotRow,
 )
-
-
-def latest_live_account_process_statement() -> Select[Any]:
-    """Load one current process state per live account.
-
-    The dashboard treats account labels as separate operational units. A
-    grouped latest-row lookup keeps the fleet endpoint bounded even when the
-    append-only process-state table has accumulated a long history.
-    """
-    latest = (
-        select(
-            ExecutionAccountProcessStateRow.account_label,
-            func.max(ExecutionAccountProcessStateRow.occurred_at).label(
-                "latest_occurred_at"
-            ),
-        )
-        .where(ExecutionAccountProcessStateRow.environment == "live")
-        .group_by(ExecutionAccountProcessStateRow.account_label)
-        .subquery("latest_live_account_process")
-    )
-    return (
-        select(ExecutionAccountProcessStateRow)
-        .join(
-            latest,
-            and_(
-                ExecutionAccountProcessStateRow.account_label == latest.c.account_label,
-                ExecutionAccountProcessStateRow.occurred_at
-                == latest.c.latest_occurred_at,
-                ExecutionAccountProcessStateRow.environment == "live",
-            ),
-        )
-        .order_by(ExecutionAccountProcessStateRow.account_label)
-    )
 
 
 def account_label_sort_key(account_label: str) -> tuple[int, int | str]:
@@ -281,7 +246,6 @@ __all__ = [
     "OverviewQueries",
     "account_label_sort_key",
     "age",
-    "latest_live_account_process_statement",
     "live_account_fleet_status",
     "service",
     "universe_entry",

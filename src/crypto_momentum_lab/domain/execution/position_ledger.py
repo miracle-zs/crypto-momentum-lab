@@ -268,7 +268,10 @@ class PositionLedger:
         """Apply newly accepted facts to the current position state."""
         if current.position_key.canonical_id != self._position_key.canonical_id:
             raise ValueError("Current projection position key does not match ledger")
-        if current.stream_scope is not None and current.stream_scope != facts.stream_scope:
+        if (
+            current.stream_scope is not None
+            and current.stream_scope != facts.stream_scope
+        ):
             raise ValueError("Current projection stream scope does not match facts")
         if facts.recovery_checkpoint is not None:
             raise ValueError("A fact delta cannot contain a recovery checkpoint")

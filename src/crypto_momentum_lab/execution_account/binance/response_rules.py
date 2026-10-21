@@ -29,11 +29,6 @@ def retry_after_seconds(response: httpx.Response) -> float | None:
     return value
 
 
-def is_invalid_leverage_rejection(exc: httpx.HTTPStatusError) -> bool:
-    """Return whether Binance rejected only the requested leverage level."""
-    return exchange_error_code(exc) == -4028
-
-
 def exchange_error_message(exc: httpx.HTTPStatusError) -> str:
     try:
         payload = exc.response.json()

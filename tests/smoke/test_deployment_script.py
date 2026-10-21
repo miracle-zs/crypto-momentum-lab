@@ -23,7 +23,7 @@ def test_deployment_script_and_remote_script_are_valid_shell() -> None:
 def test_normal_deployment_checks_live_accounts_before_stopping_services() -> None:
     script = remote_script()
     build = script.index('"${build_compose[@]}" build migrate &')
-    account_check = script.index("client.fetch_positions()")
+    account_check = script.index("client.fetch_account_information()")
     account_orders = script.index("client.fetch_open_orders()")
     stop_services = script.index('"${compose[@]}" stop --timeout 90')
     update_code = script.index('git merge --ff-only "$target_commit"')

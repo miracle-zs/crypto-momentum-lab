@@ -6,19 +6,18 @@ import argparse
 import asyncio
 import json
 import os
-from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 
+from crypto_momentum_lab.domain.execution.exchange_contract import (
+    ExchangeOrderAlreadyAbsentError,
+    ExchangeSubmissionTimeoutError,
+)
 from crypto_momentum_lab.domain.execution.order_state import (
     FuturesPositionSide,
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.execution_account.binance.client import BinanceUsdMTradeClient
-from crypto_momentum_lab.execution_account.orders.state_machine import (
-    ExchangeOrderAlreadyAbsentError,
-    ExchangeSubmissionTimeoutError,
-)
 
 
 def emit(event, **fields):
@@ -67,18 +66,12 @@ async def run(account, apply):
             if p.position_amt == 0:
                 continue
             plan = OrderExecutionPlan(
-                intent_id="emergency-" + uuid4().hex,
-                run_id="emergency-20261002-" + account,
                 client_order_id="ef_" + uuid4().hex,
                 symbol=p.symbol,
                 side="SELL" if p.position_amt > 0 else "BUY",
-                order_type="MARKET",
                 quantity=abs(p.position_amt),
-                price=None,
                 reduce_only=True,
                 position_side=FuturesPositionSide(p.position_side),
-                created_at=datetime.now(UTC),
-                quantized=True,
             )
             emit(
                 "close_requested",

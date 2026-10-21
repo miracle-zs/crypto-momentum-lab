@@ -19,15 +19,6 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.account import AccountFillEvent
-from crypto_momentum_lab.domain.execution.order_state import (
-    ExchangeOrderState,
-    FuturesPositionSide,
-)
-from crypto_momentum_lab.domain.execution.position_batches import (
-    PositionObservation,
-    PositionOrderFact,
-)
-from crypto_momentum_lab.domain.strategy import StrategySide
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,54 +224,3 @@ def get_b2_account_fill_events(
             )
         )
     return tuple(fills)
-
-
-def get_b2_system_order_facts(
-    *,
-    symbol: str = "B2USDT",
-) -> tuple[PositionOrderFact, ...]:
-    """Generate PositionOrderFact for system orders in B2USDT timeline.
-
-    External orders are intentionally excluded, representing the real-world condition
-    where exchange_orders table only contains orders initiated by the trading daemon.
-    """
-    facts: list[PositionOrderFact] = []
-    for entry in B2_TIMELINE:
-        if entry.event_type != "fill" or not entry.is_system_order:
-            continue
-        facts.append(
-            PositionOrderFact(
-                symbol=symbol,
-                position_side=FuturesPositionSide.BOTH,
-                side=entry.side,
-                reduce_only=(entry.side == "SELL"),
-                order_type="MARKET",
-                quantity=entry.quantity,
-                executed_quantity=entry.quantity,
-                state=ExchangeOrderState.FILLED,
-                client_order_id=f"c_{entry.order_id}",
-                exchange_order_id=entry.order_id,
-                created_at=entry.timestamp,
-                updated_at=entry.timestamp,
-                price=entry.price,
-                plan=None,
-                exit_batch_id=None,
-            )
-        )
-    return tuple(facts)
-
-
-def get_b2_position_observation(
-    *,
-    symbol: str = "B2USDT",
-    position_amt: Decimal,
-    entry_price: Decimal = Decimal("1.02"),
-) -> PositionObservation:
-    """Create a PositionObservation snapshot."""
-    return PositionObservation(
-        symbol=symbol,
-        side=StrategySide.LONG if position_amt > 0 else StrategySide.FLAT,
-        position_side=FuturesPositionSide.BOTH,
-        position_amt=position_amt,
-        entry_price=entry_price,
-    )
