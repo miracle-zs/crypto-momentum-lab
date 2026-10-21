@@ -12,7 +12,6 @@ import {
 } from "./sections/account.js";
 import { renderReports } from "./sections/reports.js";
 import { renderPerformance } from "./sections/performance.js";
-import { createStrategySection } from "./sections/strategy.js";
 import { latestSectionData } from "./app/section-state.js";
 import { renderLiveRuntime } from "./app/runtime-badge.js";
 import { createPoller } from "./app/poller.js";
@@ -26,18 +25,14 @@ import {
 } from "./app/wire-widgets.js";
 import { installJumpProbe } from "./app/jump-probe.js";
 
-const strategySection = createStrategySection();
-
 const renderers = {
   overview: renderOverview,
-  strategy: strategySection.render,
   universe: renderUniverse,
   collector: renderCollector,
   risk: renderRisk,
   account: renderLiveAccounts,
   reports: renderReports,
   performance: renderPerformance,
-  __strategyHooks: strategySection,
 };
 
 function renderPollState() {

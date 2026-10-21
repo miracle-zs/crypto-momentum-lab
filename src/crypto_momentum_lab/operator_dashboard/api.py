@@ -3,10 +3,9 @@ import logging
 import os
 import secrets
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeVar, cast
 
@@ -16,9 +15,6 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
-)
-from fastapi import (
-    Path as FastAPIPath,
 )
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, Response
@@ -30,22 +26,16 @@ from starlette.types import Scope
 
 from crypto_momentum_lab.operator_dashboard.ports import DashboardQueryProtocol
 from crypto_momentum_lab.operator_dashboard.queries import (
-    FIXED_COMMON_EQUITY_START_AT,
     DashboardQueries,
-    LiveCashFlowAdjustment,
 )
 from crypto_momentum_lab.operator_dashboard.schemas import (
     AccountOverviewResponse,
     DecisionSLOResponse,
     LiveAccountMetricsResponse,
     LiveAccountsResponse,
-    PaperAccountHistoryResponse,
-    PaperAccountsEquityResponse,
-    PaperAccountsResponse,
     ResearchCollectorResponse,
     RiskExecutionResponse,
     RunReportSummaryResponse,
-    StrategyRunResponse,
     SystemOverviewResponse,
     SystemPerformanceResponse,
     SystemReadinessResponse,
@@ -59,9 +49,9 @@ logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).with_name("static")
 _BASIC_AUTH = HTTPBasic(auto_error=False)
-_PAPER_CACHE_TTL_SECONDS = 5.0
-_PAPER_EQUITY_CACHE_TTL_SECONDS = 30.0
-_PAPER_EQUITY_STALE_GRACE_SECONDS = 60.0
+_DEFAULT_CACHE_TTL_SECONDS = 5.0
+_LIVE_ACCOUNT_METRICS_CACHE_TTL_SECONDS = 30.0
+_LIVE_ACCOUNT_METRICS_STALE_GRACE_SECONDS = 60.0
 _DEFAULT_STALE_GRACE_SECONDS = 60.0
 _OVERVIEW_CACHE_TTL_SECONDS = 15.0
 # The risk panel polls every 15 seconds. Keep its cached read model aligned
@@ -76,27 +66,11 @@ _PERFORMANCE_CACHE_TTL_SECONDS = 30.0
 _PERFORMANCE_QUERY_TIMEOUT_SECONDS = 10.0
 _T = TypeVar("_T")
 
-_MAX_ACCOUNT_PERFORMANCE_WINDOW_HOURS = 24 * 366
 _ACCOUNT_LABEL_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
-_ASSET_PATTERN = r"^[A-Z0-9]{2,12}$"
-AccountLabelQuery = Annotated[
-    str,
-    Query(min_length=1, max_length=64, pattern=_ACCOUNT_LABEL_PATTERN),
-]
-AccountLabelPath = Annotated[
-    str,
-    FastAPIPath(min_length=1, max_length=64, pattern=_ACCOUNT_LABEL_PATTERN),
-]
 OptionalAccountLabelQuery = Annotated[
     str | None,
     Query(min_length=1, max_length=64, pattern=_ACCOUNT_LABEL_PATTERN),
 ]
-PerformanceWindowHours = Annotated[
-    int,
-    Query(ge=1, le=_MAX_ACCOUNT_PERFORMANCE_WINDOW_HOURS),
-]
-AssetCode = Annotated[str, Query(pattern=_ASSET_PATTERN)]
-DashboardEnvironment = Literal["live", "paper", "research"]
 
 
 _cache_status_context: ContextVar[dict[str, str]] = ContextVar("cache_status_context")
@@ -300,9 +274,6 @@ def create_dashboard_app(
     queries: DashboardQueryProtocol | None = None,
     auth_username: str | None = None,
     auth_password: str | None = None,
-    paper_run_ids: frozenset[str] | None = None,
-    live_cash_flow_adjustments: Sequence[LiveCashFlowAdjustment] | None = None,
-    common_equity_start_at: datetime | None = FIXED_COMMON_EQUITY_START_AT,
     research_collector_root: Path | None = None,
     overview_cache_ttl_seconds: float = _OVERVIEW_CACHE_TTL_SECONDS,
     overview_query_timeout_seconds: float = _OVERVIEW_QUERY_TIMEOUT_SECONDS,
@@ -333,9 +304,6 @@ def create_dashboard_app(
         resolved_queries = DashboardQueries(
             async_sessionmaker(engine, expire_on_commit=False),
             nextgen_accounts=nextgen_accounts,
-            paper_run_ids=paper_run_ids,
-            live_cash_flow_adjustments=live_cash_flow_adjustments,
-            common_equity_start_at=common_equity_start_at,
             research_collector_root=(
                 research_collector_root
                 or Path(
@@ -403,7 +371,7 @@ def create_dashboard_app(
             _cache_status_context.reset(token)
 
     dashboard.mount("/static", _CachedStaticFiles(directory=STATIC_DIR), name="static")
-    response_cache = _ResponseCache(_PAPER_CACHE_TTL_SECONDS)
+    response_cache = _ResponseCache(_DEFAULT_CACHE_TTL_SECONDS)
 
     def require_dashboard_auth(
         credentials: Annotated[
@@ -526,42 +494,6 @@ def create_dashboard_app(
             ) from exc
 
     @dashboard.get(
-        "/api/performance/accounts/{account_label}",
-        response_model=dict[str, object],
-        dependencies=[Depends(require_dashboard_auth)],
-    )
-    async def account_performance(
-        account_label: AccountLabelPath,
-        window_hours: PerformanceWindowHours = 24,
-        environment: DashboardEnvironment = "live",
-        asset: AssetCode = "USDT",
-        end_time: datetime | None = None,
-    ) -> dict[str, object]:
-        try:
-            end_key = end_time.isoformat() if end_time else "now"
-            cache_key = (
-                f"account_performance:{environment}:{account_label}:"
-                f"{asset}:{window_hours}:{end_key}"
-            )
-            return await response_cache.get(
-                cache_key,
-                lambda: query_service().account_performance(
-                    account_label=account_label,
-                    window_hours=window_hours,
-                    environment=environment,
-                    asset=asset,
-                    end_time=end_time,
-                ),
-                ttl_seconds=_PERFORMANCE_CACHE_TTL_SECONDS,
-                stale_while_revalidate_seconds=default_stale_grace_seconds,
-            )
-        except (TimeoutError, SQLAlchemyTimeoutError) as exc:
-            raise HTTPException(
-                status_code=504,
-                detail="account performance query timed out",
-            ) from exc
-
-    @dashboard.get(
         "/api/overview",
         response_model=SystemOverviewResponse,
         dependencies=[Depends(require_dashboard_auth)],
@@ -605,70 +537,6 @@ def create_dashboard_app(
         return await response_cache.get(
             "universe",
             query_service().universe,
-            stale_while_revalidate_seconds=default_stale_grace_seconds,
-        )
-
-    @dashboard.get(
-        "/api/strategy-runs/current",
-        response_model=StrategyRunResponse,
-        dependencies=[Depends(require_dashboard_auth)],
-    )
-    async def strategy_run() -> StrategyRunResponse:
-        return await response_cache.get(
-            "strategy-run",
-            query_service().strategy_run,
-            stale_while_revalidate_seconds=default_stale_grace_seconds,
-        )
-
-    @dashboard.get(
-        "/api/paper-accounts",
-        response_model=PaperAccountsResponse,
-        dependencies=[Depends(require_dashboard_auth)],
-    )
-    async def paper_accounts() -> PaperAccountsResponse:
-        return await response_cache.get(
-            "paper-accounts",
-            query_service().paper_accounts,
-            stale_while_revalidate_seconds=default_stale_grace_seconds,
-        )
-
-    @dashboard.get(
-        "/api/paper-accounts/equity",
-        response_model=PaperAccountsEquityResponse,
-        dependencies=[Depends(require_dashboard_auth)],
-    )
-    async def paper_account_equity() -> PaperAccountsEquityResponse:
-        return await response_cache.get(
-            "paper-accounts-equity",
-            query_service().paper_account_equity,
-            ttl_seconds=_PAPER_EQUITY_CACHE_TTL_SECONDS,
-            stale_while_revalidate_seconds=_PAPER_EQUITY_STALE_GRACE_SECONDS,
-        )
-
-    @dashboard.get(
-        "/api/paper-accounts/{run_id}",
-        response_model=StrategyRunResponse,
-        dependencies=[Depends(require_dashboard_auth)],
-    )
-    async def paper_account(run_id: str) -> StrategyRunResponse:
-        return await response_cache.get(
-            f"paper-account:{run_id}",
-            lambda: query_service().paper_account(run_id),
-            stale_while_revalidate_seconds=default_stale_grace_seconds,
-        )
-
-    @dashboard.get(
-        "/api/paper-accounts/{run_id}/history",
-        response_model=PaperAccountHistoryResponse,
-        dependencies=[Depends(require_dashboard_auth)],
-    )
-    async def paper_history(
-        run_id: str,
-        full: bool = False,
-    ) -> PaperAccountHistoryResponse:
-        return await response_cache.get(
-            f"paper-history:{run_id}:{'full' if full else 'recent'}",
-            lambda: query_service().paper_history(run_id, full=full),
             stale_while_revalidate_seconds=default_stale_grace_seconds,
         )
 
@@ -735,51 +603,13 @@ def create_dashboard_app(
             return await response_cache.get(
                 f"live-account-metrics:{equity_range}",
                 lambda: query_service().live_account_metrics(equity_range),
-                ttl_seconds=_PAPER_EQUITY_CACHE_TTL_SECONDS,
-                stale_while_revalidate_seconds=_PAPER_EQUITY_STALE_GRACE_SECONDS,
+                ttl_seconds=_LIVE_ACCOUNT_METRICS_CACHE_TTL_SECONDS,
+                stale_while_revalidate_seconds=_LIVE_ACCOUNT_METRICS_STALE_GRACE_SECONDS,
             )
         except TimeoutError as exc:
             raise HTTPException(
                 status_code=504,
                 detail="dashboard live account metrics query timed out",
-            ) from exc
-
-    @dashboard.get(
-        "/api/account-performance",
-        response_model=dict[str, object],
-        dependencies=[Depends(require_dashboard_auth)],
-    )
-    async def get_account_performance(
-        account_label: AccountLabelQuery = "primary",
-        window_hours: PerformanceWindowHours = 24,
-        environment: DashboardEnvironment = "live",
-        asset: AssetCode = "USDT",
-        end_time: datetime | None = None,
-        is_empty_proven: bool = False,
-    ) -> dict[str, object]:
-        try:
-            end_key = end_time.isoformat() if end_time else "now"
-            cache_key = (
-                f"account-performance:{environment}:{account_label}:"
-                f"{asset}:{window_hours}:{end_key}:{is_empty_proven}"
-            )
-            return await response_cache.get(
-                cache_key,
-                lambda: query_service().account_performance(
-                    account_label=account_label,
-                    window_hours=window_hours,
-                    environment=environment,
-                    asset=asset,
-                    end_time=end_time,
-                    is_empty_proven=is_empty_proven,
-                ),
-                ttl_seconds=_PAPER_EQUITY_CACHE_TTL_SECONDS,
-                stale_while_revalidate_seconds=_PAPER_EQUITY_STALE_GRACE_SECONDS,
-            )
-        except TimeoutError as exc:
-            raise HTTPException(
-                status_code=504,
-                detail="dashboard account performance query timed out",
             ) from exc
 
     @dashboard.get(

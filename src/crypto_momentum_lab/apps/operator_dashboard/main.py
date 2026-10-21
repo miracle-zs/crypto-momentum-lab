@@ -6,10 +6,6 @@ import uvicorn
 
 from crypto_momentum_lab.config import resolve_database_url
 from crypto_momentum_lab.operator_dashboard.api import create_dashboard_app
-from crypto_momentum_lab.operator_dashboard.queries import (
-    parse_common_equity_start_at,
-    parse_live_cash_flow_adjustments,
-)
 
 
 def main() -> None:
@@ -38,9 +34,6 @@ def main() -> None:
             runtime_manifest=args.runtime_manifest,
             auth_username=args.username,
             auth_password=args.password,
-            paper_run_ids=parse_paper_run_ids(),
-            live_cash_flow_adjustments=parse_live_cash_flow_adjustments(),
-            common_equity_start_at=parse_common_equity_start_at(),
             research_collector_root=Path(
                 os.environ.get("CML_RESEARCH_COLLECTOR_ROOT", "/app/research-data")
             ),
@@ -48,15 +41,5 @@ def main() -> None:
         host=args.host,
         port=args.port,
     )
-
-
-def parse_paper_run_ids(value: str | None = None) -> frozenset[str] | None:
-    raw_value = (
-        os.environ.get("CML_PAPER_ACCOUNT_RUN_IDS", "") if value is None else value
-    )
-    run_ids = frozenset(item.strip() for item in raw_value.split(",") if item.strip())
-    return run_ids or None
-
-
 if __name__ == "__main__":
     main()

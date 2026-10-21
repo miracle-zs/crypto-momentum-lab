@@ -13,12 +13,6 @@ from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.domain.trading import OrderType, TradeSide
 
 
-class RunMode(StrEnum):
-    REPLAY = "replay"
-    PAPER = "paper"
-    LIVE = "live"
-
-
 StrategySide = TradeSide
 EntryType = OrderType
 
@@ -50,7 +44,6 @@ class StrategyRunIdentity:
     strategy_name: str
     strategy_version: str
     config_hash: str
-    run_mode: RunMode
     code_commit: str
     created_at: datetime
     source_paths: tuple[str, ...]

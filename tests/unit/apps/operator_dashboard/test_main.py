@@ -12,15 +12,10 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
     LiveAccountsResponse,
     LiveAccountSummaryResponse,
     MarketDataPerformanceResponse,
-    PaperAccountHistoryResponse,
-    PaperAccountsEquityResponse,
-    PaperAccountsResponse,
-    PaperAccountSummaryResponse,
     PersistencePerformanceResponse,
     ResearchCollectorResponse,
     RiskExecutionResponse,
     RunReportSummaryResponse,
-    StrategyRunResponse,
     StreamReadinessDetailResponse,
     SystemOverviewResponse,
     SystemPerformanceResponse,
@@ -169,58 +164,6 @@ class FakeQueries:
             monitored_symbols=[],
         )
 
-    async def strategy_run(self) -> StrategyRunResponse:
-        return StrategyRunResponse(
-            status=OperationalStatus.NO_DATA,
-            run_id=None,
-            strategy_name=None,
-            config_hash=None,
-            checkpoint_at=None,
-            latest_signals=[],
-            rejection_summary={},
-        )
-
-    async def paper_accounts(self) -> PaperAccountsResponse:
-        return PaperAccountsResponse(
-            status=OperationalStatus.READY,
-            accounts=[
-                PaperAccountSummaryResponse(
-                    status=OperationalStatus.READY,
-                    run_id="paper-account-test",
-                    strategy_name="compression_breakout",
-                    config_hash="config-hash",
-                    checkpoint_at=NOW,
-                    portfolio_summary={"equity": "1000"},
-                )
-            ],
-        )
-
-    async def paper_account_equity(self) -> PaperAccountsEquityResponse:
-        return PaperAccountsEquityResponse(
-            status=OperationalStatus.READY,
-            accounts=[],
-        )
-
-    async def paper_account(self, run_id: str) -> StrategyRunResponse:
-        response = await self.strategy_run()
-        response.run_id = run_id
-        return response
-
-    async def paper_history(
-        self,
-        run_id: str,
-        *,
-        full: bool = False,
-    ) -> PaperAccountHistoryResponse:
-        del full
-        return PaperAccountHistoryResponse(
-            status=OperationalStatus.READY,
-            run_id=run_id,
-            closed_trade_count=0,
-            closed_trades=[],
-            trade_events=[],
-        )
-
     async def account(
         self,
         equity_range: str = "24h",
@@ -293,26 +236,3 @@ class FakeQueries:
             ),
             host_resources=HostResourcesResponse(),
         )
-
-    async def account_performance(
-        self,
-        account_label: str = "primary",
-        window_hours: int = 24,
-        *,
-        environment: str = "live",
-        asset: str = "USDT",
-        end_time: datetime | None = None,
-        is_empty_proven: bool = False,
-        **kwargs: Any,
-    ) -> dict[str, object]:
-        del end_time, is_empty_proven, kwargs
-        return {
-            "account_label": account_label,
-            "window_hours": window_hours,
-            "environment": environment,
-            "asset": asset,
-            "status": "ready",
-            "twr": "0.05",
-            "modified_dietz": "0.048",
-            "mwr": "0.049",
-        }

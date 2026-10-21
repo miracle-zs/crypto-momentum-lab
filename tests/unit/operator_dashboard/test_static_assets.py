@@ -38,7 +38,6 @@ def test_static_index_contains_dashboard_mount() -> None:
     for section_id in (
         "overview",
         "universe",
-        "strategy",
         "account",
         "risk",
         "reports",

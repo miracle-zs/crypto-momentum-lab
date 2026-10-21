@@ -85,14 +85,6 @@ export const pnlClass = (value) => {
   return parsed == null || parsed === 0 ? "" : parsed > 0 ? "pos" : "neg";
 };
 
-export const PAPER_DEFAULT_INITIAL_CAPITAL = 1000;
-
-export const computeReturnRate = (equity, initialCapital = PAPER_DEFAULT_INITIAL_CAPITAL) => {
-  const eq = asNumber(equity);
-  const capital = asNumber(initialCapital);
-  return eq == null || capital == null || capital <= 0 ? null : (eq - capital) / capital;
-};
-
 export const computeRoi = (unrealizedPnl, entryNotional) => {
   const upnl = asNumber(unrealizedPnl);
   const notional = asNumber(entryNotional);

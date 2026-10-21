@@ -1,118 +1,3 @@
-/* ============ paired equity comparison ============ */
-
-.pair-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.pair-section[data-comparison-count="1"] {
-  width: 100%;
-  max-width: 1080px;
-}
-
-.pair-section[data-comparison-count="1"] .pair-grid {
-  grid-template-columns: minmax(0, 1fr);
-}
-
-.pair-section[data-comparison-count="2"] .pair-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.common-equity-section[data-common-comparison-count="1"] {
-  width: 100%;
-  max-width: 1080px;
-}
-
-.common-equity-section[data-common-comparison-count="1"] .pair-grid {
-  grid-template-columns: minmax(0, 1fr);
-}
-
-.pair-panel {
-  min-width: 0;
-  padding: 13px 14px 11px;
-  border: 1px solid var(--line);
-  border-radius: 11px;
-  background: var(--surface-2);
-}
-
-.pair-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.pair-head > div:first-child { min-width: 0; }
-
-.pair-head strong {
-  display: block;
-  overflow: hidden;
-  font-size: 12.5px;
-  font-weight: 700;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pair-head small {
-  display: block;
-  margin-top: 3px;
-  overflow: hidden;
-  color: var(--faint);
-  font: 8.5px var(--mono);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pair-spread { flex: none; text-align: right; }
-.pair-spread span { display: block; color: var(--faint); font-size: 8.5px; }
-.pair-spread b { display: block; margin-top: 2px; font-size: 12px; font-weight: 600; }
-
-.pair-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 14px;
-  margin-top: 12px;
-  color: var(--muted);
-  font-size: 9px;
-}
-
-.pair-legend span { display: inline-flex; align-items: center; gap: 5px; }
-.pair-legend span[title] { cursor: help; }
-.pair-legend i { width: 12px; height: 2px; border-radius: 2px; background: var(--series-color, var(--faint)); }
-.pair-legend span em { color: var(--series-color, var(--muted)); font-style: normal; }
-.pair-legend .fixed i { background: var(--series-color, var(--brand)); }
-.pair-legend .candle i { background: var(--series-color, var(--up)); }
-.pair-legend .variant i { background: var(--series-color, var(--warn)); }
-.pair-legend .live i { background: var(--series-color, var(--series-live)); height: 3px; }
-.pair-legend b { margin-left: 2px; font-size: 9.5px; font-weight: 500; }
-
-.pair-chart { position: relative; margin: 3px -2px 0; }
-
-.pair-panel footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding-top: 8px;
-  border-top: 1px solid var(--line);
-  color: var(--faint);
-  font-size: 8.5px;
-}
-
-.pair-panel footer b { color: var(--muted); font: 500 9px var(--mono); white-space: nowrap; }
-
-.common-equity-note {
-  margin: 10px 0 2px;
-  padding: 8px 10px;
-  border: 1px solid color-mix(in srgb, var(--brand) 22%, var(--line));
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--brand) 7%, transparent);
-  color: var(--muted);
-  font-size: 10px;
-  line-height: 1.6;
-}
-
 /* ============ equity chart ============ */
 
 .chart-context {
@@ -129,8 +14,6 @@
 
 .echart-shell { position: relative; width: 100%; outline: none; }
 .echart-surface { width: 100%; height: 280px; }
-.pair-chart .echart-surface { height: 230px; }
-.pair-section[data-comparison-count="1"] .pair-chart .echart-surface { height: 300px; }
 .echart-surface svg { display: block; width: 100%; height: 100%; }
 .echart-shell:focus-visible {
   outline: 1px solid var(--brand);
@@ -173,21 +56,4 @@
   font: 9.5px var(--mono);
   line-height: 1.45;
   pointer-events: none;
-}
-
-.pair-grid { gap: 14px; }
-
-.pair-panel { padding: 15px 16px 12px; border-radius: 12px; background: rgba(21, 33, 44, .76); }
-
-.pair-head strong { font-size: 13px; }
-
-.pair-legend { margin-top: 13px; }
-
-.pair-panel footer { padding-top: 9px; }
-
-.pair-section .pair-legend {
-  max-height: 54px;
-  overflow-y: auto;
-  padding-right: 4px;
-  scrollbar-width: thin;
 }

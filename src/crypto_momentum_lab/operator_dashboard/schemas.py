@@ -110,27 +110,6 @@ class LiveAccountMetricPointResponse(DashboardSchema):
     drawdown_ratio: str | None = None
 
 
-class AccountPerformanceSummaryResponse(DashboardSchema):
-    """Audited performance metrics evaluated by AccountPerformanceCalculator."""
-
-    start_equity: str | None = None
-    end_equity: str | None = None
-    net_equity_delta: str | None = None
-    cash_flow_adjusted_pnl: str | None = None
-    twr: str | None = None
-    modified_dietz: str | None = None
-    mwr: str | None = None
-    status: str = "unknown"
-    is_certified: bool = False
-    coverage_status: str = "uncertified"
-    cash_flow_coverage_proof: str = "uncertified_zero_cash_flow_facts"
-    cash_flow_corrections_count: int = 0
-    valuation_basis: str = "wallet"
-    asset: str = "USDT"
-    environment: str = "live"
-    method: str | None = None
-
-
 class LiveAccountMetricsAccountResponse(DashboardSchema):
     """Time-series metrics for one live account in the comparison fleet."""
 
@@ -138,7 +117,6 @@ class LiveAccountMetricsAccountResponse(DashboardSchema):
     environment: str
     status: OperationalStatus
     metrics_curve: list[LiveAccountMetricPointResponse] = Field(default_factory=list)
-    performance: AccountPerformanceSummaryResponse | None = None
 
 
 class LiveAccountMetricsResponse(DashboardSchema):
@@ -203,80 +181,6 @@ class UniverseStatusResponse(DashboardSchema):
     gainers: list[dict[str, JsonValue]]
     losers: list[dict[str, JsonValue]]
     monitored_symbols: list[dict[str, JsonValue]]
-
-
-class StrategyRunResponse(DashboardSchema):
-    status: OperationalStatus
-    run_id: str | None
-    strategy_name: str | None
-    exit_mode: str | None = None
-    exit_label: str | None = None
-    config_hash: str | None
-    checkpoint_at: datetime | None
-    equity_window_start: datetime | None = None
-    equity_window_end: datetime | None = None
-    equity_sample_interval_seconds: int | None = None
-    portfolio_summary: dict[str, JsonValue] = Field(default_factory=dict)
-    equity_curve: list[dict[str, JsonValue]] = Field(default_factory=list)
-    open_positions: list[dict[str, JsonValue]] = Field(default_factory=list)
-    closed_trades: list[dict[str, JsonValue]] = Field(default_factory=list)
-    trade_events: list[dict[str, JsonValue]] = Field(default_factory=list)
-    latest_signals: list[dict[str, JsonValue]]
-    latest_paper_fills: list[dict[str, JsonValue]] = Field(default_factory=list)
-    rejection_summary: dict[str, JsonValue]
-
-
-class PaperAccountSummaryResponse(DashboardSchema):
-    status: OperationalStatus
-    run_id: str | None
-    strategy_name: str | None
-    exit_mode: str | None = None
-    exit_label: str | None = None
-    config_hash: str | None
-    checkpoint_at: datetime | None
-    portfolio_summary: dict[str, JsonValue] = Field(default_factory=dict)
-
-
-class PaperAccountEquityResponse(DashboardSchema):
-    run_id: str
-    strategy_name: str
-    exit_mode: str
-    exit_label: str
-    equity_window_start: datetime
-    equity_window_end: datetime
-    equity_sample_interval_seconds: int
-    source: str = "paper"
-    account_label: str | None = None
-    equity_curve: list[dict[str, JsonValue]] = Field(default_factory=list)
-    common_equity_baseline: str | None = None
-    common_equity_curve: list[dict[str, JsonValue]] = Field(default_factory=list)
-
-
-class PaperAccountsEquityResponse(DashboardSchema):
-    status: OperationalStatus
-    accounts: list[PaperAccountEquityResponse] = Field(default_factory=list)
-    common_equity_start_at: datetime | None = None
-    common_equity_end_at: datetime | None = None
-    common_equity_sample_interval_seconds: int | None = None
-    common_equity_anchor: str | None = None
-    common_equity_anchor_accounts: list[str] = Field(default_factory=list)
-    common_equity_account_count: int = 0
-    common_equity_cash_flows: list[dict[str, JsonValue]] = Field(default_factory=list)
-    common_equity_note: str | None = None
-
-
-class PaperAccountsResponse(DashboardSchema):
-    status: OperationalStatus
-    accounts: list[PaperAccountSummaryResponse] = Field(default_factory=list)
-
-
-class PaperAccountHistoryResponse(DashboardSchema):
-    status: OperationalStatus
-    run_id: str
-    closed_trade_count: int
-    history_complete: bool = True
-    closed_trades: list[dict[str, JsonValue]] = Field(default_factory=list)
-    trade_events: list[dict[str, JsonValue]] = Field(default_factory=list)
 
 
 class AccountOverviewResponse(DashboardSchema):

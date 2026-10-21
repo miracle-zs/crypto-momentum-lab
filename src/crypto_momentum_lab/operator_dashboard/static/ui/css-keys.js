@@ -43,13 +43,6 @@ export const K = {
   liveAccountCardFooter: "live-account-card-footer",
   liveAccountFleetStatus: "live-account-fleet-status",
   liveAccountFleetKpis: "live-account-fleet-kpis",
-  // strategy
-  acctCards: "acct-cards",
-  paperAccountDetail: "paper-account-detail",
-  accountIndex: "data-account-index",
-  loadPaperDetail: "data-load-paper-detail",
-  loadPaperHistory: "data-load-paper-history",
-  paperComparison: "data-paper-comparison",
   // overview
   serviceAge: "data-service-age",
   serviceMeter: "data-service-meter",
@@ -77,10 +70,4 @@ export const sel = {
   selectedAccountLabel: () => `[${K.selectedAccountLabel}]`,
   accountLoadState: () => `[${K.accountLoadState}]`,
   refreshState: () => `[${K.refreshState}]`,
-  paperDetail: () => `.${K.paperAccountDetail}`,
-  acctCards: () => `.${K.acctCards}`,
-  paperComparison: () => `[${K.paperComparison}]`,
-  accountIndex: () => `[${K.accountIndex}]`,
-  loadPaperDetail: () => `[${K.loadPaperDetail}]`,
-  loadPaperHistory: () => `[${K.loadPaperHistory}]`,
 };

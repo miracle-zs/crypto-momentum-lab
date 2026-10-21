@@ -5,7 +5,7 @@
 
 export const SECTION_FETCH_TIMEOUT_MS = 12 * 1000;
 export const SAFETY_READING_TTL_MS = 60 * 1000;
-export const SAFETY_SECTIONS = new Set(["overview", "risk", "account", "strategy", "universe"]);
+export const SAFETY_SECTIONS = new Set(["overview", "risk", "account", "universe"]);
 
 export const sectionInFlight = new Set();
 export const lastSectionPollAt = new Map();

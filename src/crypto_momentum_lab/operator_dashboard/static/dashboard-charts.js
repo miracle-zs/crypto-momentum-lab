@@ -1,9 +1,7 @@
 import {
-  COMPARISON_ANCHOR_HOUR,
-  COMPARISON_SERIES_COLORS,
+  DAILY_EQUITY_ANCHOR_HOUR,
   DEFAULT_EQUITY_BUCKET_SECONDS,
   DISPLAY_TIME_ZONE,
-  STRATEGY_ORDER,
 } from "./dashboard-config.js";
 import {
   asNumber,
@@ -14,112 +12,6 @@ import {
 } from "./dashboard-formatters.js";
 import { registerChartPayload } from "./dashboard-chart-engine.js";
 import { emptyBox } from "./dashboard-ui.js";
-
-function equityBucketMap(account) {
-  const intervalSeconds = asNumber(account.equity_sample_interval_seconds) || DEFAULT_EQUITY_BUCKET_SECONDS;
-  const intervalMs = intervalSeconds * 1000;
-  const buckets = new Map();
-  for (const row of account.equity_curve || []) {
-    const observedAt = new Date(row.observed_at).getTime();
-    const equity = asNumber(row.equity);
-    if (!Number.isFinite(observedAt) || equity == null) continue;
-    const bucket = Math.floor(observedAt / intervalMs) * intervalMs;
-    buckets.set(bucket, equity);
-  }
-  return { intervalSeconds, buckets };
-}
-
-function synchronizedComparisonAccounts(accounts) {
-  if (accounts.length < 2) {
-    return { accounts, omittedAccounts: [] };
-  }
-  const maps = accounts.map(equityBucketMap);
-  const latestBuckets = maps.map((map) => Math.max(...map.buckets.keys(), -Infinity));
-  const referenceBucket = Math.max(...latestBuckets);
-  if (!Number.isFinite(referenceBucket)) {
-    return { accounts, omittedAccounts: [] };
-  }
-  const intervalMs = Math.max(...maps.map((map) => map.intervalSeconds)) * 1000;
-  const freshnessWindowMs = intervalMs * 2;
-  const currentAccounts = accounts.filter((_, index) => (
-    latestBuckets[index] >= referenceBucket - freshnessWindowMs
-  ));
-  if (currentAccounts.length < 2 || currentAccounts.length === accounts.length) {
-    return { accounts, omittedAccounts: [] };
-  }
-  return {
-    accounts: currentAccounts,
-    omittedAccounts: accounts.filter((_, index) => (
-      latestBuckets[index] < referenceBucket - freshnessWindowMs
-    )),
-  };
-}
-
-function comparisonSeriesClass(account) {
-  if (account.source === "live") return "live";
-  return account.exit_mode === "candle_15m" ? "candle" : "variant";
-}
-
-function comparisonSeriesColor(account, index) {
-  if (account.source === "live") return "var(--series-live)";
-  return COMPARISON_SERIES_COLORS[index % COMPARISON_SERIES_COLORS.length];
-}
-
-function comparisonSeriesLabel(account, index, accounts) {
-  if (account.source === "live") {
-    const base = account.exit_label || "实盘 Top10 · B8";
-    const liveAccounts = accounts.filter((candidate) => candidate.source === "live");
-    const duplicateCount = liveAccounts.filter((candidate) => (
-      candidate.exit_label || "实盘 Top10 · B8"
-    ) === base).length;
-    return duplicateCount > 1 && account.account_label
-      ? `${base} · ${account.account_label}`
-      : base;
-  }
-  const base = account.exit_label || "15M 收线退出";
-  const duplicateCount = accounts.filter((candidate) => (
-    candidate.exit_label || "15M 收线退出"
-  ) === base).length;
-  if (duplicateCount < 2) return base;
-  const accountNumber = String(account.run_id || "").match(/^paper-account-(\d+)/)?.[1];
-  return accountNumber ? `${base} · 账户 ${accountNumber}` : `${base} · 版本 ${index + 1}`;
-}
-
-function compactComparisonExitLabel(account) {
-  const label = String(account.exit_label || "").trim();
-  if (account.source === "live") {
-    return account.account_label ? `实盘 · ${account.account_label}` : "实盘基准";
-  }
-  if (!label) return "退出版本";
-  if (label.startsWith("反向后宽限 ")) {
-    const bars = label.match(/^反向后宽限\s+(\d+)\s+根\s+15M/)?.[1];
-    const direction = label.match(/仅多头|仅空头|无方向/)?.[0];
-    if (bars) return `宽限${bars}根${direction ? `/${direction.replace("仅", "")}` : ""}`;
-  }
-  if (label.startsWith("15M 收线退出")) {
-    const direction = label.match(/仅多头|仅空头|无方向/)?.[0];
-    return `收线${direction ? `/${direction.replace("仅", "")}` : ""}`;
-  }
-  if (label.startsWith("固定 TP / SL")) return "固定 TP/SL";
-  return label;
-}
-
-function comparisonSeriesDisplayLabel(account, index, accounts) {
-  const compact = compactComparisonExitLabel(account);
-  if (account.source === "live") return compact;
-  const accountNumber = String(account.run_id || "").match(/^paper-account-(\d+)/)?.[1];
-  return accountNumber ? `账户 ${accountNumber} · ${compact}` : compact;
-}
-
-function comparisonAccountOrder(account) {
-  if (account.account_label === "primary") return 0;
-  const match = String(account.account_label || "").match(/^account-(\d+)$/);
-  return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
-}
-
-export function comparisonSeriesStyle(series) {
-  return `style="--series-color:${series.color}"`;
-}
 
 function equityValues(rows) {
   return (rows || [])
@@ -151,7 +43,7 @@ export function equityWindowMetrics(rows) {
   };
 }
 
-const COMPARISON_TIME_FORMATTER = new Intl.DateTimeFormat("en-CA", {
+const DAILY_ANCHOR_FORMATTER = new Intl.DateTimeFormat("en-CA", {
   timeZone: DISPLAY_TIME_ZONE,
   calendar: "gregory",
   numberingSystem: "latn",
@@ -164,20 +56,9 @@ const COMPARISON_TIME_FORMATTER = new Intl.DateTimeFormat("en-CA", {
   hourCycle: "h23",
 });
 
-function comparisonReferenceMs(accounts) {
-  const windowEnds = accounts
-    .map((account) => new Date(account.equity_window_end || "").getTime())
-    .filter((value) => Number.isFinite(value));
-  if (windowEnds.length) return Math.max(...windowEnds);
-  const curveEnds = accounts.flatMap((account) => (account.equity_curve || [])
-    .map((row) => new Date(row.observed_at || "").getTime())
-    .filter((value) => Number.isFinite(value)));
-  return curveEnds.length ? Math.max(...curveEnds) : Date.now();
-}
-
-function comparisonDailyAnchor(referenceMs) {
+function dailyEquityAnchor(referenceMs) {
   const parts = Object.fromEntries(
-    COMPARISON_TIME_FORMATTER.formatToParts(new Date(referenceMs))
+    DAILY_ANCHOR_FORMATTER.formatToParts(new Date(referenceMs))
       .filter((part) => part.type !== "literal")
       .map((part) => [part.type, Number(part.value)]),
   );
@@ -195,202 +76,16 @@ function comparisonDailyAnchor(referenceMs) {
     parts.year,
     parts.month - 1,
     parts.day,
-    COMPARISON_ANCHOR_HOUR,
+    DAILY_EQUITY_ANCHOR_HOUR,
   );
   return anchorWallMs - offsetMs;
 }
 
 function dailyAnchorAtOrAfter(referenceMs) {
-  const anchorAt = comparisonDailyAnchor(referenceMs);
+  const anchorAt = dailyEquityAnchor(referenceMs);
   return anchorAt >= referenceMs
     ? anchorAt
-    : comparisonDailyAnchor(referenceMs + 24 * 60 * 60 * 1000);
-}
-
-function comparisonStart(commonBuckets, anchorAt) {
-  const anchoredBucket = commonBuckets.find((bucket) => bucket >= anchorAt);
-  if (anchoredBucket != null) {
-    return {
-      at: anchoredBucket,
-      mode: anchoredBucket === anchorAt ? "daily-anchor" : "after-anchor",
-    };
-  }
-  return {
-    at: commonBuckets[0],
-    mode: "common-start-fallback",
-  };
-}
-
-function strategyEquityModel(strategyName, accounts, omittedAccounts = []) {
-  if (accounts.length < 2) return null;
-  const maps = accounts.map(equityBucketMap);
-  const commonBuckets = [...maps[0].buckets.keys()]
-    .filter((bucket) => maps.every((map) => map.buckets.has(bucket)))
-    .sort((left, right) => left - right);
-  if (commonBuckets.length < 2) return null;
-
-  const anchorAt = comparisonDailyAnchor(comparisonReferenceMs(accounts));
-  const start = comparisonStart(commonBuckets, anchorAt);
-  const comparisonBuckets = commonBuckets.filter((bucket) => bucket >= start.at);
-  if (comparisonBuckets.length < 2) return null;
-  const series = accounts.map((account, index) => {
-    const map = maps[index];
-    const base = map.buckets.get(start.at);
-    const values = comparisonBuckets.map((bucket) => map.buckets.get(bucket) - base);
-    return {
-      account,
-      label: comparisonSeriesLabel(account, index, accounts),
-      displayLabel: comparisonSeriesDisplayLabel(account, index, accounts),
-      colorClass: comparisonSeriesClass(account),
-      color: comparisonSeriesColor(account, index),
-      values,
-      delta: values.at(-1),
-    };
-  });
-  const points = comparisonBuckets.map((bucket, index) => ({
-    at: bucket,
-    values: series.map((item) => item.values[index]),
-  }));
-  const domainValues = [0, ...series.flatMap((item) => item.values)];
-  let min = Math.min(...domainValues);
-  let max = Math.max(...domainValues);
-  if (min === max) {
-    min -= 0.01;
-    max += 0.01;
-  } else {
-    const padding = Math.max((max - min) * 0.08, 0.01);
-    min -= padding;
-    max += padding;
-  }
-  return {
-    strategyName,
-    accounts,
-    omittedAccounts,
-    series,
-    points,
-    startAt: start.at,
-    endAt: comparisonBuckets.at(-1),
-    anchorAt,
-    anchorMode: start.mode,
-    min,
-    max,
-    intervalSeconds: Math.max(...maps.map((map) => map.intervalSeconds)),
-  };
-}
-
-function commonEquityBucketMap(account) {
-  const buckets = new Map();
-  for (const row of account.common_equity_curve || []) {
-    const observedAt = new Date(row.observed_at).getTime();
-    const delta = asNumber(row.delta);
-    if (!Number.isFinite(observedAt) || delta == null) continue;
-    buckets.set(observedAt, delta);
-  }
-  return buckets;
-}
-
-function commonEquityComparisonModel(strategyName, accounts, meta = {}) {
-  if (accounts.length < 2) return null;
-  const maps = accounts.map(commonEquityBucketMap);
-  const commonBuckets = [...maps[0].keys()]
-    .filter((bucket) => maps.every((map) => map.has(bucket)))
-    .sort((left, right) => left - right);
-  if (commonBuckets.length < 2) return null;
-
-  const series = accounts.map((account, index) => {
-    const map = maps[index];
-    const values = commonBuckets.map((bucket) => map.get(bucket));
-    return {
-      account,
-      label: comparisonSeriesLabel(account, index, accounts),
-      displayLabel: comparisonSeriesDisplayLabel(account, index, accounts),
-      colorClass: comparisonSeriesClass(account),
-      color: comparisonSeriesColor(account, index),
-      values,
-      delta: values.at(-1),
-    };
-  });
-  const points = commonBuckets.map((bucket, index) => ({
-    at: bucket,
-    values: series.map((item) => item.values[index]),
-  }));
-  const domainValues = [0, ...series.flatMap((item) => item.values)];
-  let min = Math.min(...domainValues);
-  let max = Math.max(...domainValues);
-  if (min === max) {
-    min -= 0.01;
-    max += 0.01;
-  } else {
-    const padding = Math.max((max - min) * 0.08, 0.01);
-    min -= padding;
-    max += padding;
-  }
-  const metadataStart = new Date(meta.common_equity_start_at || "").getTime();
-  const metadataEnd = new Date(meta.common_equity_end_at || "").getTime();
-  return {
-    strategyName,
-    accounts,
-    series,
-    points,
-    startAt: Number.isFinite(metadataStart) ? metadataStart : commonBuckets[0],
-    endAt: Number.isFinite(metadataEnd) ? metadataEnd : commonBuckets.at(-1),
-    commonStartAt: commonBuckets[0],
-    commonEndAt: commonBuckets.at(-1),
-    anchorAt: commonBuckets[0],
-    anchorMode: "latest-start",
-    min,
-    max,
-    intervalSeconds: asNumber(meta.common_equity_sample_interval_seconds) || 15 * 60,
-    note: meta.common_equity_note || "",
-  };
-}
-
-export function buildStrategyEquityModels(accounts) {
-  return STRATEGY_ORDER.flatMap((strategyName) => {
-    const strategyAccounts = accounts
-      .filter((account) => account.strategy_name === strategyName)
-      .sort((left, right) => {
-        const leftLive = left.source === "live" ? 1 : 0;
-        const rightLive = right.source === "live" ? 1 : 0;
-        return leftLive - rightLive
-          || (leftLive && rightLive
-            ? comparisonAccountOrder(left) - comparisonAccountOrder(right)
-            : 0)
-          || String(left.run_id).localeCompare(String(right.run_id));
-      });
-    const synchronized = synchronizedComparisonAccounts(strategyAccounts);
-    const model = strategyEquityModel(
-      strategyName,
-      synchronized.accounts,
-      synchronized.omittedAccounts,
-    );
-    return model ? [model] : [];
-  });
-}
-
-export function buildLatestStartEquityModels(accounts, meta = {}) {
-  return STRATEGY_ORDER.flatMap((strategyName) => {
-    const strategyAccounts = accounts
-      .filter((account) => (
-        account.strategy_name === strategyName
-        && (account.common_equity_curve || []).length >= 2
-      ))
-      .sort((left, right) => {
-        const leftLive = left.source === "live" ? 1 : 0;
-        const rightLive = right.source === "live" ? 1 : 0;
-        return leftLive - rightLive
-          || (leftLive && rightLive
-            ? comparisonAccountOrder(left) - comparisonAccountOrder(right)
-            : 0)
-          || String(left.run_id).localeCompare(String(right.run_id));
-      });
-    const model = commonEquityComparisonModel(
-      strategyName,
-      strategyAccounts,
-      meta,
-    );
-    return model ? [model] : [];
-  });
+    : dailyEquityAnchor(referenceMs + 24 * 60 * 60 * 1000);
 }
 
 export function standaloneSparkline(rows) {
@@ -465,55 +160,6 @@ export function equityChart(rows, chartId = "eq", windowStart = null, windowEnd 
     ${chartMetrics}
     <div class="echart-surface" aria-hidden="true"></div>
   </div>`;
-}
-
-function renderComparisonChart(model, chartId, title, ariaLabel) {
-  registerChartPayload(chartId, {
-    kind: "comparison",
-    title,
-    strategyName: model.strategyName,
-    domainStart: model.startAt,
-    domainEnd: model.endAt,
-    anchorAt: model.anchorAt,
-    anchorMode: model.anchorMode,
-    min: model.min,
-    max: model.max,
-    points: model.points,
-    series: model.series.map((series) => ({
-      label: series.label,
-      displayLabel: series.displayLabel,
-      color: series.color,
-      colorClass: series.colorClass,
-      values: series.values,
-      delta: series.delta,
-      isLive: series.account?.source === "live",
-    })),
-  });
-  return `<div class="pair-chart echart-shell" data-echart-chart data-echart-kind="comparison" data-echart-id="${esc(chartId)}" tabindex="0" role="group" aria-label="${esc(ariaLabel)}；使用左右方向键查看数据点">
-    <div class="echart-surface" aria-hidden="true"></div>
-  </div>`;
-}
-
-export function strategyEquityChart(model) {
-  const chartId = `comparison-${String(model.strategyName || "strategy")
-    .replace(/[^A-Za-z0-9_-]+/g, "-")}`;
-  return renderComparisonChart(
-    model,
-    chartId,
-    `${model.strategyName} 各退出方式同期权益对比`,
-    `${model.strategyName} 各退出方式同期权益对比`,
-  );
-}
-
-export function latestStartEquityChart(model) {
-  const chartId = `latest-start-${String(model.strategyName || "strategy")
-    .replace(/[^A-Za-z0-9_-]+/g, "-")}`;
-  return renderComparisonChart(
-    model,
-    chartId,
-    `${model.strategyName} 最晚启动统一起点权益金额变化`,
-    `${model.strategyName} 最晚启动统一起点权益金额变化`,
-  );
 }
 
 const LIVE_ACCOUNT_METRIC_COLORS = [

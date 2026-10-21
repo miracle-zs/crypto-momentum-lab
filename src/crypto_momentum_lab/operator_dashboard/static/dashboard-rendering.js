@@ -55,23 +55,5 @@ export function sectionRenderKey(id, data) {
     delete snapshot.status;
   }
 
-  if (id === "strategy") {
-    const fields = [
-      "run_id",
-      "strategy_name",
-      "exit_mode",
-      "exit_label",
-      "config_hash",
-    ];
-    snapshot.accounts = (snapshot.accounts || []).map((account) =>
-      Object.fromEntries(
-        fields
-          .filter((field) => account[field] !== undefined)
-          .map((field) => [field, account[field]]),
-      ),
-    );
-    delete snapshot.status;
-  }
-
   return JSON.stringify(snapshot);
 }

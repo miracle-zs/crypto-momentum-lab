@@ -9,7 +9,6 @@ import structlog
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
-    RunMode,
     StrategyDecision,
     StrategyRunIdentity,
 )
@@ -63,7 +62,6 @@ class MomentumStrategyEngine:
             strategy_name=account_config.strategy,
             strategy_version="v0",
             config_hash=account_config.strategy_config_hash,
-            run_mode=RunMode.LIVE,
             code_commit=account_config.image_commit,
             created_at=datetime.now(UTC),
             source_paths=("MarketStateHub",),

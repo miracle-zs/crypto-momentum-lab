@@ -3,7 +3,7 @@ from decimal import Decimal
 
 import pytest
 
-from crypto_momentum_lab.domain.strategy import RunMode, StrategyRunIdentity
+from crypto_momentum_lab.domain.strategy import StrategyRunIdentity
 from crypto_momentum_lab.strategies.order_flow_impulse import OrderFlowImpulseConfig
 from crypto_momentum_lab.strategies.registry import (
     StrategyRegistryError,
@@ -104,7 +104,6 @@ def _identity(strategy_name: str) -> StrategyRunIdentity:
         strategy_name=strategy_name,
         strategy_version="v0",
         config_hash="a" * 64,
-        run_mode=RunMode.PAPER,
         code_commit="unknown",
         created_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
         source_paths=("memory",),

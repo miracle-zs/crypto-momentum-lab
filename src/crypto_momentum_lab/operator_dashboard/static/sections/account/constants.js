@@ -1,5 +1,5 @@
 import {
-  COMPARISON_ANCHOR_HOUR,
+  DAILY_EQUITY_ANCHOR_HOUR,
   DEFAULT_EQUITY_BUCKET_SECONDS,
   DISPLAY_TIME_ZONE_LABEL,
 } from "../../dashboard-config.js";
@@ -36,7 +36,7 @@ export function windowRangeText(data, selectedRange) {
 }
 
 export function anchorLabel() {
-  return `${String(COMPARISON_ANCHOR_HOUR).padStart(2, "0")}:00 ${DISPLAY_TIME_ZONE_LABEL}`;
+  return `${String(DAILY_EQUITY_ANCHOR_HOUR).padStart(2, "0")}:00 ${DISPLAY_TIME_ZONE_LABEL}`;
 }
 
 export function equityRangeControls(selectedRange) {

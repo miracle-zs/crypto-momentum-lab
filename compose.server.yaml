@@ -39,16 +39,9 @@ x-app: &app
   stop_grace_period: 20s
   logging: *default-logging
 
-# Historical Paper IDs remain for database exit protection and dashboard
-# queries. No Paper runner is part of this deployment; keep existing historical
-# account visibility and retention behavior independent of runner retirement.
-x-paper-account-run-ids: &paper-account-run-ids >-
-  paper-account-16-orderflow-b8-gainer10-imbalance040-v1,
-  paper-account-17-orderflow-b1-gainer10-imbalance040-v1
-
 # Explicit operator retirement confirmed 2026-10-07. Retain checkpoint rows
 # for audit, but do not let these retired owners pin market-state retention.
-# This is separate from Paper position subscription/exit protection above.
+# This list only controls checkpoint retention for retired strategy runs.
 x-retired-strategy-run-ids: &retired-strategy-run-ids >-
   paper-account-16-orderflow-b8-gainer10-v1,
   paper-account-17-orderflow-b1-gainer10-v1,
@@ -157,7 +150,6 @@ services:
     environment:
       <<: *app-environment
       CML_ENVIRONMENT_CONFIG: configs/environments/server_paper.yaml
-      CML_PAPER_EXIT_RUN_IDS: *paper-account-run-ids
       CML_RETIRED_STRATEGY_RUN_IDS: *retired-strategy-run-ids
       # Explicit labels supplement accounts discovered from ready open-position
       # reconciliations, including accounts whose services are stopped.
@@ -244,9 +236,6 @@ services:
     image: ${CML_DASHBOARD_IMAGE:-crypto-momentum-lab-app:${CML_CODE_COMMIT:?set CML_CODE_COMMIT}}
     environment:
       <<: *app-environment
-      CML_PAPER_ACCOUNT_RUN_IDS: *paper-account-run-ids
-      CML_DASHBOARD_LIVE_CASH_FLOWS_JSON: ${CML_DASHBOARD_LIVE_CASH_FLOWS_JSON:-}
-      CML_DASHBOARD_COMMON_EQUITY_START_AT: "2026-08-21T02:45:00Z"
       CML_MARKET_REVISION_ARCHIVE_DIR: /app/market-revision-archive
     entrypoint: ["cml-operator-dashboard"]
     command: ["--host", "0.0.0.0", "--port", "8765"]

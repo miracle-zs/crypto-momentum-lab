@@ -7,7 +7,6 @@ import pytest
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import (
     RejectionReason,
-    RunMode,
     StrategyCheckpoint,
     StrategyRunIdentity,
     StrategySide,
@@ -276,7 +275,6 @@ def _strategy(
         strategy_name="orderflow_impulse",
         strategy_version="v0",
         config_hash=deterministic_config_hash(config),
-        run_mode=RunMode.PAPER,
         code_commit="unknown",
         created_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
         source_paths=("memory",),

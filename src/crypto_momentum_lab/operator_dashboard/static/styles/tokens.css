@@ -18,15 +18,10 @@
   --warn: #e9b45b;
   --info: #86aef5;
   --live: #34d399;
-  --series-fixed: #86aef5;
-  --series-candle: #65d39a;
-  --series-live: #67e8f9;
   --series-amber: #e9b45b;
   --series-violet: #c084fc;
   --series-cyan: #22d3ee;
-  --series-coral: #f4777f;
   --series-lime: #a3e635;
-  --series-sky: #38bdf8;
   --sans: "Avenir Next", "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", -apple-system, sans-serif;
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", "IBM Plex Mono", Menlo, Consolas, monospace;
 }

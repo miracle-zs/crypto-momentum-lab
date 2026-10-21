@@ -16,7 +16,6 @@ MODULES = [
     "sections/universe.css",
     "sections/risk.css",
     "sections/account.css",
-    "sections/strategy.css",
     "sections/reports.css",
     "sections/collector.css",
     "sections/performance.css",

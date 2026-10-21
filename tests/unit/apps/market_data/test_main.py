@@ -1,6 +1,5 @@
 
 import asyncio
-from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -217,12 +216,6 @@ def test_refresh_command_rejects_invalid_timestamp() -> None:
     assert result.exit_code != 0
 
 
-def test_parse_paper_exit_run_ids_normalizes_csv() -> None:
-    assert main.parse_paper_exit_run_ids(" run-1,run-2, run-1, ,") == frozenset(
-        {"run-1", "run-2"}
-    )
-
-
 def test_parse_live_position_account_labels_supports_multiple_accounts() -> None:
     assert main.parse_live_position_account_labels(
         " primary, account-2,primary "
@@ -234,15 +227,7 @@ def test_parse_live_position_account_labels_rejects_empty_tokens() -> None:
         main.parse_live_position_account_labels("primary,,account-2")
 
 
-async def test_protected_symbols_load_live_position_symbols_once() -> None:
-    class FakePaperRepository:
-        async def load_open_position_symbols(
-            self,
-            run_ids: frozenset[str],
-        ) -> frozenset[str]:
-            assert run_ids == frozenset({"paper-run"})
-            return frozenset({"PAPERUSDT"})
-
+async def test_live_position_symbols_load_once() -> None:
     class FakeTradingRepository:
         def __init__(self) -> None:
             self.calls: list[str] = []
@@ -255,23 +240,13 @@ async def test_protected_symbols_load_live_position_symbols_once() -> None:
 
     trading = FakeTradingRepository()
 
-    symbols = await main._load_protected_symbols(
-        paper_repository=FakePaperRepository(),
-        trading_repository=trading,
-        protected_run_ids=frozenset({"paper-run"}),
-    )
+    symbols = await main._load_live_position_symbols(trading_repository=trading)
 
-    assert symbols == frozenset({"PAPERUSDT", "PRIMARYUSDT", "ACCOUNT-2USDT"})
+    assert symbols == frozenset({"PRIMARYUSDT", "ACCOUNT-2USDT"})
     assert trading.calls == ["live"]
 
 
-async def test_load_protected_symbols_succeeds_when_all_accounts_flat() -> None:
-    class FakePaperRepository:
-        async def load_open_position_symbols(
-            self, protected_run_ids: Iterable[str]
-        ) -> frozenset[str]:
-            return frozenset()
-
+async def test_live_position_symbols_are_empty_when_all_accounts_are_flat() -> None:
     class FlatTradingRepository:
         async def async_get_active_position_symbols(
             self, *, environment: str
@@ -279,22 +254,14 @@ async def test_load_protected_symbols_succeeds_when_all_accounts_flat() -> None:
             assert environment == "live"
             return frozenset()
 
-    symbols = await main._load_protected_symbols(
-        paper_repository=FakePaperRepository(),
-        trading_repository=FlatTradingRepository(),
-        protected_run_ids=frozenset(),
+    symbols = await main._load_live_position_symbols(
+        trading_repository=FlatTradingRepository()
     )
 
     assert symbols == frozenset()
 
 
-async def test_load_protected_symbols_propagates_live_query_exception() -> None:
-    class FakePaperRepository:
-        async def load_open_position_symbols(
-            self, protected_run_ids: Iterable[str]
-        ) -> frozenset[str]:
-            return frozenset({"PAPERUSDT"})
-
+async def test_live_position_symbols_propagate_query_exception() -> None:
     class FailingTradingRepository:
         async def async_get_active_position_symbols(
             self, *, environment: str
@@ -302,20 +269,12 @@ async def test_load_protected_symbols_propagates_live_query_exception() -> None:
             raise RuntimeError("active position symbols query failed")
 
     with pytest.raises(RuntimeError, match="active position symbols query failed"):
-        await main._load_protected_symbols(
-            paper_repository=FakePaperRepository(),
-            trading_repository=FailingTradingRepository(),
-            protected_run_ids=frozenset({"paper-run"}),
+        await main._load_live_position_symbols(
+            trading_repository=FailingTradingRepository()
         )
 
 
-async def test_load_protected_symbols_propagates_database_timeout() -> None:
-    class FakePaperRepository:
-        async def load_open_position_symbols(
-            self, protected_run_ids: Iterable[str]
-        ) -> frozenset[str]:
-            return frozenset({"PAPERUSDT"})
-
+async def test_live_position_symbols_propagate_database_timeout() -> None:
     class FailingDiscoveryTradingRepository:
         async def async_get_active_position_symbols(
             self, *, environment: str
@@ -323,10 +282,8 @@ async def test_load_protected_symbols_propagates_database_timeout() -> None:
             raise RuntimeError("database timeout during discovery")
 
     with pytest.raises(RuntimeError, match="database timeout during discovery"):
-        await main._load_protected_symbols(
-            paper_repository=FakePaperRepository(),
-            trading_repository=FailingDiscoveryTradingRepository(),
-            protected_run_ids=frozenset({"paper-run"}),
+        await main._load_live_position_symbols(
+            trading_repository=FailingDiscoveryTradingRepository()
         )
 
 

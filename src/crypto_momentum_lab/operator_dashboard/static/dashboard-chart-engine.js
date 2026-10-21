@@ -31,7 +31,7 @@ export function chartPayloadSignature(payload) {
   const series = payload.series || [];
   const ptsTimes = points.map((p) => p.at).join(",");
   const seriesSig = series.map((s) => `${s.label ?? ""}:${s.color ?? ""}:${s.delta ?? ""}:${(s.values || []).join(",")}`).join(";");
-  return `${payload.kind || "comparison"}|${payload.title ?? ""}|${payload.domainStart ?? ""}|${payload.domainEnd ?? ""}|${payload.min ?? ""}|${payload.max ?? ""}|${payload.valueFormat ?? ""}|${ptsTimes}|${seriesSig}`;
+  return `${payload.kind || "metric-comparison"}|${payload.title ?? ""}|${payload.domainStart ?? ""}|${payload.domainEnd ?? ""}|${payload.min ?? ""}|${payload.max ?? ""}|${payload.valueFormat ?? ""}|${ptsTimes}|${seriesSig}`;
 }
 
 const FALLBACK_COLORS = {
@@ -44,15 +44,10 @@ const FALLBACK_COLORS = {
   lineStrong: "#3a4960",
   text: "#e9edf4",
   muted: "#a5b0c3",
-  live: "#67e8f9",
-  seriesFixed: "#7aa2f7",
-  seriesCandle: "#34d399",
   seriesAmber: "#f5b755",
   seriesViolet: "#c084fc",
   seriesCyan: "#22d3ee",
-  seriesCoral: "#fb7185",
   seriesLime: "#a3e635",
-  seriesSky: "#38bdf8",
 };
 
 export function registerChartPayload(id, payload) {
@@ -80,15 +75,10 @@ function chartColors() {
     lineStrong: cssToken("--line-strong", FALLBACK_COLORS.lineStrong),
     text: cssToken("--text", FALLBACK_COLORS.text),
     muted: cssToken("--muted", FALLBACK_COLORS.muted),
-    live: cssToken("--series-live", FALLBACK_COLORS.live),
-    seriesFixed: cssToken("--series-fixed", FALLBACK_COLORS.seriesFixed),
-    seriesCandle: cssToken("--series-candle", FALLBACK_COLORS.seriesCandle),
     seriesAmber: cssToken("--series-amber", FALLBACK_COLORS.seriesAmber),
     seriesViolet: cssToken("--series-violet", FALLBACK_COLORS.seriesViolet),
     seriesCyan: cssToken("--series-cyan", FALLBACK_COLORS.seriesCyan),
-    seriesCoral: cssToken("--series-coral", FALLBACK_COLORS.seriesCoral),
     seriesLime: cssToken("--series-lime", FALLBACK_COLORS.seriesLime),
-    seriesSky: cssToken("--series-sky", FALLBACK_COLORS.seriesSky),
   };
 }
 
@@ -96,15 +86,10 @@ function resolveSeriesColor(color, colors) {
   const token = String(color || "").match(/^var\((--[^)]+)\)$/)?.[1];
   if (!token) return color || colors.muted;
   return cssToken(token, {
-    "--series-fixed": colors.seriesFixed,
-    "--series-candle": colors.seriesCandle,
-    "--series-live": colors.live,
     "--series-amber": colors.seriesAmber,
     "--series-violet": colors.seriesViolet,
     "--series-cyan": colors.seriesCyan,
-    "--series-coral": colors.seriesCoral,
     "--series-lime": colors.seriesLime,
-    "--series-sky": colors.seriesSky,
   }[token] || colors.muted);
 }
 
@@ -257,7 +242,7 @@ function equityOption(payload, colors) {
   return option;
 }
 
-function comparisonOption(payload, colors) {
+function metricComparisonOption(payload, colors) {
   const option = baseOption(payload, colors);
   option.grid.left = 62;
   option.grid.right = 18;
@@ -303,8 +288,8 @@ function comparisonOption(payload, colors) {
 }
 
 export function buildChartOption(payload, colors = chartColors()) {
-  return payload?.kind === "comparison" || payload?.kind === "metric-comparison"
-    ? comparisonOption(payload, colors)
+  return payload?.kind === "metric-comparison"
+    ? metricComparisonOption(payload, colors)
     : equityOption(payload, colors);
 }
 

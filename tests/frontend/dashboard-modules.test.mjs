@@ -3,23 +3,18 @@ import test from "node:test";
 
 import {
   asNumber,
-  computeReturnRate,
   computeRoi,
   esc,
   money,
   statusClass,
 } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-formatters.js";
 import {
-  buildLatestStartEquityModels,
-  buildStrategyEquityModels,
   equityChart,
   equityWindowMetrics,
-  latestStartEquityChart,
   liveAccountMetricChart,
   liveAccountMetricModel,
   maxDrawdown,
   standaloneSparkline,
-  strategyEquityChart,
 } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-charts.js";
 import {
   buildChartOption,
@@ -31,12 +26,6 @@ import { renderOverview } from "../../src/crypto_momentum_lab/operator_dashboard
 import { renderRisk } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/risk.js";
 import { renderAccount } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/account.js";
 import { renderCollector } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/collector.js";
-import {
-  DEFAULT_INITIAL_CAPITAL,
-  computePaperAccountReturn,
-  computeUnrealizedPnlRatio,
-  createStrategySection,
-} from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/strategy.js";
 import { renderUniverse } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/universe.js";
 import {
   POLL_MS,
@@ -52,7 +41,6 @@ test("dashboard polling keeps safety sections fresh and backs off cold sections"
     risk: 15000,
     account: 15000,
     performance: 15000,
-    strategy: 30000,
     universe: 30000,
     collector: 30000,
     reports: 30000,
@@ -169,27 +157,6 @@ test("collector heartbeat updates do not rebuild the section", () => {
   assert.equal(sectionRenderKey("collector", first), sectionRenderKey("collector", second));
 });
 
-test("strategy account heartbeats refresh cards without rebuilding the page", () => {
-  const first = {
-    status: "READY",
-    accounts: [{
-      run_id: "paper-account-1",
-      checkpoint_at: "2026-09-06T11:00:00Z",
-      portfolio_summary: { equity: "1000" },
-    }],
-  };
-  const second = {
-    ...first,
-    accounts: [{
-      ...first.accounts[0],
-      checkpoint_at: "2026-09-06T11:00:30Z",
-      portfolio_summary: { equity: "1001" },
-    }],
-  };
-
-  assert.equal(sectionRenderKey("strategy", first), sectionRenderKey("strategy", second));
-});
-
 test("operator formatters keep status and money output stable", () => {
   assert.equal(esc('<live status="READY">'), "&lt;live status=&quot;READY&quot;&gt;");
   assert.equal(statusClass("live"), "status-LIVE");
@@ -208,12 +175,6 @@ test("operator formatters keep status and money output stable", () => {
   assert.equal(asNumber(NaN), null);
   assert.equal(asNumber("invalid"), null);
 
-  assert.equal(computeReturnRate(1100, 1000), 0.1);
-  assert.equal(computeReturnRate(900, 1000), -0.1);
-  assert.equal(computeReturnRate(null, 1000), null);
-  assert.equal(computeReturnRate(1000, 0), null);
-  assert.equal(computeReturnRate(1000, -100), null);
-  assert.equal(computeReturnRate(1000, null), null);
 
   assert.equal(computeRoi(50, 500), 0.1);
   assert.equal(computeRoi(-50, 500), -0.1);
@@ -240,183 +201,6 @@ test("global readiness uses database status for the overview section", () => {
     readinessStatusForSection("risk", { status: "READY", _cache_status: "STALE" }),
     "STALE",
   );
-});
-
-test("strategy equity models align paper and live B1 on common buckets", () => {
-  const equityCurve = (values) => values.map((equity, index) => ({
-    observed_at: `2026-08-16T00:${String(index * 6).padStart(2, "0")}:00Z`,
-    equity,
-  }));
-  const accounts = [
-    {
-      run_id: "paper-account-1",
-      strategy_name: "orderflow_impulse",
-      source: "paper",
-      exit_label: "固定 TP / SL",
-      equity_curve: equityCurve([1000, 1002, 1005]),
-    },
-    {
-      run_id: "live-primary",
-      strategy_name: "orderflow_impulse",
-      source: "live",
-      exit_label: "实盘 B1",
-      equity_curve: equityCurve([1000, 999, 1003]),
-    },
-  ];
-
-  const [model] = buildStrategyEquityModels(accounts);
-  assert.equal(model.strategyName, "orderflow_impulse");
-  assert.deepEqual(model.series.map((series) => series.label), ["固定 TP / SL", "实盘 B1"]);
-  assert.deepEqual(model.series.map((series) => series.displayLabel), ["账户 1 · 固定 TP/SL", "实盘基准"]);
-  assert.deepEqual(model.series.map((series) => series.values), [[0, 2, 5], [0, -1, 3]]);
-  assert.equal(model.series[1].colorClass, "live");
-  assert.equal(model.anchorAt, Date.parse("2026-08-16T00:00:00Z"));
-  assert.equal(model.startAt, Date.parse("2026-08-16T00:00:00Z"));
-  assert.equal(model.anchorMode, "daily-anchor");
-});
-
-test("strategy comparison labels duplicate live accounts by account label", () => {
-  const equityCurve = (values) => values.map((equity, index) => ({
-    observed_at: `2026-08-16T00:${String(index * 6).padStart(2, "0")}:00Z`,
-    equity,
-  }));
-  const accounts = ["primary", "account-2", "account-3", "account-4"].map(
-    (account_label, index) => ({
-      run_id: `live-${account_label}`,
-      account_label,
-      strategy_name: "orderflow_impulse",
-      source: "live",
-      exit_label: "实盘 Top10 · B8",
-      equity_curve: equityCurve([1000 + index, 1001 + index, 1002 + index]),
-    }),
-  );
-
-  const [model] = buildStrategyEquityModels(accounts);
-  assert.deepEqual(
-    model.series.map((series) => series.label),
-    [
-      "实盘 Top10 · B8 · primary",
-      "实盘 Top10 · B8 · account-2",
-      "实盘 Top10 · B8 · account-3",
-      "实盘 Top10 · B8 · account-4",
-    ],
-  );
-  assert.deepEqual(
-    model.series.map((series) => series.displayLabel),
-    ["实盘 · primary", "实盘 · account-2", "实盘 · account-3", "实盘 · account-4"],
-  );
-});
-
-test("strategy equity comparison starts at the first common bucket after 08:00", () => {
-  const equityCurve = (values) => values.map((equity, index) => ({
-    observed_at: `2026-08-16T00:${String((index + 1) * 6).padStart(2, "0")}:00Z`,
-    equity,
-  }));
-  const [model] = buildStrategyEquityModels([
-    {
-      run_id: "paper-account-1",
-      strategy_name: "orderflow_impulse",
-      source: "paper",
-      exit_label: "15M 收线退出",
-      equity_curve: equityCurve([1000, 1002, 1005]),
-    },
-    {
-      run_id: "live-primary",
-      strategy_name: "orderflow_impulse",
-      source: "live",
-      exit_label: "实盘 B1",
-      equity_curve: equityCurve([1000, 999, 1003]),
-    },
-  ]);
-
-  assert.equal(model.anchorAt, Date.parse("2026-08-16T00:00:00Z"));
-  assert.equal(model.startAt, Date.parse("2026-08-16T00:06:00Z"));
-  assert.equal(model.anchorMode, "after-anchor");
-  assert.deepEqual(model.series.map((series) => series.values), [[0, 2, 5], [0, -1, 3]]);
-});
-
-test("strategy equity comparison keeps the current synchronized cohort", () => {
-  const equityCurve = (startHour, values) => values.map((equity, index) => ({
-    observed_at: `2026-08-16T${String(startHour).padStart(2, "0")}:${String(index * 6).padStart(2, "0")}:00Z`,
-    equity,
-  }));
-  const [model] = buildStrategyEquityModels([
-    {
-      run_id: "paper-account-old-1",
-      strategy_name: "orderflow_impulse",
-      source: "paper",
-      exit_label: "旧版本 A",
-      equity_curve: equityCurve(0, [1000, 1001, 1002]),
-    },
-    {
-      run_id: "paper-account-old-2",
-      strategy_name: "orderflow_impulse",
-      source: "paper",
-      exit_label: "旧版本 B",
-      equity_curve: equityCurve(0, [1000, 999, 1001]),
-    },
-    {
-      run_id: "paper-account-current-1",
-      strategy_name: "orderflow_impulse",
-      source: "paper",
-      exit_label: "当前版本 A",
-      equity_curve: equityCurve(3, [1000, 1002, 1004]),
-    },
-    {
-      run_id: "paper-account-current-2",
-      strategy_name: "orderflow_impulse",
-      source: "paper",
-      exit_label: "当前版本 B",
-      equity_curve: equityCurve(3, [1000, 1001, 1003]),
-    },
-  ]);
-
-  assert.deepEqual(
-    model.accounts.map((account) => account.run_id),
-    ["paper-account-current-1", "paper-account-current-2"],
-  );
-  assert.equal(model.omittedAccounts.length, 2);
-  assert.equal(model.points.length, 3);
-});
-
-test("latest-start equity models expose cash-flow-adjusted amount deltas", () => {
-  const commonCurve = (deltas) => deltas.map((delta, index) => ({
-    observed_at: new Date(Date.parse("2026-08-21T02:45:00Z") + index * 900000).toISOString(),
-    equity: String(1000 + delta),
-    delta: String(delta),
-    return_pct: String(delta / 10),
-  }));
-  const meta = {
-    common_equity_start_at: "2026-08-21T02:45:00Z",
-    common_equity_end_at: "2026-08-21T03:15:00Z",
-    common_equity_sample_interval_seconds: 900,
-    common_equity_note: "实盘已扣除 200 USDT 充值。",
-  };
-  const [model] = buildLatestStartEquityModels([
-    {
-      run_id: "paper-account-15",
-      strategy_name: "orderflow_impulse",
-      source: "paper",
-      exit_label: "15M 收线退出",
-      common_equity_curve: commonCurve([0, 2, 5]),
-    },
-    {
-      run_id: "live-primary-b1",
-      strategy_name: "orderflow_impulse",
-      source: "live",
-      exit_label: "实盘 B1",
-      common_equity_curve: commonCurve([0, -1, 3]),
-    },
-  ], meta);
-
-  assert.equal(model.startAt, Date.parse("2026-08-21T02:45:00Z"));
-  assert.deepEqual(model.series.map((series) => series.values), [[0, 2, 5], [0, -1, 3]]);
-  assert.equal(model.series[1].delta, 3);
-  const chartHtml = latestStartEquityChart(model);
-  const payload = getChartPayload("latest-start-orderflow_impulse");
-  assert.match(chartHtml, /data-echart-id="latest-start-orderflow_impulse"/);
-  assert.equal(payload.kind, "comparison");
-  assert.deepEqual(payload.series.map((series) => series.label), ["15M 收线退出", "实盘 B1"]);
 });
 
 test("sparklines render an empty state without a browser DOM", () => {
@@ -653,61 +437,10 @@ test("risk renderer distinguishes UNKNOWN/QUERY_ERROR coverage error from real m
   assert.doesNotMatch(html, /行情缺失/);
 });
 
-test("strategy section owns paper-account rendering state", () => {
-  const strategy = createStrategySection({
-    requestJson: async () => ({}),
-  });
-  const [status, html] = strategy.render({ status: "NO_DATA", accounts: [] });
-  assert.equal(status, "NO_DATA");
-  assert.match(html, /等待模拟账户启动/);
-});
-
-test("strategy section hides fixed TP/SL accounts consistently", () => {
-  const strategy = createStrategySection({
-    requestJson: async () => ({}),
-  });
-  const [status, html] = strategy.render({
-    status: "READY",
-    accounts: [
-      {
-        run_id: "fixed-account",
-        strategy_name: "orderflow_impulse",
-        exit_mode: "fixed",
-        exit_label: "固定 TP / SL",
-      },
-      {
-        run_id: "candle-account",
-        strategy_name: "orderflow_impulse",
-        exit_mode: "candle_15m",
-        exit_label: "15M 收线退出",
-        portfolio_summary: {},
-      },
-    ],
-  });
-  assert.equal(status, "READY");
-  assert.doesNotMatch(html, /固定 TP \/ SL/);
-  assert.match(html, /15M 收线退出/);
-});
-
-test("strategy return and unrealized pnl calculations defend against bad inputs", () => {
-  assert.equal(DEFAULT_INITIAL_CAPITAL, 1000);
-  assert.equal(computePaperAccountReturn("1100"), 0.1);
-  assert.equal(computePaperAccountReturn("900"), -0.1);
-  assert.equal(computePaperAccountReturn(null), null);
-  assert.equal(computePaperAccountReturn(undefined), null);
-  assert.equal(computePaperAccountReturn("invalid"), null);
-
-  assert.equal(computeUnrealizedPnlRatio("10", "100"), 0.1);
-  assert.equal(computeUnrealizedPnlRatio("-5", "100"), -0.05);
-  assert.equal(computeUnrealizedPnlRatio("10", "0"), null);
-  assert.equal(computeUnrealizedPnlRatio("10", null), null);
-  assert.equal(computeUnrealizedPnlRatio(null, "100"), null);
-});
-
 test("chartPayloadSignature detects series.values and point mutations without object coercion", () => {
   const initialComparison = {
-    kind: "comparison",
-    title: "Strategy Comparison",
+    kind: "metric-comparison",
+    title: "Live Account Metric Comparison",
     points: [{ at: 1000 }, { at: 2000 }],
     series: [
       { label: "Account 1", color: "#34d399", values: [0, 10] },
@@ -763,100 +496,6 @@ test("chartPayloadSignature detects series.values and point mutations without ob
   assert.notEqual(eqSig1, eqSig2, "Signature must differ when equity point value changes");
 });
 
-test("strategy section defends against race conditions and unmounted nodes during history fetch", async () => {
-  let resolveHistory0;
-  const history0Promise = new Promise((resolve) => {
-    resolveHistory0 = resolve;
-  });
-
-  const requestedUrls = [];
-  const strategy = createStrategySection({
-    requestJson: async (url) => {
-      requestedUrls.push(url);
-      if (url.includes("acc-0/history")) {
-        return history0Promise;
-      }
-      return { closed_trades: [], trade_events: [] };
-    },
-  });
-
-  const data = {
-    status: "READY",
-    accounts: [
-      {
-        run_id: "acc-0",
-        strategy_name: "orderflow_impulse",
-        exit_mode: "candle_15m",
-        portfolio_summary: { equity: 1000 },
-      },
-      {
-        run_id: "acc-1",
-        strategy_name: "orderflow_impulse",
-        exit_mode: "candle_15m",
-        portfolio_summary: { equity: 2000 },
-      },
-    ],
-  };
-
-  strategy.render(data);
-  assert.equal(strategy.currentAccountIs(data.accounts[0]), true);
-  assert.equal(strategy.currentAccountIs(data.accounts[1]), false);
-
-  let replaceCalled = false;
-  const mockButton = { disabled: false, textContent: "" };
-  const unmountedBody = {
-    isConnected: false,
-    querySelector: (sel) => {
-      if (sel.includes("data-load-paper-history")) return mockButton;
-      if (sel.includes("paper-account-panel") || sel.includes("paper-account-detail")) {
-        return {
-          replaceWith: () => { replaceCalled = true; },
-        };
-      }
-      return null;
-    },
-  };
-
-  // Launch history request on unmounted body
-  const pendingHistory = strategy.loadHistory(unmountedBody, data.accounts[0], 0);
-  assert.equal(mockButton.disabled, true);
-  assert.equal(mockButton.textContent, "加载中…");
-
-  // In-flight request deduplication: calling again does not fire another HTTP request
-  const dupHistory = strategy.loadHistory(unmountedBody, data.accounts[0], 0);
-  assert.equal(requestedUrls.filter((u) => u.includes("acc-0/history")).length, 1);
-
-  // Resolve network response
-  resolveHistory0({
-    history_complete: true,
-    closed_trades: [{ symbol: "BTCUSDT", realized_pnl: 100 }],
-    trade_events: [],
-  });
-
-  await pendingHistory;
-
-  // Unmounted body must not have replaced DOM
-  assert.equal(replaceCalled, false);
-
-  // Cross-account protection: when active account is acc-0, acc-1 request must not touch DOM
-  let crossAccountReplaced = false;
-  const connectedBody = {
-    isConnected: true,
-    querySelector: (sel) => {
-      if (sel.includes("paper-account-panel") || sel.includes("paper-account-detail")) {
-        return {
-          replaceWith: () => { crossAccountReplaced = true; },
-        };
-      }
-      return null;
-    },
-  };
-
-  const acc1Promise = strategy.loadHistory(connectedBody, data.accounts[1], 1);
-  await acc1Promise;
-  assert.equal(crossAccountReplaced, false);
-});
-
 test("equity charts register an ECharts payload with native metrics", () => {
   const rows = [
     { observed_at: "2026-08-16T00:00:00Z", equity: 1000 },
@@ -898,31 +537,6 @@ test("equity charts register an ECharts payload with native metrics", () => {
   });
   assert.equal(maxDrawdown([{ equity: 1000 }, { equity: 992 }, { equity: 995 }]), -8);
 
-  const [model] = buildStrategyEquityModels([
-    {
-      run_id: "paper-account-1",
-      strategy_name: "orderflow_impulse",
-      source: "paper",
-      exit_mode: "candle_15m",
-      exit_label: "15M 收线退出",
-      equity_curve: rows,
-    },
-    {
-      run_id: "live-primary",
-      strategy_name: "orderflow_impulse",
-      source: "live",
-      exit_label: "实盘 B1",
-      equity_curve: [{ ...rows[0], equity: 1000 }, { ...rows[1], equity: 999 }],
-    },
-  ]);
-  const comparisonHtml = strategyEquityChart(model);
-  const comparisonPayload = getChartPayload("comparison-orderflow_impulse");
-  assert.match(comparisonHtml, /data-echart-chart/);
-  assert.match(comparisonHtml, /data-echart-kind="comparison"/);
-  assert.match(comparisonHtml, /data-echart-id="comparison-orderflow_impulse"/);
-  assert.deepEqual(comparisonPayload.series.map((series) => series.label), ["15M 收线退出", "实盘 B1"]);
-  assert.equal(comparisonPayload.series[1].isLive, true);
-  assert.equal(comparisonPayload.points.length, 2);
 });
 
 test("live account metric charts compare all four accounts with unit-aware axes", () => {

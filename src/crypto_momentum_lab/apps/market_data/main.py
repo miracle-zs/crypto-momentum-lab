@@ -102,9 +102,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
 from crypto_momentum_lab.persistence.postgres.operational_retention import (
     PostgresOperationalRetentionRepository,
 )
-from crypto_momentum_lab.persistence.postgres.paper_position_protection_repository import (
-    PostgresPaperPositionProtectionRepository,
-)
 from crypto_momentum_lab.persistence.postgres.repository import (
     PostgresUniverseRepository,
 )
@@ -152,7 +149,6 @@ _CONTRACT_METADATA_RETENTION_HOURS = 6.0
 _RUNTIME_STATE_RETENTION_HOURS = 12.0
 _CONTRACT_METADATA_RETENTION_BATCH_SIZE = 250
 _RUNTIME_STATE_RETENTION_BATCH_SIZE = 250
-_PAPER_EXIT_RUN_IDS_ENV = "CML_PAPER_EXIT_RUN_IDS"
 _LIVE_POSITION_ACCOUNT_LABELS_ENV = "CML_LIVE_POSITION_ACCOUNT_LABELS"
 _MARKET_STATE_HUB_HOST_ENV = "CML_MARKET_STATE_HUB_HOST"
 _MARKET_STATE_HUB_PORT_ENV = "CML_MARKET_STATE_HUB_PORT"
@@ -205,13 +201,6 @@ def _market_database_url(default_url: str) -> str:
     return resolve_database_url(None, "CML_MARKET_DATABASE_URL") or default_url
 
 
-def parse_paper_exit_run_ids(value: str | None = None) -> frozenset[str]:
-    raw_value = os.environ.get(_PAPER_EXIT_RUN_IDS_ENV, "") if value is None else value
-    return frozenset(
-        run_id for item in raw_value.split(",") if (run_id := item.strip())
-    )
-
-
 def parse_retired_strategy_run_ids(value: str | None = None) -> frozenset[str]:
     """Exact operator-retired checkpoint owners; never infer retirement by age."""
     raw = os.environ.get("CML_RETIRED_STRATEGY_RUN_IDS", "") if value is None else value
@@ -256,18 +245,14 @@ def _ignore_backfill_result(
     return _run
 
 
-async def _load_protected_symbols(
+async def _load_live_position_symbols(
     *,
-    paper_repository: PostgresPaperPositionProtectionRepository,
     trading_repository: PostgresTradingRepository,
-    protected_run_ids: frozenset[str],
 ) -> frozenset[str]:
-    """Load paper symbols plus symbols in current live position batches."""
-    paper_symbols = await paper_repository.load_open_position_symbols(protected_run_ids)
-    live_symbols = await trading_repository.async_get_active_position_symbols(
+    """Keep current live-position symbols in the market-data subscription set."""
+    return await trading_repository.async_get_active_position_symbols(
         environment="live"
     )
-    return paper_symbols | live_symbols
 
 
 def parse_market_state_hub_port(value: str | None = None) -> int:
@@ -1176,7 +1161,6 @@ async def build_market_data_runtime(
     capture_repository = PostgresCaptureRepository(observability_sessions)
     maintenance_capture_repository = PostgresCaptureRepository(maintenance_sessions)
     operational_retention = PostgresOperationalRetentionRepository(maintenance_sessions)
-    paper_repository = PostgresPaperPositionProtectionRepository(maintenance_sessions)
     trading_repository = PostgresTradingRepository(maintenance_engine)
     runtime_state_repository = PostgresRuntimeMarketStateRepository(market_sessions)
     if startup_timer is not None:
@@ -1216,13 +1200,9 @@ async def build_market_data_runtime(
         realtime_quote_sink=quote_hub.publish,
         on_durable_state_persisted=on_durable_state_persisted,
     )
-    protected_run_ids = parse_paper_exit_run_ids()
-
     async def load_protected_symbols() -> frozenset[str]:
-        return await _load_protected_symbols(
-            paper_repository=paper_repository,
+        return await _load_live_position_symbols(
             trading_repository=trading_repository,
-            protected_run_ids=protected_run_ids,
         )
 
     persisted_memberships = await universe_repository.load_active_memberships()

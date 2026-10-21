@@ -2,7 +2,6 @@ from datetime import UTC, datetime
 
 from crypto_momentum_lab.operator_dashboard.schemas import (
     AccountOverviewResponse,
-    RunReportSummaryResponse,
     SystemOverviewResponse,
 )
 from crypto_momentum_lab.operator_dashboard.status import OperationalStatus
@@ -14,10 +13,6 @@ def test_dashboard_overview_schema_excludes_secret_fields() -> None:
     assert "api_key" not in schema_text
     assert "api_secret" not in schema_text
     assert "credential" not in schema_text
-
-
-def test_report_schema_does_not_repeat_paper_accounts() -> None:
-    assert "paper_runs" not in RunReportSummaryResponse.model_fields
 
 
 def test_account_schema_exposes_live_equity_curve() -> None:

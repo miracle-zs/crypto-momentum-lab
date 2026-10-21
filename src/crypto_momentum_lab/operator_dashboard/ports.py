@@ -1,6 +1,5 @@
 """Query interface consumed by the dashboard HTTP application."""
 
-from datetime import datetime
 from typing import Any, Protocol
 
 from crypto_momentum_lab.operator_dashboard.schemas import (
@@ -8,13 +7,9 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
     DecisionSLOResponse,
     LiveAccountMetricsResponse,
     LiveAccountsResponse,
-    PaperAccountHistoryResponse,
-    PaperAccountsEquityResponse,
-    PaperAccountsResponse,
     ResearchCollectorResponse,
     RiskExecutionResponse,
     RunReportSummaryResponse,
-    StrategyRunResponse,
     SystemOverviewResponse,
     SystemPerformanceResponse,
     SystemReadinessResponse,
@@ -40,21 +35,6 @@ class DashboardQueryProtocol(Protocol):
 
     async def universe(self) -> UniverseStatusResponse: ...
 
-    async def strategy_run(self) -> StrategyRunResponse: ...
-
-    async def paper_accounts(self) -> PaperAccountsResponse: ...
-
-    async def paper_account_equity(self) -> PaperAccountsEquityResponse: ...
-
-    async def paper_account(self, run_id: str) -> StrategyRunResponse: ...
-
-    async def paper_history(
-        self,
-        run_id: str,
-        *,
-        full: bool = False,
-    ) -> PaperAccountHistoryResponse: ...
-
     async def account(
         self,
         equity_range: str = "24h",
@@ -77,13 +57,3 @@ class DashboardQueryProtocol(Protocol):
         self,
         window: str = "24h",
     ) -> SystemPerformanceResponse: ...
-
-    async def account_performance(
-        self,
-        account_label: str = "primary",
-        window_hours: int = 24,
-        environment: str = "live",
-        asset: str = "USDT",
-        end_time: datetime | None = None,
-        is_empty_proven: bool = False,
-    ) -> dict[str, object]: ...

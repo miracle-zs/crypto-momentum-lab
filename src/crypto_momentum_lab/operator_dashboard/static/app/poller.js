@@ -58,8 +58,6 @@ export function setSectionStatus(id, status, cacheStatus = null) {
 }
 
 export function createPoller({ renderers, onAfterRender }) {
-  const strategyHooks = renderers.__strategyHooks || null;
-
   function updateGlobalMode(data) {
     const live = data.services?.find(
       (service) => service.name === "strategy-runner" && service.details?.engine === "nextgen",
@@ -127,10 +125,6 @@ export function createPoller({ renderers, onAfterRender }) {
       }
       body?.classList.remove("loading");
       body?.removeAttribute("aria-busy");
-      if (id === "strategy" && strategyHooks) {
-        if (shouldRender) strategyHooks.wire(body, data);
-        else strategyHooks.refresh(body, data);
-      }
       if (id === "account" && onAfterRender?.account) {
         if (shouldRender) onAfterRender.account.wire(body, data);
         // Account detail and fleet metrics both mutate large DOM regions.
@@ -181,7 +175,7 @@ export function createPoller({ renderers, onAfterRender }) {
     }
     forcedSectionRefreshes.forEach((id) => visibleSections.add(id));
     const allSectionIds = Array.from(new Set([
-      ...Object.keys(renderers).filter((id) => id !== "__strategyHooks" && document.getElementById(id)?.dataset?.endpoint),
+      ...Object.keys(renderers).filter((id) => document.getElementById(id)?.dataset?.endpoint),
     ]));
     const dueSections = allSectionIds.filter((id) => {
       if (!visibleSections.has(id)) return false;

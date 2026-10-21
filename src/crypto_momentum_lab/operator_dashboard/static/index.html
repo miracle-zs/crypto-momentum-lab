@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>CML · 运行控制 · 总览 · Flight Deck</title>
-  <link rel="stylesheet" href="static/assets/dashboard-7a46223a906e1ae6.css">
+  <link rel="stylesheet" href="static/assets/dashboard-e81d3ca55538c735.css">
 </head>
 <body>
   <a class="skip-link" href="#overview">跳到当前工作视图</a>
@@ -25,7 +25,7 @@
         </button>
         <button type="button" class="workspace-tab" data-workspace-tab="data" role="tab" aria-selected="false">
           <span class="workspace-tab-index">02</span>
-          <span class="workspace-tab-copy"><b>策略与数据</b><small>ANALYTICS</small></span>
+          <span class="workspace-tab-copy"><b>行情与数据</b><small>MARKET DATA</small></span>
         </button>
       </div>
 
@@ -39,8 +39,7 @@
           <a href="#performance" data-nav="performance" data-label="性能"><kbd class="nav-key">5</kbd><span>系统性能</span><em class="nav-dot status-UNKNOWN" data-nav-dot="performance"></em></a>
         </div>
         <div class="nav-workspace" data-workspace-nav="data" hidden>
-          <span class="nav-group-label">STRATEGY &amp; DATA</span>
-          <a href="#strategy" data-nav="strategy" data-label="策略"><span>模拟策略</span><em class="nav-dot status-UNKNOWN" data-nav-dot="strategy"></em></a>
+          <span class="nav-group-label">MARKET &amp; DATA</span>
           <a href="#universe" data-nav="universe" data-label="市场"><span>市场行情</span><em class="nav-dot status-UNKNOWN" data-nav-dot="universe"></em></a>
           <a href="#collector" data-nav="collector" data-label="数据采集"><span>数据采集</span><em class="nav-dot status-UNKNOWN" data-nav-dot="collector"></em></a>
         </div>
@@ -65,7 +64,7 @@
           </div>
           <div class="mobile-workspace-switcher" role="tablist" aria-label="切换工作区">
             <button type="button" class="workspace-tab is-active" data-workspace-tab="ops" role="tab" aria-selected="true">运行控制</button>
-            <button type="button" class="workspace-tab" data-workspace-tab="data" role="tab" aria-selected="false">策略与数据</button>
+            <button type="button" class="workspace-tab" data-workspace-tab="data" role="tab" aria-selected="false">行情与数据</button>
           </div>
         </div>
         <div class="topbar-meta">
@@ -127,16 +126,6 @@
           </div>
         </section>
 
-        <section id="strategy" class="card" data-workspace="data" data-view-title="策略" data-endpoint="api/paper-accounts" aria-labelledby="strategy-title" hidden>
-          <header class="card-head">
-            <div class="card-title"><div><h2 id="strategy-title">模拟策略</h2><small>PAPER / LIVE COHORT · ON-DEMAND DETAIL</small></div></div>
-            <span class="section-state status-UNKNOWN">UNKNOWN</span>
-          </header>
-          <div class="panel-body loading" aria-busy="true">
-            <div class="skeleton"><s style="width:31%"></s><s style="width:88%"></s><s style="width:88%"></s><s style="width:64%"></s><s style="width:79%"></s></div>
-          </div>
-        </section>
-
         <section id="universe" class="card" data-workspace="data" data-view-title="市场" data-endpoint="api/universe" aria-labelledby="universe-title" hidden>
           <header class="card-head">
             <div class="card-title"><div><h2 id="universe-title">市场行情</h2><small>UTC 动量排名与监控池</small></div></div>
@@ -185,6 +174,6 @@
     </div>
   </div>
   <script src="static/assets/echarts-dae720e256d2461b.js"></script>
-  <script type="module" src="static/assets/dashboard-cf85f3fc6a84b05e.js" defer></script>
+  <script type="module" src="static/assets/dashboard-fdc988648574b0bf.js" defer></script>
 </body>
 </html>

@@ -23,8 +23,6 @@ def test_operator_dashboard_reads_local_postgres(
         for route in (
             "/api/overview",
             "/api/universe",
-            "/api/strategy-runs/current",
-            "/api/paper-accounts",
             "/api/account",
             "/api/risk-execution",
             "/api/reports",
