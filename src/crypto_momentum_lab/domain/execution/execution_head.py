@@ -56,15 +56,6 @@ def decode_execution_head_state(
     )
 
 
-def decode_current_facts(
-    payload: object,
-    *,
-    key: PositionKey,
-    scope: AccountFactStreamScope,
-):
-    return decode_execution_head_state(payload, key=key, scope=scope).current_facts
-
-
 def _sequence(state: dict[str, object], field: str) -> int:
     value = state.get(field)
     if type(value) is not int or value < 0:
