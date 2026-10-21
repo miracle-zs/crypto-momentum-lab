@@ -1,4 +1,4 @@
-"""DecisionEngine and SimulationExecution contracts (R3)."""
+"""Pure decision and policy contracts."""
 
 from crypto_momentum_lab.domain.decision.decision_engine import (
     DecisionInput,
@@ -22,11 +22,6 @@ from crypto_momentum_lab.domain.decision.policy_transition import (
     compute_transition_input_hash,
     execute_policy_transition,
 )
-from crypto_momentum_lab.domain.decision.simulation_execution import (
-    FillModel,
-    SimulatedFillResult,
-    SimulationExecutionAdapter,
-)
 from crypto_momentum_lab.domain.strategy.sizing import (
     EquityFractionSizingModel,
     FixedNotionalSizingModel,
@@ -44,13 +39,10 @@ __all__ = [
     "DecisionResult",
     "EffectivePolicy",
     "EquityFractionSizingModel",
-    "FillModel",
     "FixedNotionalSizingModel",
     "FrozenDecisionInputs",
     "PolicyState",
     "PolicyTransition",
-    "SimulatedFillResult",
-    "SimulationExecutionAdapter",
     "SizingModel",
     "SizingPlan",
     "SizingRejection",
