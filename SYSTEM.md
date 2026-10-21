@@ -1093,3 +1093,5 @@ SSH使用已配置的密钥或--control-path指定的已登录会话，不在脚
 继续检查决策回放用的 `PositionView`：coverage、reservations、observation id、reconciliation status、diagnostics、discrepancy、零仓快照标记和 stream scope 都没有决策、trace 或迁移消费者；迁移通过 `LegacyPositionProjection` 处理这些历史字段，决策 trace 也不保存它们。已从 `PositionView` 删除这些字段和仅构造这些字段的测试夹具；保留 trace 输入实际读取的数量、批次、健康状态、reconciliation gap 与 comparability。在线 NextGen 状态不受影响。仅做静态语法与 diff 检查，未运行测试，未部署。
 
 随后将只被 0062 旧 head 转换使用的 `AccountFactStreamScope`、成交扫描 provenance、coverage interval 和 discrepancy 类型移入现有迁移 projection 模块；运行时执行领域模型不再承载这些旧 payload 类型。迁移只需解码和验证字段，因此同时删除没有迁移调用方的 coverage 判定及 provenance 派生方法；字段校验和序列化内容保持不变。迁移专属测试已改从迁移模块导入这些类型。静态语法与 diff 检查通过；未运行测试，未部署。
+
+另删除全仓无调用方的旧 `ExchangeOrderState`、`OrderExecutionPlan`、`ExchangeOrderSnapshot`，以及空置的 `exchange_contract.py` / `order_submission.py` 异常定义模块。保留被离线决策回放和迁移使用的 `FuturesPositionSide` 与 `ExitAllocation`。静态语法与 diff 检查通过；未运行测试，未部署。
