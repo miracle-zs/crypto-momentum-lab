@@ -11,8 +11,6 @@ from crypto_momentum_lab.domain.account.models import (
     AccountPositionSnapshot,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    AccountFactStreamScope,
-    FactCoverageInterval,
     PositionKey,
 )
 from .execution_head_migration_codec import (
@@ -20,6 +18,8 @@ from .execution_head_migration_codec import (
     PositionRecoveryCodec,
 )
 from .execution_head_migration_projection import (
+    AccountFactStreamScope,
+    FactCoverageInterval,
     LegacyPositionProjection,
     encode_position_key,
     encode_projection,

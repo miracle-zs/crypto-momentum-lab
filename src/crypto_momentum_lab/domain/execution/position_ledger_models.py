@@ -3,7 +3,6 @@
 Provides strict identity types:
 - ``PositionKey``: Fully qualified identity across environment,
   account, symbol, and side;
-- ``FactCoverageInterval``: Watermark and coverage boundaries of observed facts;
 - ``PositionLedgerBatch``: An entry lot within a specific position episode;
 - ``PositionEpisode``: A continuous non-zero holding lifecycle
   bounded by zero-crossings;
@@ -12,20 +11,12 @@ Provides strict identity types:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.trading import TradeSide as StrategySide
-
-
-class FactCoverageStatus(StrEnum):
-    """Integrity and completeness status of a fact coverage interval."""
-
-    CONFIRMED = "CONFIRMED"
-    GAP_DETECTED = "GAP_DETECTED"
-    PENDING = "PENDING"
 
 
 class PositionHealthStatus(StrEnum):
@@ -38,37 +29,6 @@ class PositionHealthStatus(StrEnum):
     CATCHING_UP = "CATCHING_UP"
     INCOMPLETE = "INCOMPLETE"
     CONFLICT = "CONFLICT"
-
-
-class DiscrepancyKind(StrEnum):
-    """Classification of divergences across models, observations, and fact journals."""
-
-    INPUT_MISSING = "INPUT_MISSING"
-    TIME_MISALIGNED = "TIME_MISALIGNED"
-    QUANTITY_MISMATCH = "QUANTITY_MISMATCH"
-    PRICE_MISMATCH = "PRICE_MISMATCH"
-    IDENTITY_MISMATCH = "IDENTITY_MISMATCH"
-    BOUNDARY_MISMATCH = "BOUNDARY_MISMATCH"
-    PENDING_BINDING = "PENDING_BINDING"
-
-
-@dataclass(frozen=True, slots=True)
-class PositionDiscrepancy:
-    """Structured audit record for a single model or observation discrepancy."""
-
-    discrepancy_id: str
-    key: PositionKey
-    kind: DiscrepancyKind
-    first_seen_at: datetime
-    last_seen_at: datetime
-    count: int
-    input_hash: str
-    details: str
-    event_cut: datetime | None = None
-    snapshot_at: datetime | None = None
-    first_divergent_fact: str | None = None
-    is_reconciled: bool = False
-    resolution_evidence: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,196 +56,6 @@ class PositionKey:
             for value in (self.environment, self.account_label, self.symbol)
         ):
             raise ValueError("position key fields must not contain ':'")
-
-
-@dataclass(frozen=True, slots=True)
-class AccountFactStreamScope:
-    """Identity of the source stream that supplied account facts.
-
-    ``stream_epoch`` distinguishes independent source continuity windows. A
-    checkpoint from another epoch may still seed a quantity projection, but it
-    cannot prove coverage for this scope by itself.
-    """
-
-    environment: str
-    account_label: str
-    symbol: str
-    position_side: FuturesPositionSide
-    stream_id: str
-    stream_epoch: str
-
-    def __post_init__(self) -> None:
-        for name in (
-            "environment",
-            "account_label",
-            "symbol",
-            "stream_id",
-            "stream_epoch",
-        ):
-            if not getattr(self, name).strip():
-                raise ValueError(f"{name} must not be empty")
-
-    @classmethod
-    def for_position_key(
-        cls,
-        key: PositionKey,
-        *,
-        stream_id: str,
-        stream_epoch: str,
-    ) -> AccountFactStreamScope:
-        return cls(
-            environment=key.environment,
-            account_label=key.account_label,
-            symbol=key.symbol,
-            position_side=key.position_side,
-            stream_id=stream_id,
-            stream_epoch=stream_epoch,
-        )
-
-@dataclass(frozen=True, slots=True)
-class AccountFillLoadProvenance:
-    """Durable continuity proof for paginated account-fill reconciliation.
-
-    A scan origin alone does not establish historical completeness. Coverage
-    also requires a trusted source anchor, an exhausted non-truncated page
-    chain, and an exact checked-through cut.
-    """
-
-    stream_scope: AccountFactStreamScope
-    load_id: str
-    scan_origin_from_id: int | None
-    scan_origin_start_time_ms: int | None
-    request_from_id: int | None
-    next_from_id: int | None
-    page_count: int
-    page_exhausted: bool
-    truncated: bool
-    checked_through: datetime | None
-    observed_at: datetime
-    source_anchor_id: str
-    source_anchor_event_cut: datetime
-
-    def __post_init__(self) -> None:
-        if not self.load_id.strip():
-            raise ValueError("fill load id must not be empty")
-        if not self.source_anchor_id.strip():
-            raise ValueError("fill scan requires a source anchor")
-        if (self.scan_origin_from_id is None) == (
-            self.scan_origin_start_time_ms is None
-        ):
-            raise ValueError("fill scan requires exactly one source origin")
-        for name, value in (
-            ("scan_origin_from_id", self.scan_origin_from_id),
-            ("scan_origin_start_time_ms", self.scan_origin_start_time_ms),
-            ("request_from_id", self.request_from_id),
-            ("next_from_id", self.next_from_id),
-        ):
-            if value is not None and (type(value) is not int or value < 0):
-                raise ValueError(f"{name} must be a non-negative integer or null")
-        if type(self.page_count) is not int or self.page_count < 0:
-            raise ValueError("fill scan page_count must be a non-negative integer")
-        if type(self.page_exhausted) is not bool or type(self.truncated) is not bool:
-            raise ValueError("fill scan pagination flags must be booleans")
-        if self.page_exhausted and (self.truncated or self.next_from_id is not None):
-            raise ValueError("exhausted fill scan cannot be truncated or have a cursor")
-        if self.page_exhausted and self.page_count == 0:
-            raise ValueError("exhausted fill scan must record at least one page")
-        if self.checked_through is not None and (
-            self.checked_through.tzinfo is None
-            or self.checked_through.utcoffset() is None
-        ):
-            raise ValueError("fill scan checked_through must be timezone-aware")
-        for name, timestamp in (
-            ("observed_at", self.observed_at),
-            ("source_anchor_event_cut", self.source_anchor_event_cut),
-        ):
-            if timestamp.tzinfo is None or timestamp.utcoffset() is None:
-                raise ValueError(f"fill scan {name} must be timezone-aware")
-        if self.checked_through is not None and self.checked_through > self.observed_at:
-            raise ValueError("fill scan checked_through is after its observation")
-
-    @property
-    def is_complete(self) -> bool:
-        return (
-            self.page_exhausted
-            and not self.truncated
-            and self.next_from_id is None
-            and self.checked_through is not None
-        )
-
-    @property
-    def origin_start_at(self) -> datetime | None:
-        if self.scan_origin_start_time_ms is None:
-            return None
-        return datetime(1970, 1, 1, tzinfo=UTC) + timedelta(
-            milliseconds=self.scan_origin_start_time_ms
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class FactCoverageInterval:
-    """Interval over which account facts are confirmed to be complete."""
-
-    start_at: datetime
-    end_at: datetime
-    has_known_gaps: bool = False
-    source_cursor: str | None = None
-    status: FactCoverageStatus = FactCoverageStatus.CONFIRMED
-    confirmed_revision: int | None = None
-    stream_scope: AccountFactStreamScope | None = None
-    evidence_observed_at: datetime | None = None
-    load_provenance: AccountFillLoadProvenance | None = None
-
-    def __post_init__(self) -> None:
-        if self.start_at.tzinfo is None:
-            raise ValueError("start_at must be timezone-aware")
-        if self.end_at.tzinfo is None:
-            raise ValueError("end_at must be timezone-aware")
-        if self.end_at < self.start_at:
-            raise ValueError("end_at must not precede start_at")
-        if self.evidence_observed_at is not None and (
-            self.evidence_observed_at.tzinfo is None
-            or self.evidence_observed_at.utcoffset() is None
-        ):
-            raise ValueError("evidence_observed_at must be timezone-aware")
-        if self.load_provenance is not None:
-            if self.stream_scope != self.load_provenance.stream_scope:
-                raise ValueError("coverage load provenance scope mismatch")
-            if (
-                self.evidence_observed_at is not None
-                and self.load_provenance.observed_at > self.evidence_observed_at
-            ):
-                raise ValueError("coverage predates its load provenance")
-
-    def covers(self, point_in_time: datetime) -> bool:
-        """Returns True if point_in_time is within interval without known gaps."""
-        if not self._is_authoritative():
-            return False
-        return self.start_at <= point_in_time <= self.end_at
-
-    def covers_range(self, start: datetime, end: datetime) -> bool:
-        """Returns True if [start, end] is within interval without known gaps."""
-        if not self._is_authoritative():
-            return False
-        return self.start_at <= start and end <= self.end_at
-
-    @property
-    def is_authoritative(self) -> bool:
-        """Whether this coverage can authorize the exact scoped live stream."""
-        return self._is_authoritative()
-
-    def _is_authoritative(self) -> bool:
-        if self.has_known_gaps or self.status != FactCoverageStatus.CONFIRMED:
-            return False
-        if self.load_provenance is None:
-            return self.stream_scope is None or self.stream_scope.environment != "live"
-        return (
-            self.load_provenance.is_complete
-            and self.stream_scope == self.load_provenance.stream_scope
-            and self.load_provenance.source_anchor_event_cut <= self.start_at
-            and self.load_provenance.checked_through is not None
-            and self.load_provenance.checked_through >= self.end_at
-        )
 
 
 @dataclass(frozen=True, slots=True)

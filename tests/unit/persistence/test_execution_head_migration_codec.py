@@ -6,15 +6,17 @@ import pytest
 
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    AccountFactStreamScope,
-    AccountFillLoadProvenance,
-    FactCoverageInterval,
-    FactCoverageStatus,
     PositionKey,
 )
 from crypto_momentum_lab.persistence.postgres.execution_head_migration_codec import (
     PositionRecoveryCodec,
     RecoverySchemaError,
+)
+from crypto_momentum_lab.persistence.postgres.execution_head_migration_projection import (
+    AccountFactStreamScope,
+    AccountFillLoadProvenance,
+    FactCoverageInterval,
+    FactCoverageStatus,
 )
 
 

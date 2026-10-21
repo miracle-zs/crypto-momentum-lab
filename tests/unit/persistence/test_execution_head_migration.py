@@ -7,7 +7,6 @@ from crypto_momentum_lab.domain.account.models import (
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    AccountFactStreamScope,
     PositionEpisode,
     PositionLedgerBatch,
     PositionKey,
@@ -15,6 +14,9 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
 from crypto_momentum_lab.domain.trading import TradeSide
 from crypto_momentum_lab.persistence.postgres import (
     execution_head_migration_projection,
+)
+from crypto_momentum_lab.persistence.postgres.execution_head_migration_projection import (
+    AccountFactStreamScope,
 )
 from crypto_momentum_lab.persistence.postgres.execution_head_migration import (
     convert_legacy_execution_head,

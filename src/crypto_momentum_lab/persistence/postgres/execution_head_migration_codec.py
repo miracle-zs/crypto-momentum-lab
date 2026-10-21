@@ -13,12 +13,6 @@ from crypto_momentum_lab.domain.account.models import (
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    AccountFactStreamScope,
-    AccountFillLoadProvenance,
-    DiscrepancyKind,
-    FactCoverageInterval,
-    FactCoverageStatus,
-    PositionDiscrepancy,
     PositionEpisode,
     PositionHealthStatus,
     PositionKey,
@@ -29,7 +23,13 @@ from . import (
     execution_head_migration_projection as projection_codec,
 )
 from .execution_head_migration_projection import (
+    AccountFactStreamScope,
+    AccountFillLoadProvenance,
+    DiscrepancyKind,
+    FactCoverageInterval,
+    FactCoverageStatus,
     LegacyPositionProjection,
+    PositionDiscrepancy,
     _datetime,
     _decimal,
 )
