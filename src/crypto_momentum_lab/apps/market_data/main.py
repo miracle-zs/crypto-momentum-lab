@@ -102,8 +102,8 @@ from crypto_momentum_lab.persistence.postgres.models import (
 from crypto_momentum_lab.persistence.postgres.operational_retention import (
     PostgresOperationalRetentionRepository,
 )
-from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
-    PostgresPaperDaemonRepository,
+from crypto_momentum_lab.persistence.postgres.paper_position_protection_repository import (
+    PostgresPaperPositionProtectionRepository,
 )
 from crypto_momentum_lab.persistence.postgres.repository import (
     PostgresUniverseRepository,
@@ -258,7 +258,7 @@ def _ignore_backfill_result(
 
 async def _load_protected_symbols(
     *,
-    paper_repository: PostgresPaperDaemonRepository,
+    paper_repository: PostgresPaperPositionProtectionRepository,
     trading_repository: PostgresTradingRepository,
     protected_run_ids: frozenset[str],
 ) -> frozenset[str]:
@@ -1176,7 +1176,7 @@ async def build_market_data_runtime(
     capture_repository = PostgresCaptureRepository(observability_sessions)
     maintenance_capture_repository = PostgresCaptureRepository(maintenance_sessions)
     operational_retention = PostgresOperationalRetentionRepository(maintenance_sessions)
-    paper_repository = PostgresPaperDaemonRepository(maintenance_sessions)
+    paper_repository = PostgresPaperPositionProtectionRepository(maintenance_sessions)
     trading_repository = PostgresTradingRepository(maintenance_engine)
     runtime_state_repository = PostgresRuntimeMarketStateRepository(market_sessions)
     if startup_timer is not None:
