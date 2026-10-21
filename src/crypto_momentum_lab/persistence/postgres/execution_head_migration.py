@@ -12,11 +12,11 @@ from crypto_momentum_lab.domain.account.models import (
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
-    ExitOrderSubmissionFact,
     FactCoverageInterval,
     PositionKey,
 )
 from .execution_head_migration_codec import (
+    LegacyExitOrderSubmissionFact,
     PositionRecoveryCodec,
 )
 from .execution_head_migration_projection import (
@@ -62,7 +62,7 @@ def convert_legacy_execution_head(payload: object) -> dict[str, object]:
         PositionRecoveryCodec.decode_snapshot(item)
         for item in _array(payload, "active_snapshots")
     )
-    exit_boundaries: tuple[ExitOrderSubmissionFact, ...] = tuple(
+    exit_boundaries: tuple[LegacyExitOrderSubmissionFact, ...] = tuple(
         PositionRecoveryCodec.decode_boundary(item)
         for item in _array(payload, "active_exit_boundaries")
     )
@@ -142,7 +142,7 @@ def _encode_current_position_state(
     stream_scope: AccountFactStreamScope,
     projection: LegacyPositionProjection,
     snapshots: tuple[AccountPositionSnapshot, ...],
-    exit_boundaries: tuple[ExitOrderSubmissionFact, ...],
+    exit_boundaries: tuple[LegacyExitOrderSubmissionFact, ...],
     coverage: FactCoverageInterval | None,
     has_synthetic_fills: bool,
     episode_sequence: int,
@@ -192,7 +192,7 @@ def _current_verification(
     position_key: PositionKey,
     stream_scope: AccountFactStreamScope,
     snapshots: tuple[AccountPositionSnapshot, ...],
-    exit_boundaries: tuple[ExitOrderSubmissionFact, ...],
+    exit_boundaries: tuple[LegacyExitOrderSubmissionFact, ...],
     coverage: FactCoverageInterval | None,
     has_synthetic_fills: bool,
 ) -> dict[str, object]:

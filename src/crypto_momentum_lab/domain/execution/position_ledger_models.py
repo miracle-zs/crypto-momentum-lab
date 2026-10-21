@@ -336,24 +336,6 @@ class FactCoverageInterval:
 
 
 @dataclass(frozen=True, slots=True)
-class ExitOrderSubmissionFact:
-    """The submission of an exit (reduce-only) order defining a batch boundary."""
-
-    order_id: str
-    submitted_at: datetime
-    symbol: str
-    position_side: FuturesPositionSide
-    client_order_id: str | None = None
-    target_batch_id: str | None = None
-
-    def __post_init__(self) -> None:
-        if self.submitted_at.tzinfo is None:
-            raise ValueError("submitted_at must be timezone-aware")
-        if not self.order_id.strip():
-            raise ValueError("order_id must not be empty")
-
-
-@dataclass(frozen=True, slots=True)
 class PositionLedgerBatch:
     """One discrete entry lot inside a position episode."""
 

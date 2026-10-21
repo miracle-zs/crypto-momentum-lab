@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -15,7 +16,6 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
     AccountFillLoadProvenance,
     DiscrepancyKind,
-    ExitOrderSubmissionFact,
     FactCoverageInterval,
     FactCoverageStatus,
     PositionDiscrepancy,
@@ -34,6 +34,24 @@ from .execution_head_migration_projection import (
     _decimal,
 )
 from .execution_head_migration_snapshot import encode_position_snapshot
+
+
+@dataclass(frozen=True, slots=True)
+class LegacyExitOrderSubmissionFact:
+    """Exit boundary retained only while converting legacy execution heads."""
+
+    order_id: str
+    submitted_at: datetime
+    symbol: str
+    position_side: FuturesPositionSide
+    client_order_id: str | None = None
+    target_batch_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.submitted_at.tzinfo is None:
+            raise ValueError("submitted_at must be timezone-aware")
+        if not self.order_id.strip():
+            raise ValueError("order_id must not be empty")
 
 
 class RecoverySchemaError(ValueError):
@@ -285,7 +303,9 @@ class PositionRecoveryCodec:
         )
 
     @classmethod
-    def encode_boundary(cls, boundary: ExitOrderSubmissionFact) -> dict[str, object]:
+    def encode_boundary(
+        cls, boundary: LegacyExitOrderSubmissionFact
+    ) -> dict[str, object]:
         return {
             "order_id": boundary.order_id,
             "submitted_at": _datetime(boundary.submitted_at),
@@ -296,7 +316,7 @@ class PositionRecoveryCodec:
         }
 
     @classmethod
-    def decode_boundary(cls, value: object) -> ExitOrderSubmissionFact:
+    def decode_boundary(cls, value: object) -> LegacyExitOrderSubmissionFact:
         data = _mapping(value, "boundary")
         _require_keys(
             data,
@@ -316,7 +336,7 @@ class PositionRecoveryCodec:
             raise RecoverySchemaError("client_order_id must be a string or null")
         if target_batch_id is not None and not isinstance(target_batch_id, str):
             raise RecoverySchemaError("target_batch_id must be a string or null")
-        return ExitOrderSubmissionFact(
+        return LegacyExitOrderSubmissionFact(
             order_id=_string(data, "order_id"),
             submitted_at=_datetime_value(data, "submitted_at"),
             symbol=_string(data, "symbol"),
