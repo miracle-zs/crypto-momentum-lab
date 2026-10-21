@@ -1,25 +1,5 @@
-from crypto_momentum_lab.domain.risk.gateway import (
-    CandidateRiskAssessment,
-    RiskContext,
-    RiskGateway,
-)
-from crypto_momentum_lab.domain.risk.models import (
-    RiskConfigSnapshot,
-    RiskDecision,
-    RiskEvaluation,
-    RiskHalt,
-    StrategyLiveState,
-    StrategyLiveStateRecord,
-)
+"""Risk configuration models shared with the active NextGen runtime."""
 
-__all__ = [
-    "RiskConfigSnapshot",
-    "RiskDecision",
-    "RiskEvaluation",
-    "RiskHalt",
-    "StrategyLiveState",
-    "StrategyLiveStateRecord",
-    "CandidateRiskAssessment",
-    "RiskContext",
-    "RiskGateway",
-]
+from crypto_momentum_lab.domain.risk.models import RiskConfigSnapshot
+
+__all__ = ["RiskConfigSnapshot"]

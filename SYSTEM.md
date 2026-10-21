@@ -1097,3 +1097,5 @@ SSH使用已配置的密钥或--control-path指定的已登录会话，不在脚
 另删除全仓无调用方的旧 `ExchangeOrderState`、`OrderExecutionPlan`、`ExchangeOrderSnapshot`，以及空置的 `exchange_contract.py` / `order_submission.py` 异常定义模块。保留被离线决策回放和迁移使用的 `FuturesPositionSide` 与 `ExitAllocation`。静态语法与 diff 检查通过；未运行测试，未部署。
 
 继续将 `PositionEpisode.batches` 从决策追踪模型移除：回放输入的批次本就在 `PositionView.batches`，episode 内嵌批次只为旧 schema 1 head 的重复 payload 服务。该嵌套副本现由迁移专用 `LegacyPositionEpisode` 解码与编码，迁移校验和输出保持原样；回放模型保留 episode 摘要字段。`order_id`、`client_order_id`、`is_external` 也只用于旧批次 payload，现由 `LegacyPositionBatch` 持有；共享 `PositionLedgerBatch` 保留回放和决策读取的字段。迁移夹具同步使用迁移模型，并移除传给 projection 的无效 sequence 参数。静态语法与 diff 检查通过；未运行测试，未部署。
+
+继续清理未接入 NextGen 的旧风险准入层：全仓仅旧风险单测引用 `RiskGateway`、`FixedLiveLimits` 和量化名义价值校验，NextGen 只读取共用的 `RiskConfigSnapshot`。删除旧 gateway/limits 实现、专用测试及仅被它们使用的风险决策、策略状态、评估模型；保留 NextGen 仍使用的风险配置快照。静态引用搜索、Python AST 与 diff 检查通过；未运行测试，未部署。

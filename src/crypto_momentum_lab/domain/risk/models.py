@@ -1,39 +1,8 @@
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from decimal import Decimal
-from enum import StrEnum
 
-from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.domain.strategy import deterministic_config_hash
-
-
-class RiskDecision(StrEnum):
-    APPROVED = "approved"
-    REJECTED = "rejected"
-    HALTED = "halted"
-
-
-class StrategyLiveState(StrEnum):
-    ACTIVE = "active"
-    DRAINING = "draining"
-    HALTED = "halted"
-
-
-@dataclass(frozen=True, slots=True)
-class StrategyLiveStateRecord:
-    environment: str
-    account_label: str
-    strategy_name: str
-    state: StrategyLiveState
-    changed_at: datetime
-    reason: str | None
-
-    def __post_init__(self) -> None:
-        _require_common(self.environment, self.account_label)
-        _require_non_empty(self.strategy_name, "strategy_name")
-        if not isinstance(self.state, StrategyLiveState):
-            raise ValueError("state must be a StrategyLiveState")
-        _require_aware(self.changed_at, "changed_at")
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,42 +33,6 @@ class RiskConfigSnapshot:
         values = asdict(self)
         values.pop("created_at")
         return deterministic_config_hash(values)
-
-
-@dataclass(frozen=True, slots=True)
-class RiskHalt:
-    halt_id: str
-    environment: str
-    account_label: str
-    reason: str
-    active: bool
-    created_at: datetime
-    details: dict[str, JsonValue]
-
-    def __post_init__(self) -> None:
-        _require_non_empty(self.halt_id, "halt_id")
-        _require_common(self.environment, self.account_label)
-        _require_non_empty(self.reason, "reason")
-        _require_aware(self.created_at, "created_at")
-
-
-@dataclass(frozen=True, slots=True)
-class RiskEvaluation:
-    evaluation_id: str
-    candidate_id: str
-    decision: RiskDecision
-    reason: str
-    evaluated_at: datetime
-    details: dict[str, JsonValue]
-
-    def __post_init__(self) -> None:
-        _require_non_empty(self.evaluation_id, "evaluation_id")
-        _require_non_empty(self.candidate_id, "candidate_id")
-        if not isinstance(self.decision, RiskDecision):
-            raise ValueError("decision must be a RiskDecision")
-        _require_non_empty(self.reason, "reason")
-        _require_aware(self.evaluated_at, "evaluated_at")
-        object.__setattr__(self, "details", dict(self.details))
 
 
 def _require_common(environment: str, account_label: str) -> None:
