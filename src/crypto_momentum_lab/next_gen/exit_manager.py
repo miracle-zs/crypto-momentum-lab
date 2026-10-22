@@ -140,14 +140,23 @@ class ExitManager:
             price=None if immediate else rounded_limit_price,
             order_type="MARKET" if immediate else "LIMIT",
         )
-        if not await self._submit_exit_order(limit_order):
+        if not await self._submit_exit_order(
+            limit_order,
+            raw_limit_price=None if immediate else limit_price,
+        ):
             return
         if immediate:
             return
 
         await self._complete_limit_exit(limit_order, grace_sec)
 
-    async def _submit_exit_order(self, order: Order) -> bool:
+    async def _submit_exit_order(
+        self,
+        order: Order,
+        *,
+        raw_limit_price: Decimal | None = None,
+        refresh_price_filter: bool = True,
+    ) -> bool:
         try:
             await self._executor.submit_order(order)
         except BinanceOrderRejectedError as error:
@@ -168,6 +177,16 @@ class ExitManager:
                 await self._state.db.async_save_batch(
                     self._state.batches[order.batch_id]
                 )
+            if (
+                refresh_price_filter
+                and error.code == -4014
+                and order.order_type == "LIMIT"
+                and raw_limit_price is not None
+            ):
+                return await self._refresh_and_retry_limit_exit(
+                    order,
+                    raw_limit_price,
+                )
             return False
         except RuntimeError as error:
             # A closed gate is temporary. Other RuntimeErrors are real faults.
@@ -181,6 +200,59 @@ class ExitManager:
             )
             return False
         return True
+
+    async def _refresh_and_retry_limit_exit(
+        self,
+        rejected_order: Order,
+        raw_limit_price: Decimal,
+    ) -> bool:
+        """Refresh changed exchange price filters after an explicit tick rejection."""
+        try:
+            exchange_info = await self._rest.fetch_exchange_info()
+            self.symbol_rules.update_from_exchange_info(exchange_info)
+            limit_price = self.symbol_rules.round_price(
+                rejected_order.symbol,
+                raw_limit_price,
+            )
+        except Exception as error:
+            log.warning(
+                "exit_price_filter_refresh_failed",
+                batch_id=rejected_order.batch_id,
+                symbol=rejected_order.symbol,
+                error=str(error),
+            )
+            return False
+
+        if limit_price == rejected_order.price:
+            return False
+        batch = self._state.batches.get(rejected_order.batch_id)
+        if batch is None or batch.quantity <= 0:
+            return False
+        quantity = self.symbol_rules.round_quantity(batch.symbol, batch.quantity)
+        if quantity <= 0:
+            return False
+
+        retry_order = self._state.create_exit_order(
+            batch_id=batch.batch_id,
+            quantity=quantity,
+            price=limit_price,
+            order_type="LIMIT",
+        )
+        log.info(
+            "retrying_exit_with_refreshed_price_filter",
+            batch_id=batch.batch_id,
+            symbol=batch.symbol,
+            previous_price=str(rejected_order.price),
+            refreshed_price=str(limit_price),
+        )
+        submitted = await self._submit_exit_order(
+            retry_order,
+            raw_limit_price=raw_limit_price,
+            refresh_price_filter=False,
+        )
+        if submitted:
+            self._rejected_exit_until.pop(batch.batch_id, None)
+        return submitted
 
     def _scheduled_flatten_due(self, now: datetime) -> bool:
         schedule = self._state.scheduled_risk_window
