@@ -10,9 +10,10 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 import structlog
-from sqlalchemy import insert, select, text
+from sqlalchemy import Integer, String, column, insert, select, text, true, values
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.orm import aliased
 
 from crypto_momentum_lab.domain.account.models import AccountFillEvent
 from crypto_momentum_lab.domain.market.models import MarketState15s
@@ -380,8 +381,11 @@ class PostgresTradingRepository:
                     f"获取 PostgreSQL 会话咨询锁失败: [{lock_key}] "
                     "已被另一进程持有！拒绝启动以防多实例竞态！"
                 )
-            log.info("advisory_lock_acquired", key=lock_key)
             try:
+                # Session locks survive commit; do not leave the dedicated
+                # connection idle in a transaction for the daemon's lifetime.
+                await conn.commit()
+                log.info("advisory_lock_acquired", key=lock_key)
                 yield
             finally:
                 try:
@@ -784,25 +788,35 @@ class PostgresTradingRepository:
     async def async_get_historical_market_states(
         self, environment: str, symbols: list[str], limit: int
     ) -> list[MarketState15s]:
-        result: list[MarketState15s] = []
-        factory = async_sessionmaker(self._engine)
-        async with factory() as session:
-            for symbol in symbols:
-                rows = (
-                    await session.scalars(
-                        select(RuntimeMarketState15sRow)
-                        .where(
-                            RuntimeMarketState15sRow.environment == environment,
-                            RuntimeMarketState15sRow.symbol == symbol,
-                        )
-                        # 15s bucket_end is derived from bucket_start; this uses
-                        # the primary-key order instead of sorting each symbol.
-                        .order_by(RuntimeMarketState15sRow.bucket_start.desc())
-                        .limit(limit)
-                    )
-                ).all()
-                result.extend(market_state_from_row(row) for row in reversed(rows))
-        return result
+        if not symbols:
+            return []
+        requested = values(
+            column("symbol", String),
+            column("ordinal", Integer),
+            name="requested_symbols",
+        ).data([(symbol, ordinal) for ordinal, symbol in enumerate(symbols)])
+        # Keep one index-backed top-N lookup per symbol inside a single statement.
+        # A window over all history would scan far more rows than warmup needs.
+        latest = (
+            select(RuntimeMarketState15sRow)
+            .where(
+                RuntimeMarketState15sRow.environment == environment,
+                RuntimeMarketState15sRow.symbol == requested.c.symbol,
+            )
+            .order_by(RuntimeMarketState15sRow.bucket_start.desc())
+            .limit(limit)
+            .correlate(requested)
+            .lateral("latest_states")
+        )
+        state_row = aliased(RuntimeMarketState15sRow, latest)
+        statement = (
+            select(state_row)
+            .select_from(requested.join(latest, true()))
+            .order_by(requested.c.ordinal, latest.c.bucket_start)
+        )
+        async with async_sessionmaker(self._engine)() as session:
+            rows = (await session.scalars(statement)).all()
+            return [market_state_from_row(row) for row in rows]
 
     async def async_get_signal_universe(
         self, observed_at: datetime, symbol: str

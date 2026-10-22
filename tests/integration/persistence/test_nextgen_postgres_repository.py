@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import text
@@ -11,6 +13,7 @@ from crypto_momentum_lab.next_gen.models import Order, OrderStatus, PositionBatc
 from crypto_momentum_lab.next_gen.persistence import PostgresTradingRepository
 from crypto_momentum_lab.persistence.postgres.session import (
     create_async_database_engine,
+    create_execution_database_engine,
 )
 
 ENVIRONMENT = "test-nextgen-postgres"
@@ -66,6 +69,51 @@ async def test_postgres_advisory_lock_mutual_exclusion(
     # 退出 context 后，咨询锁应已释放，再次获取应成功
     async with postgres_repo.acquire_dedicated_advisory_lock(lock_key):
         pass
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_postgres_advisory_lock_survives_idle_transaction_timeout(
+    async_database_url: str,
+) -> None:
+    owner_engine = create_execution_database_engine(async_database_url, pool_size=1)
+    contender_engine = create_execution_database_engine(async_database_url, pool_size=1)
+    owner = PostgresTradingRepository(owner_engine)
+    contender = PostgresTradingRepository(contender_engine)
+    lock_key = f"{ENVIRONMENT}:idle-timeout:{uuid4()}"
+    try:
+        # The single-connection pool returns this same session to the lock owner.
+        async with owner_engine.begin() as connection:
+            await connection.execute(
+                text("SET idle_in_transaction_session_timeout = '200ms'")
+            )
+            owner_pid = await connection.scalar(text("SELECT pg_backend_pid()"))
+
+        async with owner.acquire_dedicated_advisory_lock(lock_key):
+            # Exercise a real PostgreSQL timeout, rather than a scheduling race.
+            await asyncio.sleep(0.6)
+            with pytest.raises(RuntimeError, match="已被另一进程持有"):
+                async with contender.acquire_dedicated_advisory_lock(lock_key):
+                    pass
+            async with contender_engine.connect() as connection:
+                activity = (
+                    await connection.execute(
+                        text(
+                            "SELECT state, xact_start FROM pg_stat_activity "
+                            "WHERE pid = :pid"
+                        ),
+                        {"pid": owner_pid},
+                    )
+                ).one()
+                assert activity.state == "idle"
+                assert activity.xact_start is None
+
+        # A separate session can acquire the lock once the owner exits.
+        async with contender.acquire_dedicated_advisory_lock(lock_key):
+            pass
+    finally:
+        await owner_engine.dispose()
+        await contender_engine.dispose()
 
 
 @pytest.mark.integration
@@ -300,10 +348,22 @@ async def test_postgres_get_active_batches_and_recent_orders(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_full_market_state_warmup_preserves_order_flow_fields(postgres_repo):
+@pytest.mark.parametrize(
+    ("symbols", "limit"),
+    [
+        (["BTCUSDT"], 2),
+        (["ETHUSDT", "BTCUSDT"], 2),
+        (["ETHUSDT", "MISSING", "BTCUSDT", "ETHUSDT"], 2),
+        ([], 2),
+        (["BTCUSDT", "ETHUSDT"], 0),
+    ],
+)
+async def test_full_market_state_warmup_preserves_order_flow_fields(
+    postgres_repo, symbols, limit
+):
     from dataclasses import replace
 
-    from sqlalchemy import delete, insert
+    from sqlalchemy import delete, event, insert
 
     from crypto_momentum_lab.persistence.postgres.models import RuntimeMarketState15sRow
     from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
@@ -313,13 +373,27 @@ async def test_full_market_state_warmup_preserves_order_flow_fields(postgres_rep
         fixture_state,
     )
 
-    states = tuple(
-        replace(fixture_state("BTCUSDT", i), environment=ENVIRONMENT) for i in range(3)
-    )
+    states = {
+        symbol: [
+            replace(fixture_state(symbol, i), environment=ENVIRONMENT)
+            for i in range(count)
+        ]
+        for symbol, count in (("BTCUSDT", 3), ("ETHUSDT", 1))
+    }
+    other_environment = f"{ENVIRONMENT}-other"
+    stored = [state for history in states.values() for state in history]
+    stored.append(replace(stored[-1], environment=other_environment))
+    queries = []
+
+    def capture_query(conn, cursor, statement, parameters, context, executemany):
+        queries.append(statement)
+
     async with postgres_repo._engine.begin() as connection:
         await connection.execute(
             delete(RuntimeMarketState15sRow).where(
-                RuntimeMarketState15sRow.environment == ENVIRONMENT,
+                RuntimeMarketState15sRow.environment.in_(
+                    (ENVIRONMENT, other_environment)
+                ),
             )
         )
         await connection.execute(
@@ -331,23 +405,39 @@ async def test_full_market_state_warmup_preserves_order_flow_fields(postgres_rep
                     input_sequence_min=None,
                     input_sequence_max=None,
                 )
-                for row in states
+                for row in stored
             ],
         )
+    event.listen(
+        postgres_repo._engine.sync_engine, "before_cursor_execute", capture_query
+    )
     try:
         loaded = await postgres_repo.async_get_historical_market_states(
-            ENVIRONMENT,
-            ["BTCUSDT"],
-            2,
+            ENVIRONMENT, symbols, limit
         )
-        assert loaded == list(states[-2:])
-        assert loaded[-1].aggressive_buy_notional == states[-1].aggressive_buy_notional
-        assert loaded[-1].last_ask_price == states[-1].last_ask_price
+        expected = [
+            state
+            for symbol in symbols
+            for state in (states.get(symbol, [])[-limit:] if limit else [])
+        ]
+        assert loaded == expected
+        assert len(queries) == (1 if symbols else 0)
+        if loaded:
+            assert (
+                loaded[-1].aggressive_buy_notional
+                == expected[-1].aggressive_buy_notional
+            )
+            assert loaded[-1].last_ask_price == expected[-1].last_ask_price
     finally:
+        event.remove(
+            postgres_repo._engine.sync_engine, "before_cursor_execute", capture_query
+        )
         async with postgres_repo._engine.begin() as connection:
             await connection.execute(
                 delete(RuntimeMarketState15sRow).where(
-                    RuntimeMarketState15sRow.environment == ENVIRONMENT,
+                    RuntimeMarketState15sRow.environment.in_(
+                        (ENVIRONMENT, other_environment)
+                    ),
                 )
             )
 
@@ -497,6 +587,7 @@ async def test_dashboard_reads_nextgen_state_and_never_invents_margin(postgres_r
                 "ws_connected": True,
                 "balances": {"USDT": "1000"},
                 "unrealized_pnl": "5",
+                "account_equity": "1005",
                 "market_data": {
                     "bucket_end": now.isoformat(),
                     "received_at": now.isoformat(),

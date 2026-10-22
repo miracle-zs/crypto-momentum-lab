@@ -149,7 +149,10 @@ async def test_entry_batch_merges_until_first_exit(strategy_setup, exit_started)
     )
     state.batches[batch.batch_id] = batch
     previous = state.create_entry_order(
-        batch.symbol, batch.position_side, batch.quantity, batch.entry_price,
+        batch.symbol,
+        batch.position_side,
+        batch.quantity,
+        batch.entry_price,
         batch.batch_id,
     )
     previous.status = OrderStatus.FILLED
@@ -221,6 +224,52 @@ async def test_entry_ttl_uses_account_configuration(strategy_setup):
     await strategy.cancel_stale_entry_orders()
     rest.cancel_order.assert_awaited_once()
     rest.query_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_entry_ttl_only_visits_active_orders_and_rechecks_after_cancel(
+    strategy_setup,
+):
+    state, _, rest, _, strategy, _ = strategy_setup
+    old = state.create_entry_order(
+        "BTCUSDT", "LONG", Decimal("1"), Decimal("100"), "old"
+    )
+    state.mark_order_rejected(old.client_order_id)
+    active = [
+        state.create_entry_order(symbol, "LONG", Decimal("1"), Decimal("100"), symbol)
+        for symbol in ("BTCUSDT", "ETHUSDT")
+    ]
+    for order in (old, *active):
+        order.created_at = datetime.now(UTC) - timedelta(seconds=901)
+
+    class OrdersById(dict):
+        def values(self):
+            raise AssertionError("TTL check must not scan historical orders")
+
+    state.orders = OrdersById(state.orders)
+
+    async def cancelled(**kwargs):
+        # Both orders finish while the first cancellation awaits its WS reply.
+        for order in active:
+            await state.on_order_trade_update(
+                order.client_order_id,
+                order.symbol,
+                order.position_side,
+                order.side,
+                OrderStatus.CANCELED,
+                Decimal("0"),
+                Decimal("0"),
+                Decimal("0"),
+                Decimal("0"),
+            )
+
+    rest.cancel_order.side_effect = cancelled
+    await strategy.cancel_stale_entry_orders()
+    rest.cancel_order.assert_awaited_once_with(
+        symbol=active[0].symbol, client_order_id=active[0].client_order_id
+    )
+    assert state.active_entry_orders == {}
+    assert old.is_terminal
 
 
 @pytest.mark.asyncio

@@ -1972,7 +1972,7 @@ SELECT json_build_object(
                         },
                     )
                 )
-        alerts = [
+        alerts.append(
             Alert(
                 f"live_heartbeat_stale:{account_label}",
                 "critical",
@@ -1980,7 +1980,7 @@ SELECT json_build_object(
                 "account restart is operator-controlled",
                 details.copy(),
             )
-        ]
+        )
         return tuple(alerts)
 
     def _archive_container_logs(
@@ -2254,7 +2254,7 @@ SELECT json_build_object(
             for line in output.splitlines():
                 record = _parse_log_record(line)
                 event = str(record.get("event", ""))
-                if event == "live_runtime_telemetry_persist_failed":
+                if event == "runtime_status_publish_failed":
                     telemetry_failures += 1
                 elif event == "live_grace_timeout_processing_degraded":
                     symbol = record.get("symbol")
@@ -2346,7 +2346,7 @@ WITH activity AS (
   ) AS rows
   FROM (
     SELECT queryid, calls, temp_blks_written, total_exec_time
-    FROM pg_stat_statements
+    FROM pg_stat_statements(false)
     ORDER BY temp_blks_written DESC NULLS LAST
     LIMIT 5
   ) ranked

@@ -15,6 +15,7 @@ import pytest
 
 from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
 from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.live_rollout.closed_candle_feed import ClosedCandle15mEvent
 from crypto_momentum_lab.live_rollout.runtime_manifest import load_live_runtime_manifest
 from crypto_momentum_lab.next_gen.client import (
     BinanceRestClient,
@@ -74,23 +75,26 @@ class _FakeClosedCandleFeed:
     connection_available = True
 
     def __init__(self, **kwargs: Any) -> None:
-        self._waiter = asyncio.Event()
+        self.symbols: frozenset[str] = frozenset()
+        self.events: asyncio.Queue[ClosedCandle15mEvent | None] = asyncio.Queue()
 
     def set_symbols(self, symbols: frozenset[str]) -> None:
-        return None
+        self.symbols = symbols
 
     async def start(self) -> None:
         return None
 
     async def stop(self) -> None:
-        self._waiter.set()
+        self.events.put_nowait(None)
 
     def __aiter__(self) -> _FakeClosedCandleFeed:
         return self
 
     async def __anext__(self) -> Any:
-        await self._waiter.wait()
-        raise StopAsyncIteration
+        event = await self.events.get()
+        if event is None:
+            raise StopAsyncIteration
+        return event
 
 
 def _account_config() -> Any:
@@ -177,6 +181,7 @@ async def test_nextgen_daemon_entry_fill_and_candle_exit(
     trade_client.fetch_startup_realized_pnl.return_value = Decimal("0")
 
     async def post_order(**kwargs: Any) -> dict[str, Any]:
+        assert daemon._candle_feed.symbols == frozenset({kwargs["symbol"]})
         price = kwargs["price"] if kwargs["price"] is not None else Decimal("105")
         timestamp = int(datetime.now(UTC).timestamp() * 1000)
         await fake_ws.messages.put(
@@ -246,15 +251,17 @@ async def test_nextgen_daemon_entry_fill_and_candle_exit(
             open_price=entry_price + Decimal("10"),
             close_price=entry_price + Decimal("5"),
         )
-        scheduled = daemon.exit_manager.evaluate_active_batches(
-            now=candle.candle_end + timedelta(seconds=1),
-            current_prices={"BTCUSDT": candle.close_price},
-            closed_candle=candle,
+        await daemon._candle_feed.events.put(
+            ClosedCandle15mEvent(
+                candle=candle,
+                exchange_event_at=candle.candle_end,
+                received_at=candle.candle_end + timedelta(seconds=1),
+            )
         )
-        assert scheduled == [batch.batch_id]
         await _wait_until(lambda: batch.quantity == Decimal("0"))
         assert batch.status == "CLOSED"
         assert daemon.state.active_exit_orders == {}
+        assert daemon._candle_feed.symbols == frozenset()
         assert trade_client.post_order.await_count >= 2
     finally:
         stop_event.set()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -53,11 +54,14 @@ class AccountState:
         account_label: str,
         db: TradingRepositoryProtocol | None = None,
         rest_client: Any = None,
+        *,
+        on_active_symbols_change: Callable[[frozenset[str]], None] | None = None,
     ) -> None:
         self.environment = environment
         self.account_label = account_label
         self._db: TradingRepositoryProtocol | None = db
         self._rest_client = rest_client
+        self._on_active_symbols_change = on_active_symbols_change
         self._ws_client: Any = None
 
         self.orders: dict[str, Order] = {}
@@ -96,6 +100,18 @@ class AccountState:
         self.risk_day = datetime.now(UTC).date()
         self.daily_pnl_ready = False
         self.income_cutoff: datetime | None = None
+
+    @property
+    def active_symbols(self) -> frozenset[str]:
+        """Symbols with an open position or an unconfirmed order."""
+        return frozenset(
+            {batch.symbol for batch in self.batches.values() if batch.quantity > 0}
+            | {order.symbol for order in self.orders.values() if not order.is_terminal}
+        )
+
+    def _notify_active_symbols_changed(self) -> None:
+        if self._on_active_symbols_change is not None:
+            self._on_active_symbols_change(self.active_symbols)
 
     @property
     def db(self) -> TradingRepositoryProtocol | None:
@@ -346,6 +362,7 @@ class AccountState:
         )
         self.orders[client_order_id] = order
         self.active_entry_orders[entry_key] = client_order_id
+        self._notify_active_symbols_changed()
         return order
 
     def create_exit_order(
@@ -391,6 +408,7 @@ class AccountState:
         )
         self.orders[client_order_id] = order
         self.active_exit_orders[exit_key] = client_order_id
+        self._notify_active_symbols_changed()
         return order
 
     def rollback_unsubmitted_order(self, order: Order) -> None:
@@ -404,6 +422,7 @@ class AccountState:
             batch = self.batches.get(order.batch_id)
             if batch:
                 order.release_batch_reservation(batch)
+        self._notify_active_symbols_changed()
         log.warning(
             "order_unsubmitted_rolled_back",
             order_id=order.client_order_id,
@@ -424,6 +443,7 @@ class AccountState:
             batch = self.batches.get(order.batch_id)
             if batch:
                 order.release_batch_reservation(batch)
+        self._notify_active_symbols_changed()
         log.warning("order_gateway_rejected_cleaned", id=client_order_id, reason=reason)
 
     async def watch_submission_timeout(
@@ -658,6 +678,8 @@ class AccountState:
                     batch.status = "ACTIVE"
                     batch.entry_bar_time = trade_time or datetime.now(UTC)
             batch.updated_at = datetime.now(UTC)
+
+        self._notify_active_symbols_changed()
 
         # 异步直调持久化 2 张表 (支持 1 次微退避重试)
         if self._db is not None:

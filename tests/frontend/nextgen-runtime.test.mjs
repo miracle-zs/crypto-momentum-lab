@@ -37,5 +37,5 @@ test("NextGen closing fill renders as an exit even without exchange reduceOnly",
     summary: {}, positions: [], open_orders: [], balances: [], equity_curve: [],
     fills: [{symbol: "MANTRAUSDT", side: "SELL", is_exit: true, quantity: "1", price: "1"}],
   });
-  assert.match(html, /退出原因未记录/);
+  assert.match(html, /退出路径未记录/);
 });

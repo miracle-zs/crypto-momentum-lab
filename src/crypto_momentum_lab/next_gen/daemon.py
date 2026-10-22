@@ -88,6 +88,7 @@ class NextGenDaemon:
             account_label=account_label,
             db=db,
             rest_client=self.read_client,
+            on_active_symbols_change=self._candle_feed.set_symbols,
         )
         self.state.scheduled_risk_window = ScheduledRiskWindowConfig.from_environment()
         self.ws_client.on_status_change = self._on_ws_status_change
@@ -163,7 +164,7 @@ class NextGenDaemon:
     async def _run_exit_candles(self) -> None:
         """Feed formal exchange 15m closes directly to the existing exit policy."""
         feed = self._candle_feed
-        feed.set_symbols(frozenset(self.strategy_engine.symbols))
+        feed.set_symbols(self.state.active_symbols)
         try:
             if self.stop_event.is_set():
                 return
@@ -349,7 +350,10 @@ class NextGenDaemon:
                 try:
                     await self._publish_runtime_status(ready)
                 except Exception:
-                    log.exception("runtime_status_publish_failed")
+                    healthy = False
+                    log.exception(
+                        "runtime_status_publish_failed", account=self.account_label
+                    )
                 if not healthy:
                     account_health_file.unlink(missing_ok=True)  # noqa: ASYNC240
                     status_file.write_text("not_ready", encoding="utf-8")  # noqa: ASYNC240
@@ -435,16 +439,7 @@ class NextGenDaemon:
                     # New entry symbols are configured lazily before their first
                     # order; setting every tradable symbol fails on symbols with
                     # a lower maximum leverage (-4028).
-                    active_symbols = {
-                        batch.symbol
-                        for batch in self.state.batches.values()
-                        if batch.quantity > 0
-                    } | {
-                        order.symbol
-                        for order in self.state.orders.values()
-                        if not order.is_terminal
-                    }
-                    for symbol in sorted(active_symbols):
+                    for symbol in sorted(self.state.active_symbols):
                         try:
                             await self.rest_client.set_margin_type(
                                 symbol,

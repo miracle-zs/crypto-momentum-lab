@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock
@@ -10,7 +11,12 @@ import pytest
 from crypto_momentum_lab.next_gen.client import BinanceUserDataStream
 from crypto_momentum_lab.next_gen.daemon import NextGenDaemon, run_nextgen_daemon
 from crypto_momentum_lab.next_gen.engine import AccountSnapshot, PositionSnapshot
-from crypto_momentum_lab.next_gen.models import SystemMode
+from crypto_momentum_lab.next_gen.models import (
+    Order,
+    OrderStatus,
+    PositionBatch,
+    SystemMode,
+)
 from crypto_momentum_lab.next_gen.persistence import InMemoryTradingRepository
 from tests.unit.next_gen.factories import risk_config
 from tests.unit.next_gen.test_strategy_engine import exchange_info
@@ -39,10 +45,10 @@ def fake_market_feed(monkeypatch, tmp_path):
 def fake_closed_candle_feed(monkeypatch):
     class Feed:
         def __init__(self, **kwargs):
-            pass
+            self.symbols = frozenset()
 
         def set_symbols(self, symbols):
-            pass
+            self.symbols = symbols
 
         connection_available = True
 
@@ -129,6 +135,121 @@ async def test_nextgen_daemon_lifecycle_happy_path(
     mock_rest_client.fetch_open_orders.assert_awaited_once()
     mock_rest_client.fetch_account_information.assert_awaited_once()
     mock_rest_client.create_listen_key.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_exit_candle_subscriptions_follow_restored_and_current_responsibility(
+    account_config,
+    mock_rest_client: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = InMemoryTradingRepository()
+    for batch_id in ("restored-btc-1", "restored-btc-2"):
+        await repo.async_save_batch(
+            PositionBatch(
+                "live",
+                "a1",
+                batch_id,
+                "BTCUSDT",
+                "LONG",
+                Decimal("1"),
+                Decimal("100"),
+                datetime.now(UTC),
+            )
+        )
+    restored_order = Order(
+        "live",
+        "a1",
+        "e_restored_eth_01",
+        "restored-eth",
+        "ETHUSDT",
+        "BUY",
+        "LONG",
+        "LIMIT",
+        Decimal("1"),
+        Decimal("100"),
+        status=OrderStatus.OPEN,
+    )
+    await repo.async_save_order(restored_order)
+    daemon = NextGenDaemon(
+        environment="live",
+        account_label="a1",
+        account_config=account_config,
+        db=repo,
+        rest_client=mock_rest_client,
+        symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT", "ADAUSDT"],
+    )
+    await daemon.order_executor.load_active_state()
+    feed = daemon._candle_feed
+    started = asyncio.Event()
+
+    async def start_feed() -> None:
+        started.set()
+
+    monkeypatch.setattr(feed, "start", start_feed)
+    candle_task = asyncio.create_task(daemon._run_exit_candles())
+
+    async def update(order, status, quantity) -> None:
+        await daemon.state.on_order_trade_update(
+            order.client_order_id,
+            order.symbol,
+            order.position_side,
+            order.side,
+            status,
+            Decimal(quantity),
+            Decimal("100"),
+            Decimal("0"),
+            Decimal("100"),
+            trade_time=datetime.now(UTC),
+        )
+
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert feed.symbols == frozenset({"BTCUSDT", "ETHUSDT"})
+
+        # Canceling a partially filled entry must retain its position's stream.
+        await update(
+            daemon.state.orders[restored_order.client_order_id],
+            OrderStatus.PARTIALLY_FILLED,
+            "0.4",
+        )
+        await update(
+            daemon.state.orders[restored_order.client_order_id],
+            OrderStatus.CANCELED,
+            "0.4",
+        )
+        assert feed.symbols == frozenset({"BTCUSDT", "ETHUSDT"})
+        exit_order = daemon.state.create_exit_order(
+            "restored-eth", Decimal("0.4"), None, order_type="MARKET"
+        )
+        await update(exit_order, OrderStatus.FILLED, "0.4")
+        assert feed.symbols == frozenset({"BTCUSDT"})
+
+        # The stream is requested synchronously, before entry submission.
+        entry = daemon.state.create_entry_order(
+            "SOLUSDT", "LONG", Decimal("1"), Decimal("100"), "new-sol"
+        )
+        assert feed.symbols == frozenset({"BTCUSDT", "SOLUSDT"})
+        daemon.state.rollback_unsubmitted_order(entry)
+        assert feed.symbols == frozenset({"BTCUSDT"})
+        entry = daemon.state.create_entry_order(
+            "ADAUSDT", "LONG", Decimal("1"), Decimal("100"), "new-ada"
+        )
+        assert feed.symbols == frozenset({"BTCUSDT", "ADAUSDT"})
+        daemon.state.mark_order_rejected(entry.client_order_id, "test rejection")
+        assert feed.symbols == frozenset({"BTCUSDT"})
+
+        # Closing one batch must not remove the other batch's subscription.
+        for batch_id in ("restored-btc-1", "restored-btc-2"):
+            exit_order = daemon.state.create_exit_order(
+                batch_id, Decimal("1"), None, order_type="MARKET"
+            )
+            await update(exit_order, OrderStatus.FILLED, "1")
+            expected = {"BTCUSDT"} if batch_id == "restored-btc-1" else set()
+            assert feed.symbols == frozenset(expected)
+    finally:
+        candle_task.cancel()
+        await asyncio.gather(candle_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -398,6 +519,67 @@ async def test_nextgen_daemon_health_heartbeat(
     # After shutdown, health files should be unlinked
     account_health_file = health_dir / "nextgen-a1.ok"
     assert not account_health_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_runtime_status_publish_failure_invalidates_health_and_recovers(
+    account_config,
+    mock_rest_client: AsyncMock,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    health_dir = tmp_path / "health"
+    health_dir.mkdir()
+    database_file = health_dir / "database"
+    database_file.write_text("previous-success", encoding="utf-8")
+    repo = InMemoryTradingRepository()
+    repo.risk_configs[("live", "a1")] = risk_config("live", "a1")
+    repo.fail_next_n_writes(1)
+    mock_rest_client.fetch_account_margin_status.return_value = (
+        Decimal("0"),
+        Decimal("1000"),
+        Decimal("1000"),
+        0,
+        False,
+    )
+    daemon = NextGenDaemon(
+        environment="live",
+        account_label="a1",
+        account_config=account_config,
+        db=repo,
+        rest_client=mock_rest_client,
+        ws_client=BinanceUserDataStream(mock_rest_client, ws_connector=False),
+    )
+    daemon.state.set_system_mode(SystemMode.RUNNING)
+    daemon.state.ws_connected = True
+
+    async def run_cycle(*, publish_failed: bool) -> None:
+        stop_event = asyncio.Event()
+
+        async def check_markers_after_cycle() -> bool:
+            assert (health_dir / "status").read_text(encoding="utf-8") == (
+                "not_ready" if publish_failed else "ready"
+            )
+            assert (health_dir / "nextgen-a1.ok").exists() is not publish_failed
+            assert (
+                database_file.read_text(encoding="utf-8") == "previous-success"
+            ) is publish_failed
+            stop_event.set()
+            return True
+
+        # The stop wait runs after marker writes, so inspect each completed
+        # heartbeat without polling the filesystem or racing another cycle.
+        monkeypatch.setattr(stop_event, "wait", check_markers_after_cycle)
+        await asyncio.wait_for(daemon._run_health_heartbeat(stop_event), timeout=1)
+        assert daemon.state.system_mode is SystemMode.RUNNING
+        assert daemon.state.has_unrecoverable_fault is False
+        assert daemon.state.can_submit_entry_order() is True
+        assert daemon.state.can_submit_exit_order() is True
+
+    await run_cycle(publish_failed=True)
+    assert repo.runtime_observations == []
+    await run_cycle(publish_failed=False)
+    assert len(repo.runtime_observations) == 1
 
 
 @pytest.mark.asyncio

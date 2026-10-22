@@ -24,65 +24,42 @@ import {
 } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/account/loaders.js";
 
 
-test("account payload cache only matches the same rendered target and data", () => {
+test("account payload cache matches the rendered account and exact payload", () => {
   const slot = {
     __cmlRenderedPayload: JSON.stringify({ value: 1 }),
-    dataset: {
-      renderedAccount: "primary",
-      renderedRange: "24h",
-    },
+    dataset: { renderedAccount: "primary" },
   };
-
-  assert.equal(renderedPayloadMatches(slot, { value: 1 }, {
-    accountLabel: "primary",
-    equityRange: "24h",
-  }), true);
-  assert.equal(renderedPayloadMatches(slot, { value: 2 }, {
-    accountLabel: "primary",
-    equityRange: "24h",
-  }), false);
-  assert.equal(renderedPayloadMatches(slot, { value: 1 }, {
-    accountLabel: "account-2",
-    equityRange: "24h",
-  }), false);
-  assert.equal(renderedPayloadMatches(slot, { value: 1 }, {
-    accountLabel: "primary",
-    equityRange: "7d",
-  }), false);
+  assert.equal(renderedPayloadMatches(slot, { value: 1 }, { accountLabel: "primary" }), true);
+  assert.equal(renderedPayloadMatches(slot, { value: 2 }, { accountLabel: "primary" }), false);
+  assert.equal(renderedPayloadMatches(slot, { value: 1 }, { accountLabel: "account-2" }), false);
+  assert.equal(renderedPayloadMatches({ dataset: {} }, { value: 1 }), false);
+  assert.equal(renderedPayloadMatches(slot, { value: 1 }), true);
 });
 
 
-test("live account renderer exposes equity range controls and yearly dates", () => {
+test("live account renderer shows the online 24h window without archived range controls", () => {
   const [, html] = renderAccount({
     status: "READY",
     observed_at: "2026-08-24T00:00:00Z",
-    equity_range: "1y",
-    equity_window_start: "2025-08-24T00:00:00Z",
+    equity_window_start: "2026-08-23T00:00:00Z",
     equity_window_end: "2026-08-24T00:00:00Z",
-    equity_sample_interval_seconds: 172800,
+    equity_sample_interval_seconds: 360,
     equity_curve: [
-      { observed_at: "2026-08-20T00:00:00Z", equity: "280" },
-      { observed_at: "2026-08-22T00:00:00Z", equity: "282" },
+      { observed_at: "2026-08-23T23:54:00Z", equity: "280" },
+      { observed_at: "2026-08-24T00:00:00Z", equity: "282" },
     ],
-    balances: [],
-    positions: [],
-    open_orders: [],
-    fills: [],
+    balances: [], positions: [], open_orders: [], fills: [],
   });
 
-  assert.match(html, /data-account-equity-range="24h"/);
-  assert.match(html, /data-account-equity-range="7d"/);
-  assert.match(html, /data-account-equity-range="30d"/);
-  assert.match(html, /data-account-equity-range="1y" aria-pressed="true"/);
-  assert.match(html, /ROLLING 1Y · 2 DAY BUCKETS/);
-  assert.match(html, /2025-08-24/);
-  assert.match(html, /随实盘运行持续沉淀/);
-
+  assert.doesNotMatch(html, /data-account-equity-range/);
+  assert.match(html, /ROLLING 24H/);
+  assert.match(html, /仅显示最近 24 小时在线权益/);
+  assert.match(html, /本页不读取归档/);
   const payload = getChartPayload("live-account-equity");
   const option = buildChartOption(payload);
   assert.equal(
-    option.xAxis.axisLabel.formatter(Date.parse("2026-08-01T00:00:00Z")),
-    "2026-08",
+    option.xAxis.axisLabel.formatter(Date.parse("2026-08-24T00:00:00Z")),
+    "08:00:00",
   );
 });
 
@@ -103,7 +80,7 @@ test("live account directory renders every account against shared market data", 
 
   assert.equal(status, "READY");
   assert.match(html, /实盘账户矩阵/);
-  assert.match(html, /同一 market-data/);
+  assert.match(html, /共享行情接入 · 各账户独立执行/);
   for (const accountLabel of ["primary", "account-2", "account-3", "account-4"]) {
     assert.match(html, new RegExp(`>${accountLabel}<`));
   }
@@ -130,11 +107,11 @@ test("live account cards show strategy state without lease status", () => {
   assert.doesNotMatch(html, /租约/);
 });
 
-test("updateLiveAccountsDynamic updates card status, KPIs, footer, and fleet summary in-place", () => {
+test("updateLiveAccountsDynamic updates execution cards and fleet status in-place", async () => {
   const cardElements = {
     status: { className: "", textContent: "" },
     state: { innerHTML: "" },
-    kpis: { innerHTML: "", className: "live-account-card-kpis" },
+    detail: { innerHTML: "" },
     footer: { innerHTML: "" },
   };
   const fleetElements = {
@@ -145,7 +122,7 @@ test("updateLiveAccountsDynamic updates card status, KPIs, footer, and fleet sum
     querySelector(selector) {
       if (selector === ".live-account-card-status") return cardElements.status;
       if (selector === ".live-account-card-state") return cardElements.state;
-      if (selector === ".live-account-card-kpis") return cardElements.kpis;
+      if (selector === ".live-account-card-state-detail") return cardElements.detail;
       if (selector === ".live-account-card-footer") return cardElements.footer;
       return null;
     },
@@ -159,12 +136,15 @@ test("updateLiveAccountsDynamic updates card status, KPIs, footer, and fleet sum
     },
   };
 
-  updateLiveAccountsDynamic(mockRoot, {
+  await updateLiveAccountsDynamic(mockRoot, {
     status: "READY",
     accounts: [
       {
         account_label: "primary",
         status: "READY",
+        strategy_name: "orderflow_impulse",
+        strategy_state: "running",
+        startup_baseline: { status: "MATCHED" },
         observed_at: "2026-09-27T10:00:00Z",
         summary: {
           usdt_wallet_balance: "1500.50",
@@ -180,11 +160,13 @@ test("updateLiveAccountsDynamic updates card status, KPIs, footer, and fleet sum
 
   assert.equal(cardElements.status.className, "live-account-card-status status-READY");
   assert.equal(cardElements.status.textContent, "正常");
-  assert.match(cardElements.kpis.innerHTML, /1,500\.50/);
-  assert.match(cardElements.kpis.innerHTML, /\+\$45\.20/);
-  assert.match(cardElements.footer.innerHTML, /2 个持仓 · 1 个挂单/);
-  assert.match(fleetElements.status.innerHTML, /1 正常 · 0 停止 · 0 待确认/);
-  assert.match(fleetElements.kpis.innerHTML, /USDT 钱包合计/);
+  assert.match(cardElements.state.innerHTML, /同步/);
+  assert.match(cardElements.detail.innerHTML, /orderflow_impulse · 运行中/);
+  assert.match(cardElements.detail.innerHTML, /启动基线一致/);
+  assert.match(cardElements.footer.innerHTML, /进入账户详情/);
+  assert.match(fleetElements.status.innerHTML, /1 正常 · 0 停止 · 0 需检查/);
+  assert.match(fleetElements.kpis.innerHTML, /实盘账户.*1 个/);
+  assert.match(fleetElements.kpis.innerHTML, /正常账户.*1 个/);
 });
 
 test("same-structure live-account polls refresh selected details and fleet metrics without dropping last-good DOM", async () => {
@@ -209,7 +191,8 @@ test("same-structure live-account polls refresh selected details and fleet metri
     removeAttribute() {},
   });
   const detailSlot = makeSlot({ accountLabel: "primary", renderedAccount: "primary" });
-  const metricsSlot = makeSlot({ renderedRange: "24h" });
+  const metricsSlot = makeSlot({});
+  metricsSlot.__cmlRenderedPayload = JSON.stringify({ status: "READY", accounts: [] });
   const card = {
     dataset: { liveAccountLabel: "primary" },
     classList: { toggle() {} },
@@ -247,8 +230,8 @@ test("same-structure live-account polls refresh selected details and fleet metri
   });
 
   assert.deepEqual(requestedUrls, [
-    "api/account?account_label=primary&equity_range=24h",
-    "api/live-account-metrics?equity_range=24h",
+    "api/account?account_label=primary",
+    "api/live-account-metrics",
   ]);
   assert.equal(detailSlot.replacements, 0, "a transient detail error must retain the last successful detail DOM");
   assert.equal(metricsSlot.replacements, 0, "a transient metrics error must retain the last successful charts");
@@ -276,7 +259,8 @@ test("live account detail settles before fleet metrics starts a second scroll-se
     removeAttribute() {},
   });
   const detailSlot = makeSlot({ accountLabel: "primary", renderedAccount: "primary" });
-  const metricsSlot = makeSlot({ renderedRange: "24h" });
+  const metricsSlot = makeSlot({});
+  metricsSlot.__cmlRenderedPayload = JSON.stringify({ status: "READY", accounts: [] });
   const card = {
     dataset: { liveAccountLabel: "primary" },
     classList: { toggle() {} },
@@ -311,13 +295,13 @@ test("live account detail settles before fleet metrics starts a second scroll-se
   while (!releaseDetail) {
     await new Promise((resolve) => setImmediate(resolve));
   }
-  assert.deepEqual(requestedUrls, ["api/account?account_label=primary&equity_range=24h"]);
+  assert.deepEqual(requestedUrls, ["api/account?account_label=primary"]);
 
   releaseDetail();
   await refresh;
   assert.deepEqual(requestedUrls, [
-    "api/account?account_label=primary&equity_range=24h",
-    "api/live-account-metrics?equity_range=24h",
+    "api/account?account_label=primary",
+    "api/live-account-metrics",
   ]);
 });
 

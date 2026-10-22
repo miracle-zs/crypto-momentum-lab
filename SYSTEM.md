@@ -1,6 +1,6 @@
 # 系统契约与架构重构
 
-状态：业务决策 Q1–Q9 沿用已确认契约；T1–T3 已完成源码收敛，核心运行版本已部署；T4 按可测证据继续收敛。当前仓库与 origin/main 为 `b656a7bb`。2026-10-22 仅更新 dashboard：dashboard 运行 `b656a7bb`，其余 6 个应用容器仍运行 `a4b092a8`；8 个 Compose 容器均 healthy，数据库迁移为 `20261021_0069`。本次没有重启账户、行情、研究采集或 PostgreSQL，也没有运行迁移。真实交易闭环与严格同负载的新旧性能对比仍未完成；本次 dashboard 查询测量及其限制记于文末。
+状态：业务决策 Q1–Q9 沿用已确认契约；T1–T3 已完成源码收敛，核心运行版本已部署；T4 按可测证据继续收敛。本轮审查基线及审查前的 origin/main 为 `0cd61b8b`。2026-10-22 仅更新 dashboard：dashboard 运行 `b656a7bb`，其余 6 个应用容器仍运行 `a4b092a8`；8 个 Compose 容器均 healthy，数据库迁移为 `20261021_0069`。本次没有重启账户、行情、研究采集或 PostgreSQL，也没有运行迁移。真实交易闭环与严格同负载的新旧性能对比仍未完成；本次 dashboard 查询测量及其限制记于文末。文末新增四个方向的审查，记录了互斥锁失效、监控漏报及性能收敛项；互斥锁和监控漏报已完成本地修复与相关回归，尚未部署，其余项目待修复或评估。
 
 **当前源码说明（2026-10-22）**：NextGen 是唯一部署的交易运行时，在线策略决策由 `next_gen` 路径完成。本文 §8 及后续章节保存了旧 `live_rollout`/`ExecutionBook` 的决策与历史验收记录；其中测试名、源码行号和运行时描述不代表当前代码清单。旧 `ExecutionBook` 领域编排、证据/命令写入与恢复流程、PostgreSQL 写入适配器及其专属测试已从工作树移除；没有运行时调用方的成交恢复来源查询和订单身份查询也已删除。`PositionView` 等账本值模型仅供确定性决策追踪与回放工具使用；研究寻优使用独立的 `local_optimization.SimulationLedger`。旧 `PositionBook` / `PositionLedger` 运行时实现已移除；0062 迁移通过投影 codec 与迁移专用 verification 编码转换 schema 1 head，`PositionLedgerBatch` 仍供决策追踪与回放使用。无生产调用方的模拟发单适配器、预留协调器、重复交易规则模型与运行时元数据快照及其专属测试也已清理。未部署的纸面策略写入仓库及其专属模型和测试已移除；Paper 模拟看板及专属查询、权益对比代码已退役；纸面历史数据仍保留供归档、保留策略和迁移使用，历史决策回放工具继续保留，行情服务不再查询纸面持仓。单账户旧绩效查询及未接入的 TWR/Dietz 审计展示与计算已移除；账户快照和资金流修正记录仍保留，实盘资金时序图读取 NextGen 运行记录。纸面运行检查点表 `strategy_checkpoints` 已由 0069 退役，生产迁移已应用；该表上线前确认为空，活跃行情检查点仍使用 `strategy_runtime_checkpoints`。看板、诊断、归档和独立运维工具仍使用其所需的共享表模型与查询逻辑。孤立的 PostgreSQL runtime-context 辅助函数、账户进程状态写入适配器及其领域类型已删除；看板当前权益查询改从 NextGen 运行清单枚举实盘账户。`execution_account_process_states` 和 `strategy_live_states` 已无当前 ORM 或查询调用方；旧表由 0068 归档校验后删除，历史内容保留在服务器归档目录。依赖已删除执行栈的历史诊断和性能探针仍有本机副本，但这些脚本位于 Git 忽略的归档目录，未纳入版本库，且不能在当前源码上运行；报告正文与采样输出继续保留。
 
@@ -1129,3 +1129,156 @@ SSH使用已配置的密钥或--control-path指定的已登录会话，不在脚
 发布后的只读性能观测：`/api/account?account_label=primary` 首次缓存未命中 583.7 ms，随后命中 12.2–19.3 ms，均 HTTP 200。新增带 `bucket_start` 下界的行情查询在 `pg_stat_statements` 中记录 1 次、7.24 ms；旧查询指纹历史 142 次、平均 117.71 ms、最高 2403.39 ms。旧、新查询运行时标的数不同（旧 2 个、新 5 个），且不是同负载对照，不能据此宣称精确加速比例；单次新查询与分区计划只支持当前查询已避免旧计划扫描范围的判断。未运行测试套件。
 
 最近 6 小时 PostgreSQL 的 2 秒慢查询日志有 17 条：15 条来自本机 `psql` 人工诊断，另 2 条来自应用，分别是发布前 dashboard 行情查询 2403 ms，以及 market-data maintenance 读取最新账户对账记录 2430 ms。维护任务默认每 300 秒运行，相关查询使用现有 `ix_account_reconciliation_active_discovery`，本轮只观察到一次超过慢查询阈值；它不在下单/退出路径。当前证据支持继续观察，不新增索引或重复的最新状态表。发布后实盘账户详情的新行情查询为 7.24 ms；尚未完成跨版本同负载对照。
+
+### 存储、传输、计算与可观测审查（2026-10-22，审查与处理进度）
+
+审查基于源码 `0cd61b8b`，结合当日约 16:30–16:42（北京时间）的生产只读观测及本地定向诊断，全程未使用子代理。生产 dashboard 为 `b656a7bb`，其余 6 个应用容器为 `a4b092a8`，8 个容器均 healthy。以下结论区分生产已确认缺陷、已复现的实现行为及需要进一步测量或明确需求的可选项；不把尚未部署的修复重复列为最新版缺陷。
+
+结论：优先修复互斥锁和监控缺口，随后按实际收益局部收敛订阅、内存工作集和等待链。当前没有证据支持整体重构、扩大数据库连接池、增加通用缓存或恢复复杂消息调度框架。下表保留审查发现及当前处理进度；互斥锁、监控漏报及退出订阅的本地修复与回归记录见文末，尚未部署。
+
+| 编号 | 方向 | 问题及优先级 | 证据与处理边界 |
+|---|---|---|---|
+| 1 | 存储与状态 | **P1：账户会话互斥锁启动约 30 秒后失效** | 生产日志及 `pg_locks` 已确认；本地已修，真实 PostgreSQL 回归通过，待部署。 |
+| 2 | 可观测与弹性 | **P2：状态上报失败仍刷新健康标记，监控不识别新版事件** | 本地已修，包含同一监控路径的归档失败告警被覆盖问题；相关回归通过，待部署。 |
+| 3 | 通信与传输 | **P2：四账户分别订阅 524 个标的的退出 K 线** | 本地已改为按持仓及未完成订单动态订阅，相关回归通过，待部署；具体 CPU 和网络节省量尚未测量。 |
+| 4 | 计算与并发 | **P2：单个标的的发单和信号记录等待阻塞其余标的** | 本地屏障诊断确认串行等待；未证明已经造成线上漏单。 |
+| 5 | 存储与状态 | **P2：已结束订单和批次持续驻留内存并参与扫描** | 已本地收敛入场超时扫描；自动释放及迟到回报查库重建实现经复核撤回，保留现有对象生命周期。尚无持续内存增长或 OOM 的现场证据，先观测再决定是否需要释放。 |
+| 6 | 存储与状态 | **可选：持续生成完整行情 revision 副本的必要性需复核** | 实盘、采集补齐和本地寻优不依赖该副本，但仍有离线数据集及历史回放消费者，不能直接删除。 |
+| 7 | 可观测与弹性 | **可选：统计采样读取了不需要的 SQL 文本** | 监控已本地改用 `pg_stat_statements(false)`，本地相关回归通过，未部署；实际发布后收益待测。 |
+| 8 | 可观测与弹性 | **可选：旧决策耗时查询没有新版事件生产者** | 当前展示为“未接入”；按性能分析需求补最少测量，或退役该查询与展示。 |
+
+#### 存储与状态：锁、工作集与历史副本
+
+**互斥锁失效。** `src/crypto_momentum_lab/next_gen/persistence.py:370` 的专用连接执行 `pg_try_advisory_lock` 后，未经提交即进入覆盖整个守护进程生命周期的 `yield`。该 SQL 开启的事务保持空闲，而 `persistence/postgres/session.py:95` 设置的 `idle_in_transaction_session_timeout` 为 30 秒。数据库关闭会话时释放会话级锁；交易任务使用其他连接继续运行，因此容器 healthy 不代表锁仍存在。
+
+四账户启动日志的取锁时间为 01:03:45–01:03:46 UTC，PostgreSQL 对应的 4 条 `terminating connection due to idle-in-transaction timeout` 为 01:04:15–01:04:16 UTC。现场 `pg_locks` 中 advisory lock 为 0 行。这证明防重复启动保护已失效，没有证据表明当时存在双实例交易。最小修复是取得锁后立即结束事务，同时保留同一会话连接，退出时在该会话解锁；无需引入分布式租约或 Fencing Token。
+
+**历史对象驻留。** `next_gen/engine.py:63` 的 `orders`、`batches` 没有已完成对象的运行期清理路径。`next_gen/strategy_engine.py:376` 的过期订单检查、安全门检查和 `next_gen/exit_manager.py:341` 的退出评估会遍历这些对象。使用真实 `AccountState` 与内存仓储完成 100 次正常开平仓后，非零持仓、活跃入场单和活跃退出单均为 0，但仍保留 200 个订单、100 个批次。应收敛每秒扫描的工作集，并保留活动批次订单、未决责任和必要的迟到事件识别依据，不能按终态直接无条件丢弃。生产账户单次内存快照约 94–102 MiB，限制为 192 MiB；此项可排在前两项之后。
+
+**行情 revision 副本。** `persistence/postgres/runtime_state_repository.py:201` 在保存结构化行情后，继续生成完整 JSON revision。采集补齐从 runtime 状态读取，本地寻优主要读取采集 Parquet；revision 仍供离线数据集和历史回放工具使用。生产 `market_revision_refs` 的表及索引约 5553 MB，估计约 179 万行；该存量包含历史、索引和可复用空间，不能当作每日增速或可立即回收量。先明确后续新数据是否仍需离线数据集固定版本，再决定新 revision 的生成范围；既有历史回放依据继续保留。
+
+#### 通信与传输：退出 K 线订阅范围
+
+`next_gen/daemon.py:163` 将全部策略可交易标的传给退出流。四账户启动日志分别记录 524 个标的，合计 2096 个标的订阅；观测时每账户只持有 AGTUSDT。无持仓标的的未收盘更新仍需接收、解码和过滤，最终只消费收盘事件并不能省去这些工作。
+
+可以复用 `live_rollout/closed_candle_feed.py:259` 已有的 `set_symbols`，按活动持仓和未完成入场订单维护退出订阅集合。独立退出流的职责保留。此项浪费由调用链和生产日志确认，实际 CPU、网络收益须做调整前后测量，不能按标的数量直接换算加速比例。
+
+#### 计算与并发：跨标的等待与启动查询
+
+`next_gen/market_feed.py:156` 对同一批行情逐标的 `await on_market_state`；回调会等待数据库、首次保证金与杠杆设置、HTTP 发单，最后还等待 `strategy_engine.py:184` 的信号查询及持久化。暂停标的 A 的回调时，标的 B 不会开始；释放 A 后 B 才处理。本地定向诊断已确认此行为，但没有量化生产排队时长，也没有证明线上已经漏单。
+
+建议保留同一标的的顺序，用有限任务隔开发单等待和其他标的的行情处理，并避免展示记录占住整个接收链。无需新增通用 EventBus、分区调度框架或死信系统。正式退出 K 线已有独立任务，本轮没有发现它经过这条入场等待链。
+
+另有可排后的启动优化：`next_gen/persistence.py:784` 逐标的读取历史预热数据，524 个标的意味着每账户约 524 次 SELECT。批量读取可减少往返，但本轮未分离测量它对启动时间的贡献，不把它列为当前运行瓶颈。 后续已在本地将此方法改为一次批量查询，见文末实施记录；该实现现已完成本地 PostgreSQL 回归，尚未部署。
+
+#### 可观测与弹性：失败可见性与观测开销
+
+**状态上报失败漏报。** `next_gen/daemon.py:349` 捕获 `_publish_runtime_status` 失败后，只记录 `runtime_status_publish_failed`，随后仍按先前计算的 `healthy` 刷新 `ready` 和 `database` 标记。`deploy/ops/cml_ops_monitor.py:2257` 只将旧事件 `live_runtime_telemetry_persist_failed` 计为上报失败，没有映射新版事件。
+
+本地在实际心跳循环中模拟状态写入失败，仍观察到 `ready` 和 `database` 标记更新；通过真实监控解析路径输入旧事件会产生 `telemetry_persist_failure`，输入新版事件则没有告警。生产未注入失败。最小修复是使健康标记与实际成功动作一致，并将新版事件接入现有告警；纯展示上报失败不应被扩大为不可恢复的交易故障。
+
+**统计采样开销。** 本轮诊断从 `pg_stat_statements` 视图读取统计计数，查询自身耗时 323.791 ms，并写出 4632 个临时块，约 36.2 MiB；此开销已从业务性能判断中剔除。同机改读 `pg_stat_statements(false)` 的单次执行计划为 9.37 ms，无临时块写入。现有监控的内存压力诊断（`deploy/ops/cml_ops_monitor.py:2348`）也使用该视图读取计数，可以采用同样的小改动。两次查询形式有差异，结果不代表整个系统的加速比例；该诊断按压力触发，也不据此宣称它是常态实盘瓶颈。
+
+**旧耗时查询无新版生产者。** `operator_dashboard/telemetry_queries.py:35` 仍筛选 `candidate_accepted`、`exchange_request_started` 等旧事件，当前源码没有相应的现行写入路径。新版主要保存运行状态、入场信号和退出决定；前端将缺少样本显示为“未接入”，没有冒充 0 ms。如仍需比较交易性能，只补少量真实时延测量；如不需要，可退役这部分查询和展示，无需恢复旧版全套决策轨迹写入。
+
+#### 验证边界与实施顺序
+
+生产 20 秒数据库差分窗口中，除诊断采样自身外，所列 SQL 均值均低于 1.5 ms。该短窗口未覆盖真实发单负载，不能宣称系统不存在慢查询。四账户的单次 CPU 快照约 6.2%–6.7%；未测量多日内存曲线，未执行真实交易或压力测试。
+
+建议顺序：先修互斥锁和监控缺口；再缩小退出订阅及状态扫描范围；最后按实测等待情况调整跨标的并发。revision 和旧耗时查询按实际分析需求选择，启动批量读取排后。本轮仅审查及本地定向诊断，未修改运行代码、未运行测试套件、未提交或部署、未重启服务、未修改生产业务数据。
+
+### 账户互斥锁事务边界修复（2026-10-22，本地已修，待发布）
+
+`PostgresTradingRepository.acquire_dedicated_advisory_lock` 在取得会话锁后、进入长期运行的 `yield` 前显式提交事务。会话级锁跨提交保留，专用连接继续由原上下文持有；持锁期间不再处于 `idle in transaction`，退出仍使用同一连接解锁。没有更换锁机制、增加续约任务或改变数据库全局超时配置。
+
+新增真实 PostgreSQL 回归 `test_postgres_advisory_lock_survives_idle_transaction_timeout`：使用两个独立的执行数据库连接池，将持锁测试会话的空闲事务超时缩短为 200 ms，等待 600 ms 后检查另一会话仍无法取得同一把锁；同时确认持锁会话仍存活、状态为 `idle` 且 `xact_start` 为 NULL，退出后另一会话可以取得锁。修复前该用例因第二会话成功取锁而失败，修复后通过。测试只使用本地 `cml_test`，没有连接生产数据库。
+
+同一集成文件的看板用例缺少当前权益曲线要求的 `account_equity` 样本，导致曲线为空；使用 HEAD 原仓储实现运行也同样失败。本次仅为该夹具补入它原本断言的显式权益 `1005`，保留保证金未知的断言，没有恢复用钱包余额和浮盈亏替代权益的回退逻辑。
+
+验证：`rtk proxy .venv/bin/python -m pytest tests/integration/persistence/test_nextgen_postgres_repository.py tests/unit/next_gen/test_persistence.py tests/unit/next_gen/test_daemon.py::test_nextgen_daemon_mutual_exclusion_advisory_lock -q`，结果 **15 passed**。变更 Python 文件的 Ruff 检查、格式检查与 `git diff --check` 通过。未执行全量回归；本轮尚未提交、推送或部署，生产账户尚未应用此修复。
+
+### 状态上报与监控漏报修复（2026-10-22，本地已修，待发布）
+
+账户心跳在 `_publish_runtime_status` 失败时将本次本地健康判定设为 false，撤下账户健康文件、写入 `not_ready`，不刷新 `database` 成功标记；后续上报成功即可按现有条件恢复健康。失败日志增加账户标签。此处不改变 `SystemMode` 或 `has_unrecoverable_fault`，纯上报失败不会冻结入场、退出或设置交易不可恢复故障。
+
+监控将当前生产者的 `runtime_status_publish_failed` 直接接入现有 `telemetry_persist_failure` 告警；原 `live_runtime_telemetry_persist_failed` 已没有生产调用方，移除该旧事件匹配，没有增加兼容分支。同一监控路径中，归档失败告警原先加入列表后被心跳告警的列表赋值覆盖，现改为追加心跳告警，确保两项均保留；账户重启仍由运维控制。
+
+回归覆盖：实际心跳循环中一次上报写入失败后的标记、成功上报后的恢复以及交易门保持；真实控制台日志解析到新版失败告警；日志归档成功/失败与维护窗口两种状态下的账户告警及不自动重启行为。修复前新增与扩展用例为 4 failed、2 passed，修复后通过。还修正了原有通知标题用例的输入：旧输入已经短于上限，未触发它声称验证的截断条件，现使用真正超长的描述；通知标题生成逻辑没有修改。
+
+验证：`rtk proxy .venv/bin/python -m pytest tests/unit/next_gen/test_daemon.py tests/unit/ops/test_cml_ops_monitor.py tests/unit/ops/test_monitor_service_config.py tests/unit/ops/test_ops_monitor_retention_timer.py tests/integration/persistence/test_nextgen_postgres_repository.py tests/unit/next_gen/test_persistence.py -q --tb=short`，结果 **107 passed**，包含上一轮互斥锁回归。变更文件的 Ruff 检查（忽略既有 E501）通过；逐项比较 HEAD 与当前诊断，26 项既有行长告警未增加。daemon 及其测试的格式检查、`git diff --check` 通过；监控文件的既有格式问题未扩展清理。未执行全量回归，未提交、推送或部署，生产服务未变更。
+
+### 退出 K 线订阅范围收敛（2026-10-22，本地已修，待发布）
+
+账户退出流不再订阅全部策略标的，改用 `AccountState.active_symbols`：数量大于零的持仓批次与非终态订单的标的并集。启动恢复后使用同一集合，开仓订单创建时即更新订阅目标，先于 HTTP 发单；订单回报、拒单及未提交回滚后同步更新。部分成交后撤单仍保留持仓订阅，同标的多个批次须全部平仓且没有未完成订单才移除。空仓且无未完成订单时订阅集合为空。启动时配置已有责任标的的保证金和杠杆，也复用该集合。
+
+实现直接调用已有 `BinanceClosedCandle15mFeed.set_symbols`，没有新增轮询、缓存或调度框架；该接口更新期望订阅，网络订阅控制仍由原连接处理，不代表交易所已在 HTTP 发单前确认订阅。独立退出流、正式收盘时间及策略退出规则保持原实现。实际 CPU 与网络收益待部署后测量，不能用订阅数量直接换算。
+
+新增回归在原实现下复现全标的订阅，修复后覆盖恢复持仓与未完成入场单、部分成交后撤单、完全平仓、未提交回滚、拒单及同标的多批次；端到端用例通过真实 daemon 退出循环注入模拟收盘事件，并检查发单前订阅目标和清仓后的移除。
+
+验证：`rtk proxy .venv/bin/python -m pytest tests/unit/next_gen tests/unit/live_rollout/test_closed_candle_feed.py tests/e2e/test_nextgen_lifecycle.py tests/unit/ops/test_cml_ops_monitor.py tests/unit/ops/test_monitor_service_config.py tests/unit/ops/test_ops_monitor_retention_timer.py tests/integration/persistence/test_nextgen_postgres_repository.py -q --tb=short`，结果 **251 passed**，包含前两项修复回归。本轮变更的四个 Python 文件 Ruff 检查及格式检查通过，`git diff --check` 通过。未执行全量项目回归，未提交、推送或部署。
+
+### 入场超时检查工作集收敛（2026-10-22，本地已改，未验证运行）
+
+`StrategyEngine.cancel_stale_entry_orders` 每秒检查改为遍历现有 `active_entry_orders` 的订单 ID 快照，再从 `orders` 取当前对象并判断终态和 TTL。取消过程会等待私有流回报，因此使用 ID 快照，并在每笔取消前重新读取当前对象；检查范围不再随已结束历史订单数量增长。没有新增索引、缓存或轮询任务，TTL 和撤单确认规则不变。
+
+本步没有删除历史对象：活跃批次的历史入场订单仍用于并发额度计算和订单编号，退出任务还可能持有批次引用，迟到回报也依赖原订单识别。直接删除会改变交易行为或触发未知订单故障。因此审查第 5 项尚未整体解决；本步仅收敛其中的每秒入场超时扫描。按当前指令未新增或运行测试，未提交、推送或部署。
+
+### 完全空仓后的历史对象释放（2026-10-22，曾本地实现，收尾复核已撤回）
+
+**当前状态：本节方案已从工作区撤回，以下为曾实现方案的历史记录，不在待发布改动中。** 为释放历史对象而新增迟到回报的数据库读取、批次及订单历史重建，扩大了私有回报路径的复杂度；当前单次内存快照约 94–102 MiB，没有持续增长或 OOM 证据。保留原有内存生命周期与未知订单处理，保留独立的活跃入场单扫描优化。
+
+复用现有 `ExitManager.run` 循环，在退出评估之后、没有活跃退出任务且 `OrderExecutor.has_inflight_submissions` 为 false 时，调用 `AccountState.release_completed_state`。该方法仅在账户 RUNNING、无不可恢复故障、私有更新锁未占用、无订单终态等待者、无活跃开平仓锁、所有订单终态，以及所有批次 CLOSED 且持仓量和预留量均为零时，清空内存 `orders` 与 `batches`。只释放内存对象，不删除数据库历史，不清空余额、已实现盈亏、风险配置或交易门状态。不新增后台任务、定时器、保留天数或历史缓存。
+
+清理后的 WebSocket 回报若找不到内存订单，使用仓储已有的 `async_get_order` 识别数据库中的本账户终态订单。累计成交量没有增加的回报直接结束处理，原有逐笔成交保存路径仍先执行；累计成交量增加时，读取对应批次及其历史订单，恢复退出编号，再交给原有累计成交处理逻辑。只有从未成交的终态入场单允许没有原批次；已成交订单缺失批次，或数据库中也没有该订单，仍按原未知订单路径降级。没有增加交易所 REST 查询，也没有用数据库生成新的成交事实。
+
+本步采用账户完全空仓时统一释放，避免活跃批次加仓计数、订单编号和在途退出任务引用被破坏。若账户一直有持仓，则尚未释放的历史对象仍可能累积；本项没有宣称解决永久持仓情况下的内存上限，也未测量生产内存改善。
+
+变更运行文件为 `next_gen/engine.py`、`next_gen/executor.py` 和 `next_gen/exit_manager.py`；三个文件 Ruff 和格式检查通过，`git diff --check` 通过。本轮未新增或运行测试，先前的 **251 passed** 不覆盖本步及上一轮入场超时检查修改。未提交、推送或部署。
+
+### 监控统计采样减少 SQL 文本读取（2026-10-22，本地已改，待发布）
+
+`deploy/ops/cml_ops_monitor.py` 的 `_postgres_memory_pressure_context` 只需要 queryid、调用次数、临时块数量和执行耗时，原来却通过 `pg_stat_statements` 视图读取统计。现改为 `pg_stat_statements(false)`，在统计函数层关闭查询文本读取；字段、排序、前 5 条限制、采样触发条件及通知内容不变。不增加扩展、兼容回退、缓存或后台任务。
+
+本轮只修改采样 SQL；此前 16:30–16:42 只读诊断中的 323.791 ms / 9.37 ms 是两种查询形式的现场样本，不是本次已部署的性能结果。未修改交易调度，未新增或运行测试，未提交、推送或部署。
+
+跨标的串行等待问题暂缓改动：按标的并发虽能缩短同批回调等待，但也可能改变账户额度有限时的入场先后顺序；当前没有生产等待分布或漏单证据，不能只依据可复现的串行行为宣称需要改变交易调度。审查第 4 项仍保留为待测量项。
+
+### 启动历史行情批量读取（2026-10-22，本地实现，未回归、待发布）
+
+`PostgresTradingRepository.async_get_historical_market_states` 原先每个标的一次 SELECT，现将输入标的及其顺序构造成 VALUES 表，通过 LATERAL 为每个标的分别执行按 `bucket_start DESC LIMIT N` 的读取，再按输入顺序及时间升序返回。每个标的的 N 条上限、环境隔离、输入中重复标的的重复返回语义，以及完整行情字段转换均保留；空标的列表直接返回空列表。没有改成所有标的共用一个 LIMIT，也没有先对全部历史做窗口排名。
+
+以 524 个输入标的为例，应用到数据库的 SELECT 往返从 524 次改为 1 次；数据库内部仍需执行各标的的 top-N 读取，不能据此宣称数据库工作量或启动耗时减少 524 倍。只调整启动预热读取，不修改实时信号、订单与退出路径，不新增索引、缓存或配置。
+
+本轮 Ruff、格式检查及 `git diff --check` 通过。尚未运行数据库查询或回归测试，未测量执行计划与实际启动耗时；先前的 **251 passed** 不覆盖本步。未提交、推送或部署。
+
+### 本轮改动收尾复核（2026-10-22，源码复核，未回归）
+
+复核空仓释放对退出任务引用、订单编号、加仓计数及迟到回报识别的影响后，撤回尚未提交的 `AccountState.release_completed_state`、终态订单查库及批次重建分支、`OrderExecutor.has_inflight_submissions` 和退出循环中的释放调用。`executor.py` 与 `exit_manager.py` 恢复本轮修改前内容；`engine.py` 仍保留退出订阅所需的活动标的集合与通知。数据库记录、生产进程没有修改。
+
+当前待发布改动保留：会话锁取得后提交事务、上报健康标记与监控事件修正、归档失败告警保留、退出 K 线按活动责任订阅、活跃入场订单 TTL 扫描、不读取 SQL 文本的统计采样，以及启动行情批量预热。跨标的调度、历史 revision 和旧耗时展示暂不扩大改动；内存生命周期维持原实现，待连续观测证明需要后再处理。
+
+本轮仅源码复核与静态检查，没有新增或运行测试；此前 251 项回归不覆盖后来加入的 TTL 扫描、统计采样和批量预热修改。未提交、推送或部署。
+
+### 现有改动定向验证（2026-10-22，256 项通过，待提交与发布）
+
+按下一步验证要求，先执行现有相关用例，结果 **251 passed**；随后补齐批量预热和活跃入场单 TTL 扫描的断言，重新运行同组用例，结果 **256 passed（12.62 秒）**。本轮没有新增运行逻辑，前述章节中的“未回归”描述是各步骤当时的状态，当前验证结果以本节为准；自动内存释放方案仍维持撤回。
+
+真实本地 PostgreSQL 预热用例覆盖单标的、多标的、各标的样本数不足、缺失标的、重复输入、空列表、limit 为 0、环境隔离和完整订单流字段。用 SQLAlchemy 查询事件计数，确认非空输入整次调用只执行 1 条 SQL，空输入为 0 条，且按输入标的顺序和各标的时间升序返回。未测量生产耗时，不将 SQL 次数下降当作等比例性能提升。
+
+TTL 用例在订单字典的 `values()` 上设置禁止遍历断言，确认超时检查只按活跃订单 ID 读取；第一笔撤单等待期间两笔活跃订单均收到终态回报，随后不会重复撤销已结束的第二笔订单。原 TTL 配置用例继续通过。监控统计用例明确断言 `FROM pg_stat_statements(false)`。互斥锁、健康标记、告警及退出订阅相关回归均包含在本次范围内。
+
+执行：`rtk proxy .venv/bin/python -m pytest tests/unit/next_gen tests/unit/live_rollout/test_closed_candle_feed.py tests/e2e/test_nextgen_lifecycle.py tests/unit/ops/test_cml_ops_monitor.py tests/unit/ops/test_monitor_service_config.py tests/unit/ops/test_ops_monitor_retention_timer.py tests/integration/persistence/test_nextgen_postgres_repository.py -q --tb=short`。数据库仅为本地测试库，交易所由模拟接口替代，没有真实发单或生产变更。
+
+`mypy src/crypto_momentum_lab/next_gen` 的 **13 个源文件通过**；相关运行文件和测试 Ruff 检查通过，监控两个文件仍仅忽略此前已记录的既有 E501；检查过的 7 个 Python 文件格式检查及 `git diff --check` 通过。未执行全项目回归，未提交、推送或部署。
+
+### 全项目回归与前端测试契约同步（2026-10-22，待提交与发布）
+
+执行 `rtk proxy .venv/bin/python -m pytest -m 'not live' -q --tb=short`，最终工作区结果 **1119 passed、4 skipped、1 deselected（27.43 秒）**。3 项跳过要求 Bash 4+ 的 Linux 归档脚本环境，1 项跳过要求本地回环套接字许可；排除的 1 项为 `live` 公共行情长测。另有 1 条既有 Starlette/httpx 弃用提示，本轮未改依赖。该结果覆盖本仓库当前 Python 测试目录，未执行真实交易所长测。
+
+前端首次执行 `rtk proxy node --test tests/frontend/*.test.mjs` 得到 49 passed、9 failed。将 `HEAD=0cd61b8b` 的前端源码和测试通过 `git archive` 提取到临时目录独立运行，也得到完全相同的 9 项失败，确认不是本轮运行代码引入。逐项对照当前实现及既有产品约定后，只同步 3 个测试文件：
+
+- 账户页只查在线 24 小时，不再断言 7 天、全年范围控件及已退役的 `equity_range` 请求参数；缓存按账户与精确响应内容匹配。
+- 四账户卡片断言当前执行状态、策略和启动基线；账户详情保留 7 个证据区，包括交易所实际持仓；同步带语义属性的选中账户标题及当前“退出路径”文案。
+- 刷新失败保留图表的模拟槽位补入上次成功响应缓存，符合当前 last-good 判定；仍检查不替换成功详情和图表、详情刷新结束后才开始时序刷新，没有移除这些行为约束。
+
+修改文件为 `tests/frontend/account-equity-ranges.test.mjs`、`tests/frontend/nextgen-runtime.test.mjs` 与 `tests/frontend/operator-dashboard-v2.test.mjs`，没有修改前端产品代码。最终前端结果 **58 passed、0 failed**。随后 Python 全量再次通过上述 1119 项；`git diff --check` 通过。前端为 Node 单元测试，未执行真实浏览器手工验收。本轮没有新增运行逻辑，未提交、推送或部署，生产服务未变更。

@@ -274,6 +274,27 @@ def test_log_signals_reads_console_output_and_ignores_re_enable(tmp_path) -> Non
     assert names == ["live_exit_processing_degraded"]
 
 
+def test_log_signals_alert_on_nextgen_runtime_status_publish_failure(tmp_path) -> None:
+    class Runner:
+        def run(self, args, *, timeout_seconds):
+            assert args[:2] == ["docker", "logs"]
+            return (
+                "2026-10-22 16:00:00 [error    ] "
+                "runtime_status_publish_failed account=account-2\n"
+            )
+
+    monitor = OpsMonitor(
+        MonitorConfig(state_path=tmp_path / "state.json"), runner=Runner()
+    )
+    signals = monitor._log_signals(None, "account-2-container", since_seconds=60)
+    alerts = evaluate_log_signals(signals)
+
+    assert len(alerts) == 1
+    assert alerts[0].name == "telemetry_persist_failure"
+    assert alerts[0].severity == "warning"
+    assert alerts[0].details["failure_count"] == 1
+
+
 def test_log_signals_alert_on_persist_failure_and_dead_task() -> None:
     alerts = evaluate_log_signals(
         LogSignals(
@@ -856,7 +877,7 @@ def test_postgres_memory_pressure_context_is_aggregate_and_query_text_free(
     assert context["temp_heavy_queries"] == [{"queryid": "42", "temp_blks_written": 99}]
     assert runner.args is not None
     sql = str(runner.args[-1])
-    assert "pg_stat_statements" in sql
+    assert "FROM pg_stat_statements(false)" in sql
     assert "queryid" in sql
     assert "'query', query" not in sql
 
@@ -924,14 +945,13 @@ def test_push_title_drops_the_scope_before_truncating_the_label() -> None:
     )
 
     # Too long for the cap: the scope goes, the label survives intact.
-    title = _serverchan_title("严重", "account-4", "实时策略心跳过期")
-    assert title == "CML | 严重 | 实时策略心跳过期"
+    label = "账户执行进程心跳过期需要人工核验"
+    title = _serverchan_title("严重", "account-4", label)
+    assert title == f"CML | 严重 | {label}"
     assert "过期" in title
 
     # Same rule on the resolution side.
-    assert _serverchan_title("恢复", "account-4", "实时策略心跳过期") == (
-        "CML | 恢复 | 实时策略心跳过期"
-    )
+    assert _serverchan_title("恢复", "account-4", label) == f"CML | 恢复 | {label}"
 
     # No scope at all still renders.
     assert _serverchan_title("恢复", "", "行情延迟过高") == "CML | 恢复 | 行情延迟过高"
@@ -1365,10 +1385,12 @@ def test_flapping_detection_flags_frequent_state_changes(monkeypatch, tmp_path) 
 
 
 @pytest.mark.parametrize("maintenance", [False, True])
+@pytest.mark.parametrize("archive_failure", [False, True])
 def test_unhealthy_nextgen_account_alerts_without_automatic_restart(
     tmp_path,
     monkeypatch,
     maintenance,
+    archive_failure,
 ) -> None:
     expected_service = "nextgen-strategy-account-2"
 
@@ -1403,6 +1425,8 @@ def test_unhealthy_nextgen_account_alerts_without_automatic_restart(
             if command[:2] == ["docker", "stats"]:
                 return "10MiB / 512MiB\n"
             if command[:2] == ["docker", "logs"]:
+                if archive_failure:
+                    raise RuntimeError("container logs unavailable")
                 return ""
             if command[:2] == ["docker", "exec"]:
                 return ""
@@ -1447,12 +1471,20 @@ def test_unhealthy_nextgen_account_alerts_without_automatic_restart(
     assert any(alert.name == "live_heartbeat_stale:account-2" for alert in alerts)
     assert not any(call[:2] == ["docker", "compose"] for call in runner.calls)
     archives = tuple((tmp_path / "crash-logs").glob("*.log"))
-    assert len(archives) == 1
-    assert "container_id=account-2-container" in archives[0].read_text(encoding="utf-8")
-    assert any(
-        alert.details.get("crash_log_archive") == str(archives[0])
-        for alert in alerts
-    )
+    if archive_failure:
+        assert archives == ()
+        assert any(
+            alert.name == "live_crash_log_archive_failed:account-2" for alert in alerts
+        )
+    else:
+        assert len(archives) == 1
+        assert "container_id=account-2-container" in archives[0].read_text(
+            encoding="utf-8"
+        )
+        assert any(
+            alert.details.get("crash_log_archive") == str(archives[0])
+            for alert in alerts
+        )
 
 
 def test_container_memory_pressure_human_formatting() -> None:

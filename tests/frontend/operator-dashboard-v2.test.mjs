@@ -69,12 +69,13 @@ test("account v2 keeps populated evidence behind stable disclosures", () => {
   const [status, html] = renderAccount(populatedAccount);
 
   assert.equal(status, "READY");
-  assert.equal((html.match(/class="block secondary disclosure"/g) || []).length, 6);
+  assert.equal((html.match(/class="block secondary disclosure"/g) || []).length, 7);
   assert.match(html, /实盘策略信号/);
   assert.match(html, /24H 成交额/);
   assert.match(html, /过滤 \/ 门控/);
   assert.match(html, /data-state-key="live-strategy-signals" open/);
   assert.match(html, /data-state-key="account-balances"/);
+  assert.match(html, /data-state-key="exchange-positions"/);
   assert.match(html, /data-state-key="account-positions"/);
   assert.match(html, /data-state-key="account-open-orders"/);
   assert.match(html, /BTCUSDT/);
@@ -116,8 +117,9 @@ test("live account fleet keeps four accounts visible and selects one detail", ()
   assert.match(html, /四账户实盘总览/);
   assert.match(html, /实盘账户.*4 个/);
   assert.match(html, /class="live-account-card is-selected"[^>]*data-live-account-label="account-3"/);
-  assert.match(html, /<h3>account-3<\/h3>/);
-  assert.match(html, /USDT 钱包合计/);
+  assert.match(html, /<h3 data-selected-account-label>account-3<\/h3>/);
+  assert.match(html, /正常账户.*4 个/);
+  assert.match(html, /共享行情接入 · 各账户独立执行/);
 });
 
 test("live account fleet renders six comparable metric charts", () => {

@@ -376,8 +376,10 @@ class MomentumStrategyEngine:
     async def cancel_stale_entry_orders(self) -> None:
         now = datetime.now(UTC)
         ttl = self.account_config.strategy_inputs.entry_limit_ttl_seconds
-        for order in list(self.state.orders.values()):
-            if order.client_order_id.startswith("e_") and not order.is_terminal:
+        # Snapshot IDs: private order updates may release locks while cancel awaits.
+        for order_id in list(self.state.active_entry_orders.values()):
+            order = self.state.orders.get(order_id)
+            if order is not None and not order.is_terminal:
                 if (now - order.created_at).total_seconds() >= ttl:
                     await self.order_executor.cancel_and_confirm(order)
 
