@@ -1,4 +1,6 @@
 import asyncio
+import json
+import ssl
 from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
@@ -29,6 +31,69 @@ def test_binance_rest_sign_params(rest_client: BinanceRestClient):
     assert signed["timestamp"] == 1700000000000
     assert "signature" in signed
     assert len(signed["signature"]) == 64  # SHA256 hex string
+
+
+@pytest.mark.asyncio
+async def test_margin_samples_reuse_verified_tls_context_and_close_connections(
+    rest_client: BinanceRestClient,
+):
+    contexts = []
+    connections = []
+
+    def connect(url, **kwargs):
+        contexts.append(kwargs["ssl"])
+        ws = AsyncMock()
+
+        async def receive():
+            request = json.loads(ws.send.call_args.args[0])
+            assert request["method"] == "account.status"
+            return json.dumps(
+                {
+                    "id": request["id"],
+                    "status": 200,
+                    "result": {
+                        "totalPositionInitialMargin": "10",
+                        "totalOpenOrderInitialMargin": "2",
+                        "totalMarginBalance": "100",
+                        "availableBalance": "88",
+                        "feeTier": 1,
+                        "multiAssetsMargin": False,
+                    },
+                }
+            )
+
+        ws.recv.side_effect = receive
+        connection = AsyncMock()
+        connection.__aenter__.return_value = ws
+        connections.append(connection)
+        return connection
+
+    with (
+        patch(
+            "crypto_momentum_lab.next_gen.client.ssl.create_default_context",
+            wraps=ssl.create_default_context,
+        ) as create_context,
+        patch(
+            "crypto_momentum_lab.next_gen.client.websockets.connect",
+            side_effect=connect,
+        ),
+    ):
+        for _ in range(3):
+            assert await rest_client.fetch_account_margin_status() == (
+                Decimal("12"),
+                Decimal("100"),
+                Decimal("88"),
+                1,
+                False,
+            )
+        create_context.assert_called_once_with()
+
+    assert len(connections) == 3
+    assert all(context is contexts[0] for context in contexts)
+    assert contexts[0].verify_mode == ssl.CERT_REQUIRED
+    assert contexts[0].check_hostname
+    for connection in connections:
+        connection.__aexit__.assert_awaited_once()
 
 
 @pytest.mark.asyncio

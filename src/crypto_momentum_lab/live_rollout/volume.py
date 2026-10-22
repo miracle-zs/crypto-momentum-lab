@@ -8,7 +8,6 @@ not an execution capability.
 """
 
 import asyncio
-from collections import deque
 from collections.abc import AsyncIterable
 from datetime import UTC, datetime
 from typing import Protocol
@@ -18,8 +17,6 @@ import structlog
 from crypto_momentum_lab.market_data.quote_volume import QuoteVolume24hSnapshot
 
 log = structlog.get_logger()
-
-_DEFAULT_HISTORY_SIZE = 128
 
 
 class QuoteVolume24hProvider(Protocol):
@@ -44,19 +41,17 @@ class QuoteVolumeSnapshotSource(AsyncIterable[QuoteVolume24hSnapshot], Protocol)
 
 
 class WebSocketQuoteVolumeProvider:
-    """Consume the market-data hub's shared volume snapshots."""
+    """Keep the latest shared volume snapshot for each symbol.
+
+    Callers capture the immutable snapshot before awaiting signal submission.
+    """
 
     def __init__(
         self,
         source: QuoteVolumeSnapshotSource,
-        *,
-        history_size: int = _DEFAULT_HISTORY_SIZE,
     ) -> None:
         self._source = source
-        if history_size <= 0:
-            raise ValueError("history_size must be positive")
-        self._history_size = history_size
-        self._snapshots: dict[str, deque[QuoteVolume24hSnapshot]] = {}
+        self._snapshots: dict[str, QuoteVolume24hSnapshot] = {}
         self._lookup_hit_count: int = 0
         self._lookup_miss_count: int = 0
         self._task: asyncio.Task[None] | None = None
@@ -72,7 +67,7 @@ class WebSocketQuoteVolumeProvider:
 
     @property
     def total_snapshot_count(self) -> int:
-        return sum(len(history) for history in self._snapshots.values())
+        return len(self._snapshots)
 
     @property
     def lookup_hit_count(self) -> int:
@@ -88,11 +83,9 @@ class WebSocketQuoteVolumeProvider:
         now: datetime | None = None,
     ) -> float | None:
         oldest_at: datetime | None = None
-        for history in self._snapshots.values():
-            if history:
-                first = history[0].fetched_at
-                if oldest_at is None or first < oldest_at:
-                    oldest_at = first
+        for snapshot in self._snapshots.values():
+            if oldest_at is None or snapshot.fetched_at < oldest_at:
+                oldest_at = snapshot.fetched_at
         if oldest_at is None:
             return None
         current = now or datetime.now(tz=UTC)
@@ -137,14 +130,10 @@ class WebSocketQuoteVolumeProvider:
         if not symbol.strip():
             raise ValueError("symbol must not be empty")
         _require_aware(as_of, "as_of")
-        history = self._snapshots.get(symbol.upper())
-        if not history:
-            self._lookup_miss_count += 1
-            return None
-        for snapshot in reversed(history):
-            if snapshot.fetched_at <= as_of:
-                self._lookup_hit_count += 1
-                return snapshot
+        snapshot = self._snapshots.get(symbol.upper())
+        if snapshot is not None and snapshot.fetched_at <= as_of:
+            self._lookup_hit_count += 1
+            return snapshot
         self._lookup_miss_count += 1
         return None
 
@@ -164,11 +153,7 @@ class WebSocketQuoteVolumeProvider:
             exchange=snapshot.exchange,
             environment=snapshot.environment,
         )
-        history = self._snapshots.setdefault(
-            normalized.symbol,
-            deque(maxlen=self._history_size),
-        )
-        history.append(normalized)
+        self._snapshots[normalized.symbol] = normalized
         return True
 
     async def _run(self) -> None:

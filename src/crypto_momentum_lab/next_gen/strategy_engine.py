@@ -157,6 +157,18 @@ class MomentumStrategyEngine:
             "candidate_filter_results": {},
             "gate_reasons": [],
         }
+        # Capture telemetry before submission can yield to a volume refresh.
+        signal_volumes = {}
+        if self.quote_volume_provider is not None:
+            for signal in decision.signals:
+                try:
+                    signal_volumes[signal.signal_id] = (
+                        self.quote_volume_provider.snapshot(signal.symbol, as_of=now)
+                    )
+                except Exception:
+                    log.exception(
+                        "entry_signal_volume_capture_failed", signal_id=signal.signal_id
+                    )
         try:
             return await self._submit_candidates(
                 decision, market_state, now, filter_context=filter_context
@@ -184,13 +196,7 @@ class MomentumStrategyEngine:
                     context["universe"] = await repository.async_get_signal_universe(
                         market_state.bucket_end, signal.symbol
                     )
-                    volume = (
-                        None
-                        if self.quote_volume_provider is None
-                        else self.quote_volume_provider.snapshot(
-                            signal.symbol, as_of=now
-                        )
-                    )
+                    volume = signal_volumes.get(signal.signal_id)
                     await repository.async_save_entry_signal(
                         self.state.environment,
                         self.state.account_label,

@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import ssl
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -88,6 +89,7 @@ class BinanceRestClient:
             self.base_url = default_rest
         self._client = http_client or httpx.AsyncClient(timeout=10.0)
         self._owns_client = http_client is None
+        self._ws_api_ssl_context: ssl.SSLContext | None = None
 
     async def close(self) -> None:
         if self._owns_client:
@@ -283,8 +285,13 @@ class BinanceRestClient:
             "params": params,
         }
 
+        # Repeatedly loading the CA store for short-lived sampling connections
+        # increases native memory even after the sockets have been closed.
+        if self._ws_api_ssl_context is None:
+            self._ws_api_ssl_context = ssl.create_default_context()
         async with websockets.connect(
             get_binance_ws_api_url(self.environment),
+            ssl=self._ws_api_ssl_context,
             open_timeout=3,
             close_timeout=1,
             ping_interval=None,

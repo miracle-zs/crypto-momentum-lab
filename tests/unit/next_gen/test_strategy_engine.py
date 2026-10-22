@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from crypto_momentum_lab.live_rollout.volume import WebSocketQuoteVolumeProvider
+from crypto_momentum_lab.market_data.quote_volume import QuoteVolume24hSnapshot
 from crypto_momentum_lab.next_gen.engine import AccountState
 from crypto_momentum_lab.next_gen.executor import OrderExecutor
 from crypto_momentum_lab.next_gen.models import OrderStatus, PositionBatch, SystemMode
@@ -130,6 +132,28 @@ async def test_signal_observation_failure_does_not_change_submitted_order(
     assert len(result) == 1
     rest.post_order.assert_awaited_once()
     assert state.orders[result[0]].status is OrderStatus.SUBMITTED
+
+
+@pytest.mark.asyncio
+async def test_signal_keeps_volume_captured_before_order_submission(strategy_setup):
+    _, repository, rest, _, strategy, last = strategy_setup
+    provider = WebSocketQuoteVolumeProvider(AsyncMock())
+    before = datetime.now(UTC) - timedelta(minutes=1)
+    provider._observe(QuoteVolume24hSnapshot("BTCUSDT", Decimal("100"), before, before))
+    strategy.quote_volume_provider = provider
+
+    async def submit(**kwargs):
+        refreshed = datetime.now(UTC)
+        provider._observe(
+            QuoteVolume24hSnapshot("BTCUSDT", Decimal("200"), refreshed, refreshed)
+        )
+        return {"orderId": 123, "clientOrderId": kwargs["client_order_id"]}
+
+    rest.post_order.side_effect = submit
+    result = await strategy.on_market_state(last)
+    assert len(result) == 1
+    assert repository.entry_signals[-1]["quote_volume_24h"] == "100"
+    assert provider.snapshot("BTCUSDT", as_of=datetime.now(UTC)).quote_volume == 200
 
 
 @pytest.mark.asyncio
