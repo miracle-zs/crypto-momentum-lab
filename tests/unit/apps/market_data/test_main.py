@@ -61,7 +61,9 @@ async def test_market_retention_excludes_only_explicitly_retired_checkpoints(
             return SimpleNamespace(all=lambda: [])
 
         async def scalar(self, statement):
-            # Model the SQL predicate over two persisted checkpoints, not age.
+            if "live_position_batches" in str(statement):
+                return position
+            # Model the SQL predicate over persisted checkpoints, not age.
             params = statement.compile().params
             retired = next(
                 (set(v) for k, v in params.items() if k.startswith("run_id")), set()
@@ -73,12 +75,6 @@ async def test_market_retention_excludes_only_explicitly_retired_checkpoints(
             )
 
     monkeypatch.setenv("CML_RETIRED_STRATEGY_RUN_IDS", "paper-retired")
-    monkeypatch.setattr(
-        main.PostgresAccountRepository,
-        "load_active_position_retention_watermark",
-        AsyncMock(return_value=position),
-        raising=False,
-    )
     requirements = await main._resolve_market_data_consumer_requirements(Session)
     assert {r.consumer_id: r.min_required_watermark for r in requirements} == {
         "active_strategy_checkpoints": live,
@@ -214,17 +210,6 @@ def test_refresh_command_rejects_invalid_timestamp() -> None:
     )
 
     assert result.exit_code != 0
-
-
-def test_parse_live_position_account_labels_supports_multiple_accounts() -> None:
-    assert main.parse_live_position_account_labels(
-        " primary, account-2,primary "
-    ) == frozenset({"primary", "account-2"})
-
-
-def test_parse_live_position_account_labels_rejects_empty_tokens() -> None:
-    with pytest.raises(ValueError, match="non-empty labels"):
-        main.parse_live_position_account_labels("primary,,account-2")
 
 
 async def test_live_position_symbols_load_once() -> None:

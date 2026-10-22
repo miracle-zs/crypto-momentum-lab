@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import signal
 from pathlib import Path
 from typing import Annotated
@@ -20,9 +19,7 @@ from crypto_momentum_lab.market_data.hub import (
     MarketStateHubConfig,
     WebSocketMarketStateSource,
 )
-from crypto_momentum_lab.persistence.postgres.account_repository import (
-    PostgresAccountRepository,
-)
+from crypto_momentum_lab.next_gen.persistence import PostgresTradingRepository
 from crypto_momentum_lab.persistence.postgres.repository import (
     PostgresUniverseRepository,
 )
@@ -91,13 +88,6 @@ def run_command(
         typer.Option(
             "--database-url",
             help="Optional database URL; environment variables are used by default.",
-        ),
-    ] = None,
-    account_label: Annotated[
-        str | None,
-        typer.Option(
-            "--account-label",
-            help="Live account label whose open positions are retained.",
         ),
     ] = None,
     position_environment: Annotated[
@@ -180,7 +170,6 @@ def run_command(
                 environment=environment,
                 root=root,
                 database_url=database_url,
-                account_label=account_label,
                 position_environment=position_environment,
                 top_count=top_count,
                 all_symbols=all_symbols,
@@ -235,7 +224,6 @@ async def _run_collector(
     environment: str,
     root: Path,
     database_url: str | None,
-    account_label: str | None,
     position_environment: str,
     top_count: int,
     all_symbols: bool,
@@ -276,9 +264,6 @@ async def _run_collector(
         window_seconds=window_seconds,
         late_tolerance_seconds=late_tolerance_seconds,
     )
-    if account_label is None:
-        account_label = os.environ.get("CML_LIVE_ACCOUNT_LABEL")
-
     engine = create_async_database_engine(
         resolved_database_url,
         pool_size=1,
@@ -289,19 +274,16 @@ async def _run_collector(
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     startup_timer.mark("database_resources_created")
     universe_repository = PostgresUniverseRepository(sessions)
-    account_repository = (
-        None if account_label is None else PostgresAccountRepository(sessions)
-    )
+    position_repository = PostgresTradingRepository(engine)
     runtime_repository = PostgresRuntimeMarketStateRepository(sessions)
     selector = (
         AllSymbolsSelector()
         if all_symbols
         else PostgresTop30Selector(
             universe_repository=universe_repository,
-            account_repository=account_repository,
+            position_repository=position_repository,
             environment=environment,
             top_count=top_count,
-            account_label=account_label,
             position_environment=position_environment,
         )
     )

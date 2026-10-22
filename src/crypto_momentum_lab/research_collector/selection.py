@@ -9,9 +9,7 @@ from crypto_momentum_lab.domain.universe.models import (
     MembershipStatus,
     UniverseSnapshot,
 )
-from crypto_momentum_lab.persistence.postgres.account_repository import (
-    PostgresAccountRepository,
-)
+from crypto_momentum_lab.next_gen.persistence import PostgresTradingRepository
 from crypto_momentum_lab.persistence.postgres.repository import (
     PostgresUniverseRepository,
 )
@@ -68,19 +66,17 @@ class StaticSymbolSelector:
 class PostgresTop30Selector:
     """Read the active point-in-time universe and protect open positions.
 
-    The selector deliberately queries the already persisted universe snapshot
-    rather than recomputing a rank from market states.  It therefore uses the
-    same ranking and retention decisions as the live market-data process.
+    The selector reads the persisted universe snapshot and current NextGen
+    position batches; it does not rebuild either view from market states.
     """
 
     def __init__(
         self,
         *,
         universe_repository: PostgresUniverseRepository,
-        account_repository: PostgresAccountRepository | None,
+        position_repository: PostgresTradingRepository,
         environment: str,
         top_count: int = 30,
-        account_label: str | None = None,
         position_environment: str | None = None,
         refresh_interval_seconds: int = 60,
     ) -> None:
@@ -90,17 +86,12 @@ class PostgresTop30Selector:
             raise ValueError("top_count must be positive")
         if refresh_interval_seconds <= 0:
             raise ValueError("refresh_interval_seconds must be positive")
-        if account_label is not None and not account_label.strip():
-            raise ValueError("account_label must not be empty")
-        if account_label is not None and account_repository is None:
-            raise ValueError("account_repository is required when account_label is set")
         if position_environment is not None and not position_environment.strip():
             raise ValueError("position_environment must not be empty")
         self._universe_repository = universe_repository
-        self._account_repository = account_repository
+        self._position_repository = position_repository
         self._environment = environment
         self._top_count = top_count
-        self._account_label = account_label
         self._position_environment = position_environment or environment
         self._refresh_interval = timedelta(seconds=refresh_interval_seconds)
         self._cached_selection: SelectionSnapshot | None = None
@@ -133,17 +124,9 @@ class PostgresTop30Selector:
         return selection
 
     async def _load_position_symbols(self) -> frozenset[str]:
-        if self._account_repository is None or self._account_label is None:
-            return frozenset()
-        state = await self._account_repository.load_active_position_state(
-            environment=self._position_environment,
-            account_label=self._account_label,
+        return await self._position_repository.async_get_active_position_symbols(
+            self._position_environment
         )
-        if state is None:
-            raise RuntimeError(
-                f"missing account position state for {self._account_label}"
-            )
-        return state.symbols
 
 
 def _build_selection(

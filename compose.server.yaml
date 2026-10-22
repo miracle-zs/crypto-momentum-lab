@@ -191,8 +191,6 @@ services:
       - research
       - --root
       - /app/research-data
-      - --account-label
-      - ${CML_LIVE_ACCOUNT_LABEL:-primary}
       - --position-environment
       - live
       - --top-count

@@ -88,10 +88,8 @@ from crypto_momentum_lab.market_data.runtime_states import (
     ClosedMarketStatePublisher,
     ClosedMarketStatePublisherConfig,
 )
+from crypto_momentum_lab.next_gen.db_models import LivePositionBatchRow
 from crypto_momentum_lab.next_gen.persistence import PostgresTradingRepository
-from crypto_momentum_lab.persistence.postgres.account_repository import (
-    PostgresAccountRepository,
-)
 from crypto_momentum_lab.persistence.postgres.capture_repository import (
     PostgresCaptureRepository,
 )
@@ -149,7 +147,6 @@ _CONTRACT_METADATA_RETENTION_HOURS = 6.0
 _RUNTIME_STATE_RETENTION_HOURS = 12.0
 _CONTRACT_METADATA_RETENTION_BATCH_SIZE = 250
 _RUNTIME_STATE_RETENTION_BATCH_SIZE = 250
-_LIVE_POSITION_ACCOUNT_LABELS_ENV = "CML_LIVE_POSITION_ACCOUNT_LABELS"
 _MARKET_STATE_HUB_HOST_ENV = "CML_MARKET_STATE_HUB_HOST"
 _MARKET_STATE_HUB_PORT_ENV = "CML_MARKET_STATE_HUB_PORT"
 _MARKET_STATE_HUB_DEFAULT_HOST = "0.0.0.0"
@@ -212,28 +209,6 @@ def parse_retired_strategy_run_ids(value: str | None = None) -> frozenset[str]:
             "CML_RETIRED_STRATEGY_RUN_IDS requires exact non-empty run IDs"
         )
     return frozenset(run_ids)
-
-
-def parse_live_position_account_labels(
-    value: str | None = None,
-) -> frozenset[str]:
-    """Parse the live accounts whose positions must remain market-protected."""
-    plural_value = (
-        os.environ.get(_LIVE_POSITION_ACCOUNT_LABELS_ENV, "")
-        if value is None
-        else value
-    )
-    raw_labels = (
-        tuple(item.strip() for item in plural_value.split(","))
-        if plural_value.strip()
-        else ()
-    )
-    if any(not item for item in raw_labels):
-        raise ValueError(
-            f"{_LIVE_POSITION_ACCOUNT_LABELS_ENV} must contain non-empty labels"
-        )
-    labels = {item for item in raw_labels if item}
-    return frozenset(labels)
 
 
 def _ignore_backfill_result(
@@ -1039,11 +1014,13 @@ async def _resolve_market_data_consumer_requirements(
                     reason="protect active strategy replay and checkpoint baseline",
                 )
             )
-    earliest_position = await PostgresAccountRepository(
-        session_factory
-    ).load_active_position_retention_watermark(
-        expected_account_labels=parse_live_position_account_labels(),
-    )
+        earliest_position = await session.scalar(
+            select(func.min(LivePositionBatchRow.entry_bar_time)).where(
+                LivePositionBatchRow.environment == "live",
+                LivePositionBatchRow.status.in_(("ACTIVE", "EXITING")),
+                LivePositionBatchRow.quantity > 0,
+            )
+        )
     if earliest_position is not None:
         requirements.append(
             RetentionConsumerRequirement(

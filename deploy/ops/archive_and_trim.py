@@ -86,6 +86,10 @@ TABLES: tuple[tuple[str, str], ...] = (
     # membership rows had accumulated from 2026-07-25 with no TTL.
     ("universe_snapshots", "observed_at"),
 )
+_POSITION_SNAPSHOT_TABLES = (
+    "account_balance_snapshots",
+    "account_position_snapshots",
+)
 
 
 def _psql(sql: str, *, container: str, database: str, user: str) -> str:
@@ -499,41 +503,62 @@ class PsqlRetentionRepository:
         _psql(sql, **self.db)
 
 
-def _resolve_consumer_watermark(table: str, **db: str) -> datetime | None:
-    """Resolve earliest recovery watermark required across active consumers."""
-    has_dep_table = _scalar(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
-        "WHERE table_name = 'consumer_dependencies')",
-        **db,
+def build_active_position_watermark_sql() -> str:
+    """Find the oldest entry bar among current NextGen position batches."""
+    return (
+        "SELECT min(entry_bar_time)::text FROM live_position_batches\n"
+        "WHERE environment = 'live'\n"
+        "  AND status IN ('ACTIVE', 'EXITING')\n"
+        "  AND quantity > 0;"
     )
-    if has_dep_table == "t":
-        scope = resolve_dataset_scope(table)
-        names = scope.related_dataset_names()
-        names_clause = ", ".join(f"'{n}'" for n in names)
-        earliest_dep = _scalar(
-            "SELECT min(recovery_watermark)::text FROM consumer_dependencies "
-            f"WHERE dataset_name IN ({names_clause})",
-            **db,
-        )
-        if earliest_dep:
-            try:
-                return datetime.fromisoformat(earliest_dep)
-            except Exception:
-                pass
 
-    if table in ("account_position_snapshots", "account_balance_snapshots"):
-        earliest_pos = _scalar(
-            "SELECT min(observed_at)::text FROM account_position_snapshots "
-            "WHERE abs(position_amt) > 0",
-            **db,
-        )
-        if earliest_pos:
-            try:
-                return datetime.fromisoformat(earliest_pos)
-            except Exception:
-                pass
 
-    return None
+def _load_active_position_watermark(**db: str) -> datetime | None:
+    raw = _scalar(build_active_position_watermark_sql(), **db)
+    if not raw:
+        return None
+    watermark = datetime.fromisoformat(raw)
+    if watermark.tzinfo is None:
+        raise RuntimeError("active position watermark must include a timezone")
+    return watermark.astimezone(UTC)
+
+
+def sync_active_position_dependencies(
+    authority: RetentionAuthority,
+    watermark: datetime | None,
+    *,
+    dry_run: bool,
+) -> None:
+    """Keep only the current position-episode dependency in the retention plan."""
+    if dry_run:
+        return
+
+    if watermark is not None:
+        authority.register_dependency(
+            consumer_id="live_active_positions",
+            generation=1,
+            recovery_spec=RecoverySpec(
+                source_dataset="account_position_snapshots",
+                earliest_needed_watermark=watermark,
+                reason="Current open position episode",
+            ),
+        )
+
+    # Retire the old per-table mirrors. They copied the minimum watermark from
+    # the dependency table, so after a position closed they could pin retention
+    # to an obsolete date indefinitely.
+    for table in _POSITION_SNAPSHOT_TABLES:
+        if watermark is None or table != "account_position_snapshots":
+            authority.unregister_dependency(
+                consumer_id="live_active_positions",
+                dataset_name=table,
+                retired_by="archive_and_trim: position episode ended or moved",
+            )
+        authority.unregister_dependency(
+            consumer_id=f"consumer_{table}",
+            dataset_name=table,
+            retired_by="archive_and_trim: retire copied watermark",
+        )
 
 
 def build_freeze_targets_sql(
@@ -748,6 +773,14 @@ def main(argv: list[str] | None = None) -> int:
     cutoff_dt = datetime(cutoff.year, cutoff.month, cutoff.day, tzinfo=UTC)
     repo = PsqlRetentionRepository(db)
     authority = RetentionAuthority(repository=repo)
+    position_watermark: datetime | None = None
+    if args.table is None or args.table in _POSITION_SNAPSHOT_TABLES:
+        position_watermark = _load_active_position_watermark(**db)
+        sync_active_position_dependencies(
+            authority,
+            position_watermark,
+            dry_run=args.dry_run,
+        )
     print(
         f"retention: {args.retention_days}d   cutoff: {cutoff}   "
         f"dry-run: {args.dry_run}\n"
@@ -776,53 +809,29 @@ def main(argv: list[str] | None = None) -> int:
             continue
         oldest = datetime.fromisoformat(oldest_raw).date()
 
-        # Protect active positions if table holds balance/position snapshots
-        if table in ("account_position_snapshots", "account_balance_snapshots"):
-            earliest_pos_raw = _scalar(
-                "SELECT min(observed_at)::text FROM account_position_snapshots "
-                "WHERE abs(position_amt) > 0",
-                **db,
-            )
-            if earliest_pos_raw:
-                try:
-                    earliest_pos_dt = datetime.fromisoformat(
-                        earliest_pos_raw
-                    ).astimezone(UTC)
-                    authority.register_dependency(
-                        consumer_id="live_active_positions",
-                        generation=1,
-                        recovery_spec=RecoverySpec(
-                            source_dataset=table,
-                            earliest_needed_watermark=earliest_pos_dt,
-                            reason="Active position protection",
-                        ),
-                    )
-                except Exception:
-                    pass
-
-        min_watermark = _resolve_consumer_watermark(table, **db)
-        if min_watermark is not None:
-            authority.register_dependency(
-                consumer_id=f"consumer_{table}",
-                generation=1,
-                recovery_spec=RecoverySpec(
-                    source_dataset=table,
-                    earliest_needed_watermark=min_watermark,
-                    reason="Registered consumer recovery watermark",
-                ),
-            )
-
         plan = authority.plan_prune(
             dataset_name=table,
             requested_cutoff=cutoff_dt,
         )
 
-        effective_cutoff = plan.effective_cutoff.date()
-        if plan.is_constrained:
+        effective_cutoff_dt = plan.effective_cutoff
+        binding_consumer_id = plan.binding_consumer_id
+        if (
+            args.dry_run
+            and table in _POSITION_SNAPSHOT_TABLES
+            and position_watermark is not None
+            and position_watermark < effective_cutoff_dt
+        ):
+            # A dry run must not write a live-position dependency, but should
+            # still show the cutoff the real run would use.
+            effective_cutoff_dt = position_watermark
+            binding_consumer_id = "live_active_positions"
+        effective_cutoff = effective_cutoff_dt.date()
+        if effective_cutoff_dt < cutoff_dt:
             print(
                 f"  [CONSTRAINED] {table} cutoff {cutoff} pulled back to "
                 f"{effective_cutoff} by active consumer/position dependency "
-                f"({plan.binding_consumer_id})"
+                f"({binding_consumer_id})"
             )
 
         if oldest >= effective_cutoff:

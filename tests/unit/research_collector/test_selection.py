@@ -1,6 +1,5 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -108,7 +107,7 @@ def test_top30_selection_keeps_retained_and_open_position_symbols() -> None:
     }
 
 
-async def test_top30_selector_propagates_position_state_load_failure() -> None:
+async def test_top30_selector_reads_all_positions_and_propagates_failure() -> None:
     from unittest.mock import AsyncMock
 
     from crypto_momentum_lab.research_collector.selection import (
@@ -137,28 +136,29 @@ async def test_top30_selector_propagates_position_state_load_failure() -> None:
     universe_repo = AsyncMock()
     universe_repo.load_snapshot_at = AsyncMock(return_value=snapshot)
 
-    account_repo = AsyncMock()
+    position_repo = AsyncMock()
     # 1. First call: returns SOLUSDT position successfully
-    account_repo.load_active_position_state = AsyncMock(
-        return_value=SimpleNamespace(symbols=frozenset({"SOLUSDT"}))
+    position_repo.async_get_active_position_symbols = AsyncMock(
+        return_value=frozenset({"SOLUSDT"})
     )
 
     selector = PostgresTop30Selector(
         universe_repository=universe_repo,
-        account_repository=account_repo,
+        position_repository=position_repo,
         environment="research",
-        account_label="paper-account",
+        position_environment="live",
         refresh_interval_seconds=3600,
     )
 
     s1 = await selector.selection_at(observed_at)
     assert "SOLUSDT" in s1.by_symbol
+    position_repo.async_get_active_position_symbols.assert_awaited_once_with("live")
 
     # 2. Advance time past cache expiry. Position discovery now raises RuntimeError!
     t2 = observed_at + timedelta(seconds=3601)
-    account_repo.load_active_position_state = AsyncMock(
-        side_effect=RuntimeError("missing active position snapshots")
+    position_repo.async_get_active_position_symbols = AsyncMock(
+        side_effect=RuntimeError("position repository unavailable")
     )
 
-    with pytest.raises(RuntimeError, match="missing active position snapshots"):
+    with pytest.raises(RuntimeError, match="position repository unavailable"):
         await selector.selection_at(t2)
