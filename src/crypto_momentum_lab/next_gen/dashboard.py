@@ -421,6 +421,7 @@ class NextGenDashboardQueries:
                     )
                 )
             ).all()
+            market_state_cutoff = self._clock()
             marks = (
                 await session.scalars(
                     select(RuntimeMarketState15sRow)
@@ -436,9 +437,11 @@ class NextGenDashboardQueries:
                                 for position in exchange_position_snapshots
                             }
                         ),
-                        RuntimeMarketState15sRow.bucket_end <= self._clock(),
+                        RuntimeMarketState15sRow.bucket_end <= market_state_cutoff,
                         RuntimeMarketState15sRow.bucket_end
-                        >= self._clock() - timedelta(seconds=60),
+                        >= market_state_cutoff - timedelta(seconds=60),
+                        RuntimeMarketState15sRow.bucket_start
+                        >= market_state_cutoff - timedelta(seconds=75),
                     )
                     .order_by(
                         RuntimeMarketState15sRow.symbol,
