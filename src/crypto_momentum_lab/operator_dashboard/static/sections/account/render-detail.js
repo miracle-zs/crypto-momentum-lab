@@ -71,7 +71,7 @@ function renderAccountKpiGrid(summary) {
     ${tile("USDT 可用余额", money(summary.usdt_available_balance), `交易所快照 · ${summary.available_balance_observed_at ? esc(fullDateTime(summary.available_balance_observed_at)) : "时间未知"}`)}
     ${tile("持仓浮动盈亏（估算）", signedMoney(summary.total_unrealized_pnl), `${summary.position_count || 0} 个策略持仓批次`, pnlClass(summary.total_unrealized_pnl))}
     ${tile("持仓名义价值", money(summary.gross_position_notional), "按近期行情估算的策略持仓暴露")}
-    ${tile("挂单 / 最近成交", `${summary.open_order_count ?? 0} / ${summary.recent_trade_count ?? summary.recent_fill_count ?? 0}`, "当前挂单 / 最近成交订单")}
+    ${tile("挂单 / 最近成交", `${summary.open_order_count ?? 0} / ${summary.recent_trade_count ?? 0}`, "当前挂单 / 最近成交订单")}
   </div>`;
 }
 
@@ -174,7 +174,7 @@ function renderOrdersTable(openOrders, strategy) {
     { label: "类型 / 价格", value: (row) => `${row.order_type || "—"} / ${price(row.price)}`, align: "right" },
     { label: "数量", value: (row) => `${num(row.executed_quantity, 4)} / ${num(row.original_quantity, 4)}`, align: "right" },
     { label: "状态", value: (row) => pill(row.status), html: true },
-    { label: "开 / 平仓", value: (row) => (row.is_exit ?? row.reduce_only) ? "平仓" : "开仓", cls: "muted" },
+    { label: "开 / 平仓", value: (row) => row.is_exit ? "平仓" : "开仓", cls: "muted" },
     { label: "更新时间", value: (row) => dayTime(row.observed_at), align: "right", cls: "muted" },
   ], openOrders, {
     emptyText: "无挂单",
@@ -195,7 +195,7 @@ function renderFillsTable(fills, strategy) {
     { label: "数量", value: (row) => num(row.quantity, 4), align: "right" },
     { label: "已实现盈亏", value: (row) => signedMoney(row.realized_pnl), align: "right", cls: (row) => pnlClass(row.realized_pnl) },
     { label: "手续费", value: (row) => row.fees ? Object.entries(row.fees).map(([asset, amount]) => `${num(amount, 4)} ${asset}`).join(" / ") : `${num(row.fee, 4)} ${row.fee_asset || ""}`, align: "right" },
-    { label: "退出路径", value: (row) => (row.is_exit ?? row.reduce_only) ? (row.close_path || "退出路径未记录") : "开仓", cls: "muted" },
+    { label: "退出路径", value: (row) => row.is_exit ? (row.close_path || "退出路径未记录") : "开仓", cls: "muted" },
   ], fills, {
     emptyText: "尚无成交记录",
     tall: true,

@@ -364,7 +364,6 @@ class NextGenDashboardQueries:
                             AccountFillEventRow.symbol,
                             AccountFillEventRow.order_id,
                             AccountFillEventRow.fee_asset,
-                            func.count().label("fill_count"),
                             func.sum(AccountFillEventRow.quantity).label("quantity"),
                             func.sum(
                                 AccountFillEventRow.price * AccountFillEventRow.quantity
@@ -484,11 +483,11 @@ class NextGenDashboardQueries:
                 {
                     **self._order(order),
                     "strategy_name": config.strategy,
-                    "close_reason": close_reason,
                     "close_path": self._close_path(
                         order,
                         exit_orders_by_batch.get(order.batch_id, []),
                         close_reason,
+                        config.execution_inputs.candle_grace_bars * 900,
                     )
                     if self._is_exit_order(order)
                     else None,
@@ -504,9 +503,6 @@ class NextGenDashboardQueries:
                     else None,
                     "order_updated_at": order.updated_at.isoformat(),
                     "aggregation": "fills" if complete else "order",
-                    "fill_count": sum(item["fill_count"] for item in detail)
-                    if complete
-                    else None,
                     "fee": str(detail[0]["fee"])
                     if complete and len(detail) == 1
                     else None,
@@ -702,6 +698,7 @@ class NextGenDashboardQueries:
         order: LiveOrderRow,
         batch_orders: list[LiveOrderRow],
         reason: str | None,
+        grace_period_sec: int,
     ) -> str:
         if reason == "scheduled_risk_window":
             return "定时清仓"
@@ -710,13 +707,22 @@ class NextGenDashboardQueries:
         if order.order_type == "LIMIT":
             return "宽限期内止盈"
         if order.order_type == "MARKET":
-            has_prior_unfinished_limit = any(
-                previous.order_type == "LIMIT"
-                and previous.created_at < order.created_at
-                and previous.status in {"CANCELED", "EXPIRED", "REJECTED"}
-                for previous in batch_orders
+            prior_limit = min(
+                (
+                    previous
+                    for previous in batch_orders
+                    if previous.order_type == "LIMIT"
+                    and previous.created_at < order.created_at
+                    and previous.status in {"CANCELED", "EXPIRED", "REJECTED"}
+                ),
+                key=lambda previous: previous.created_at,
+                default=None,
             )
-            if has_prior_unfinished_limit:
+            if (
+                prior_limit is not None
+                and order.created_at
+                >= prior_limit.created_at + timedelta(seconds=grace_period_sec)
+            ):
                 return "宽限期后止损"
             if reason is not None and reason.startswith("candle_15m_"):
                 return "首根反向 15 分钟 K 线止盈"

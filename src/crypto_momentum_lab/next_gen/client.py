@@ -279,7 +279,7 @@ class BinanceRestClient:
         request_id = str(uuid4())
         request = {
             "id": request_id,
-            "method": "v2/account.status",
+            "method": "account.status",
             "params": params,
         }
 
