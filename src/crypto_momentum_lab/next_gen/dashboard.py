@@ -708,7 +708,7 @@ class NextGenDashboardQueries:
         if reason in {"drain_active", "operator_drain"}:
             return "人工排空"
         if order.order_type == "LIMIT":
-            return "宽限期间限价成交"
+            return "宽限期内止盈"
         if order.order_type == "MARKET":
             has_prior_unfinished_limit = any(
                 previous.order_type == "LIMIT"
@@ -716,12 +716,11 @@ class NextGenDashboardQueries:
                 and previous.status in {"CANCELED", "EXPIRED", "REJECTED"}
                 for previous in batch_orders
             )
-            return (
-                "限价未完成后市价扫尾"
-                if has_prior_unfinished_limit
-                else "触发后直接市价退出"
-            )
-        return order.order_type
+            if has_prior_unfinished_limit:
+                return "宽限期后止损"
+            if reason is not None and reason.startswith("candle_15m_"):
+                return "首根反向 15 分钟 K 线止盈"
+        return "退出路径未记录"
 
     @staticmethod
     def _order(row: LiveOrderRow) -> dict[str, Any]:
