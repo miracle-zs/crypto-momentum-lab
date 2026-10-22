@@ -163,6 +163,16 @@ function renderOrdersTable(openOrders, strategy) {
   });
 }
 
+function closeTriggerLabel(reason) {
+  return ({
+    candle_15m_bearish: "15 分钟阴线触发",
+    candle_15m_bullish: "15 分钟阳线触发",
+    scheduled_risk_window: "定时清仓触发",
+    drain_active: "排空触发",
+    operator_drain: "人工排空",
+  })[reason] || reason || "触发原因未记录";
+}
+
 function renderFillsTable(fills, strategy) {
   return dataTable([
     { label: "成交 / 订单更新时间", value: (row) => row.aggregation === "order" ? `${dayTime(row.order_updated_at)}（订单更新）` : dayTime(row.trade_at), align: "right", cls: "muted" },
@@ -175,7 +185,8 @@ function renderFillsTable(fills, strategy) {
     { label: "成交片数", value: (row) => row.aggregation === "order" ? "订单累计" : (row.fill_count == null ? "—" : `${row.fill_count} 片`), align: "right", cls: "muted" },
     { label: "已实现盈亏", value: (row) => signedMoney(row.realized_pnl), align: "right", cls: (row) => pnlClass(row.realized_pnl) },
     { label: "手续费", value: (row) => row.fees ? Object.entries(row.fees).map(([asset, amount]) => `${num(amount, 4)} ${asset}`).join(" / ") : `${num(row.fee, 4)} ${row.fee_asset || ""}`, align: "right" },
-    { label: "平仓原因", value: (row) => (row.is_exit ?? row.reduce_only) ? (row.close_reason || "退出原因未记录") : "开仓", cls: "muted" },
+    { label: "退出触发", value: (row) => (row.is_exit ?? row.reduce_only) ? closeTriggerLabel(row.close_reason) : "开仓", cls: "muted" },
+    { label: "退出路径", value: (row) => (row.is_exit ?? row.reduce_only) ? (row.close_path || "路径未知") : "开仓", cls: "muted" },
   ], fills, {
     emptyText: "尚无成交记录",
     tall: true,

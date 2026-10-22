@@ -333,6 +333,21 @@ class NextGenDashboardQueries:
                     .limit(200)
                 )
             ).all()
+            exit_batch_ids = {
+                row.batch_id for row in orders if self._is_exit_order(row)
+            }
+            if exit_batch_ids:
+                exit_order_history = (
+                    await session.scalars(
+                        select(LiveOrderRow).where(
+                            LiveOrderRow.environment == "live",
+                            LiveOrderRow.account_label == label,
+                            LiveOrderRow.batch_id.in_(exit_batch_ids),
+                        )
+                    )
+                ).all()
+            else:
+                exit_order_history = []
             order_keys = [
                 (row.symbol, str(row.exchange_order_id))
                 for row in orders
@@ -436,6 +451,12 @@ class NextGenDashboardQueries:
         exit_reasons = {
             row.details["batch_id"]: row.details["reason"] for row in exit_events
         }
+        exit_orders_by_batch: dict[str, list[LiveOrderRow]] = {}
+        for history_order in exit_order_history:
+            if self._is_exit_order(history_order):
+                exit_orders_by_batch.setdefault(history_order.batch_id, []).append(
+                    history_order
+                )
         trade_rows: list[dict[str, Any]] = []
         for order in orders:
             if order.filled_quantity <= 0:
@@ -445,11 +466,24 @@ class NextGenDashboardQueries:
             )
             quantity = sum((item["quantity"] for item in detail), Decimal("0"))
             complete = bool(detail) and quantity == order.filled_quantity
+            close_reason = exit_reasons.get(order.batch_id)
+            realized_pnl = (
+                sum((item["realized_pnl"] for item in detail), Decimal("0"))
+                if complete
+                else None
+            )
             trade_rows.append(
                 {
                     **self._order(order),
                     "strategy_name": config.strategy,
-                    "close_reason": exit_reasons.get(order.batch_id),
+                    "close_reason": close_reason,
+                    "close_path": self._close_path(
+                        order,
+                        exit_orders_by_batch.get(order.batch_id, []),
+                        close_reason,
+                    )
+                    if self._is_exit_order(order)
+                    else None,
                     "quantity": str(order.filled_quantity),
                     "price": str(
                         sum((item["notional"] for item in detail), Decimal("0"))
@@ -474,11 +508,7 @@ class NextGenDashboardQueries:
                     "fees": {item["fee_asset"]: str(item["fee"]) for item in detail}
                     if complete
                     else None,
-                    "realized_pnl": str(
-                        sum((item["realized_pnl"] for item in detail), Decimal("0"))
-                    )
-                    if complete
-                    else None,
+                    "realized_pnl": None if realized_pnl is None else str(realized_pnl),
                 }
             )
         price_by_symbol = {
@@ -578,6 +608,38 @@ class NextGenDashboardQueries:
         )
 
     @staticmethod
+    def _is_exit_order(row: LiveOrderRow) -> bool:
+        return (row.position_side == "LONG" and row.side == "SELL") or (
+            row.position_side == "SHORT" and row.side == "BUY"
+        )
+
+    @staticmethod
+    def _close_path(
+        order: LiveOrderRow,
+        batch_orders: list[LiveOrderRow],
+        reason: str | None,
+    ) -> str:
+        if reason == "scheduled_risk_window":
+            return "定时清仓"
+        if reason in {"drain_active", "operator_drain"}:
+            return "人工排空"
+        if order.order_type == "LIMIT":
+            return "宽限期间限价成交"
+        if order.order_type == "MARKET":
+            has_prior_unfinished_limit = any(
+                previous.order_type == "LIMIT"
+                and previous.created_at < order.created_at
+                and previous.status in {"CANCELED", "EXPIRED", "REJECTED"}
+                for previous in batch_orders
+            )
+            return (
+                "限价未完成后市价扫尾"
+                if has_prior_unfinished_limit
+                else "触发后直接市价退出"
+            )
+        return order.order_type
+
+    @staticmethod
     def _order(row: LiveOrderRow) -> dict[str, Any]:
         return {
             "symbol": row.symbol,
@@ -586,8 +648,7 @@ class NextGenDashboardQueries:
             "batch_id": row.batch_id,
             "side": row.side,
             "position_side": row.position_side,
-            "is_exit": (row.position_side == "LONG" and row.side == "SELL")
-            or (row.position_side == "SHORT" and row.side == "BUY"),
+            "is_exit": NextGenDashboardQueries._is_exit_order(row),
             "order_type": row.order_type,
             "status": row.status,
             "price": None if row.price is None else str(row.price),

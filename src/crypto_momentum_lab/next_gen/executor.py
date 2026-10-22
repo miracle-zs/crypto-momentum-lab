@@ -255,6 +255,12 @@ class OrderExecutor:
             quantity = rules.round_quantity(batch.symbol, batch.quantity)
             if quantity <= 0 or quantity != batch.quantity:
                 raise RuntimeError("Exchange quantity does not align with symbol rules")
+            await self.record_exit_decision(
+                batch.batch_id,
+                batch.symbol,
+                "operator_drain",
+                datetime.now(UTC),
+            )
             order = self._state.create_exit_order(
                 batch.batch_id, quantity, None, order_type="MARKET"
             )
