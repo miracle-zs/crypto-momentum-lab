@@ -76,7 +76,6 @@ export function setLiveAccountTabState(root, accountLabel) {
   root.querySelectorAll(sel.accountCards()).forEach((button) => {
     const active = button.dataset.liveAccountLabel === accountLabel;
     button.classList.toggle("is-selected", active);
-    button.classList.toggle("is-active", active);
     button.setAttribute("aria-selected", String(active));
     button.setAttribute("tabindex", active ? "0" : "-1");
   });

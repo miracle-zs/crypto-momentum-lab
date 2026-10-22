@@ -62,16 +62,16 @@ export function renderUniverse(data) {
   ], monitoringAdditions, { emptyText: "无补充监控成员", tall: monitoringAdditions.length > 24 });
   const monitoringNote = `<div class="monitor-note">涨幅榜中的目标标的已计入监控池；此处只展示未出现在涨幅榜中的保留和持仓保护成员。</div>`;
   const viewTabs = `<div class="view-tabs market-view-tabs" role="tablist" aria-label="市场子视图">
-    <button type="button" class="view-tab is-active" data-market-view="rankings" role="tab" aria-selected="true">UTC 排名<small>TOP 20</small></button>
-    <button type="button" class="view-tab" data-market-view="monitoring" role="tab" aria-selected="false">监控池<small>PROTECTED UNIVERSE</small></button>
+    <button type="button" class="view-tab is-active" id="universe-tab-rankings" data-market-view="rankings" role="tab" aria-selected="true" aria-controls="universe-panel-rankings" tabindex="0">UTC 排名<small>TOP 20</small></button>
+    <button type="button" class="view-tab" id="universe-tab-monitoring" data-market-view="monitoring" role="tab" aria-selected="false" aria-controls="universe-panel-monitoring" tabindex="-1">监控池<small>PROTECTED UNIVERSE</small></button>
   </div>`;
   const body = `<div class="detail-meta"><span>快照时间 <b class="num">${esc(dayTime(data.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</b></span><span>${esc(relToNow(data.observed_at))}</span></div>
     <div class="market-board" data-market-board>
       ${viewTabs}
-      <div class="market-panel" data-market-panel="rankings" role="tabpanel">
+      <div class="market-panel" id="universe-panel-rankings" data-market-panel="rankings" role="tabpanel" aria-labelledby="universe-tab-rankings" tabindex="0">
         <div class="block">${blockTitle("涨幅榜 Top 20", "TOP GAINERS · UTC DAY", searchBox("过滤币种...", "[data-market-panel='rankings']"))}${universeTable(data.gainers)}</div>
       </div>
-      <div class="market-panel" data-market-panel="monitoring" role="tabpanel" hidden>
+      <div class="market-panel" id="universe-panel-monitoring" data-market-panel="monitoring" role="tabpanel" aria-labelledby="universe-tab-monitoring" tabindex="0" hidden>
         <div class="block">${blockTitle(`监控池 ${monitored.length}`, "MONITORED UNIVERSE", summary)}${monitoringNote}${blockTitle(`补充监控 ${monitoringAdditions.length}`, "MONITORING ADDITIONS", searchBox("过滤补充监控...", "[data-market-panel='monitoring']"))}${monitoringTable}</div>
       </div>
     </div>`;

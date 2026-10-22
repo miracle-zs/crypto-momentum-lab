@@ -64,7 +64,7 @@ export function createShell({ onNavigate }) {
     workspaceTabs.forEach((tab) => {
       const active = tab.dataset.workspaceTab === key;
       tab.classList.toggle("is-active", active);
-      tab.setAttribute("aria-selected", String(active));
+      tab.setAttribute("aria-pressed", String(active));
     });
     workspaceNavs.forEach((nav) => {
       const active = nav.dataset.workspaceNav === key;

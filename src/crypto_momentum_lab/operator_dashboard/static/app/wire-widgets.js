@@ -8,6 +8,21 @@ export function wireMarketTab(tab) {
     if (!board) return;
     applyMarketView(board, tab.dataset.marketView);
   });
+  tab.addEventListener("keydown", (event) => {
+    if (!["ArrowRight", "ArrowLeft", "Home", "End"].includes(event.key)) return;
+    const board = tab.closest("[data-market-board]");
+    const tabs = Array.from(board?.querySelectorAll("[data-market-view]") || []);
+    const current = tabs.indexOf(tab);
+    if (current < 0 || tabs.length === 0) return;
+    const next = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? tabs.length - 1
+        : (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+    tabs[next].focus();
+    applyMarketView(board, tabs[next].dataset.marketView);
+    event.preventDefault();
+  });
 }
 
 export function applyMarketView(board, view = "rankings") {
@@ -16,6 +31,7 @@ export function applyMarketView(board, view = "rankings") {
     const active = candidate.dataset.marketView === view;
     candidate.classList.toggle("is-active", active);
     candidate.setAttribute("aria-selected", String(active));
+    candidate.tabIndex = active ? 0 : -1;
   });
   board.querySelectorAll("[data-market-panel]").forEach((panel) => {
     panel.hidden = panel.dataset.marketPanel !== view;
@@ -96,8 +112,9 @@ export function wireTableSorting(root) {
     headers.forEach((th, colIdx) => {
       if (th.dataset.sortWired === "true") return;
       th.dataset.sortWired = "true";
+      th.tabIndex = 0;
       th.style.cursor = "pointer";
-      th.title = "点击排序";
+      th.title = "点击或按 Enter/空格排序";
       th.addEventListener("click", () => {
         const tbody = table.querySelector("tbody");
         if (!tbody) return;
@@ -107,10 +124,12 @@ export function wireTableSorting(root) {
         const newOrder = currentAsc ? "desc" : "asc";
         headers.forEach((h) => {
           delete h.dataset.sortOrder;
+          h.removeAttribute("aria-sort");
           const indicator = h.querySelector(".sort-indicator");
           if (indicator) indicator.remove();
         });
         th.dataset.sortOrder = newOrder;
+        th.setAttribute("aria-sort", newOrder === "asc" ? "ascending" : "descending");
         const indicator = document.createElement("span");
         indicator.className = "sort-indicator";
         indicator.textContent = newOrder === "asc" ? " ▲" : " ▼";
@@ -127,6 +146,11 @@ export function wireTableSorting(root) {
           return newOrder === "asc" ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
         });
         rows.forEach((row) => tbody.appendChild(row));
+      });
+      th.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        th.click();
       });
     });
   });

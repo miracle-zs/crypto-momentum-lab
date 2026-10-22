@@ -58,13 +58,6 @@
 
 .nav { display: grid; gap: 18px; }
 
-.nav-group { display: grid; gap: 2px; }
-
-.nav-group + .nav-group {
-  padding-top: 12px;
-  border-top: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
-}
-
 .nav-group-label {
   display: block;
   margin: 0 10px 5px;
@@ -546,7 +539,6 @@
     padding-bottom: 4px;
   }
 
-  .nav-group { display: contents; }
   .nav-group-label { display: none; }
   .nav a { flex: none; grid-template-columns: auto auto; padding: 8px 12px; border: 1px solid var(--line); }
   .nav a > i, .nav a > span small { display: none; }
@@ -563,7 +555,6 @@
 @media (max-width: 760px) {
   .card { scroll-margin-top: 210px; }
   .live-account-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .live-account-directory-head { align-items: flex-start; flex-direction: column; }
   .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .account-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .account-state-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -654,10 +645,6 @@
 .brand-name small { margin-top: 5px; color: var(--faint); font-size: 9px; letter-spacing: .09em; }
 
 .nav { gap: 14px; }
-
-.nav-group { gap: 4px; }
-
-.nav-group + .nav-group { padding-top: 14px; }
 
 .nav-group-label { margin: 0 10px 6px; color: var(--faint); font-size: 9px; letter-spacing: .17em; }
 
@@ -814,7 +801,6 @@
   .brand, .sidebar-foot, .nav-group-label { display: none; }
   .nav { display: flex; gap: 5px; overflow-x: auto; padding: 0 2px; scrollbar-width: none; }
   .nav::-webkit-scrollbar { display: none; }
-  .nav-group { display: contents; }
   .nav a {
     position: relative;
     flex: 0 0 76px;
