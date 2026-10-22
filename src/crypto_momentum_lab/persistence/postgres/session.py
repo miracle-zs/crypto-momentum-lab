@@ -43,13 +43,6 @@ _EXECUTION_COMMAND_TIMEOUT_SECONDS = _env_float(
     "CML_DB_EXECUTION_COMMAND_TIMEOUT_SECONDS", 5.0
 )
 
-_ACCOUNT_POOL_SIZE = _env_int("CML_DB_ACCOUNT_POOL_SIZE", 2)
-_ACCOUNT_MAX_OVERFLOW = _env_int("CML_DB_ACCOUNT_MAX_OVERFLOW", 0)
-_ACCOUNT_POOL_TIMEOUT_SECONDS = _env_float("CML_DB_ACCOUNT_POOL_TIMEOUT_SECONDS", 3.0)
-_ACCOUNT_COMMAND_TIMEOUT_SECONDS = _env_float(
-    "CML_DB_ACCOUNT_COMMAND_TIMEOUT_SECONDS", 5.0
-)
-
 _MAINTENANCE_POOL_SIZE = _env_int("CML_DB_MAINTENANCE_POOL_SIZE", 1)
 _MAINTENANCE_MAX_OVERFLOW = _env_int("CML_DB_MAINTENANCE_MAX_OVERFLOW", 0)
 _MAINTENANCE_POOL_TIMEOUT_SECONDS = _env_float(
@@ -73,15 +66,6 @@ _OBSERVABILITY_POOL_TIMEOUT_SECONDS = _env_float(
 )
 _OBSERVABILITY_COMMAND_TIMEOUT_SECONDS = _env_float(
     "CML_DB_OBSERVABILITY_COMMAND_TIMEOUT_SECONDS", 10.0
-)
-
-_CHECKPOINT_POOL_SIZE = _env_int("CML_DB_CHECKPOINT_POOL_SIZE", 1)
-_CHECKPOINT_MAX_OVERFLOW = _env_int("CML_DB_CHECKPOINT_MAX_OVERFLOW", 0)
-_CHECKPOINT_POOL_TIMEOUT_SECONDS = _env_float(
-    "CML_DB_CHECKPOINT_POOL_TIMEOUT_SECONDS", 2.0
-)
-_CHECKPOINT_COMMAND_TIMEOUT_SECONDS = _env_float(
-    "CML_DB_CHECKPOINT_COMMAND_TIMEOUT_SECONDS", 10.0
 )
 
 _DASHBOARD_POOL_SIZE = _env_int("CML_DB_DASHBOARD_POOL_SIZE", 4)
@@ -185,26 +169,6 @@ def create_execution_database_engine(
     )
 
 
-def create_account_database_engine(
-    database_url: str,
-    *,
-    pool_size: int = _ACCOUNT_POOL_SIZE,
-    max_overflow: int = _ACCOUNT_MAX_OVERFLOW,
-    pool_timeout_seconds: float = _ACCOUNT_POOL_TIMEOUT_SECONDS,
-    command_timeout_seconds: float = _ACCOUNT_COMMAND_TIMEOUT_SECONDS,
-) -> AsyncEngine:
-    """Create the small pool used by one serial account-sync daemon."""
-
-    return create_async_database_engine(
-        database_url,
-        pool_size=pool_size,
-        max_overflow=max_overflow,
-        pool_timeout_seconds=pool_timeout_seconds,
-        command_timeout_seconds=command_timeout_seconds,
-        application_name="cml.account",
-    )
-
-
 def create_maintenance_database_engine(
     database_url: str,
     *,
@@ -262,26 +226,6 @@ def create_observability_database_engine(
         pool_timeout_seconds=pool_timeout_seconds,
         command_timeout_seconds=command_timeout_seconds,
         application_name="cml.observability",
-    )
-
-
-def create_checkpoint_database_engine(
-    database_url: str,
-    *,
-    pool_size: int = _CHECKPOINT_POOL_SIZE,
-    max_overflow: int = _CHECKPOINT_MAX_OVERFLOW,
-    pool_timeout_seconds: float = _CHECKPOINT_POOL_TIMEOUT_SECONDS,
-    command_timeout_seconds: float = _CHECKPOINT_COMMAND_TIMEOUT_SECONDS,
-) -> AsyncEngine:
-    """Create an isolated pool for durable strategy checkpoint writes."""
-
-    return create_async_database_engine(
-        database_url,
-        pool_size=pool_size,
-        max_overflow=max_overflow,
-        pool_timeout_seconds=pool_timeout_seconds,
-        command_timeout_seconds=command_timeout_seconds,
-        application_name="cml.checkpoint",
     )
 
 

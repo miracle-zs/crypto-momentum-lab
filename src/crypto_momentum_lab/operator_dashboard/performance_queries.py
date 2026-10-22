@@ -1,13 +1,11 @@
 """System performance and observability read model for the operator dashboard.
 
-This module aggregates performance telemetry across four domains:
+This module aggregates performance telemetry across three domains:
 1. Decision path SLO (latencies, transition phases, terminal reasons)
-2. Database persistence & checkpoint staggering (prepare, lag, sql_execute, total_ms)
-3. Market data ingestion freshness & quality events (market_delay_ms, drops)
-4. Host & PostgreSQL resources (load average, memory, swap, connections, size)
+2. Market data ingestion freshness & quality events (market_delay_ms, drops)
+3. Host & PostgreSQL resources (load average, memory, swap, connections, size)
 """
 
-import math
 import os
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -16,17 +14,14 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.operator_dashboard.schemas import (
-    CheckpointMetricItem,
     HostResourcesResponse,
     MarketDataPerformanceResponse,
-    PersistencePerformanceResponse,
     SystemPerformanceResponse,
 )
 from crypto_momentum_lab.operator_dashboard.status import (
     OperationalStatus,
 )
 from crypto_momentum_lab.operator_dashboard.telemetry_queries import (
-    _DECISION_SLO_WINDOWS,
     DecisionSLOQueries,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
@@ -36,41 +31,11 @@ from crypto_momentum_lab.persistence.postgres.models import (
     StrategyRuntimeEventRow,
 )
 
-_CHECKPOINT_PERSISTED_EVENT = "strategy_checkpoint_persisted"
-_MAX_CHECKPOINT_SAMPLES = 100
-
 
 def _as_float(value: object) -> float | None:
     if value is None:
         return None
     return float(str(value))
-
-
-def _as_int(value: object) -> int | None:
-    if value is None:
-        return None
-    return int(str(value))
-
-
-def _account_label_and_phase(run_id: str) -> tuple[str, float]:
-    """Map live run identifiers to user-facing account labels and expected phase."""
-    if "primary" in run_id or "b1-long" in run_id:
-        return "primary", 0.0
-    if "account-2" in run_id:
-        return "account-2", 15.0
-    if "account-3" in run_id:
-        return "account-3", 30.0
-    if "account-4" in run_id:
-        return "account-4", 45.0
-    return run_id, 0.0
-
-
-def _percentile(values: list[float], quantile: float) -> float:
-    if not values:
-        return 0.0
-    sorted_values = sorted(values)
-    index = math.ceil(quantile * len(sorted_values)) - 1
-    return sorted_values[max(0, min(index, len(sorted_values) - 1))]
 
 
 def _read_meminfo() -> dict[str, int]:
@@ -118,26 +83,8 @@ class PerformanceQueries:
         # 1. Decision SLO
         decision_slo = await self._decision_slo_queries.decision_slo(window=window)
 
-        # 2. Persistence & Checkpoint metrics
-        window_delta = _DECISION_SLO_WINDOWS.get(window, timedelta(hours=6))
-        since = now - window_delta
         async with self._session_factory() as session:
-            checkpoint_rows = list(
-                (
-                    await session.scalars(
-                        select(StrategyRuntimeEventRow)
-                        .where(
-                            StrategyRuntimeEventRow.event_type
-                            == _CHECKPOINT_PERSISTED_EVENT,
-                            StrategyRuntimeEventRow.occurred_at >= since,
-                        )
-                        .order_by(StrategyRuntimeEventRow.occurred_at.desc())
-                        .limit(_MAX_CHECKPOINT_SAMPLES)
-                    )
-                ).all()
-            )
-
-            # 3. Market data status
+            # 2. Market data status
             latest_market_state = await session.scalar(
                 select(RuntimeMarketState15sRow)
                 .order_by(RuntimeMarketState15sRow.bucket_start.desc())
@@ -165,7 +112,7 @@ class PerformanceQueries:
                 or 0
             )
 
-            # 4. Host & Postgres resources
+            # 3. Host & Postgres resources
             pg_active_conns = None
             pg_idle_conns = None
             pg_db_size = None
@@ -193,99 +140,6 @@ class PerformanceQueries:
                     pg_db_size = int(db_size_res)
             except Exception:
                 pass
-
-        # Build PersistencePerformanceResponse
-        checkpoint_items: list[CheckpointMetricItem] = []
-        account_latest: dict[str, CheckpointMetricItem] = {}
-        total_latencies: list[float] = []
-
-        for row in checkpoint_rows:
-            details = row.details
-            label, phase = _account_label_and_phase(row.run_id)
-            total_ms = (
-                _as_float(details.get("total_ms"))
-                if details.get("total_ms") is not None
-                else None
-            )
-            pre_commit_ms = (
-                _as_float(details.get("pre_commit_ms"))
-                if details.get("pre_commit_ms") is not None
-                else total_ms
-            )
-            commit_ms = (
-                _as_float(details.get("commit_ms"))
-                if details.get("commit_ms") is not None
-                else None
-            )
-            item = CheckpointMetricItem(
-                run_id=row.run_id,
-                account_label=label,
-                occurred_at=row.occurred_at,
-                prepare_ms=(
-                    _as_float(details.get("prepare_ms"))
-                    if details.get("prepare_ms") is not None
-                    else None
-                ),
-                event_loop_lag_ms=(
-                    _as_float(details.get("event_loop_lag_ms"))
-                    if details.get("event_loop_lag_ms") is not None
-                    else None
-                ),
-                pool_acquire_ms=(
-                    _as_float(details.get("pool_acquire_ms"))
-                    if details.get("pool_acquire_ms") is not None
-                    else None
-                ),
-                is_new_connection=(
-                    bool(details["is_new_connection"])
-                    if details.get("is_new_connection") is not None
-                    else None
-                ),
-                pool_checked_in=(
-                    _as_int(details.get("pool_checked_in"))
-                    if details.get("pool_checked_in") is not None
-                    else None
-                ),
-                pool_checked_out=(
-                    _as_int(details.get("pool_checked_out"))
-                    if details.get("pool_checked_out") is not None
-                    else None
-                ),
-                sql_execute_ms=(
-                    _as_float(details.get("sql_execute_ms"))
-                    if details.get("sql_execute_ms") is not None
-                    else None
-                ),
-                pre_commit_ms=pre_commit_ms,
-                commit_ms=commit_ms,
-                total_ms=total_ms,
-                phase_seconds=phase,
-            )
-            checkpoint_items.append(item)
-            if total_ms is not None:
-                total_latencies.append(total_ms)
-            if label not in account_latest:
-                account_latest[label] = item
-
-        persistence_status = OperationalStatus.READY
-        if not checkpoint_items:
-            persistence_status = OperationalStatus.NO_DATA
-        elif (now - checkpoint_items[0].occurred_at).total_seconds() > 300:
-            persistence_status = OperationalStatus.STALE
-
-        persistence_resp = PersistencePerformanceResponse(
-            status=persistence_status,
-            sample_count=len(checkpoint_items),
-            p50_total_ms=(
-                _percentile(total_latencies, 0.50) if total_latencies else None
-            ),
-            p95_total_ms=(
-                _percentile(total_latencies, 0.95) if total_latencies else None
-            ),
-            max_total_ms=max(total_latencies) if total_latencies else None,
-            recent_checkpoints=checkpoint_items[:30],
-            account_latest_checkpoints=account_latest,
-        )
 
         # Build MarketDataPerformanceResponse
         observed_at = (
@@ -409,17 +263,17 @@ class PerformanceQueries:
         overall_status = OperationalStatus.READY
         if any(
             status in (OperationalStatus.HALTED, OperationalStatus.DOWN)
-            for status in (decision_slo.status, persistence_status, market_status)
+            for status in (decision_slo.status, market_status)
         ):
             overall_status = OperationalStatus.HALTED
         elif any(
             status in (OperationalStatus.STALE, OperationalStatus.DEGRADED)
-            for status in (decision_slo.status, persistence_status, market_status)
+            for status in (decision_slo.status, market_status)
         ):
             overall_status = OperationalStatus.DEGRADED
         elif all(
             status == OperationalStatus.NO_DATA
-            for status in (decision_slo.status, persistence_status, market_status)
+            for status in (decision_slo.status, market_status)
         ):
             overall_status = OperationalStatus.NO_DATA
 
@@ -427,7 +281,6 @@ class PerformanceQueries:
             status=overall_status,
             generated_at=now,
             decision_slo=decision_slo,
-            persistence=persistence_resp,
             market_data=market_resp,
             host_resources=host_resp,
         )

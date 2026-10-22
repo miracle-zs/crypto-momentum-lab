@@ -86,9 +86,7 @@ class ClosedStateRepository(Protocol):
     async def mark_incomplete(self, gap: AggTradeGap) -> None: ...
 
 
-type RealtimeStateSink = Callable[
-    [tuple[MarketState15s, ...], frozenset[str]], Awaitable[None]
-]
+type RealtimeStateSink = Callable[[tuple[MarketState15s, ...]], Awaitable[None]]
 type RealtimeQuoteSink = Callable[[RealtimeMarketQuote], Awaitable[None]]
 type DurableStatePersistedCallback = Callable[[datetime], None]
 
@@ -280,12 +278,6 @@ class ClosedMarketStatePublisher:
             _EventLatenessCounters,
         ] = {}
         self._expected_symbols: frozenset[str] = frozenset()
-        self._expected_symbols_initialized = False
-        # Symbols that entered the dense set since the last publish.  A symbol
-        # that just entered has no prior bucket, so its first bucket is a new
-        # baseline rather than a gap; forwarding this lets consumers tell
-        # "just entered" apart from "buckets were lost".
-        self._pending_entry_symbols: set[str] = set()
         self._observed_symbol_keys: set[tuple[str, str]] = set()
         self._exchange_by_symbol_key: dict[tuple[str, str], str] = {}
         self._last_materialized_bucket_by_symbol: dict[tuple[str, str], datetime] = {}
@@ -301,18 +293,7 @@ class ClosedMarketStatePublisher:
         expected_symbols = frozenset(
             symbol.strip() for symbol in symbols if symbol.strip()
         )
-        # The first call is the startup baseline: every symbol is new to this
-        # process but none of them "just entered the pool", so it must not
-        # report a mass entry.
-        added_symbols = (
-            expected_symbols - self._expected_symbols
-            if self._expected_symbols_initialized
-            else frozenset()
-        )
-        self._expected_symbols_initialized = True
         removed_symbols = self._expected_symbols - expected_symbols
-        if added_symbols:
-            self._pending_entry_symbols |= added_symbols
         if removed_symbols:
             for symbol_key in tuple(self._last_materialized_bucket_by_symbol):
                 if symbol_key[1] in removed_symbols:
@@ -329,13 +310,6 @@ class ClosedMarketStatePublisher:
         self._expected_symbols = expected_symbols
         self._realtime_continuity.set_monitored_symbols(expected_symbols)
         self._last_materialized_empty_buckets_through = None
-
-    def consume_pending_entry_symbols(self) -> frozenset[str]:
-        """Return, and clear, the symbols that newly entered the dense set."""
-
-        pending = frozenset(self._pending_entry_symbols)
-        self._pending_entry_symbols.clear()
-        return pending
 
     async def start(self) -> None:
         if self._durable_task is not None:
@@ -667,13 +641,7 @@ class ClosedMarketStatePublisher:
                     )
             if self._realtime_state_sink is not None and realtime_states:
                 try:
-                    # Hand over the entry churn recorded since the last publish
-                    # so consumers can treat a newly-entered symbol's first
-                    # bucket as a baseline rather than a gap.
-                    await self._realtime_state_sink(
-                        realtime_states,
-                        self.consume_pending_entry_symbols(),
-                    )
+                    await self._realtime_state_sink(realtime_states)
                     self._realtime_batch_count += 1
                 except Exception:
                     self._realtime_sink_failure_count += 1

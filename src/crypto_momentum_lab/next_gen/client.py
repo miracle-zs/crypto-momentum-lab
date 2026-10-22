@@ -622,7 +622,6 @@ class BinanceUserDataStream:
         while not (stop_event and stop_event.is_set()):
             try:
                 await self._ensure_connection()
-                backoff = self.initial_backoff
 
                 if self._ws is None:
                     if stop_event is not None:
@@ -649,8 +648,12 @@ class BinanceUserDataStream:
                             err=str(e),
                             payload=str(raw_msg)[:200],
                         )
-                        if self.on_status_change:
-                            self.on_status_change(False)
+                        # A handler failure may mean an order/account update was
+                        # lost. Leave this socket and let the outer loop reconnect;
+                        # AccountState keeps its private gap latched for startup
+                        # reconciliation when there is live responsibility.
+                        raise
+                    backoff = self.initial_backoff
             except asyncio.CancelledError:
                 break
             except Exception as e:

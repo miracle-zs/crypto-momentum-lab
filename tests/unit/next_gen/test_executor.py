@@ -109,6 +109,51 @@ async def test_order_executor_submit_order_rejected_cleans_up(test_setup):
 
 
 @pytest.mark.asyncio
+async def test_order_executor_degrades_if_rejection_status_cannot_be_persisted(
+    test_setup, monkeypatch
+):
+    state, repo, mock_rest, executor = test_setup
+    mock_rest.post_order.side_effect = BinanceOrderRejectedError(
+        code=-2019, message="Margin is insufficient."
+    )
+    original_save_order = repo.async_save_order
+
+    async def fail_rejected_order(order):
+        if order.status is OrderStatus.REJECTED:
+            raise RuntimeError("rejected status write failed")
+        await original_save_order(order)
+
+    monkeypatch.setattr(repo, "async_save_order", fail_rejected_order)
+    batch_id = generate_batch_id(
+        symbol="BTCUSDT",
+        position_side="LONG",
+        account_label="a1",
+        timestamp_str="261018120000",
+        salt="9f",
+        counter=1,
+    )
+    order = state.create_entry_order(
+        symbol="BTCUSDT",
+        position_side="LONG",
+        quantity=Decimal("1.0"),
+        price=Decimal("65000"),
+        batch_id=batch_id,
+    )
+
+    with pytest.raises(RuntimeError):
+        await executor.submit_order(order)
+
+    assert order.status is OrderStatus.REJECTED
+    assert state.has_unrecoverable_fault is True
+    assert state.system_mode is SystemMode.DEGRADED
+    assert state.can_submit_entry_order() is False
+    assert ("a1", "BTCUSDT", "LONG") not in state.active_entry_orders
+    saved = repo.get_order("live", "a1", order.client_order_id)
+    assert saved is not None
+    assert saved.status is OrderStatus.SUBMITTED
+
+
+@pytest.mark.asyncio
 async def test_entry_configures_symbol_settings_once(test_setup):
     state, repo, mock_rest, executor = test_setup
     executor._entry_leverage = 5

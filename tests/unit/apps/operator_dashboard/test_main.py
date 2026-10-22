@@ -12,7 +12,6 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
     LiveAccountsResponse,
     LiveAccountSummaryResponse,
     MarketDataPerformanceResponse,
-    PersistencePerformanceResponse,
     ResearchCollectorResponse,
     RiskExecutionResponse,
     RunReportSummaryResponse,
@@ -227,10 +226,6 @@ class FakeQueries:
             status=OperationalStatus.READY,
             generated_at=NOW,
             decision_slo=await self.decision_slo(window),
-            persistence=PersistencePerformanceResponse(
-                status=OperationalStatus.READY,
-                sample_count=0,
-            ),
             market_data=MarketDataPerformanceResponse(
                 status=OperationalStatus.READY,
             ),

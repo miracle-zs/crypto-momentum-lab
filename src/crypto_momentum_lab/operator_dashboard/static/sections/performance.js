@@ -126,7 +126,7 @@ export function renderPerformance(data) {
 
   const body = `
     ${kpis}
-    <p class="muted">当前引擎不采集独立 Checkpoint；决策耗时暂无采样时会显示为未接入。</p>
+    <p class="muted">决策耗时暂无采样时会显示为未接入。</p>
     <div class="block" style="margin-top: 14px;">
       ${blockTitle("系统基础设施稳态", "HOST & DATABASE RESOURCES")}
       <div class="performance-meter-grid">

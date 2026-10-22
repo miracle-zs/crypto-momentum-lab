@@ -393,8 +393,7 @@ class PostgresTradingRepository:
                 except Exception as e:
                     log.warning("advisory_unlock_error", key=lock_key, err=str(e))
 
-    async def async_save_order(self, order: Order) -> None:
-        """初始发单落库 (INSERT ... ON CONFLICT DO UPDATE)"""
+    async def _save_order(self, conn: Any, order: Order) -> None:
         sql = """
         INSERT INTO live_orders (
             environment, account_label, client_order_id, exchange_order_id,
@@ -445,11 +444,9 @@ class PostgresTradingRepository:
             "created_at": order.created_at,
             "updated_at": order.updated_at,
         }
-        async with self._engine.begin() as conn:
-            await conn.execute(text(sql), params)
+        await conn.execute(text(sql), params)
 
-    async def async_save_batch(self, batch: PositionBatch) -> None:
-        """批次更新落库 (INSERT ... ON CONFLICT DO UPDATE)"""
+    async def _save_batch(self, conn: Any, batch: PositionBatch) -> None:
         sql = """
         INSERT INTO live_position_batches (
             environment, account_label, batch_id, symbol,
@@ -492,8 +489,17 @@ class PostgresTradingRepository:
             "exiting_quantity": batch.exiting_quantity,
             "updated_at": batch.updated_at,
         }
+        await conn.execute(text(sql), params)
+
+    async def async_save_order(self, order: Order) -> None:
+        """初始发单落库 (INSERT ... ON CONFLICT DO UPDATE)"""
         async with self._engine.begin() as conn:
-            await conn.execute(text(sql), params)
+            await self._save_order(conn, order)
+
+    async def async_save_batch(self, batch: PositionBatch) -> None:
+        """批次更新落库 (INSERT ... ON CONFLICT DO UPDATE)"""
+        async with self._engine.begin() as conn:
+            await self._save_batch(conn, batch)
 
     async def async_save_fill(self, fill: AccountFillEvent) -> None:
         statement = pg_insert(AccountFillEventRow).values(**asdict(fill))
@@ -508,111 +514,9 @@ class PostgresTradingRepository:
     ) -> None:
         """原子单事务双表直写"""
         async with self._engine.begin() as conn:
-            # 1. 保存订单
-            await conn.execute(
-                text(
-                    """
-                    INSERT INTO live_orders (
-                        environment, account_label, client_order_id, exchange_order_id,
-                        batch_id, symbol, side, position_side, order_type,
-                        quantity, price, status, filled_quantity, average_price,
-                        created_at, updated_at
-                    ) VALUES (
-                        :environment, :account_label,
-                        :client_order_id, :exchange_order_id,
-                        :batch_id, :symbol, :side, :position_side, :order_type,
-                        :quantity, :price, :status, :filled_quantity, :average_price,
-                        :created_at, :updated_at
-                    )
-                    ON CONFLICT (environment, account_label, client_order_id)
-                    DO UPDATE SET
-                        exchange_order_id = COALESCE(
-                            EXCLUDED.exchange_order_id, live_orders.exchange_order_id
-                        ),
-                        status = CASE 
-                            WHEN live_orders.status IN (
-                                'FILLED', 'CANCELED', 'REJECTED'
-                            ) THEN live_orders.status
-                            ELSE EXCLUDED.status
-                        END,
-                        filled_quantity = GREATEST(
-                            live_orders.filled_quantity,
-                            EXCLUDED.filled_quantity
-                        ),
-                        average_price = CASE 
-                            WHEN EXCLUDED.average_price > 0 THEN EXCLUDED.average_price 
-                            ELSE live_orders.average_price 
-                        END,
-                        updated_at = EXCLUDED.updated_at;
-                    """
-                ),
-                {
-                    "environment": order.environment,
-                    "account_label": order.account_label,
-                    "client_order_id": order.client_order_id,
-                    "exchange_order_id": order.exchange_order_id,
-                    "batch_id": order.batch_id,
-                    "symbol": order.symbol,
-                    "side": order.side,
-                    "position_side": order.position_side,
-                    "order_type": order.order_type,
-                    "quantity": order.quantity,
-                    "price": order.price,
-                    "status": order.status.name,
-                    "filled_quantity": order.filled_qty,
-                    "average_price": order.avg_price,
-                    "created_at": order.created_at,
-                    "updated_at": order.updated_at,
-                },
-            )
-            # 2. 保存批次 (若存在)
+            await self._save_order(conn, order)
             if batch is not None:
-                await conn.execute(
-                    text(
-                        """
-                        INSERT INTO live_position_batches (
-                            environment, account_label, batch_id, symbol,
-                            position_side, quantity, entry_price, entry_bar_time,
-                            exit_order_submitted_at, status, realized_pnl,
-                            exiting_quantity, updated_at
-                        ) VALUES (
-                            :environment, :account_label, :batch_id, :symbol,
-                            :position_side, :quantity, :entry_price, :entry_bar_time,
-                            :exit_order_submitted_at, :status, :realized_pnl,
-                            :exiting_quantity, :updated_at
-                        )
-                        ON CONFLICT (environment, account_label, batch_id)
-                        DO UPDATE SET
-                            quantity = EXCLUDED.quantity,
-                            entry_price = EXCLUDED.entry_price,
-            entry_bar_time = EXCLUDED.entry_bar_time,
-                            exit_order_submitted_at = COALESCE(
-                                EXCLUDED.exit_order_submitted_at,
-                                live_position_batches.exit_order_submitted_at
-                            ),
-                            status = EXCLUDED.status,
-                            realized_pnl = EXCLUDED.realized_pnl,
-                            exiting_quantity = EXCLUDED.exiting_quantity,
-                            updated_at = EXCLUDED.updated_at
-                        WHERE EXCLUDED.updated_at >= live_position_batches.updated_at;
-                        """
-                    ),
-                    {
-                        "environment": batch.environment,
-                        "account_label": batch.account_label,
-                        "batch_id": batch.batch_id,
-                        "symbol": batch.symbol,
-                        "position_side": batch.position_side,
-                        "quantity": batch.quantity,
-                        "entry_price": batch.entry_price,
-                        "entry_bar_time": batch.entry_bar_time,
-                        "exit_order_submitted_at": batch.exit_order_submitted_at,
-                        "status": batch.status,
-                        "realized_pnl": batch.realized_pnl,
-                        "exiting_quantity": batch.exiting_quantity,
-                        "updated_at": batch.updated_at,
-                    },
-                )
+                await self._save_batch(conn, batch)
 
     async def async_get_batch(
         self, environment: str, account_label: str, batch_id: str
@@ -891,7 +795,9 @@ class PostgresTradingRepository:
                             RuntimeMarketState15sRow.environment == environment,
                             RuntimeMarketState15sRow.symbol == symbol,
                         )
-                        .order_by(RuntimeMarketState15sRow.bucket_end.desc())
+                        # 15s bucket_end is derived from bucket_start; this uses
+                        # the primary-key order instead of sorting each symbol.
+                        .order_by(RuntimeMarketState15sRow.bucket_start.desc())
                         .limit(limit)
                     )
                 ).all()

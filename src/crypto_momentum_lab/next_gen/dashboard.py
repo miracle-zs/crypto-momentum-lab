@@ -275,8 +275,10 @@ class NextGenDashboardQueries:
         self, equity_range: str = "24h"
     ) -> LiveAccountMetricsResponse:
         accounts = []
+        summaries = []
         for label in self._accounts:
             summary, _ = await self._status(label)
+            summaries.append(summary)
             start, end, interval, points = await self._equity_points(
                 label, equity_range
             )
@@ -289,7 +291,7 @@ class NextGenDashboardQueries:
                 )
             )
         return LiveAccountMetricsResponse(
-            status=(await self.live_accounts()).status,
+            status=live_account_fleet_status(summaries),
             equity_range=cast(EquityRange, equity_range),
             equity_window_start=start,
             equity_window_end=end,
@@ -307,7 +309,12 @@ class NextGenDashboardQueries:
         if label not in self._accounts or environment not in (None, "live"):
             raise ValueError("Unknown NextGen live account")
         config = self._accounts[label]
-        summary, status_row = await self._status(label)
+        account_statuses: dict[
+            str, tuple[LiveAccountSummaryResponse, StrategyRuntimeEventRow | None]
+        ] = {}
+        for account_name in self._accounts:
+            account_statuses[account_name] = await self._status(account_name)
+        summary, status_row = account_statuses[label]
         payload: dict[str, Any] | None = (
             None if status_row is None else cast(dict[str, Any], status_row.details)
         )
@@ -455,9 +462,12 @@ class NextGenDashboardQueries:
             fills_by_order.setdefault((fill["symbol"], fill["order_id"]), []).append(
                 fill
             )
-        exit_reasons = {
-            row.details["batch_id"]: row.details["reason"] for row in exit_events
-        }
+        exit_reasons: dict[str, list[tuple[datetime, str]]] = {}
+        for row in exit_events:
+            details = cast(dict[str, Any], row.details)
+            exit_reasons.setdefault(str(details["batch_id"]), []).append(
+                (row.occurred_at, str(details["reason"]))
+            )
         exit_orders_by_batch: dict[str, list[LiveOrderRow]] = {}
         for history_order in exit_order_history:
             if self._is_exit_order(history_order):
@@ -473,7 +483,7 @@ class NextGenDashboardQueries:
             )
             quantity = sum((item["quantity"] for item in detail), Decimal("0"))
             complete = bool(detail) and quantity == order.filled_quantity
-            close_reason = exit_reasons.get(order.batch_id)
+            close_reason = self._exit_reason_for_order(order, exit_reasons)
             realized_pnl = (
                 sum((item["realized_pnl"] for item in detail), Decimal("0"))
                 if complete
@@ -585,9 +595,7 @@ class NextGenDashboardQueries:
                     "position_amt": str(abs(amount)),
                     "entry_price": None if entry_price is None else str(entry_price),
                     "mark_price": None if mark is None else str(mark),
-                    "notional": (
-                        None if mark is None else str(abs(amount) * mark)
-                    ),
+                    "notional": (None if mark is None else str(abs(amount) * mark)),
                     "unrealized_pnl": (
                         None
                         if mark is None or entry_price is None
@@ -632,9 +640,7 @@ class NextGenDashboardQueries:
                 None
                 if payload is None
                 or payload.get("exchange_positions_observed_at") is None
-                else datetime.fromisoformat(
-                    payload["exchange_positions_observed_at"]
-                )
+                else datetime.fromisoformat(payload["exchange_positions_observed_at"])
             ),
             positions=positions,
             open_orders=[
@@ -676,7 +682,9 @@ class NextGenDashboardQueries:
                     else None
                 ),
             },
-            available_accounts=(await self.live_accounts()).accounts,
+            available_accounts=[
+                account_status[0] for account_status in account_statuses.values()
+            ],
             equity_range=cast(EquityRange, equity_range),
             equity_window_start=start,
             equity_window_end=end,
@@ -692,6 +700,16 @@ class NextGenDashboardQueries:
         return (row.position_side == "LONG" and row.side == "SELL") or (
             row.position_side == "SHORT" and row.side == "BUY"
         )
+
+    @staticmethod
+    def _exit_reason_for_order(
+        order: LiveOrderRow,
+        exit_reasons: dict[str, list[tuple[datetime, str]]],
+    ) -> str | None:
+        for occurred_at, reason in reversed(exit_reasons.get(order.batch_id, [])):
+            if occurred_at <= order.created_at:
+                return reason
+        return None
 
     @staticmethod
     def _close_path(

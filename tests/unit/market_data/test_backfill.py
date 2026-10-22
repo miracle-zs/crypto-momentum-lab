@@ -56,8 +56,8 @@ class _Publisher:
     def __init__(self) -> None:
         self.batches = []
 
-    async def publish(self, states, entered_symbols=frozenset()):
-        self.batches.append((states, entered_symbols))
+    async def publish(self, states):
+        self.batches.append(states)
 
 
 async def test_backfill_publishes_oldest_first_states() -> None:
@@ -77,4 +77,4 @@ async def test_backfill_publishes_oldest_first_states() -> None:
     assert reports[0].buckets == 1
     assert reports[1].symbol == "S2USDT"
     assert reports[1].buckets == 0
-    assert publisher.batches[0][1] == frozenset({"S1USDT"})
+    assert publisher.batches[0][0].symbol == "S1USDT"

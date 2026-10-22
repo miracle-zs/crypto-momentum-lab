@@ -9,8 +9,6 @@ from crypto_momentum_lab.operator_dashboard import api as dashboard_api
 from crypto_momentum_lab.operator_dashboard.api import create_dashboard_app
 from crypto_momentum_lab.operator_dashboard.performance_queries import (
     PerformanceQueries,
-    _account_label_and_phase,
-    _percentile,
 )
 from crypto_momentum_lab.operator_dashboard.schemas import (
     SystemPerformanceResponse,
@@ -29,21 +27,6 @@ from tests.unit.apps.operator_dashboard.test_main import (
 NOW = datetime(2026, 9, 18, 0, 0, tzinfo=UTC)
 
 
-def test_percentile_calculation() -> None:
-    values = [10.0, 20.0, 30.0, 40.0, 50.0]
-    assert _percentile(values, 0.50) == 30.0
-    assert _percentile(values, 0.95) == 50.0
-    assert _percentile([], 0.50) == 0.0
-
-
-def test_account_label_and_phase_mapping() -> None:
-    assert _account_label_and_phase("cml-live-primary") == ("primary", 0.0)
-    assert _account_label_and_phase("cml-live-account-2") == ("account-2", 15.0)
-    assert _account_label_and_phase("cml-live-account-3") == ("account-3", 30.0)
-    assert _account_label_and_phase("cml-live-account-4") == ("account-4", 45.0)
-    assert _account_label_and_phase("other-run") == ("other-run", 0.0)
-
-
 def test_performance_endpoint_returns_200_and_matches_schema() -> None:
     with TestClient(
         create_dashboard_app(queries=FakeQueries(), **DASHBOARD_AUTH_KWARGS)
@@ -54,7 +37,7 @@ def test_performance_endpoint_returns_200_and_matches_schema() -> None:
     data = response.json()
     assert data["status"] == "READY"
     assert "decision_slo" in data
-    assert "persistence" in data
+    assert "persistence" not in data
     assert "market_data" in data
     assert "host_resources" in data
 
@@ -85,7 +68,6 @@ async def test_performance_queries_aggregates_empty_database() -> None:
     result = await queries.performance()
     assert isinstance(result, SystemPerformanceResponse)
     assert result.status == OperationalStatus.NO_DATA
-    assert result.persistence.sample_count == 0
     assert result.market_data.missing_agg_trade_count == 0
 
 

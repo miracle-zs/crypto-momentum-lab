@@ -2,7 +2,7 @@
 
 import asyncio
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -23,11 +23,11 @@ from crypto_momentum_lab.domain.operational.retention_contract import (
 async def test_resolve_market_data_consumer_requirements_collects_watermarks() -> None:
     session = AsyncMock()
     session.scalars.return_value = MagicMock(all=MagicMock(return_value=[]))
-    # Checkpoint watermark is read here; current position episodes are owned
-    # by the account repository, not an all-history non-zero snapshot minimum.
+    # Both the checkpoint and active-batch watermark are read from the current
+    # persistence tables, not the legacy account snapshots.
     checkpoint_time = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
     position_time = datetime(2026, 9, 20, 9, 30, tzinfo=UTC)
-    session.scalar.return_value = checkpoint_time
+    session.scalar.side_effect = [checkpoint_time, position_time]
 
     session_ctx = AsyncMock()
     session_ctx.__aenter__.return_value = session
@@ -35,13 +35,7 @@ async def test_resolve_market_data_consumer_requirements_collects_watermarks() -
 
     factory = MagicMock(return_value=session_ctx)
 
-    with patch(
-        "crypto_momentum_lab.apps.market_data.main.PostgresAccountRepository"
-    ) as accounts:
-        accounts.return_value.load_active_position_retention_watermark = AsyncMock(
-            return_value=position_time
-        )
-        requirements = await _resolve_market_data_consumer_requirements(factory)
+    requirements = await _resolve_market_data_consumer_requirements(factory)
 
     assert len(requirements) == 2
     assert requirements[0].consumer_id == "active_strategy_checkpoints"

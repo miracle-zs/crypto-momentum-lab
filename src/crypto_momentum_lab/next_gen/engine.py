@@ -109,8 +109,7 @@ class AccountState:
         log.info("system_mode_changed", mode=mode.name, account=self.account_label)
 
     def recheck_system_mode(self) -> None:
-        """外部条件恢复后，按仍未解决的安全阻断重新评估运行状态。
-        """
+        """外部条件恢复后，按仍未解决的安全阻断重新评估运行状态。"""
         if self.system_mode != SystemMode.DEGRADED:
             return
         if (
@@ -126,13 +125,6 @@ class AccountState:
         if not has_in_doubt:
             self.system_mode = SystemMode.RUNNING
             log.info("system_mode_restored_to_running", account=self.account_label)
-
-    def reset_fault_state(self) -> None:
-        """【运维人工核实复位】：排查底层数据库或网络异常后，显式清除不可恢复故障标记"""
-        self.has_unrecoverable_fault = False
-        self.private_stream_gap = False
-        log.warning("operator_reset_fault_state", account=self.account_label)
-        self.recheck_system_mode()
 
     def on_ws_status_change(self, connected: bool) -> None:
         """WebSocket 连接状态变动回调：

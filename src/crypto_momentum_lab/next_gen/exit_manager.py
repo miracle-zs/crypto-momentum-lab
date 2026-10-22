@@ -87,11 +87,14 @@ class ExitManager:
         if not batch or batch.quantity <= Decimal("0"):
             self._pending_exits.pop(batch_id, None)
             return
-        if exit_reason is not None and exit_reason != "resume_exit":
+        decision_reason = exit_reason
+        if self._scheduled_flatten_due(datetime.now(UTC)):
+            decision_reason = "scheduled_risk_window"
+        if decision_reason is not None and decision_reason != "resume_exit":
             await self._executor.record_exit_decision(
                 batch_id,
                 batch.symbol,
-                exit_reason,
+                decision_reason,
                 datetime.now(UTC),
             )
         self._pending_exits.setdefault(batch_id, (limit_price, grace_sec, immediate))
@@ -305,6 +308,13 @@ class ExitManager:
                 remaining_batch.symbol, remaining_batch.quantity
             )
             if sweep_qty > Decimal("0"):
+                if self._scheduled_flatten_due(datetime.now(UTC)):
+                    await self._executor.record_exit_decision(
+                        batch_id,
+                        remaining_batch.symbol,
+                        "scheduled_risk_window",
+                        datetime.now(UTC),
+                    )
                 market_order = self._state.create_exit_order(
                     batch_id=batch_id,
                     quantity=sweep_qty,

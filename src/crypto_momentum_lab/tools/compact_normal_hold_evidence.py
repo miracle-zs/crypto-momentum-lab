@@ -106,11 +106,9 @@ async def compact_normal_hold_evidence(
             """
             SELECT count(*)
             FROM decision_traces
-            WHERE rejection_reason = $1
-              AND coalesce(trace_payload ->> 'evidence_level', '') <> $2
-            """,
-            _NORMAL_HOLD_OUTCOME,
-            _SUMMARY_LEVEL,
+            WHERE rejection_reason = 'holding_position_no_exit'
+              AND coalesce(trace_payload ->> 'evidence_level', '') <> 'summary'
+            """
         )
         return int(count or 0)
 
@@ -122,14 +120,12 @@ async def compact_normal_hold_evidence(
                 SELECT decision_id, trace_payload::text AS trace_payload,
                        evaluated_revision_ids::text AS revision_ids
                 FROM decision_traces
-                WHERE rejection_reason = $1
-                  AND coalesce(trace_payload ->> 'evidence_level', '') <> $2
+                WHERE rejection_reason = 'holding_position_no_exit'
+                  AND coalesce(trace_payload ->> 'evidence_level', '') <> 'summary'
                 ORDER BY created_at, decision_id
-                LIMIT $3
+                LIMIT $1
                 FOR UPDATE SKIP LOCKED
                 """,
-                _NORMAL_HOLD_OUTCOME,
-                _SUMMARY_LEVEL,
                 batch_size,
             )
             if not trace_rows:
@@ -251,10 +247,14 @@ async def purge_unreferenced_revisions(
         older_than_parameter="$1" if purge_before is not None else None,
     )
     if dry_run:
-        count_sql = "SELECT count(*) FROM (" + build_revision_purge_candidate_sql(
-            batch_size_parameter=None,
-            older_than_parameter="$1" if purge_before is not None else None,
-        ) + ") AS candidates"
+        count_sql = (
+            "SELECT count(*) FROM ("
+            + build_revision_purge_candidate_sql(
+                batch_size_parameter=None,
+                older_than_parameter="$1" if purge_before is not None else None,
+            )
+            + ") AS candidates"
+        )
         count_parameters: list[object] = []
         if purge_before is not None:
             count_parameters.append(purge_before)
@@ -262,9 +262,7 @@ async def purge_unreferenced_revisions(
 
     deleted = 0
     while True:
-        remaining = (
-            None if max_purge_count is None else max_purge_count - deleted
-        )
+        remaining = None if max_purge_count is None else max_purge_count - deleted
         if remaining is not None and remaining <= 0:
             break
         effective_batch_size = min(batch_size, remaining or batch_size)
@@ -304,9 +302,7 @@ async def _run(args: argparse.Namespace) -> int:
         raise ValueError("database URL must be provided or configured")
     connection = await asyncpg.connect(_database_url(database_url))
     try:
-        await connection.execute(
-            f"SET lock_timeout = '{args.lock_timeout_seconds}s'"
-        )
+        await connection.execute(f"SET lock_timeout = '{args.lock_timeout_seconds}s'")
         acquired = await connection.fetchval(
             "SELECT pg_try_advisory_lock(hashtext($1))",
             "cml:compact_normal_hold_evidence",
@@ -391,9 +387,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.lock_timeout_seconds < 1:
         parser.error("--lock-timeout-seconds must be at least 1")
     if not args.dry_run and not args.apply:
-        parser.error(
-            "destructive mode requires --apply; use --dry-run to inspect only"
-        )
+        parser.error("destructive mode requires --apply; use --dry-run to inspect only")
     if args.purge_unreferenced_revisions and not args.apply and not args.dry_run:
         parser.error("--purge-unreferenced-revisions requires --apply")
     if args.purge_only and not args.purge_unreferenced_revisions:

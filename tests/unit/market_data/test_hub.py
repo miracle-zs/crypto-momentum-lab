@@ -44,60 +44,6 @@ def test_market_state_batch_round_trips_decimal_and_timestamps() -> None:
     assert decoded == (state,)
 
 
-def test_market_state_batch_round_trips_entered_symbols() -> None:
-    """The entry hint survives the wire format; an empty hint stays omitted."""
-
-    state = fixture_state("BTCUSDT", 0)
-
-    encoded = encode_market_state_batch(
-        (state,),
-        sequence=1,
-        published_at=state.bucket_end,
-        entered_symbols=frozenset({"BTCUSDT", "ETHUSDT"}),
-    )
-    decoded = decode_market_state_batch_envelope(
-        encoded,
-        expected_environment="research",
-    )
-    assert decoded.entered_symbols == frozenset({"BTCUSDT", "ETHUSDT"})
-
-    # With no entries the field is omitted, so the payload is byte-identical to
-    # what an older publisher would have sent.
-    plain = encode_market_state_batch(
-        (state,),
-        sequence=2,
-        published_at=state.bucket_end,
-    )
-    assert "entered_symbols" not in json.loads(plain)
-    assert (
-        decode_market_state_batch_envelope(
-            plain,
-            expected_environment="research",
-        ).entered_symbols
-        == frozenset()
-    )
-
-
-def test_market_state_batch_decoder_tolerates_malformed_entered_symbols() -> None:
-    """A malformed hint must not fail the batch; it is only an optimisation."""
-
-    state = fixture_state("BTCUSDT", 0)
-    payload = json.loads(
-        encode_market_state_batch(
-            (state,),
-            sequence=1,
-            published_at=state.bucket_end,
-        )
-    )
-    payload["entered_symbols"] = ["BTCUSDT", 7, None]
-
-    decoded = decode_market_state_batch_envelope(
-        json.dumps(payload),
-        expected_environment="research",
-    )
-    assert decoded.entered_symbols == frozenset({"BTCUSDT"})
-
-
 def test_market_state_batch_decoder_handles_is_backfill() -> None:
     from dataclasses import replace
 
@@ -174,7 +120,8 @@ async def test_market_state_hub_metrics_keep_latest_bucket_start_monotonic() -> 
 
 @pytest.mark.parametrize("rewarm_on_stream_reset", [False, True])
 async def test_batch_source_can_fail_closed_with_replay_metadata(
-    monkeypatch, rewarm_on_stream_reset,
+    monkeypatch,
+    rewarm_on_stream_reset,
 ) -> None:
     messages = [
         json.dumps(
@@ -233,7 +180,8 @@ async def test_batch_source_can_fail_closed_with_replay_metadata(
 
 @pytest.mark.parametrize("rewarm_on_stream_reset", [False, True])
 async def test_durable_market_state_source_requires_ready_stream_epoch(
-    monkeypatch, rewarm_on_stream_reset,
+    monkeypatch,
+    rewarm_on_stream_reset,
 ) -> None:
     messages = [
         json.dumps(

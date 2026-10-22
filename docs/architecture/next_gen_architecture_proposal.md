@@ -36,7 +36,7 @@ stateDiagram-v2
     
     RUNNING --> DEGRADED: 发生异常 / 收到停机排空信号 / WS 断开 / 遇到未知订单:\n1. WebSocket 物理长连断开 (全面冻结发单)\n2. 存在 RECONCILING 订单存疑 (只读查证不回写，全面冻结发单)\n3. 数据库直调写透失败 (has_unrecoverable_fault=True)\n4. 遇到交易所强平/未知订单 (autoclose / 未登记订单)\n5. 收到停机信号 (SIGINT/SIGTERM) 或 Drain\n(置位 is_draining=True 启动受控排空)\n[安全降级: 严格禁止开仓；无故障、无存疑且推流在线时允许受控排空平仓，否则全面冻结发单]
     
-    DEGRADED --> RUNNING: 存疑订单收敛恢复 (recheck_system_mode):\n迟到 WS 推流确认存疑订单终结 / 运维核验复位 (reset_fault_state)\n且推流在线、无存疑订单、无未恢复故障
+    DEGRADED --> RUNNING: 当前进程收到迟到 WS 并确认所有存疑订单终结\n且推流在线、无存疑订单、无未恢复故障；私有流缺口或不可恢复故障需重启后走启动核对
     
     DEGRADED --> STOPPED: 排空完成达到扁平基线 (所有标的持仓归零且无挂单)\n或致命不可恢复异常强制终止
     
@@ -49,7 +49,7 @@ stateDiagram-v2
 | :--- | :---: | :---: | :--- |
 | **`BOOTING`** | ❌ 严禁 | ❌ 严禁 | 进程启动初始化阶段。并发拉取 REST 快照建立初始基线、建立并完成 WebSocket 物理长连握手、预热指标后跃迁至 `RUNNING`；若检测到存量持仓/挂单则 Fail-Fast 阻断退出。 |
 | **`RUNNING`** | ✅ 允许 | ✅ 允许 | 系统处于完全健康状态。推流物理在线且正常保活、所有订单状态明确、单进程独占掌控交易。 |
-| **`DEGRADED`** | ❌ 严禁 | ⚠️ **受限允许** | **安全降级模式（Freeze on Anomaly / Drain Exit Only）**。<br/>- **单账户独占前提**：一期严格限定单账户由本进程独占交易，严禁外部手工或其它程序并发操作。<br/>- **触发源**：管理员下发 Drain 排空、发单网络超时/未知（`RECONCILING`）、推流物理断开（`ws_connected=False`）、数据库写透重试耗尽失败、或收到交易所强平/未知订单（如 `autoclose-...`、`adl_autoclose`）。<br/>- **平仓守卫铁律（防失控双重开仓与状态漂移）**：双向持仓模式下发单严格不传 `reduceOnly`，发平仓单必须依赖推流确认上一单成交结果：<br/>1. **受控排空允许平仓**：仅当 **降级原因纯粹为管理员下发的 Drain 计划排空（`is_draining=True`）**，且同时满足 **未发生不可恢复致命故障（`has_unrecoverable_fault=False`，如数据库正常）**、**WebSocket 物理在线（`ws_connected=True`）** 且 **无存疑订单（无 `RECONCILING`）** 时，系统才允许 ExitManager 发出平仓单；<br/>2. **异常全面冻结发单（Freeze Ordering on Anomaly）**：若因推流断开（含 24h 断连）、发单超时/未知（`RECONCILING`）、数据库写失败或遇到交易所未知强平订单进入降级，**严禁发送任何新订单（无论是开仓还是平仓）**！系统彻底冻结所有自动发单行为并发出高优先级告警，杜绝黑盒盲动导致翻转仓位或双重成交。<br/>- **状态恢复路径（State Convergence）**：当迟到推流将所有 `RECONCILING` 订单推进至明确终态，或运维人员通过 `resolve_in_doubt_order()` / `reset_fault_state()` 完成人工复位后，系统通过 `recheck_system_mode()` 自动安全恢复为 `RUNNING`。 |
+| **`DEGRADED`** | ❌ 严禁 | ⚠️ **受限允许** | **安全降级模式（Freeze on Anomaly / Drain Exit Only）**。<br/>- **单账户独占前提**：一期严格限定单账户由本进程独占交易，严禁外部手工或其它程序并发操作。<br/>- **触发源**：管理员下发 Drain 排空、发单网络超时/未知（`RECONCILING`）、推流物理断开（`ws_connected=False`）、数据库写透重试耗尽失败、或收到交易所强平/未知订单（如 `autoclose-...`、`adl_autoclose`）。<br/>- **平仓守卫铁律（防失控双重开仓与状态漂移）**：双向持仓模式下发单严格不传 `reduceOnly`，发平仓单必须依赖推流确认上一单成交结果：<br/>1. **受控排空允许平仓**：仅当 **降级原因纯粹为管理员下发的 Drain 计划排空（`is_draining=True`）**，且同时满足 **未发生不可恢复致命故障（`has_unrecoverable_fault=False`，如数据库正常）**、**WebSocket 物理在线（`ws_connected=True`）** 且 **无存疑订单（无 `RECONCILING`）** 时，系统才允许 ExitManager 发出平仓单；<br/>2. **异常全面冻结发单（Freeze Ordering on Anomaly）**：若因推流断开（含 24h 断连）、发单超时/未知（`RECONCILING`）、数据库写失败或遇到交易所未知强平订单进入降级，**严禁发送任何新订单（无论是开仓还是平仓）**！系统彻底冻结所有自动发单行为并发出高优先级告警，杜绝黑盒盲动导致翻转仓位或双重成交。<br/>- **状态恢复路径（State Convergence）**：迟到推流只有在当前进程核实所有存疑订单终结、且无私有流缺口和不可恢复故障时，才能由 `recheck_system_mode()` 恢复为 `RUNNING`。存在私有流缺口或不可恢复故障时，当前进程不提供人工复位；需重启并执行启动核对。 |
 | **`STOPPED`** | ❌ 严禁 | ❌ 严禁 | 进程终结状态。仅在排空完成达到扁平基线（所有标的持仓归零且无挂单）或致命不可恢复异常强制终止后跃迁进入。撤销所有未完成挂单，释放全部网络连接与数据库连接池。 |
 
 ---
@@ -522,7 +522,7 @@ class AccountState:
         self.system_mode = mode
 
     def recheck_system_mode(self) -> None:
-        # 【状态收敛核心路径】：在迟到推流确认或人工复位后，重新评估是否能回到 RUNNING
+        # 【状态收敛核心路径】：在迟到推流确认后，重新评估是否能回到 RUNNING
         if self.system_mode != SystemMode.DEGRADED:
             return
         if self.is_draining or self.has_unrecoverable_fault or not self.ws_connected:
@@ -531,12 +531,6 @@ class AccountState:
         if not has_in_doubt:
             self.system_mode = SystemMode.RUNNING
             log.info("system_mode_restored_to_running", account=self.account_label)
-
-    def reset_fault_state(self) -> None:
-        # 【运维人工核实复位】：排查底层数据库或网络异常后，显式清除不可恢复故障标记
-        self.has_unrecoverable_fault = False
-        log.warning("operator_reset_fault_state", account=self.account_label)
-        self.recheck_system_mode()
 
     def update_balances(self, balances: dict[str, Decimal], available_balance_snapshot: Decimal | None = None) -> None:
         self.wallet_balances = balances

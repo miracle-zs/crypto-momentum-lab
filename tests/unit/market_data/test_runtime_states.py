@@ -119,72 +119,6 @@ async def test_quiet_symbol_fills_when_global_watermark_advances() -> None:
     ]
 
 
-def test_expected_symbols_reports_real_entries_only() -> None:
-    """Entering the dense set is reported once; the startup baseline is not."""
-
-    publisher = ClosedMarketStatePublisher(
-        repository=FakeRuntimeStateRepository(),
-        config=ClosedMarketStatePublisherConfig(
-            realtime_closure_delay_seconds=15, durable_closure_delay_seconds=15
-        ),
-    )
-
-    # The first call is the startup baseline: nothing "just entered".
-    publisher.set_expected_symbols(frozenset({"BTCUSDT"}))
-    assert publisher.consume_pending_entry_symbols() == frozenset()
-
-    # An unchanged set reports nothing.
-    publisher.set_expected_symbols(frozenset({"BTCUSDT"}))
-    assert publisher.consume_pending_entry_symbols() == frozenset()
-
-    # A symbol joining is reported exactly once, then cleared.
-    publisher.set_expected_symbols(frozenset({"BTCUSDT", "ETHUSDT"}))
-    assert publisher.consume_pending_entry_symbols() == frozenset({"ETHUSDT"})
-    assert publisher.consume_pending_entry_symbols() == frozenset()
-
-    # A symbol leaving, or re-appearing after a leave, is not an entry.
-    publisher.set_expected_symbols(frozenset({"ETHUSDT"}))
-    assert publisher.consume_pending_entry_symbols() == frozenset()
-
-    # Re-entering after leaving IS an entry -- this is the case that used to
-    # look like lost buckets downstream.
-    publisher.set_expected_symbols(frozenset({"ETHUSDT", "BTCUSDT"}))
-    assert publisher.consume_pending_entry_symbols() == frozenset({"BTCUSDT"})
-
-
-async def test_realtime_batch_announces_pending_entry_symbols_once() -> None:
-    """The entry handover reaches the sink, and only on the first batch after."""
-
-    batches: list[tuple[object, frozenset[str]]] = []
-
-    async def realtime_sink(states, entered_symbols=frozenset()) -> None:
-        batches.append((states, entered_symbols))
-
-    publisher = ClosedMarketStatePublisher(
-        repository=FakeRuntimeStateRepository(),
-        config=ClosedMarketStatePublisherConfig(
-            realtime_closure_delay_seconds=15, durable_closure_delay_seconds=15
-        ),
-        realtime_state_sink=realtime_sink,
-    )
-
-    # Baseline, then ETHUSDT joins the dense set.
-    publisher.set_expected_symbols(frozenset({"BTCUSDT"}))
-    publisher.set_expected_symbols(frozenset({"BTCUSDT", "ETHUSDT"}))
-
-    await publisher.observe(fixture_trade(0, price="100", sequence=1))
-    await publisher.observe(fixture_trade(16, price="102", sequence=2))
-    await publisher.observe(
-        fixture_trade(16, price="200", sequence=3, symbol="ETHUSDT")
-    )
-
-    assert batches, "expected at least one realtime batch"
-    announced = [entered for _states, entered in batches if "ETHUSDT" in entered]
-    # Announced exactly once: it is consumed, not repeated on every batch.
-    assert len(announced) == 1
-    assert announced[0] == frozenset({"ETHUSDT"})
-
-
 async def test_late_event_for_closed_bucket_is_rejected() -> None:
     repository = FakeRuntimeStateRepository()
     publisher = ClosedMarketStatePublisher(
@@ -370,7 +304,7 @@ async def test_publisher_fanout_happens_before_durable_runtime_state_write() -> 
     repository = FakeRuntimeStateRepository()
     events: list[str] = []
 
-    async def realtime_sink(states, entered_symbols=frozenset()) -> None:
+    async def realtime_sink(states) -> None:
         assert states
         events.append("realtime")
 
@@ -635,7 +569,9 @@ async def test_long_silent_symbol_has_continuous_buckets_with_last_known_price()
     )
     publisher.set_expected_symbols({"BTCUSDT", "ETHUSDT"})
     await publisher.observe(fixture_trade(0, price="100", sequence=1))
-    await publisher.observe(fixture_trade(10, price="200", sequence=2, symbol="ETHUSDT"))
+    await publisher.observe(
+        fixture_trade(10, price="200", sequence=2, symbol="ETHUSDT")
+    )
     states = sorted(
         (item for item in repository.saved_states if item.symbol == "BTCUSDT"),
         key=lambda item: item.bucket_start,
@@ -645,5 +581,7 @@ async def test_long_silent_symbol_has_continuous_buckets_with_last_known_price()
         base + timedelta(seconds=15 * index) for index in range(9)
     ]
     assert all(item.close_price == Decimal("100") for item in states)
-    assert all(item.source_event_count == 0 and item.trade_count == 0 for item in states[1:])
+    assert all(
+        item.source_event_count == 0 and item.trade_count == 0 for item in states[1:]
+    )
     assert all(item.data_complete for item in states)

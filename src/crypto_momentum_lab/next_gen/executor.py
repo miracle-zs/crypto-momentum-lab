@@ -382,7 +382,19 @@ class OrderExecutor:
         except BinanceOrderRejectedError as e:
             # 业务明确拒单（如 -2010/-2019 等）：交易所未建单，原子清理活跃锁与预留
             self._state.mark_order_rejected(order.client_order_id, e.message)
-            await self._db.async_save_order(order)
+            try:
+                await self._db.async_save_order(order)
+            except Exception as persist_error:
+                log.critical(
+                    "rejected_order_state_persist_failed",
+                    order_id=order.client_order_id,
+                    error=str(persist_error),
+                )
+                self._state.has_unrecoverable_fault = True
+                self._state.set_system_mode(SystemMode.DEGRADED)
+                raise RuntimeError(
+                    "Rejected order state could not be persisted; account degraded"
+                ) from persist_error
             raise
         except Exception as e:
             # 网络超时/5xx：订单处于存疑状态，绝不清理活跃锁，由看门狗转入 RECONCILING

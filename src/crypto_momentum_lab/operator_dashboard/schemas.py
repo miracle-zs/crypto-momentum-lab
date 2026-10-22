@@ -237,35 +237,6 @@ class RunReportSummaryResponse(DashboardSchema):
     live_sessions: list[dict[str, JsonValue]]
 
 
-class CheckpointMetricItem(DashboardSchema):
-    run_id: str
-    account_label: str
-    occurred_at: datetime
-    prepare_ms: float | None = None
-    event_loop_lag_ms: float | None = None
-    pool_acquire_ms: float | None = None
-    is_new_connection: bool | None = None
-    pool_checked_in: int | None = None
-    pool_checked_out: int | None = None
-    sql_execute_ms: float | None = None
-    pre_commit_ms: float | None = None
-    commit_ms: float | None = None
-    total_ms: float | None = None
-    phase_seconds: float | None = None
-
-
-class PersistencePerformanceResponse(DashboardSchema):
-    status: OperationalStatus
-    sample_count: int
-    p50_total_ms: float | None = None
-    p95_total_ms: float | None = None
-    max_total_ms: float | None = None
-    recent_checkpoints: list[CheckpointMetricItem] = Field(default_factory=list)
-    account_latest_checkpoints: dict[str, CheckpointMetricItem] = Field(
-        default_factory=dict
-    )
-
-
 class MarketDataPerformanceResponse(DashboardSchema):
     status: OperationalStatus
     observed_at: datetime | None = None
@@ -298,7 +269,6 @@ class SystemPerformanceResponse(DashboardSchema):
     status: OperationalStatus
     generated_at: datetime
     decision_slo: DecisionSLOResponse
-    persistence: PersistencePerformanceResponse
     market_data: MarketDataPerformanceResponse
     host_resources: HostResourcesResponse
 

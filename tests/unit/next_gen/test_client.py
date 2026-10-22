@@ -355,6 +355,55 @@ async def test_user_data_stream_auto_reconnects_on_disconnect() -> None:
 
 
 @pytest.mark.asyncio
+async def test_user_data_stream_reconnects_after_event_dispatch_failure() -> None:
+    mock_rest = AsyncMock()
+    mock_rest.create_listen_key.side_effect = ["key_1", "key_2"]
+
+    class MockWS:
+        def __init__(self, msgs: list[str], *, wait_until_closed: bool = False) -> None:
+            self.msgs = msgs
+            self.closed = False
+            self.closed_event = asyncio.Event()
+            self.wait_until_closed = wait_until_closed
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self.msgs:
+                return self.msgs.pop(0)
+            if self.wait_until_closed:
+                await self.closed_event.wait()
+            raise StopAsyncIteration
+
+        async def close(self) -> None:
+            self.closed = True
+            self.closed_event.set()
+
+    ws1 = MockWS(['{"e": "ACCOUNT_UPDATE", "E": 1}'], wait_until_closed=True)
+    ws2 = MockWS(['{"e": "ORDER_TRADE_UPDATE", "E": 2}'])
+    mock_connector = AsyncMock(side_effect=[ws1, ws2])
+    stop_event = asyncio.Event()
+
+    def handle_event(event: dict) -> None:
+        if event["e"] == "ACCOUNT_UPDATE":
+            raise RuntimeError("account update persistence failed")
+        stop_event.set()
+
+    stream = BinanceUserDataStream(
+        rest_client=mock_rest,
+        ws_connector=mock_connector,
+        initial_backoff=0.01,
+    )
+    stream._on_event = handle_event
+
+    await asyncio.wait_for(stream.run_stream(stop_event=stop_event), timeout=1.0)
+
+    assert ws1.closed is True
+    assert mock_connector.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_set_margin_type_accepts_already_applied(rest_client: BinanceRestClient):
     with patch.object(rest_client, "_request", new_callable=AsyncMock) as mock_req:
         mock_req.side_effect = BinanceOrderRejectedError(

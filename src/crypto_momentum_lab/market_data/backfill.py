@@ -42,7 +42,6 @@ class HistoricalStatePublisher(Protocol):
     async def publish(
         self,
         states: tuple[MarketState15s, ...],
-        entered_symbols: frozenset[str] = frozenset(),
     ) -> None: ...
 
 
@@ -212,10 +211,7 @@ class PromotionHistoryBackfiller:
                     environment=self._environment,
                 )
                 if states:
-                    await self._publisher.publish(
-                        states,
-                        entered_symbols=frozenset({symbol}),
-                    )
+                    await self._publisher.publish(states)
                 reports.append(
                     SymbolBackfillReport(
                         symbol=symbol,

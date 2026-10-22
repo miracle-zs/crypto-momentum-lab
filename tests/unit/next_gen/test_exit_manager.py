@@ -6,6 +6,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
+from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
+    ScheduledRiskWindowConfig,
+)
 from crypto_momentum_lab.next_gen.engine import AccountState
 from crypto_momentum_lab.next_gen.executor import OrderExecutor
 from crypto_momentum_lab.next_gen.exit_manager import ExitManager
@@ -164,6 +167,60 @@ async def test_exit_manager_grace_timeout_cancels_limit_and_sweeps_market(exit_s
     second_call = mock_rest.post_order.call_args_list[1].kwargs
     assert second_call["order_type"] == "MARKET"
     assert second_call["client_order_id"] == f"fm_{batch_id}_02"
+
+
+@pytest.mark.asyncio
+async def test_scheduled_flatten_records_override_for_active_limit_exit(exit_setup):
+    state, repo, mock_rest, exit_mgr = exit_setup
+    state.scheduled_risk_window = ScheduledRiskWindowConfig()
+    state.scheduled_flatten_pending = True
+    mock_rest.post_order.return_value = {"orderId": 222}
+
+    now = datetime.now(UTC)
+    batch = PositionBatch(
+        "live",
+        "a1",
+        "scheduled-override",
+        "BTCUSDT",
+        "LONG",
+        Decimal("1"),
+        Decimal("65000"),
+        now,
+    )
+    state.batches[batch.batch_id] = batch
+    await repo.async_save_exit_decision(
+        "live",
+        "a1",
+        now,
+        {
+            "batch_id": batch.batch_id,
+            "symbol": batch.symbol,
+            "reason": "candle_15m_bearish",
+        },
+    )
+    limit_order = state.create_exit_order(
+        batch.batch_id, Decimal("1"), Decimal("66000"), order_type="LIMIT"
+    )
+
+    async def observe_cancel(**params):
+        order = state.orders[params["client_order_id"]]
+        await state.on_order_trade_update(
+            order.client_order_id,
+            order.symbol,
+            order.position_side,
+            order.side,
+            OrderStatus.CANCELED,
+            Decimal("0"),
+            Decimal("0"),
+            Decimal("0"),
+            Decimal("0"),
+        )
+
+    mock_rest.cancel_order.side_effect = observe_cancel
+    await exit_mgr._complete_limit_exit(limit_order, 7200)
+
+    assert repo.exit_decisions[-1]["reason"] == "scheduled_risk_window"
+    assert mock_rest.post_order.await_args.kwargs["order_type"] == "MARKET"
 
 
 @pytest.mark.asyncio

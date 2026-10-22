@@ -66,33 +66,6 @@ def test_execution_engine_uses_a_bounded_dedicated_pool(monkeypatch) -> None:
     }
 
 
-def test_account_engine_uses_a_small_serial_sync_pool(monkeypatch) -> None:
-    captured: dict[str, object] = {}
-
-    def fake_create_async_engine(database_url: str, **kwargs: object):
-        captured["database_url"] = database_url
-        captured.update(kwargs)
-        return object()
-
-    monkeypatch.setattr(session, "create_async_engine", fake_create_async_engine)
-
-    result = session.create_account_database_engine("postgresql+asyncpg://account")
-
-    assert result is not None
-    assert captured["database_url"] == "postgresql+asyncpg://account"
-    assert captured["pool_size"] == 2
-    assert captured["max_overflow"] == 0
-    assert captured["pool_timeout"] == 3
-    assert captured["connect_args"] == {
-        "command_timeout": 5,
-        "server_settings": {
-            "statement_timeout": "5000ms",
-            "idle_in_transaction_session_timeout": "30000ms",
-            "application_name": "cml.account",
-        },
-    }
-
-
 def test_observability_engine_has_a_small_best_effort_pool(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
@@ -118,35 +91,6 @@ def test_observability_engine_has_a_small_best_effort_pool(monkeypatch) -> None:
             "statement_timeout": "10000ms",
             "idle_in_transaction_session_timeout": "30000ms",
             "application_name": "cml.observability",
-        },
-    }
-
-
-def test_checkpoint_engine_isolated_from_best_effort_telemetry(monkeypatch) -> None:
-    captured: dict[str, object] = {}
-
-    def fake_create_async_engine(database_url: str, **kwargs: object):
-        captured["database_url"] = database_url
-        captured.update(kwargs)
-        return object()
-
-    monkeypatch.setattr(session, "create_async_engine", fake_create_async_engine)
-
-    result = session.create_checkpoint_database_engine(
-        "postgresql+asyncpg://checkpoint"
-    )
-
-    assert result is not None
-    assert captured["database_url"] == "postgresql+asyncpg://checkpoint"
-    assert captured["pool_size"] == 1
-    assert captured["max_overflow"] == 0
-    assert captured["pool_timeout"] == 2
-    assert captured["connect_args"] == {
-        "command_timeout": 10,
-        "server_settings": {
-            "statement_timeout": "10000ms",
-            "idle_in_transaction_session_timeout": "30000ms",
-            "application_name": "cml.checkpoint",
         },
     }
 
