@@ -218,7 +218,6 @@ if [[ "$deploy_scope" == dashboard ]]; then
   curl --fail --silent --show-error --max-time 10 \
     http://127.0.0.1:8765/api/health >/dev/null
   set_env_value CML_DASHBOARD_IMAGE "$target_image"
-  set_maintenance_image "$target_image"
   chmod 600 .env.server
   echo "deployed_commit=$target_commit scope=dashboard"
   "${compose[@]}" ps dashboard
