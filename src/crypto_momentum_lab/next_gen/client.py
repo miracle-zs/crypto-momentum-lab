@@ -16,6 +16,7 @@ from uuid import uuid4
 import httpx
 import structlog
 import websockets
+from websockets.asyncio.client import ClientConnection
 
 from crypto_momentum_lab.next_gen.engine import AccountSnapshot, PositionSnapshot
 from crypto_momentum_lab.next_gen.models import OrderStatus
@@ -90,8 +91,16 @@ class BinanceRestClient:
         self._client = http_client or httpx.AsyncClient(timeout=10.0)
         self._owns_client = http_client is None
         self._ws_api_ssl_context: ssl.SSLContext | None = None
+        self._ws_api_connection: ClientConnection | None = None
 
     async def close(self) -> None:
+        ws_api_connection = self._ws_api_connection
+        self._ws_api_connection = None
+        if ws_api_connection is not None:
+            try:
+                await ws_api_connection.close()
+            except Exception as error:
+                log.debug("account_status_ws_close_failed", error=str(error))
         if self._owns_client:
             await self._client.aclose()
 
@@ -285,33 +294,44 @@ class BinanceRestClient:
             "params": params,
         }
 
-        # Repeatedly loading the CA store for short-lived sampling connections
-        # increases native memory even after the sockets have been closed.
-        if self._ws_api_ssl_context is None:
-            self._ws_api_ssl_context = ssl.create_default_context()
-        async with websockets.connect(
-            get_binance_ws_api_url(self.environment),
-            ssl=self._ws_api_ssl_context,
-            open_timeout=3,
-            close_timeout=1,
-            ping_interval=None,
-        ) as ws:
+        ws = self._ws_api_connection
+        try:
+            # Keep one signed-API connection for the 15-second status samples;
+            # repeated short-lived TLS sessions retain native allocations.
+            if ws is None:
+                if self._ws_api_ssl_context is None:
+                    self._ws_api_ssl_context = ssl.create_default_context()
+                ws = await websockets.connect(
+                    get_binance_ws_api_url(self.environment),
+                    ssl=self._ws_api_ssl_context,
+                    open_timeout=3,
+                    close_timeout=1,
+                    ping_interval=20,
+                )
+                self._ws_api_connection = ws
             await ws.send(json.dumps(request))
             response = json.loads(await asyncio.wait_for(ws.recv(), timeout=3))
-
-        if response.get("id") != request_id or response.get("status") != 200:
-            raise RuntimeError(f"Binance account margin request failed: {response}")
-        result = response["result"]
-        margin_used = Decimal(str(result["totalPositionInitialMargin"])) + Decimal(
-            str(result["totalOpenOrderInitialMargin"])
-        )
-        return (
-            margin_used,
-            Decimal(str(result["totalMarginBalance"])),
-            Decimal(str(result["availableBalance"])),
-            int(result["feeTier"]),
-            bool(result["multiAssetsMargin"]),
-        )
+            if response.get("id") != request_id or response.get("status") != 200:
+                raise RuntimeError(f"Binance account margin request failed: {response}")
+            result = response["result"]
+            margin_used = Decimal(str(result["totalPositionInitialMargin"])) + Decimal(
+                str(result["totalOpenOrderInitialMargin"])
+            )
+            return (
+                margin_used,
+                Decimal(str(result["totalMarginBalance"])),
+                Decimal(str(result["availableBalance"])),
+                int(result["feeTier"]),
+                bool(result["multiAssetsMargin"]),
+            )
+        except Exception:
+            self._ws_api_connection = None
+            if ws is not None:
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
+            raise
 
     async def fetch_startup_order(
         self, symbol: str, client_order_id: str

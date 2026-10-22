@@ -38,11 +38,11 @@ async def test_margin_samples_reuse_verified_tls_context_and_close_connections(
     rest_client: BinanceRestClient,
 ):
     contexts = []
-    connections = []
+    ws = AsyncMock()
 
     def connect(url, **kwargs):
         contexts.append(kwargs["ssl"])
-        ws = AsyncMock()
+        assert kwargs["ping_interval"] == 20
 
         async def receive():
             request = json.loads(ws.send.call_args.args[0])
@@ -63,10 +63,7 @@ async def test_margin_samples_reuse_verified_tls_context_and_close_connections(
             )
 
         ws.recv.side_effect = receive
-        connection = AsyncMock()
-        connection.__aenter__.return_value = ws
-        connections.append(connection)
-        return connection
+        return ws
 
     with (
         patch(
@@ -75,8 +72,8 @@ async def test_margin_samples_reuse_verified_tls_context_and_close_connections(
         ) as create_context,
         patch(
             "crypto_momentum_lab.next_gen.client.websockets.connect",
-            side_effect=connect,
-        ),
+            new=AsyncMock(side_effect=connect),
+        ) as mock_connect,
     ):
         for _ in range(3):
             assert await rest_client.fetch_account_margin_status() == (
@@ -88,12 +85,62 @@ async def test_margin_samples_reuse_verified_tls_context_and_close_connections(
             )
         create_context.assert_called_once_with()
 
-    assert len(connections) == 3
-    assert all(context is contexts[0] for context in contexts)
+    assert len(contexts) == 1
+    mock_connect.assert_awaited_once()
     assert contexts[0].verify_mode == ssl.CERT_REQUIRED
     assert contexts[0].check_hostname
-    for connection in connections:
-        connection.__aexit__.assert_awaited_once()
+    assert ws.send.await_count == 3
+    ws.close.assert_not_awaited()
+
+    await rest_client.close()
+    ws.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_margin_sample_reconnects_on_the_next_call_after_connection_failure(
+    rest_client: BinanceRestClient,
+):
+    failed_ws = AsyncMock()
+    failed_ws.recv.side_effect = RuntimeError("connection closed")
+    recovered_ws = AsyncMock()
+
+    async def receive():
+        request = json.loads(recovered_ws.send.call_args.args[0])
+        return json.dumps(
+            {
+                "id": request["id"],
+                "status": 200,
+                "result": {
+                    "totalPositionInitialMargin": "10",
+                    "totalOpenOrderInitialMargin": "2",
+                    "totalMarginBalance": "100",
+                    "availableBalance": "88",
+                    "feeTier": 1,
+                    "multiAssetsMargin": False,
+                },
+            }
+        )
+
+    recovered_ws.recv.side_effect = receive
+    connect = AsyncMock(side_effect=[failed_ws, recovered_ws])
+    with patch(
+        "crypto_momentum_lab.next_gen.client.websockets.connect", new=connect
+    ):
+        with pytest.raises(RuntimeError, match="connection closed"):
+            await rest_client.fetch_account_margin_status()
+        failed_ws.close.assert_awaited_once()
+
+        assert await rest_client.fetch_account_margin_status() == (
+            Decimal("12"),
+            Decimal("100"),
+            Decimal("88"),
+            1,
+            False,
+        )
+        assert connect.await_count == 2
+
+    await rest_client.close()
+    recovered_ws.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
