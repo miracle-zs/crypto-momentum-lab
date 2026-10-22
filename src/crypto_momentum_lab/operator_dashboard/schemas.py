@@ -88,6 +88,7 @@ class LiveAccountSummaryResponse(DashboardSchema):
     runtime_tradeability: TradeabilityDetailResponse | None = None
     runtime_observed_at: datetime | None = None
     runtime_started_at: datetime | None = None
+    startup_baseline: dict[str, JsonValue] = Field(default_factory=dict)
     # Observation-queue backpressure published with the runtime readiness
     # snapshot: depth, high watermark, overflow count, oldest pending age.
     runtime_order_observation: dict[str, JsonValue] | None = None
@@ -123,7 +124,7 @@ class LiveAccountMetricsResponse(DashboardSchema):
     """Comparable equity, margin, and drawdown curves for live accounts."""
 
     status: OperationalStatus
-    equity_range: Literal["24h", "7d", "30d", "1y"] = "24h"
+    equity_range: Literal["24h"] = "24h"
     equity_window_start: datetime | None = None
     equity_window_end: datetime | None = None
     equity_sample_interval_seconds: int | None = None
@@ -188,6 +189,8 @@ class AccountOverviewResponse(DashboardSchema):
     status: OperationalStatus
     observed_at: datetime | None
     balances: list[dict[str, JsonValue]]
+    exchange_positions: list[dict[str, JsonValue]] = Field(default_factory=list)
+    exchange_positions_observed_at: datetime | None = None
     positions: list[dict[str, JsonValue]]
     open_orders: list[dict[str, JsonValue]]
     fills: list[dict[str, JsonValue]]
@@ -195,9 +198,10 @@ class AccountOverviewResponse(DashboardSchema):
     environment: str | None = None
     account_label: str | None = None
     account_config: dict[str, JsonValue] = Field(default_factory=dict)
+    startup_baseline: dict[str, JsonValue] = Field(default_factory=dict)
     reconciliation: dict[str, JsonValue] = Field(default_factory=dict)
     summary: dict[str, JsonValue] = Field(default_factory=dict)
-    equity_range: Literal["24h", "7d", "30d", "1y"] = "24h"
+    equity_range: Literal["24h"] = "24h"
     equity_window_start: datetime | None = None
     equity_window_end: datetime | None = None
     equity_sample_interval_seconds: int | None = None

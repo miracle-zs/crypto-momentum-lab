@@ -33,6 +33,7 @@ class PositionSnapshot:
     symbol: str
     position_side: str
     position_amt: Decimal
+    entry_price: Decimal | None = None
 
 
 @dataclass
@@ -40,6 +41,7 @@ class AccountSnapshot:
     wallet_balances: dict[str, Decimal]
     available_balance: Decimal
     positions: list[PositionSnapshot]
+    hedge_mode: bool | None = None
 
 
 class AccountState:
@@ -68,6 +70,15 @@ class AccountState:
         self.wallet_balances: dict[str, Decimal] = {}
         self.wallet_balance: Decimal = Decimal("0")
         self.available_balance_snapshot: Decimal = Decimal("0")
+        self.exchange_positions: dict[tuple[str, str], PositionSnapshot] = {}
+        self.exchange_positions_observed_at: datetime | None = None
+        self.hedge_mode: bool | None = None
+        self.multi_assets_mode: bool | None = None
+        self.fee_tier: int | None = None
+        self.startup_baseline_status: str | None = None
+        self.startup_baseline_observed_at: datetime | None = None
+        self.startup_baseline_position_count: int | None = None
+        self.startup_baseline_open_order_count: int | None = None
 
         self.system_mode: SystemMode = SystemMode.BOOTING
         self.is_draining: bool = False
@@ -159,6 +170,19 @@ class AccountState:
         self.wallet_balance = self.wallet_balances.get("USDT", Decimal("0"))
         if available_balance_snapshot is not None:
             self.available_balance_snapshot = available_balance_snapshot
+
+    def replace_exchange_positions(self, positions: list[PositionSnapshot]) -> None:
+        self.exchange_positions.clear()
+        self.update_exchange_positions(positions)
+
+    def update_exchange_positions(self, positions: list[PositionSnapshot]) -> None:
+        for position in positions:
+            key = (position.symbol, position.position_side)
+            if position.position_amt == 0:
+                self.exchange_positions.pop(key, None)
+            else:
+                self.exchange_positions[key] = position
+        self.exchange_positions_observed_at = datetime.now(UTC)
 
     def can_submit_entry_order(self) -> bool:
         if (
@@ -450,6 +474,18 @@ class AccountState:
         positions: list[dict[str, Any]] | None = None,
     ) -> None:
         self.update_balances(balances, available_balance)
+        if positions:
+            self.update_exchange_positions(
+                [
+                    PositionSnapshot(
+                        symbol=str(position["s"]),
+                        position_side=str(position["ps"]),
+                        position_amt=Decimal(str(position["pa"])),
+                        entry_price=Decimal(str(position["ep"])),
+                    )
+                    for position in positions
+                ]
+            )
 
     async def on_live_event(self, event: dict[str, Any]) -> None:
         """分发来自 WebSocket 的私有流事件到领域更新方法"""

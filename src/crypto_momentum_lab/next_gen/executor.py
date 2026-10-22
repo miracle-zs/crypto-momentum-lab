@@ -238,6 +238,12 @@ class OrderExecutor:
         self._state.update_balances(
             snapshot.wallet_balances, snapshot.available_balance
         )
+        self._state.replace_exchange_positions(snapshot.positions)
+        self._state.hedge_mode = snapshot.hedge_mode
+        self._state.startup_baseline_status = "MATCHED"
+        self._state.startup_baseline_observed_at = datetime.now(UTC)
+        self._state.startup_baseline_position_count = len(actual)
+        self._state.startup_baseline_open_order_count = len(exchange_ids)
         if self._state.has_unrecoverable_fault or self._state.private_stream_gap:
             raise RuntimeError("Startup private state is not trustworthy")
 

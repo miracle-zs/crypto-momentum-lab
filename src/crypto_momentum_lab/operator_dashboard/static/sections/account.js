@@ -7,6 +7,5 @@ export {
   renderLiveAccountMetrics,
   renderLiveAccounts,
   updateLiveAccountsDynamic,
-  wireAccountEquityRanges,
   wireLiveAccounts,
 } from "./account/index.js";

@@ -190,47 +190,6 @@
   gap: 12px;
 }
 
-.account-equity-actions { display: inline-flex; }
-
-.equity-range-switch {
-  display: inline-grid;
-  grid-template-columns: repeat(4, minmax(48px, auto));
-  gap: 2px;
-  padding: 3px;
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--surface-3) 82%, transparent);
-}
-
-.equity-range-switch button {
-  min-height: 28px;
-  padding: 5px 9px;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--faint);
-  font: 600 9.5px var(--mono);
-  letter-spacing: .04em;
-  cursor: pointer;
-  transition: color .15s ease, border-color .15s ease, background .15s ease;
-}
-
-.equity-range-switch button:hover:not(:disabled) { color: var(--text); }
-
-.equity-range-switch button[aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--brand) 58%, var(--line));
-  background: color-mix(in srgb, var(--brand) 16%, var(--surface-2));
-  color: var(--brand);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--brand) 10%, transparent);
-}
-
-.equity-range-switch button:focus-visible {
-  outline: 2px solid var(--brand);
-  outline-offset: 2px;
-}
-
-.equity-range-switch button:disabled { cursor: wait; opacity: .56; }
-
 .account-equity-value {
   display: grid;
   justify-items: end;
@@ -240,10 +199,6 @@
 
 .account-equity-value small { margin: 0; letter-spacing: .05em; }
 .account-equity-value strong { font-size: 17px; }
-
-.account-equity-block.is-range-loading .equity-chart,
-.account-equity-block.is-range-loading .chart-context,
-.account-equity-block.is-range-loading .equity-coverage-note { opacity: .48; }
 
 .equity-coverage-note {
   margin: -2px 0 9px;
@@ -323,7 +278,6 @@
   .account-state-grid { grid-template-columns: 1fr; }
   .account-hero { padding: 15px 14px; }
   .account-hero-meta { justify-items: start; }
-  .equity-range-switch { width: 100%; }
   .detail-meta { gap: 5px 12px; }
   .acct-card { min-height: 184px; padding: 13px 14px; }
 }
@@ -509,31 +463,6 @@
   white-space: nowrap;
 }
 
-.live-account-card-kpis {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px 12px;
-}
-
-.live-account-card-kpis span {
-  display: grid;
-  min-width: 0;
-  gap: 3px;
-}
-
-.live-account-card-kpis small {
-  color: var(--faint);
-  font-size: 0.66rem;
-}
-
-.live-account-card-kpis b {
-  overflow: hidden;
-  color: var(--text);
-  font-size: 0.83rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .live-account-card-footer {
   padding-top: 10px;
   border-top: 1px solid var(--line);
@@ -674,10 +603,6 @@
 
 .live-account-metrics-loading {
   min-height: 260px;
-}
-
-.live-account-metrics-block.is-range-loading {
-  opacity: 0.72;
 }
 
 @media (max-width: 1180px) {

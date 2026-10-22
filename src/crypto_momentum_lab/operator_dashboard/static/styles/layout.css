@@ -614,7 +614,6 @@
   .account-hero-meta { justify-items: start; }
   .account-equity-block .block-title > span { align-items: stretch; flex-direction: column-reverse; }
   .account-equity-value { justify-items: start; }
-  .equity-range-switch { width: 100%; grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .clock strong { font-size: 15px; }
   .topbar-meta { grid-template-columns: 1fr; }
   .clock { justify-self: start; }
@@ -624,7 +623,7 @@
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   .pulse, .mode-badge.status-LIVE, .skeleton s, .pollbar.run::before { animation: none; }
-  .acct-card, .nav a, .equity-range-switch button { transition: none; }
+  .acct-card, .nav a { transition: none; }
 }
 
 .shell { grid-template-columns: 240px minmax(0, 1fr); }

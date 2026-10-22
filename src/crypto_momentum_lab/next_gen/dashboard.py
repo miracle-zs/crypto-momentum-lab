@@ -35,12 +35,9 @@ from crypto_momentum_lab.persistence.postgres.models import (
 )
 
 TERMINAL_STATUSES = ("FILLED", "CANCELED", "EXPIRED", "REJECTED")
-EquityRange = Literal["24h", "7d", "30d", "1y"]
+EquityRange = Literal["24h"]
 _EQUITY_RANGES: dict[str, tuple[timedelta, int]] = {
     "24h": (timedelta(hours=24), 6 * 60),
-    "7d": (timedelta(days=7), 60 * 60),
-    "30d": (timedelta(days=30), 3 * 60 * 60),
-    "1y": (timedelta(days=365), 2 * 24 * 60 * 60),
 }
 
 
@@ -105,6 +102,7 @@ class NextGenDashboardQueries:
             observed_at=row.occurred_at,
             strategy_name=payload["strategy_name"],
             strategy_state=payload["mode"],
+            startup_baseline=payload.get("startup_baseline", {}),
             runtime_observed_at=row.occurred_at,
             runtime_started_at=payload.get("started_at"),
             runtime_tradeability=TradeabilityDetailResponse(
@@ -252,18 +250,18 @@ class NextGenDashboardQueries:
         initial = None
         for row in rows:
             payload = row["details"]
-            wallet = payload["balances"].get("USDT")
-            unrealized = payload["unrealized_pnl"]
-            if wallet is None or unrealized is None:
+            account_equity = payload.get("account_equity")
+            if account_equity is None:
                 continue
-            equity = Decimal(wallet) + Decimal(unrealized)
+            equity = Decimal(account_equity)
             peak = equity if peak is None else max(peak, equity)
             initial = equity if initial is None else initial
             points.append(
                 LiveAccountMetricPointResponse(
                     observed_at=row["occurred_at"],
                     equity=str(equity),
-                    margin_used=None,
+                    margin_used=payload.get("margin_used"),
+                    margin_occupancy_ratio=payload.get("margin_occupancy_ratio"),
                     equity_change_ratio=None
                     if initial == 0
                     else str((equity - initial) / initial),
@@ -310,6 +308,12 @@ class NextGenDashboardQueries:
             raise ValueError("Unknown NextGen live account")
         config = self._accounts[label]
         summary, status_row = await self._status(label)
+        payload: dict[str, Any] | None = (
+            None if status_row is None else cast(dict[str, Any], status_row.details)
+        )
+        exchange_position_snapshots: list[dict[str, Any]] = (
+            [] if payload is None else payload.get("exchange_positions", [])
+        )
         async with self._sessions() as session:
             batches = (
                 await session.scalars(
@@ -421,6 +425,10 @@ class NextGenDashboardQueries:
                         RuntimeMarketState15sRow.environment == "research",
                         RuntimeMarketState15sRow.symbol.in_(
                             {batch.symbol for batch in batches}
+                            | {
+                                position["symbol"]
+                                for position in exchange_position_snapshots
+                            }
                         ),
                         RuntimeMarketState15sRow.bucket_end <= self._clock(),
                         RuntimeMarketState15sRow.bucket_end
@@ -514,9 +522,6 @@ class NextGenDashboardQueries:
         price_by_symbol = {
             row.symbol: row.mark_price for row in marks if row.mark_price is not None
         }
-        payload: dict[str, Any] | None = (
-            None if status_row is None else cast(dict[str, Any], status_row.details)
-        )
         balances: list[dict[str, Any]] = (
             []
             if payload is None
@@ -524,7 +529,9 @@ class NextGenDashboardQueries:
                 {
                     "asset": asset,
                     "wallet_balance": value,
-                    "available_balance": None,
+                    "available_balance": payload.get("available_balance")
+                    if asset == "USDT"
+                    else None,
                     "unrealized_pnl": payload["unrealized_pnl"]
                     if asset == "USDT"
                     else None,
@@ -556,6 +563,42 @@ class NextGenDashboardQueries:
                     "strategy_name": config.strategy,
                 }
             )
+        exchange_positions: list[dict[str, Any]] = []
+        for position in exchange_position_snapshots:
+            amount = Decimal(position["position_amt"])
+            position_side = str(position["position_side"])
+            entry_price = (
+                None
+                if position.get("entry_price") is None
+                else Decimal(position["entry_price"])
+            )
+            mark = price_by_symbol.get(str(position["symbol"]))
+            direction = (
+                ("LONG" if amount > 0 else "SHORT")
+                if position_side == "BOTH"
+                else position_side
+            )
+            signed_quantity = abs(amount) * (
+                Decimal("1") if direction == "LONG" else Decimal("-1")
+            )
+            exchange_positions.append(
+                {
+                    "symbol": position["symbol"],
+                    "position_side": position_side,
+                    "direction": direction,
+                    "position_amt": str(abs(amount)),
+                    "entry_price": None if entry_price is None else str(entry_price),
+                    "mark_price": None if mark is None else str(mark),
+                    "notional": (
+                        None if mark is None else str(abs(amount) * mark)
+                    ),
+                    "unrealized_pnl": (
+                        None
+                        if mark is None or entry_price is None
+                        else str(signed_quantity * (mark - entry_price))
+                    ),
+                }
+            )
         start, end, interval, points = await self._equity_points(label, equity_range)
         return AccountOverviewResponse(
             status=summary.status,
@@ -566,8 +609,37 @@ class NextGenDashboardQueries:
                 "engine": "nextgen",
                 "strategy_name": config.strategy,
                 "strategy_config_hash": config.strategy_config_hash,
+                "hedge_mode": (
+                    None
+                    if payload is None
+                    else payload.get("account_configuration", {}).get("hedge_mode")
+                ),
+                "multi_assets_mode": (
+                    None
+                    if payload is None
+                    else payload.get("account_configuration", {}).get(
+                        "multi_assets_mode"
+                    )
+                ),
+                "fee_tier": (
+                    None
+                    if payload is None
+                    else payload.get("account_configuration", {}).get("fee_tier")
+                ),
             },
+            startup_baseline=(
+                {} if payload is None else payload.get("startup_baseline", {})
+            ),
             balances=balances,
+            exchange_positions=exchange_positions,
+            exchange_positions_observed_at=(
+                None
+                if payload is None
+                or payload.get("exchange_positions_observed_at") is None
+                else datetime.fromisoformat(
+                    payload["exchange_positions_observed_at"]
+                )
+            ),
             positions=positions,
             open_orders=[
                 {**self._order(row), "strategy_name": config.strategy}
@@ -585,6 +657,18 @@ class NextGenDashboardQueries:
                 "total_unrealized_pnl": None
                 if payload is None
                 else payload["unrealized_pnl"],
+                "usdt_available_balance": None
+                if payload is None
+                else payload.get("available_balance"),
+                "available_balance_observed_at": (
+                    None
+                    if (
+                        status_row is None
+                        or payload is None
+                        or payload.get("available_balance") is None
+                    )
+                    else status_row.occurred_at.isoformat()
+                ),
                 "gross_position_notional": (
                     str(
                         sum(

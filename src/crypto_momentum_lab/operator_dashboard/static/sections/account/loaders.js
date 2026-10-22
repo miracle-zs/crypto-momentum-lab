@@ -9,10 +9,6 @@ import { K, sel } from "../../ui/css-keys.js";
 import { DISPLAY_TIME_ZONE_LABEL } from "./constants.js";
 import { renderAccount } from "./render-detail.js";
 import { renderLiveAccountMetrics } from "./render-metrics.js";
-import {
-  accountDetailRange,
-  rememberAccountDetailRange,
-} from "./state.js";
 
 export async function defaultAccountRequestJson(url, { timeoutMs = 15000 } = {}) {
   const signal = typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
@@ -27,7 +23,7 @@ export async function defaultAccountRequestJson(url, { timeoutMs = 15000 } = {})
 }
 
 const liveAccountDetailInFlight = new Map();
-const liveAccountMetricsInFlight = new Map();
+let liveAccountMetricsInFlight;
 
 /**
  * A cached API response can be polled again before its source has changed.
@@ -37,11 +33,10 @@ const liveAccountMetricsInFlight = new Map();
 export function renderedPayloadMatches(
   slot,
   payload,
-  { accountLabel = null, equityRange = null } = {},
+  { accountLabel = null } = {},
 ) {
   if (!slot || slot.__cmlRenderedPayload === undefined) return false;
   if (accountLabel != null && slot.dataset.renderedAccount !== accountLabel) return false;
-  if (equityRange != null && slot.dataset.renderedRange !== equityRange) return false;
   return slot.__cmlRenderedPayload === JSON.stringify(payload);
 }
 
@@ -60,13 +55,6 @@ export function markRefreshStale(root, message) {
 
 export function detailContentSlot(slot) {
   return slot.querySelector(sel.liveAccountDetailContent()) || slot;
-}
-
-export function selectedAccountDetailRange(slot) {
-  return slot?.dataset.requestedRange
-    || slot?.querySelector(sel.accountEquityRangePressed())?.dataset.accountEquityRange
-    || slot?.dataset.renderedRange
-    || "24h";
 }
 
 export function setLiveAccountDetailHeader(slot, accountLabel, data = {}, loadingMessage = "") {
@@ -94,78 +82,14 @@ export function setLiveAccountTabState(root, accountLabel) {
   });
 }
 
-export function wireAccountEquityRanges(root, onSelect) {
-  root.querySelectorAll(sel.accountEquityRange()).forEach((button) => {
-    if (button.dataset.accountEquityRangeWired === "true") return;
-    button.dataset.accountEquityRangeWired = "true";
-    button.addEventListener("click", async () => {
-      if (button.getAttribute("aria-pressed") === "true") return;
-      const range = button.dataset.accountEquityRange;
-      if (!range) return;
-      const slot = root.matches?.(`[${K.liveAccountDetail}]`)
-        ? root
-        : root.closest?.(`[${K.liveAccountDetail}]`);
-      if (slot) slot.dataset.requestedRange = range;
-      const controls = root.querySelectorAll(sel.accountEquityRange());
-      controls.forEach((control) => {
-        control.disabled = true;
-        control.setAttribute("aria-pressed", String(control === button));
-      });
-      root.querySelector(`.${K.accountEquityBlock}`)?.classList.add("is-range-loading");
-      try {
-        await onSelect(range);
-      } finally {
-        if (button.isConnected) {
-          controls.forEach((control) => { control.disabled = false; });
-          root.querySelector(`.${K.accountEquityBlock}`)?.classList.remove("is-range-loading");
-        }
-      }
-    });
-  });
-}
-
-export function wireLiveAccountMetricsRanges(root, onSelect, state) {
-  root.querySelectorAll(sel.liveMetricsRange()).forEach((button) => {
-    if (button.dataset.liveMetricsRangeWired === "true") return;
-    button.dataset.liveMetricsRangeWired = "true";
-    button.addEventListener("click", async () => {
-      if (button.getAttribute("aria-pressed") === "true") return;
-      const range = button.dataset.liveAccountMetricsRange;
-      if (!range) return;
-      const controls = root.querySelectorAll(sel.liveMetricsRange());
-      controls.forEach((control) => {
-        control.disabled = true;
-        control.setAttribute("aria-pressed", String(control === button));
-      });
-      root.querySelector(`.${K.liveAccountMetricsBlock}`)?.classList.add("is-range-loading");
-      try {
-        state.selectedLiveAccountMetricsRange = range;
-        await onSelect(range);
-      } finally {
-        if (root.isConnected) {
-          root.querySelectorAll(sel.liveMetricsRange()).forEach((control) => { control.disabled = false; });
-          root.querySelector(`.${K.liveAccountMetricsBlock}`)?.classList.remove("is-range-loading");
-        }
-      }
-    });
-  });
-}
-
 export async function loadLiveAccountDetail(
   state,
   root,
   accountLabel,
   requestJson,
-  equityRange = "24h",
-  { forceFetch = false } = {},
 ) {
   const slot = root.querySelector(sel.liveAccountDetail());
   if (!slot) return;
-  const wireDetailControls = (content) => {
-    wireAccountEquityRanges(content, (nextRange) => loadLiveAccountDetail(
-      state, root, accountLabel, requestJson, nextRange,
-    ));
-  };
   const contentSlot = detailContentSlot(slot);
   const selectedCard = [...root.querySelectorAll(sel.accountCards())]
     .find((button) => button.dataset.liveAccountLabel === accountLabel);
@@ -174,10 +98,8 @@ export async function loadLiveAccountDetail(
   ) : null;
   const requestId = ++state.liveAccountDetailRequest;
   state.selectedLiveAccount = accountLabel;
-  rememberAccountDetailRange(state, accountLabel, equityRange);
   setLiveAccountTabState(root, accountLabel);
   slot.dataset.accountLabel = accountLabel;
-  slot.dataset.requestedRange = equityRange;
   const renderedAccount = slot.dataset.renderedAccount;
   const isSameAccount = renderedAccount === accountLabel;
   const hasLastGood = Boolean(renderedAccount && contentSlot.children.length);
@@ -188,20 +110,6 @@ export async function loadLiveAccountDetail(
     !isSameAccount && hasLastGood ? `正在读取 ${accountLabel} 快照；保留上次内容` : "",
   );
 
-  if (!forceFetch && (accountData?.summary || accountData?.balances)) {
-    const [status, html] = renderAccount({ ...accountData, equity_range: equityRange });
-    if (isSameAccount) patchChildrenFromHtml(contentSlot, html);
-    else replaceChildrenFromHtml(contentSlot, html);
-    slot.dataset.accountStatus = status;
-    slot.dataset.renderedAccount = accountLabel;
-    slot.dataset.renderedRange = equityRange;
-    slot.dataset.requestedRange = equityRange;
-    setLiveAccountDetailHeader(slot, accountLabel, accountData);
-    wireDetailControls(contentSlot);
-    refreshEcharts(contentSlot);
-    slot.removeAttribute("aria-busy");
-    return;
-  }
   if (!hasLastGood && !contentSlot.children.length) {
     replaceChildrenFromHtml(
       contentSlot,
@@ -210,13 +118,10 @@ export async function loadLiveAccountDetail(
   }
   slot.setAttribute("aria-busy", "true");
   try {
-    const fetchKey = `${accountLabel}:${equityRange}`;
+    const fetchKey = accountLabel;
     let detailPromise = liveAccountDetailInFlight.get(fetchKey);
     if (!detailPromise) {
-      const query = new URLSearchParams({
-        account_label: accountLabel,
-        equity_range: equityRange,
-      });
+      const query = new URLSearchParams({ account_label: accountLabel });
       detailPromise = Promise.resolve(requestJson(`api/account?${query.toString()}`))
         .finally(() => {
           liveAccountDetailInFlight.delete(fetchKey);
@@ -225,17 +130,14 @@ export async function loadLiveAccountDetail(
     }
     const detail = await detailPromise;
     if (requestId !== state.liveAccountDetailRequest || !slot.isConnected) return;
-    if (renderedPayloadMatches(slot, detail, { accountLabel, equityRange })) return;
+    if (renderedPayloadMatches(slot, detail, { accountLabel })) return;
     const [status, html] = renderAccount(detail);
     if (slot.dataset.renderedAccount === accountLabel) patchChildrenFromHtml(contentSlot, html);
     else replaceChildrenFromHtml(contentSlot, html);
     slot.dataset.accountStatus = status;
     slot.dataset.renderedAccount = accountLabel;
-    slot.dataset.renderedRange = equityRange;
-    slot.dataset.requestedRange = equityRange;
     rememberRenderedPayload(slot, detail);
     setLiveAccountDetailHeader(slot, accountLabel, detail);
-    wireDetailControls(contentSlot);
     refreshEcharts(contentSlot);
   } catch (error) {
     if (requestId !== state.liveAccountDetailRequest || !slot.isConnected) return;
@@ -257,13 +159,11 @@ export async function loadLiveAccountDetail(
   }
 }
 
-export async function loadLiveAccountMetrics(state, root, requestJson, equityRange) {
+export async function loadLiveAccountMetrics(state, root, requestJson) {
   const slot = root.querySelector(sel.liveAccountMetrics());
   if (!slot) return;
   const requestId = ++state.liveAccountMetricsRequest;
-  state.selectedLiveAccountMetricsRange = equityRange;
-  slot.dataset.requestedRange = equityRange;
-  const hasLastGood = Boolean(slot.dataset.renderedRange && slot.children.length);
+  const hasLastGood = slot.__cmlRenderedPayload !== undefined && slot.children.length > 0;
   if (!hasLastGood && !slot.children.length) {
     replaceChildrenFromHtml(
       slot,
@@ -272,33 +172,28 @@ export async function loadLiveAccountMetrics(state, root, requestJson, equityRan
   }
   slot.setAttribute("aria-busy", "true");
   try {
-    const fetchKey = String(equityRange);
-    let metricsPromise = liveAccountMetricsInFlight.get(fetchKey);
+    let metricsPromise = liveAccountMetricsInFlight;
     if (!metricsPromise) {
-      const query = new URLSearchParams({ equity_range: equityRange });
-      metricsPromise = Promise.resolve(requestJson(`api/live-account-metrics?${query.toString()}`))
+      metricsPromise = Promise.resolve(requestJson("api/live-account-metrics"))
         .finally(() => {
-          liveAccountMetricsInFlight.delete(fetchKey);
+          liveAccountMetricsInFlight = undefined;
         });
-      liveAccountMetricsInFlight.set(fetchKey, metricsPromise);
+      liveAccountMetricsInFlight = metricsPromise;
     }
     const data = await metricsPromise;
     if (requestId !== state.liveAccountMetricsRequest || !slot.isConnected) return;
-    if (renderedPayloadMatches(slot, data, { equityRange })) return;
+    if (renderedPayloadMatches(slot, data)) return;
     const html = renderLiveAccountMetrics(data);
     if (hasLastGood) patchChildrenFromHtml(slot, html);
     else replaceChildrenFromHtml(slot, html);
-    slot.dataset.renderedRange = equityRange;
-    slot.dataset.requestedRange = equityRange;
     rememberRenderedPayload(slot, data);
-    wireLiveAccountMetricsRanges(slot, (nextRange) => loadLiveAccountMetrics(state, root, requestJson, nextRange), state);
     refreshEcharts(slot);
   } catch (error) {
     if (requestId !== state.liveAccountMetricsRequest || !slot.isConnected) return;
     if (hasLastGood) {
-      markRefreshStale(slot, `${equityRange} 时序刷新失败，保留上次成功图表：${error.message}`);
+      markRefreshStale(slot, `资金时序刷新失败，保留上次成功图表：${error.message}`);
     } else {
-      replaceChildrenFromHtml(slot, emptyBox("账户时序加载失败", `${equityRange} · ${error.message}`));
+      replaceChildrenFromHtml(slot, emptyBox("账户时序加载失败", error.message));
     }
   } finally {
     if (requestId === state.liveAccountMetricsRequest && slot.isConnected) {

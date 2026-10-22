@@ -86,13 +86,17 @@ def test_decision_slo_endpoint_accepts_a_bounded_window() -> None:
     assert response.json()["window"] == "7d"
 
 
-def test_account_endpoint_accepts_an_account_label() -> None:
+def test_account_endpoint_accepts_an_account_label_and_fixed_window() -> None:
     with TestClient(create_dashboard_app(queries=FakeQueries())) as client:
-        response = client.get("/api/account?account_label=account-3&equity_range=7d")
+        response = client.get("/api/account?account_label=account-3&equity_range=24h")
+        unsupported_range = client.get(
+            "/api/account?account_label=account-3&equity_range=7d"
+        )
 
     assert response.status_code == 200
     assert response.json()["account_label"] == "account-3"
-    assert response.json()["equity_range"] == "7d"
+    assert response.json()["equity_range"] == "24h"
+    assert unsupported_range.status_code == 422
 
 
 def test_live_accounts_endpoint_returns_account_collection() -> None:
@@ -105,14 +109,16 @@ def test_live_accounts_endpoint_returns_account_collection() -> None:
     assert payload["accounts"][0]["account_label"] == "primary"
 
 
-def test_live_account_metrics_endpoint_accepts_equity_range() -> None:
+def test_live_account_metrics_endpoint_uses_fixed_window() -> None:
     with TestClient(create_dashboard_app(queries=FakeQueries())) as client:
-        response = client.get("/api/live-account-metrics?equity_range=7d")
+        response = client.get("/api/live-account-metrics?equity_range=24h")
+        unsupported_range = client.get("/api/live-account-metrics?equity_range=7d")
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["equity_range"] == "7d"
+    assert payload["equity_range"] == "24h"
     assert payload["accounts"] == []
+    assert unsupported_range.status_code == 422
 
 
 def test_dashboard_enables_gzip_for_large_static_responses() -> None:
@@ -208,7 +214,7 @@ def test_account_timeout_returns_gateway_timeout() -> None:
             raise TimeoutError("account query timed out")
 
     with TestClient(create_dashboard_app(queries=SlowAccountQueries())) as client:
-        response = client.get("/api/account?equity_range=30d")
+        response = client.get("/api/account?equity_range=24h")
 
     assert response.status_code == 504
     assert response.json()["detail"] == "dashboard account query timed out"

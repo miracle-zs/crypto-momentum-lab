@@ -1,26 +1,16 @@
 import {
-  asNumber,
   esc,
-  money,
-  pnlClass,
   relToNow,
-  signedMoney,
 } from "../../dashboard-formatters.js";
 import { pill, tile } from "../../dashboard-ui.js";
 import { K, sel } from "../../ui/css-keys.js";
-import {
-  accountDetailRange,
-  createAccountSectionState,
-} from "./state.js";
+import { createAccountSectionState } from "./state.js";
 import {
   defaultAccountRequestJson,
   loadLiveAccountDetail,
   loadLiveAccountMetrics,
-  selectedAccountDetailRange,
-  wireAccountEquityRanges,
 } from "./loaders.js";
 import {
-  accountFleetMetric,
   liveAccountStatusLabel,
   liveAccountStatusClass,
   liveStrategyStateLabel,
@@ -49,7 +39,6 @@ export function wireLiveAccounts(root, data, { requestJson = defaultAccountReque
           root,
           accountLabel,
           requestJson,
-          accountDetailRange(state, accountLabel),
         );
       }
     });
@@ -71,21 +60,15 @@ export function wireLiveAccounts(root, data, { requestJson = defaultAccountReque
   const selected = accounts.find(
     (account) => account.account_label === state.selectedLiveAccount,
   ) || accounts[0];
-  if (selected && !(selected.summary || selected.balances)) {
+  if (selected) {
     void loadLiveAccountDetail(
       state,
       root,
       selected.account_label,
       requestJson,
-      accountDetailRange(state, selected.account_label),
     );
-  } else if (selected) {
-    const slot = root.querySelector(sel.liveAccountDetail());
-    if (slot) {
-      wireAccountEquityRanges(slot, (nextRange) => loadLiveAccountDetail(state, root, selected.account_label, requestJson, nextRange));
-    }
   }
-  void loadLiveAccountMetrics(state, root, requestJson, state.selectedLiveAccountMetricsRange);
+  void loadLiveAccountMetrics(state, root, requestJson);
 }
 
 export async function updateLiveAccountsDynamic(root, data) {
@@ -102,54 +85,25 @@ export async function updateLiveAccountsDynamic(root, data) {
       statusEl.className = `live-account-card-status ${liveAccountStatusClass(account.status)}`;
       statusEl.textContent = liveAccountStatusLabel(account.status);
     }
-    const summary = account.summary || {};
-    const financialSnapshot = Object.keys(summary).length > 0;
-    const reconciliation = account.reconciliation || {};
-    const mismatchCount = asNumber(reconciliation.mismatch_count);
-    const reconciliationLabel = mismatchCount != null && mismatchCount > 0
-      ? `${mismatchCount} 项差异`
-      : String(reconciliation.status || "").toUpperCase() === "READY"
-        ? "对账一致"
-        : (account.reconciliation_status ? `对账 ${account.reconciliation_status}` : "对账待确认");
-    const readiness = account.readiness || "就绪未知";
-    const cardState = financialSnapshot ? reconciliationLabel : readiness;
+    const readiness = liveAccountStatusLabel(account.readiness);
+    const baseline = String(account.startup_baseline?.status || "").toUpperCase();
+    const baselineLabel = baseline === "MATCHED" ? "启动基线一致" : "启动基线未提供";
 
     const stateEl = card.querySelector(`.${K.liveAccountCardState}`);
     if (stateEl) {
-      stateEl.innerHTML = `<span>同步 <b>${esc(relToNow(account.observed_at))}</b></span><span>${esc(cardState)}</span>`;
+      stateEl.innerHTML = `<span>同步 <b>${esc(relToNow(account.observed_at))}</b></span><span>${esc(readiness)}</span>`;
     }
 
-    const kpisEl = card.querySelector(`.${K.liveAccountCardKpis}`);
     const stateDetailEl = card.querySelector(`.${K.liveAccountCardStateDetail}`);
-    if (financialSnapshot) {
-      const kpisHtml = `<span><small>USDT 钱包</small><b class="num">${esc(money(summary.usdt_wallet_balance))}</b></span>` +
-        `<span><small>可用余额（快照）</small><b class="num">${esc(money(summary.usdt_available_balance))}</b></span>` +
-        `<span><small>未实现盈亏</small><b class="num ${pnlClass(summary.total_unrealized_pnl)}">${esc(signedMoney(summary.total_unrealized_pnl))}</b></span>` +
-        `<span><small>名义价值</small><b class="num">${esc(money(summary.gross_position_notional))}</b></span>`;
-      if (kpisEl) {
-        kpisEl.innerHTML = kpisHtml;
-      } else if (stateDetailEl) {
-        stateDetailEl.className = "live-account-card-kpis";
-        stateDetailEl.innerHTML = kpisHtml;
-      }
-    } else {
+    if (stateDetailEl) {
       const strategy = account.strategy_name || "未关联策略";
       const strategyState = liveStrategyStateLabel(account.strategy_state);
-      const stateDetailHtml = `<span>${esc(strategy)} · ${esc(strategyState)}</span><span>${esc(readiness)}</span>`;
-      if (stateDetailEl) {
-        stateDetailEl.innerHTML = stateDetailHtml;
-      } else if (kpisEl) {
-        kpisEl.className = "live-account-card-state-detail";
-        kpisEl.innerHTML = stateDetailHtml;
-      }
+      stateDetailEl.innerHTML = `<span>${esc(strategy)} · ${esc(strategyState)}</span><span>${esc(baselineLabel)}</span>`;
     }
 
     const footerEl = card.querySelector(`.${K.liveAccountCardFooter}`);
     if (footerEl) {
-      const footerText = financialSnapshot
-        ? `${summary.position_count ?? 0} 个持仓 · ${summary.open_order_count ?? 0} 个挂单`
-        : "进入账户详情";
-      footerEl.innerHTML = `${esc(footerText)}<span aria-hidden="true">→</span>`;
+      footerEl.innerHTML = `进入账户详情<span aria-hidden="true">→</span>`;
     }
   });
 
@@ -160,7 +114,7 @@ export async function updateLiveAccountsDynamic(root, data) {
 
   const fleetStatusEl = root.querySelector(`.${K.liveAccountFleetStatus}`);
   if (fleetStatusEl) {
-    fleetStatusEl.innerHTML = `<small>集群状态</small>${pill(overallStatus)}<span>${readyCount} 正常 · ${haltedCount} 停止 · ${reviewCount} 待确认</span>`;
+    fleetStatusEl.innerHTML = `<small>集群状态</small>${pill(overallStatus)}<span>${readyCount} 正常 · ${haltedCount} 停止 · ${reviewCount} 需检查</span>`;
   }
   const fleetKpisEl = root.querySelector(`.${K.liveAccountFleetKpis}`);
   if (fleetKpisEl) {
@@ -168,14 +122,8 @@ export async function updateLiveAccountsDynamic(root, data) {
       tile("实盘账户", `${accounts.length} 个`, "NextGen 账户进程状态"),
       tile("正常账户", `${readyCount} 个`, "可继续观察"),
       tile("停止账户", `${haltedCount} 个`, "需要检查"),
-      tile("待确认", `${reviewCount} 个`, "缺少可靠状态"),
+      tile("需检查", `${reviewCount} 个`, "降级、过期或未知"),
     ];
-    if (accounts.some((account) => account.summary)) {
-      tiles.push(
-        tile("USDT 钱包合计", money(accountFleetMetric(accounts, "usdt_wallet_balance")), "账户快照合计", "hero"),
-        tile("总未实现盈亏", signedMoney(accountFleetMetric(accounts, "total_unrealized_pnl")), "账户群当前浮动盈亏", pnlClass(accountFleetMetric(accounts, "total_unrealized_pnl"))),
-      );
-    }
     fleetKpisEl.innerHTML = tiles.join("");
   }
 
@@ -196,8 +144,6 @@ export async function updateLiveAccountsDynamic(root, data) {
       root,
       currentDetailLabel,
       requestJson,
-      selectedAccountDetailRange(slot),
-      { forceFetch: true },
     )
     : Promise.resolve();
   // These regions are stacked: fleet metrics sit above the selected-account
@@ -205,12 +151,7 @@ export async function updateLiveAccountsDynamic(root, data) {
   // writes can replay stale offsets. Keep one DOM mutation transaction active
   // at a time; the poller awaits this whole function before its final guard.
   await detailRefresh;
-  await loadLiveAccountMetrics(
-    state,
-    root,
-    requestJson,
-    state.selectedLiveAccountMetricsRange,
-  );
+  await loadLiveAccountMetrics(state, root, requestJson);
 }
 
 export {
@@ -219,6 +160,3 @@ export {
 export {
   renderLiveAccountMetrics,
 } from "./render-metrics.js";
-export {
-  wireAccountEquityRanges,
-} from "./loaders.js";

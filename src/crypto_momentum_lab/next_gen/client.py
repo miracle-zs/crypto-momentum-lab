@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from urllib.parse import urlencode
+from uuid import uuid4
 
 import httpx
 import structlog
@@ -55,6 +56,15 @@ def get_binance_urls(environment: str = "live") -> tuple[str, str, str]:
         "wss://fstream.binance.com/private/ws",
         "wss://fstream.binance.com/market/ws",
     )
+
+
+def get_binance_ws_api_url(environment: str = "live") -> str:
+    environment = environment.strip().lower()
+    if environment == "testnet":
+        return "wss://testnet.binancefuture.com/ws-fapi/v1"
+    if environment == "live":
+        return "wss://ws-fapi.binance.com/ws-fapi/v1"
+    raise ValueError(f"Unsupported trading environment: {environment}")
 
 
 class BinanceRestClient:
@@ -208,6 +218,17 @@ class BinanceRestClient:
     async def fetch_account_information(self) -> AccountSnapshot:
         """GET /fapi/v3/account - 并发冷启动基线快照"""
         res = await self._request("GET", "/fapi/v3/account", signed=True)
+        hedge_mode: bool | None = None
+        try:
+            position_mode = await self._request(
+                "GET", "/fapi/v1/positionSide/dual", signed=True
+            )
+            mode_value = position_mode["dualSidePosition"]
+            if not isinstance(mode_value, bool):
+                raise ValueError("Binance position mode was not a boolean")
+            hedge_mode = mode_value
+        except Exception as error:
+            log.warning("account_position_mode_unavailable", error=str(error))
 
         wallet_balances: dict[str, Decimal] = {}
         for asset_data in res["assets"]:
@@ -225,6 +246,11 @@ class BinanceRestClient:
                     symbol=pos_data["symbol"],
                     position_side=pos_data["positionSide"],
                     position_amt=pos_amt,
+                    entry_price=(
+                        Decimal(str(pos_data["entryPrice"]))
+                        if "entryPrice" in pos_data
+                        else None
+                    ),
                 )
             )
 
@@ -232,6 +258,52 @@ class BinanceRestClient:
             wallet_balances=wallet_balances,
             available_balance=avail,
             positions=positions,
+            hedge_mode=hedge_mode,
+        )
+
+    async def fetch_account_margin_status(
+        self,
+    ) -> tuple[Decimal, Decimal, Decimal, int, bool]:
+        """Read margin and available balance from the signed Futures WS API."""
+        params: dict[str, Any] = {
+            "apiKey": self.api_key,
+            "recvWindow": 5000,
+            "timestamp": int(time.time() * 1000),
+        }
+        payload = urlencode(sorted(params.items()))
+        params["signature"] = hmac.new(
+            self.api_secret.encode("utf-8"),
+            payload.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        request_id = str(uuid4())
+        request = {
+            "id": request_id,
+            "method": "v2/account.status",
+            "params": params,
+        }
+
+        async with websockets.connect(
+            get_binance_ws_api_url(self.environment),
+            open_timeout=3,
+            close_timeout=1,
+            ping_interval=None,
+        ) as ws:
+            await ws.send(json.dumps(request))
+            response = json.loads(await asyncio.wait_for(ws.recv(), timeout=3))
+
+        if response.get("id") != request_id or response.get("status") != 200:
+            raise RuntimeError(f"Binance account margin request failed: {response}")
+        result = response["result"]
+        margin_used = Decimal(str(result["totalPositionInitialMargin"])) + Decimal(
+            str(result["totalOpenOrderInitialMargin"])
+        )
+        return (
+            margin_used,
+            Decimal(str(result["totalMarginBalance"])),
+            Decimal(str(result["availableBalance"])),
+            int(result["feeTier"]),
+            bool(result["multiAssetsMargin"]),
         )
 
     async def fetch_startup_order(

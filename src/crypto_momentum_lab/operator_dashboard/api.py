@@ -546,7 +546,7 @@ def create_dashboard_app(
         dependencies=[Depends(require_dashboard_auth)],
     )
     async def account(
-        equity_range: Literal["24h", "7d", "30d", "1y"] = "24h",
+        equity_range: Literal["24h"] = "24h",
         account_label: OptionalAccountLabelQuery = None,
         view: Literal["current"] = "current",
     ) -> AccountOverviewResponse:
@@ -597,7 +597,7 @@ def create_dashboard_app(
         dependencies=[Depends(require_dashboard_auth)],
     )
     async def live_account_metrics(
-        equity_range: Literal["24h", "7d", "30d", "1y"] = "24h",
+        equity_range: Literal["24h"] = "24h",
     ) -> LiveAccountMetricsResponse:
         try:
             return await response_cache.get(

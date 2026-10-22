@@ -212,6 +212,33 @@ class NextGenDaemon:
             if unrealized is None:
                 break
             unrealized += direction * (price - batch.entry_price) * batch.quantity
+
+        margin_used: Decimal | None = None
+        account_equity: Decimal | None = None
+        margin_occupancy_ratio: Decimal | None = None
+        available_balance: Decimal | None = None
+        fee_tier: int | None = None
+        multi_assets_mode: bool | None = None
+        try:
+            (
+                margin_used,
+                margin_balance,
+                available_balance,
+                fee_tier,
+                multi_assets_mode,
+            ) = await self.read_client.fetch_account_margin_status()
+            account_equity = margin_balance
+            self.state.fee_tier = fee_tier
+            self.state.multi_assets_mode = multi_assets_mode
+            if margin_balance != 0:
+                margin_occupancy_ratio = margin_used / margin_balance
+        except Exception as error:
+            log.debug(
+                "runtime_margin_sample_unavailable",
+                account=self.account_label,
+                error=str(error),
+            )
+
         await self.db.async_save_runtime_status(
             self.environment,
             self.account_label,
@@ -236,7 +263,52 @@ class NextGenDaemon:
                     asset: str(value)
                     for asset, value in self.state.wallet_balances.items()
                 },
+                "exchange_positions": [
+                    {
+                        "symbol": position.symbol,
+                        "position_side": position.position_side,
+                        "position_amt": str(position.position_amt),
+                        "entry_price": (
+                            None
+                            if position.entry_price is None
+                            else str(position.entry_price)
+                        ),
+                    }
+                    for position in self.state.exchange_positions.values()
+                ],
+                "exchange_positions_observed_at": (
+                    None
+                    if self.state.exchange_positions_observed_at is None
+                    else self.state.exchange_positions_observed_at.isoformat()
+                ),
+                "account_configuration": {
+                    "hedge_mode": self.state.hedge_mode,
+                    "multi_assets_mode": self.state.multi_assets_mode,
+                    "fee_tier": self.state.fee_tier,
+                },
+                "startup_baseline": {
+                    "status": self.state.startup_baseline_status,
+                    "observed_at": (
+                        None
+                        if self.state.startup_baseline_observed_at is None
+                        else self.state.startup_baseline_observed_at.isoformat()
+                    ),
+                    "position_count": self.state.startup_baseline_position_count,
+                    "open_order_count": self.state.startup_baseline_open_order_count,
+                },
                 "unrealized_pnl": None if unrealized is None else str(unrealized),
+                "available_balance": (
+                    None if available_balance is None else str(available_balance)
+                ),
+                "margin_used": None if margin_used is None else str(margin_used),
+                "account_equity": (
+                    None if account_equity is None else str(account_equity)
+                ),
+                "margin_occupancy_ratio": (
+                    None
+                    if margin_occupancy_ratio is None
+                    else str(margin_occupancy_ratio)
+                ),
             },
         )
 

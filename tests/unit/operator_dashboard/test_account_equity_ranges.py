@@ -12,29 +12,20 @@ from tests.unit.apps.operator_dashboard.test_main import FakeQueries
 
 def test_live_account_equity_ranges_bound_chart_density() -> None:
     assert _account_equity_range("24h") == (timedelta(hours=24), 6 * 60)
-    assert _account_equity_range("7d") == (timedelta(days=7), 60 * 60)
-    assert _account_equity_range("30d") == (timedelta(days=30), 3 * 60 * 60)
-    assert _account_equity_range("1y") == (
-        timedelta(days=365),
-        2 * 24 * 60 * 60,
-    )
-    with pytest.raises(ValueError, match="unsupported account equity range"):
-        _account_equity_range("all")
+    for equity_range in ("7d", "30d", "1y", "all"):
+        with pytest.raises(ValueError, match="unsupported account equity range"):
+            _account_equity_range(equity_range)
 
 
 def test_account_equity_range_is_validated_and_returned() -> None:
     with TestClient(create_dashboard_app(queries=FakeQueries())) as client:
-        for equity_range in ("24h", "7d", "30d", "1y"):
-            response = client.get(
-                "/api/account",
-                params={"equity_range": equity_range},
-            )
-            assert response.status_code == 200
-            assert response.json()["equity_range"] == equity_range
+        response = client.get("/api/account", params={"equity_range": "24h"})
+        assert response.status_code == 200
+        assert response.json()["equity_range"] == "24h"
 
-        invalid = client.get(
-            "/api/account",
-            params={"equity_range": "all"},
-        )
+        invalid_responses = [
+            client.get("/api/account", params={"equity_range": value})
+            for value in ("7d", "30d", "1y", "all")
+        ]
 
-    assert invalid.status_code == 422
+    assert [response.status_code for response in invalid_responses] == [422] * 4

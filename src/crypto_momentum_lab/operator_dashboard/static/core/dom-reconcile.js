@@ -17,8 +17,6 @@ function elementKey(node) {
     "data-echart-id",
     "data-row-key",
     "data-live-account-label",
-    "data-account-equity-range",
-    "data-live-account-metrics-range",
   ]) {
     const value = node.getAttribute(attribute);
     if (value) return `${attribute}:${value}`;
