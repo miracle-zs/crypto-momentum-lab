@@ -97,6 +97,17 @@ function renderAccountEquityBlock(data, accountEquity, accountSample, accountEqu
 }
 
 function renderAccountFacts(config, startupBaseline, modeLabel) {
+  const sizing = config.entry_sizing;
+  const sizingLabels = {
+    fixed: "固定金额（单利）",
+    daily: "每日复利（北京时间 08:00 换日）",
+    per_trade: "逐笔实时复利",
+    flat_reset: "全账户空仓重置复利",
+  };
+  const fraction = asNumber(sizing?.equity_fraction);
+  const fractionLabel = sizing?.mode === "fixed"
+    ? "固定名义金额"
+    : fraction == null ? "—" : `${num(fraction * 100, 4)}% · 每笔名义金额占比`;
   const baselineMatched = String(startupBaseline.status || "").toLowerCase() === "matched";
   const baselineTime = startupBaseline.observed_at
     ? fullDateTime(startupBaseline.observed_at)
@@ -104,6 +115,11 @@ function renderAccountFacts(config, startupBaseline, modeLabel) {
   return `<div class="account-facts">
     <div><span>实盘下单通道</span><b class="pos">NextGen 账户进程</b></div>
     <div><span>同步服务模式</span><b class="muted">账户私有 WebSocket</b></div>
+    <div><span>资金模式</span><b>${esc(sizingLabels[sizing?.mode] || "—")}</b></div>
+    <div><span>开仓金额规则</span><b>${esc(fractionLabel)}</b></div>
+    <div><span>最近计算的单笔名义金额</span><b class="num">${esc(money(sizing?.target_notional))}</b></div>
+    <div><span>定额基准权益</span><b class="num">${esc(money(sizing?.basis_equity))}</b></div>
+    <div><span>定额基准时间</span><b class="num">${esc(sizing?.sampled_at ? fullDateTime(sizing.sampled_at) : "—")}</b></div>
     <div><span>持仓模式</span><b>${esc(modeLabel(config.hedge_mode, "Hedge · 双向", "One-way · 单向"))}</b></div>
     <div><span>保证金模式</span><b>${esc(modeLabel(config.multi_assets_mode, "Multi-Assets · 多资产", "Single-Asset · 单资产"))}</b></div>
     <div><span>手续费等级</span><b>${esc(config.fee_tier == null ? "—" : `VIP ${config.fee_tier}`)}</b></div>

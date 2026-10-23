@@ -34,6 +34,7 @@ from crypto_momentum_lab.next_gen.persistence import (
     TradingRepositoryProtocol,
     compute_advisory_lock_key,
 )
+from crypto_momentum_lab.next_gen.sizing import EntrySizer
 from crypto_momentum_lab.next_gen.strategy_engine import MomentumStrategyEngine
 from crypto_momentum_lab.next_gen.symbol_rules import SymbolRulesRegistry
 
@@ -93,6 +94,7 @@ class NextGenDaemon:
         self.state.scheduled_risk_window = ScheduledRiskWindowConfig.from_environment()
         self.ws_client.on_status_change = self._on_ws_status_change
         self.state.attach_ws_client(self.ws_client)
+        self.entry_sizer = EntrySizer(self.state, account_config.execution_inputs)
 
         self.order_executor = OrderExecutor(
             rest_client=rest_client,
@@ -123,7 +125,10 @@ class NextGenDaemon:
             symbol_rules=rules,
             account_config=account_config,
             market_environment=self.market_environment,
+            entry_sizer=self.entry_sizer,
         )
+        if strategy_engine is not None:
+            self.strategy_engine.entry_sizer = self.entry_sizer
         self._volume_cache = WebSocketQuoteVolumeProvider(
             WebSocketMarketQuoteVolumeSource(
                 url=os.environ.get(
@@ -287,6 +292,7 @@ class NextGenDaemon:
                     "multi_assets_mode": self.state.multi_assets_mode,
                     "fee_tier": self.state.fee_tier,
                 },
+                "entry_sizing": self.entry_sizer.describe(),
                 "startup_baseline": {
                     "status": self.state.startup_baseline_status,
                     "observed_at": (

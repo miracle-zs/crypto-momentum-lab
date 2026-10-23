@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 import yaml
 
@@ -23,6 +23,9 @@ from crypto_momentum_lab.strategies.registry import StrategyRegistryError
 
 class RuntimeManifestError(ValueError):
     """Raised when a desired runtime manifest is missing or malformed."""
+
+
+EntrySizingMode = Literal["fixed", "daily", "per_trade", "flat_reset"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +68,8 @@ class LiveRuntimeExecutionInputs:
     candle_grace_decision_profit_pct: Decimal
     candle_grace_profit_pct: Decimal
     max_concurrency_per_symbol: int | None = None
+    sizing_mode: EntrySizingMode = "fixed"
+    equity_fraction: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -409,8 +414,29 @@ def _execution_inputs(
         target_notional = _decimal(
             config["target_notional"], f"{field}.target_notional"
         )
-        if target_notional <= 0:
+        if not target_notional.is_finite() or target_notional <= 0:
             raise RuntimeManifestError(f"{field}.target_notional must be positive")
+        sizing_mode = config.get("sizing_mode", "fixed")
+        if sizing_mode not in {"fixed", "daily", "per_trade", "flat_reset"}:
+            raise RuntimeManifestError(
+                f"{field}.sizing_mode must be fixed, daily, per_trade or flat_reset"
+            )
+        raw_fraction = config.get("equity_fraction")
+        equity_fraction = (
+            None
+            if raw_fraction is None or raw_fraction == ""
+            else _decimal(raw_fraction, f"{field}.equity_fraction")
+        )
+        if equity_fraction is not None and (
+            not equity_fraction.is_finite() or not 0 < equity_fraction <= 1
+        ):
+            raise RuntimeManifestError(
+                f"{field}.equity_fraction must be finite and in (0, 1]"
+            )
+        if sizing_mode != "fixed" and equity_fraction is None:
+            raise RuntimeManifestError(
+                f"{field}.equity_fraction is required for compounding"
+            )
         return LiveRuntimeExecutionInputs(
             target_notional=target_notional,
             hedge_mode=hedge_mode,
@@ -422,6 +448,8 @@ def _execution_inputs(
             candle_grace_decision_profit_pct=candle_grace_decision_profit_pct,
             candle_grace_profit_pct=candle_grace_profit_pct,
             max_concurrency_per_symbol=max_concurrency_per_symbol,
+            sizing_mode=cast(EntrySizingMode, sizing_mode),
+            equity_fraction=equity_fraction,
         )
     except (InvalidOperation, ValueError) as error:
         if isinstance(error, RuntimeManifestError):

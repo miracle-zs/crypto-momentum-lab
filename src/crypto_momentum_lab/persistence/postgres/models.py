@@ -22,6 +22,9 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from crypto_momentum_lab.next_gen.db_models import (
+    EntrySizingStateRow as EntrySizingStateRow,
+)
+from crypto_momentum_lab.next_gen.db_models import (
     LiveOrderRow as LiveOrderRow,
 )
 from crypto_momentum_lab.next_gen.db_models import (

@@ -616,6 +616,9 @@ class NextGenDashboardQueries:
                 "engine": "nextgen",
                 "strategy_name": config.strategy,
                 "strategy_config_hash": config.strategy_config_hash,
+                "entry_sizing": (
+                    None if payload is None else payload.get("entry_sizing")
+                ),
                 "hedge_mode": (
                     None
                     if payload is None

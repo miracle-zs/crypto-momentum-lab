@@ -19,8 +19,10 @@ from crypto_momentum_lab.domain.account.models import AccountFillEvent
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk.models import RiskConfigSnapshot
 from crypto_momentum_lab.next_gen.models import Order, OrderStatus, PositionBatch
+from crypto_momentum_lab.next_gen.sizing import EntrySizingSnapshot
 from crypto_momentum_lab.persistence.postgres.models import (
     AccountFillEventRow,
+    EntrySizingStateRow,
     RiskConfigSnapshotRow,
     RiskHaltRow,
     RuntimeMarketState15sRow,
@@ -94,6 +96,12 @@ class TradingRepositoryProtocol(Protocol):
     async def async_get_risk_config(
         self, environment: str, account_label: str
     ) -> RiskConfigSnapshot: ...
+    async def async_get_entry_sizing(
+        self, environment: str, account_label: str
+    ) -> EntrySizingSnapshot | None: ...
+    async def async_save_entry_sizing(
+        self, environment: str, account_label: str, snapshot: EntrySizingSnapshot
+    ) -> None: ...
     async def async_get_historical_market_states(
         self, environment: str, symbols: list[str], limit: int
     ) -> list[MarketState15s]: ...
@@ -122,6 +130,18 @@ class InMemoryTradingRepository:
         self.entry_signals: list[dict[str, Any]] = []
         self.exit_decisions: list[dict[str, Any]] = []
         self.halted_accounts: set[tuple[str, str]] = set()
+        self.entry_sizing: dict[tuple[str, str], EntrySizingSnapshot] = {}
+
+    async def async_get_entry_sizing(
+        self, environment: str, account_label: str
+    ) -> EntrySizingSnapshot | None:
+        return self.entry_sizing.get((environment, account_label))
+
+    async def async_save_entry_sizing(
+        self, environment: str, account_label: str, snapshot: EntrySizingSnapshot
+    ) -> None:
+        self._check_and_decrement_failure()
+        self.entry_sizing[(environment, account_label)] = snapshot
 
     async def async_save_fill(self, fill: AccountFillEvent) -> None:
         key = (fill.environment, fill.account_label, fill.symbol, fill.trade_id)
@@ -306,6 +326,51 @@ class PostgresTradingRepository:
 
     def __init__(self, async_engine: Any) -> None:
         self._engine = async_engine
+
+    async def async_get_entry_sizing(
+        self, environment: str, account_label: str
+    ) -> EntrySizingSnapshot | None:
+        async with self._engine.connect() as conn:
+            result = await conn.execute(
+                select(
+                    EntrySizingStateRow.mode,
+                    EntrySizingStateRow.equity_fraction,
+                    EntrySizingStateRow.equity,
+                    EntrySizingStateRow.sampled_at,
+                ).where(
+                    EntrySizingStateRow.environment == environment,
+                    EntrySizingStateRow.account_label == account_label,
+                )
+            )
+            row = result.one_or_none()
+        if row is None:
+            return None
+        return EntrySizingSnapshot(
+            row.mode, row.equity_fraction, row.equity, row.sampled_at
+        )
+
+    async def async_save_entry_sizing(
+        self, environment: str, account_label: str, snapshot: EntrySizingSnapshot
+    ) -> None:
+        statement = pg_insert(EntrySizingStateRow).values(
+            environment=environment,
+            account_label=account_label,
+            mode=snapshot.mode,
+            equity_fraction=snapshot.equity_fraction,
+            equity=snapshot.equity,
+            sampled_at=snapshot.sampled_at,
+        )
+        statement = statement.on_conflict_do_update(
+            index_elements=["environment", "account_label"],
+            set_={
+                "mode": statement.excluded.mode,
+                "equity_fraction": statement.excluded.equity_fraction,
+                "equity": statement.excluded.equity,
+                "sampled_at": statement.excluded.sampled_at,
+            },
+        )
+        async with self._engine.begin() as conn:
+            await conn.execute(statement)
 
     async def _load_orders(
         self, environment: str, account_label: str, *, batch_id: str | None = None

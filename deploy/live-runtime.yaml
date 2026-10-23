@@ -30,8 +30,13 @@ accounts:
       entry_policy_mode: "${CML_LIVE_ENTRY_POLICY_MODE:-enforce}"
       entry_order_type: limit
       entry_limit_ttl_seconds: 900
+    # sizing_mode: fixed / daily / per_trade / flat_reset. Compounding requires
+    # equity_fraction in (0, 1]: the fraction of equity used as ENTRY NOTIONAL,
+    # not margin. Each account has its own settings; no fraction is inferred.
     execution_config:
       target_notional: "${CML_LIVE_TARGET_NOTIONAL:-100.00}"
+      sizing_mode: "${CML_LIVE_SIZING_MODE:-fixed}"
+      equity_fraction: "${CML_LIVE_EQUITY_FRACTION:-}"
       hedge_mode: true
       entry_long_only: true
       entry_leverage: "${CML_LIVE_ENTRY_LEVERAGE:-5}"
@@ -62,6 +67,8 @@ accounts:
       entry_limit_ttl_seconds: 900
     execution_config:
       target_notional: "${CML_LIVE_TARGET_NOTIONAL_ACCOUNT_2:-100.00}"
+      sizing_mode: "${CML_LIVE_SIZING_MODE_ACCOUNT_2:-flat_reset}"
+      equity_fraction: "${CML_LIVE_EQUITY_FRACTION_ACCOUNT_2:-0.40}"
       hedge_mode: true
       entry_long_only: true
       entry_leverage: "${CML_LIVE_ENTRY_LEVERAGE_ACCOUNT_2:-5}"
@@ -92,6 +99,8 @@ accounts:
       entry_limit_ttl_seconds: 900
     execution_config:
       target_notional: "${CML_LIVE_TARGET_NOTIONAL_ACCOUNT_3:-100.00}"
+      sizing_mode: "${CML_LIVE_SIZING_MODE_ACCOUNT_3:-daily}"
+      equity_fraction: "${CML_LIVE_EQUITY_FRACTION_ACCOUNT_3:-0.40}"
       hedge_mode: true
       entry_long_only: true
       entry_leverage: "${CML_LIVE_ENTRY_LEVERAGE_ACCOUNT_3:-5}"
@@ -122,6 +131,8 @@ accounts:
       entry_limit_ttl_seconds: 900
     execution_config:
       target_notional: "${CML_LIVE_TARGET_NOTIONAL_ACCOUNT_4:-100.00}"
+      sizing_mode: "${CML_LIVE_SIZING_MODE_ACCOUNT_4:-per_trade}"
+      equity_fraction: "${CML_LIVE_EQUITY_FRACTION_ACCOUNT_4:-0.40}"
       hedge_mode: true
       entry_long_only: true
       entry_leverage: "${CML_LIVE_ENTRY_LEVERAGE_ACCOUNT_4:-5}"

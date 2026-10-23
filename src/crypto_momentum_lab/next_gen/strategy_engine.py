@@ -20,6 +20,7 @@ from crypto_momentum_lab.next_gen.client import BinanceOrderRejectedError
 from crypto_momentum_lab.next_gen.engine import AccountState
 from crypto_momentum_lab.next_gen.executor import OrderExecutor
 from crypto_momentum_lab.next_gen.models import generate_batch_id
+from crypto_momentum_lab.next_gen.sizing import EntrySizer, EntrySizingUnavailable
 from crypto_momentum_lab.next_gen.symbol_rules import SymbolRulesRegistry
 from crypto_momentum_lab.strategies.registry import build_runtime_strategy
 
@@ -38,6 +39,7 @@ class MomentumStrategyEngine:
         market_environment: str,
         symbols: list[str] | None = None,
         symbol_rules: SymbolRulesRegistry,
+        entry_sizer: EntrySizer | None = None,
     ) -> None:
         self.state = state
         self.order_executor = order_executor
@@ -50,6 +52,9 @@ class MomentumStrategyEngine:
         self.market_connected = False
         self.market_data_observation: dict[str, Any] | None = None
         self.latest_prices = state.latest_prices
+        self.entry_sizer = entry_sizer or EntrySizer(
+            state, account_config.execution_inputs
+        )
         self._rejected_entry_until: dict[tuple[str, str], datetime] = {}
         self._last_state_at: dict[str, datetime] = {}
         inputs = account_config.strategy_inputs
@@ -299,8 +304,22 @@ class MomentumStrategyEngine:
             price = candidate.limit_price
             if price is None or price <= 0:
                 raise ValueError("A limit entry requires a positive prepared price")
+            try:
+                target_notional = await self.entry_sizer.entry_notional(
+                    datetime.now(UTC)
+                )
+            except EntrySizingUnavailable as error:
+                result["rejection_reason"] = f"entry_sizing_unavailable:{error}"
+                continue
+            except Exception:
+                result["rejection_reason"] = "entry_sizing_persistence_failed"
+                log.exception(
+                    "entry_sizing_persistence_failed", account=self.state.account_label
+                )
+                continue
+            result["entry_sizing"] = self.entry_sizer.describe()
             quantity = self.symbol_rules.round_quantity(
-                symbol, execution.target_notional / price
+                symbol, target_notional / price
             )
             price = self.symbol_rules.round_price(symbol, price)
             valid, reason = self.symbol_rules.validate_order(
@@ -394,4 +413,14 @@ class MomentumStrategyEngine:
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=1)
             except TimeoutError:
+                if self.market_connected:
+                    try:
+                        await self.entry_sizer.refresh(datetime.now(UTC))
+                    except EntrySizingUnavailable as error:
+                        log.debug("entry_sizing_waiting_for_state", reason=str(error))
+                    except Exception:
+                        log.exception(
+                            "entry_sizing_refresh_failed",
+                            account=self.state.account_label,
+                        )
                 await self.cancel_stale_entry_orders()

@@ -17,6 +17,32 @@ from sqlalchemy.orm import Mapped, mapped_column
 from crypto_momentum_lab.persistence.postgres.base import Base
 
 
+class EntrySizingStateRow(Base):
+    """One durable daily/cycle sizing anchor per account."""
+
+    __tablename__ = "entry_sizing_states"
+
+    environment: Mapped[str] = mapped_column(String(32), primary_key=True)
+    account_label: Mapped[str] = mapped_column(String(64), primary_key=True)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    equity_fraction: Mapped[Decimal] = mapped_column(Numeric(), nullable=False)
+    equity: Mapped[Decimal] = mapped_column(Numeric(), nullable=False)
+    sampled_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "mode IN ('daily', 'flat_reset')", name="entry_sizing_mode_check"
+        ),
+        CheckConstraint(
+            "equity_fraction > 0 AND equity_fraction <= 1",
+            name="entry_sizing_fraction_check",
+        ),
+        CheckConstraint("equity > 0", name="entry_sizing_equity_positive"),
+    )
+
+
 class LivePositionBatchRow(Base):
     """活跃持仓批次快照表 (支持多账户隔离与同标的多批次重叠共存)"""
 

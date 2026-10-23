@@ -203,6 +203,9 @@ def run_command(
         account=account_label,
         symbols=symbol_list,
         dry_run=dry_run,
+        sizing_mode=account_config.execution_inputs.sizing_mode,
+        equity_fraction=account_config.execution_inputs.equity_fraction,
+        target_notional=account_config.execution_inputs.target_notional,
     )
 
     if dry_run:
