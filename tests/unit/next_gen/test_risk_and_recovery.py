@@ -20,7 +20,7 @@ def state_with_risk():
     state = AccountState("live", "a1", repository, rest)
     state.risk_config = risk_config()
     state.set_system_mode(SystemMode.RUNNING)
-    state.set_ws_connected(True)
+    state.on_ws_status_change(True)
     return state, repository, rest
 
 

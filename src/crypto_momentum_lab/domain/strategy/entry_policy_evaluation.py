@@ -29,14 +29,6 @@ class CandidatePolicyDecision:
     candidate_id: str
     policy_decision: EntryEligibilityDecision
 
-    def as_details(self) -> dict[str, object]:
-        return {
-            "source_trace_id": self.source_trace_id,
-            "candidate_id": self.candidate_id,
-            "policy_eligible": self.policy_decision.eligible,
-            "policy_rejection_reasons": list(self.policy_decision.reasons),
-        }
-
 
 def evaluate_entry_candidate(
     candidate: OrderIntentCandidate,

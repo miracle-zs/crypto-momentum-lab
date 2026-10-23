@@ -2995,15 +2995,6 @@ def _parse_size(value: str) -> int | None:
     return None if multiplier is None else int(number * multiplier)
 
 
-def _parse_int(value: str | None) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except ValueError:
-        return None
-
-
 def _parse_env_bool(value: str | None, *, default: bool) -> bool:
     """Parse a monitor boolean and fail closed on an invalid override."""
 
@@ -3217,17 +3208,6 @@ def _serverchan_endpoint(sendkey: str) -> str:
 def _split_alert_name(alert_name: str) -> tuple[str, str | None]:
     base_name, separator, scope = alert_name.partition(":")
     return base_name, scope if separator and scope else None
-
-
-def _alert_account_scope(details: Mapping[str, object]) -> str:
-    """Render either one account or a shared account set in notifications."""
-    account_labels = details.get("account_labels")
-    if isinstance(account_labels, Sequence) and not isinstance(
-        account_labels,
-        str | bytes,
-    ):
-        return ", ".join(str(label) for label in account_labels)
-    return str(details.get("account_label", ""))
 
 
 def _service_scope(service: object) -> str | None:

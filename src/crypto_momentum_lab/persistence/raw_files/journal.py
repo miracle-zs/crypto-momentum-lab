@@ -114,20 +114,6 @@ class PendingManifestJournal:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
 
-    async def oldest_age_seconds(
-        self,
-        *,
-        now: datetime,
-    ) -> float | None:
-        entries = await asyncio.to_thread(_journal_entries, self._directory)
-        if not entries:
-            return None
-        manifest = await asyncio.to_thread(
-            _manifest_from_payload,
-            _read_json(entries[0]),
-        )
-        return max(0.0, (now - manifest.created_at).total_seconds())
-
 
 class PendingProcessStateJournal:
     def __init__(self, directory: Path) -> None:

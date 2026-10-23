@@ -1397,3 +1397,15 @@ Docker 三次短采样、间隔约 10 秒：primary CPU 均值 0.50%、account-2
 部署后 `/api/health` 为UP；`/api/readiness` 为READY，四账户均READY/RUNNING，启动基线均为零持仓、零挂单，开仓与退出门开放。一次容器内存采样中四账户约91.25–92.29 MiB／192 MiB；监控状态文件中的 `active_alerts` 为空。部署前的主要重复告警是 primary 的单条 `container_memory_high` 事件：约180 MiB／192 MiB（93.54%），持续约5.5小时，发生1309次；账户容器重建后于07:43:05 CST恢复。另有research-collector在部署期间触发一次`container_missing`，持续77秒后于07:43:22 CST恢复。它们是一个长时间内存事件的反复通知和一次部署切换告警，不代表1309个不同故障。
 
 当前采样是启动后早期数据，尚不足以证明内存增长已长期解决。继续依靠现有监控观察；若内存告警重新出现，再按新版本的运行数据判断是否还存在其他增长来源。
+
+### 无运行调用方的代码清理（2026-10-23，尚未部署）
+
+已核对运行源码、测试、部署、迁移以及本机研究和运维脚本（含 Git 忽略目录）的引用，删除旧 `LiveRuntimeConfig` 及其七个配置分组类型、五个未使用的旧运行常量和仅验证这些类型构造的测试。`runtime_config.py` 中 NextGen 仍调用的策略配置生成与审批哈希计算保持原样。另删除无引用的 `RuntimeMarketStateReadRepository`、`UniverseSnapshotReader` 协议声明；研究采集使用的分页读取协议和标的池实际仓库接口继续保留。
+
+删除无运行消费者的 `WebSocketMarketQuoteSource` 及其三项专属测试和测试辅助函数。报价服务端、报价编解码、实时与持久化闭合时钟验证以及 NextGen 使用的 `WebSocketMarketQuoteVolumeSource` 继续保留。没有删除数据库模型、迁移、历史记录、归档读取或决策回放工具。
+
+相关回归命令为 `rtk proxy .venv/bin/pytest -q tests/unit/live_rollout tests/unit/next_gen tests/unit/market_data/test_quote_hub.py tests/unit/market_data/test_quote_volume.py tests/unit/research_collector/test_source.py tests/unit/universe tests/unit/apps/market_data/test_main.py`，结果 258 passed。全量测试收集为 1121 tests collected，无收集错误；收集不代表全部用例已执行。修改文件 Ruff 检查和 `git diff --check` 通过；全库 Ruff 仍报 104 项清理范围外的导入排序、长行等格式问题。本批未部署，未重启生产服务。
+
+随后核对旧账户对账仓库，确认 `PostgresAccountRepository` 及其所有行转换函数仅被专属测试引用；当前 NextGen 通过 `PostgresTradingRepository.async_save_fill()` 写成交，账户查询和归档直接使用 ORM 表模型。删除整个旧仓库及三个专属测试文件，并移除随之失去调用方的 `AccountBalanceSnapshot`、`AccountConfigSnapshot`、`AccountOpenOrderSnapshot`、`AccountPositionStateSnapshot`、`AccountReconciliationRun`、`AccountFillReconciliationCursor` 六个领域数据类型和对应测试。保留 0062 迁移仍依赖的 `AccountPositionSnapshot`，双向持仓身份断言改为验证迁移实际使用的 `stable_snapshot_anchor_id()`。同时删除无人引用的 `AccountFillEvent.raw_position_side` 与成交额发布器 `last_refresh_at` 两个属性；成交元数据提取和刷新日志仍使用原实现。ORM 表定义、数据库迁移、历史数据、归档脚本和回放工具没有删除。
+
+该批验证：`rtk proxy .venv/bin/pytest -q tests/unit` 为 993 passed、1 skipped，跳过项是需要本地回环 socket 权限的 Hub 测试；另有一条上游 Starlette/httpx 弃用警告。全量测试收集为 1095 tests collected，无收集错误，数据库集成测试未执行。修改文件 Ruff 和 `git diff --check` 通过；包含 Git 忽略研究目录在内的引用扫描未发现被删接口的残留调用。本地验证完成，尚未部署。

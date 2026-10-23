@@ -134,12 +134,6 @@ class MarketStateBatch:
             for s in self.states
         )
 
-    def get_revision(self, symbol: str) -> MarketRevisionRef | None:
-        for r in self.revision_refs:
-            if r.symbol == symbol:
-                return r
-        return None
-
 
 @dataclass(frozen=True, slots=True)
 class _MarketStateQueueOverflow:
@@ -1153,17 +1147,6 @@ def decode_market_state_batch_envelope(
         states=states,
         stream_id=stream_id,
     )
-
-
-def decode_market_state_batch(
-    raw_message: str | bytes,
-    *,
-    expected_environment: str | None = None,
-) -> tuple[MarketState15s, ...]:
-    return decode_market_state_batch_envelope(
-        raw_message,
-        expected_environment=expected_environment,
-    ).states
 
 
 def _decode_market_state_payload(payload: dict[str, object]) -> MarketState15s:

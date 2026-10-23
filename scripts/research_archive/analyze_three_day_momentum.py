@@ -19,7 +19,7 @@ import sys
 from array import array
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -822,18 +822,7 @@ def choose_config(
         validation = [item for item in all_events if int(item["detected_ts"]) >= cutoff]
         train_stats = event_stats(train, cost)
         validation_stats = event_stats(validation, cost)
-        val_score_values = [
-            value
-            for key in ("mean_net_1m", "mean_net_5m")
-            if isinstance((value := validation_stats[key]), (int, float))
-        ]
-        train_score_values = [
-            value
-            for key in ("mean_net_1m", "mean_net_5m")
-            if isinstance((value := train_stats[key]), (int, float))
-        ]
         enough_validation = int(validation_stats["events"]) >= 3
-        score_values = val_score_values if enough_validation else train_score_values
         score = (
             0.7 * float(validation_stats["mean_net_1m"])
             + 0.3 * float(validation_stats["mean_net_5m"])

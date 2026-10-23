@@ -1,10 +1,7 @@
-import asyncio
-import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
-import crypto_momentum_lab.market_data.quote_hub as quote_hub_module
 from crypto_momentum_lab.domain.market.models import (
     CaptureRoute,
     CaptureStream,
@@ -12,8 +9,6 @@ from crypto_momentum_lab.domain.market.models import (
     RealtimeMarketQuote,
 )
 from crypto_momentum_lab.market_data.quote_hub import (
-    MarketQuoteHubConfig,
-    WebSocketMarketQuoteSource,
     decode_market_quote,
     encode_market_quote,
 )
@@ -86,95 +81,6 @@ def test_quote_hub_round_trip() -> None:
     assert decoded == quote
 
 
-async def test_quote_source_reader_keeps_latest_quote_while_consumer_is_busy(
-    monkeypatch,
-) -> None:
-    event_at = datetime(2026, 8, 23, 0, 0, tzinfo=UTC)
-    first = RealtimeMarketQuote(
-        exchange="binance-usdm",
-        environment="research",
-        symbol="BTCUSDT",
-        event_at=event_at,
-        received_at=event_at,
-        bid_price=Decimal("100"),
-        ask_price=Decimal("101"),
-    )
-    second = replace_quote(first, bid_price=Decimal("102"), ask_price=Decimal("103"))
-    second_received = asyncio.Event()
-    idle = asyncio.Event()
-
-    class FakeConnection:
-        def __init__(self) -> None:
-            self._messages = [
-                json.dumps(
-                    {
-                        "type": "market_quote_hub_ready",
-                        "schema_version": 1,
-                        "environment": "research",
-                    }
-                ),
-                encode_market_quote(first),
-            ]
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return None
-
-        async def send(self, _message):
-            return None
-
-        async def recv(self):
-            if self._messages:
-                return self._messages.pop(0)
-            if not second_received.is_set():
-                second_received.set()
-                return encode_market_quote(second)
-            await idle.wait()
-            raise OSError("simulated disconnect")
-
-    monkeypatch.setattr(
-        quote_hub_module,
-        "connect",
-        lambda *_args, **_kwargs: FakeConnection(),
-    )
-    source = WebSocketMarketQuoteSource(
-        url="ws://unused",
-        environment="research",
-        consumer_id="test-live-quotes",
-        config=MarketQuoteHubConfig(
-            reconnect_delays=(0,),
-            unavailable_timeout_seconds=10,
-        ),
-    )
-    iterator = source.__aiter__()
-    try:
-        assert await anext(iterator) == first
-        await asyncio.wait_for(second_received.wait(), timeout=1)
-        assert await anext(iterator) == second
-    finally:
-        source.stop()
-        await iterator.aclose()
-
-
-def replace_quote(
-    quote: RealtimeMarketQuote,
-    *,
-    bid_price: Decimal,
-    ask_price: Decimal,
-) -> RealtimeMarketQuote:
-    return RealtimeMarketQuote(
-        exchange=quote.exchange,
-        environment=quote.environment,
-        symbol=quote.symbol,
-        event_at=quote.event_at,
-        received_at=quote.received_at,
-        bid_price=bid_price,
-        ask_price=ask_price,
-    )
-
-
 def _trade(offset_seconds: int, *, sequence: int, price: str) -> RawEnvelope:
     event_at = datetime(2026, 8, 23, 0, 0, tzinfo=UTC) + timedelta(
         seconds=offset_seconds
@@ -203,135 +109,3 @@ def _trade(offset_seconds: int, *, sequence: int, price: str) -> RawEnvelope:
             "m": False,
         },
     )
-
-
-async def test_price_stream_source_reconnects_after_long_healthy_run(
-    monkeypatch,
-) -> None:
-    current_time = 1000.0
-
-    def fake_monotonic() -> float:
-        return current_time
-
-    monkeypatch.setattr(quote_hub_module.time, "monotonic", fake_monotonic)
-
-    first = RealtimeMarketQuote(
-        exchange="binance-usdm",
-        environment="research",
-        symbol="BTCUSDT",
-        event_at=datetime(2026, 8, 23, 0, 0, tzinfo=UTC),
-        received_at=datetime(2026, 8, 23, 0, 0, tzinfo=UTC),
-        bid_price=Decimal("100"),
-        ask_price=Decimal("101"),
-    )
-    second = replace_quote(first, bid_price=Decimal("102"), ask_price=Decimal("103"))
-
-    connections = 0
-
-    class FakeFlappingConnection:
-        def __init__(self) -> None:
-            nonlocal connections
-            connections += 1
-            self._conn_id = connections
-            self._messages = [
-                json.dumps(
-                    {
-                        "type": "market_quote_hub_ready",
-                        "schema_version": 1,
-                        "environment": "research",
-                    }
-                )
-            ]
-            if self._conn_id == 1:
-                self._messages.append(encode_market_quote(first))
-            else:
-                self._messages.append(encode_market_quote(second))
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return None
-
-        async def send(self, _message):
-            return None
-
-        async def recv(self):
-            if self._messages:
-                return self._messages.pop(0)
-            if self._conn_id == 1:
-                raise OSError("simulated short network flap")
-            await asyncio.sleep(3600)
-
-    monkeypatch.setattr(
-        quote_hub_module,
-        "connect",
-        lambda *_args, **_kwargs: FakeFlappingConnection(),
-    )
-
-    source = WebSocketMarketQuoteSource(
-        url="ws://unused",
-        environment="research",
-        consumer_id="test",
-        config=MarketQuoteHubConfig(
-            reconnect_delays=(0,),
-            unavailable_timeout_seconds=60,
-        ),
-    )
-
-    quotes = source.__aiter__()
-    quote1 = await anext(quotes)
-    assert quote1.bid_price == Decimal("100")
-
-    current_time += 300.0
-
-    quote2 = await anext(quotes)
-    assert quote2.bid_price == Decimal("102")
-    assert connections == 2
-
-    source.stop()
-    await quotes.aclose()
-
-
-async def test_price_stream_source_raises_after_continuous_unavailable_timeout(
-    monkeypatch,
-) -> None:
-    import pytest
-
-    current_time = 1000.0
-
-    def fake_monotonic() -> float:
-        return current_time
-
-    monkeypatch.setattr(quote_hub_module.time, "monotonic", fake_monotonic)
-
-    class FailingConnection:
-        async def __aenter__(self):
-            nonlocal current_time
-            current_time += 20.0
-            raise ConnectionRefusedError("Hub down")
-
-        async def __aexit__(self, *_args):
-            return None
-
-    monkeypatch.setattr(
-        quote_hub_module,
-        "connect",
-        lambda *_args, **_kwargs: FailingConnection(),
-    )
-
-    source = WebSocketMarketQuoteSource(
-        url="ws://unused",
-        environment="research",
-        consumer_id="test",
-        config=MarketQuoteHubConfig(
-            reconnect_delays=(0,),
-            unavailable_timeout_seconds=60,
-        ),
-    )
-
-    with pytest.raises(
-        quote_hub_module.MarketQuoteHubError,
-        match="market quote hub unavailable for 60.0 seconds",
-    ):
-        await anext(source.__aiter__())

@@ -1,5 +1,5 @@
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -106,8 +106,8 @@ async def test_partition_failure_does_not_switch_to_row_deletion(
         ensure_partitions,
         AsyncMock(side_effect=RuntimeError("partition DDL failed")),
     )
-    repository = PostgresOperationalRetentionRepository(AsyncMock())
-    repository._delete_batch = AsyncMock()
+    sessions = Mock(side_effect=AssertionError("unexpected database session"))
+    repository = PostgresOperationalRetentionRepository(sessions)
     with pytest.raises(RuntimeError, match="partition DDL failed"):
         await getattr(repository, method)(before=datetime(2026, 10, 1, tzinfo=UTC))
-    repository._delete_batch.assert_not_awaited()
+    sessions.assert_not_called()

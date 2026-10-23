@@ -18,8 +18,6 @@ from crypto_momentum_lab.persistence.raw_files.journal import (
     PendingProcessStateJournal,
 )
 
-fixture_now = datetime(2026, 6, 15, 2, 10, tzinfo=UTC)
-
 
 async def test_background_manifest_failure_survives_shutdown_and_restart(tmp_path):
     directory = tmp_path / "pending"
@@ -128,7 +126,7 @@ async def test_journal_replays_manifests_in_order(
     assert await journal.replay(save) == 2
 
     assert saved == list(fixture_manifests)
-    assert await journal.oldest_age_seconds(now=fixture_now) is None
+    assert not list((tmp_path / "pending").glob("*.json"))
 
 
 async def test_process_state_journal_replays_critical_transition(

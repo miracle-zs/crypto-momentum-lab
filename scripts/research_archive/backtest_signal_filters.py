@@ -32,14 +32,12 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from analyze_three_day_momentum import (  # noqa: E402
-    CANDLE_INTERVAL_SECONDS,
     GateConfig,
     RawMetrics,
     StateSeries,
     aggregate_candles,
     build_rising_runs,
     candidate_index,
-    event_from_metrics,
     finite,
     good_segments,
     iso_epoch,

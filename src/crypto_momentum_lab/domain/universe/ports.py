@@ -72,9 +72,3 @@ class UniverseSnapshotObserver(Protocol):
         self,
         snapshot: UniverseSnapshot,
     ) -> None: ...
-
-
-class UniverseSnapshotReader(Protocol):
-    async def load_snapshot_at(
-        self, observed_at: datetime
-    ) -> UniverseSnapshot | None: ...

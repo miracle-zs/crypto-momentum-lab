@@ -110,23 +110,6 @@ class DailyOpenPrefetcher:
             symbol_count=len(symbols),
         )
 
-    async def prefetch_now(
-        self,
-        symbols: Iterable[str],
-        utc_day: date,
-        *,
-        captured_at: datetime | None = None,
-    ) -> None:
-        """Synchronously fill a supplied set, primarily for startup/tests."""
-        normalized = _normalize_symbols(symbols)
-        self._active_symbols = normalized
-        async with self._work_lock:
-            await self._prefetch_symbols(
-                normalized,
-                utc_day,
-                captured_at=_normalize_datetime(captured_at or self._clock()),
-            )
-
     async def _run(self) -> None:
         while not self._closed:
             try:

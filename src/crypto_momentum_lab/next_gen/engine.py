@@ -166,9 +166,6 @@ class AccountState:
             if self.system_mode == SystemMode.RUNNING:
                 self.set_system_mode(SystemMode.DEGRADED)
 
-    def set_ws_connected(self, connected: bool) -> None:
-        self.on_ws_status_change(connected)
-
     def update_balances(
         self,
         balances: dict[str, Decimal],

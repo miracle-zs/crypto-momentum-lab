@@ -322,11 +322,6 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         for row in orders
         if not boolean(row.get("reduce_only"))
     }
-    exit_order_ids = {
-        row.get("exchange_order_id")
-        for row in orders
-        if boolean(row.get("reduce_only"))
-    }
     fill_class_counts = Counter(
         "entry" if row.get("order_id") in entry_order_ids else "exit"
         for row in run_fills

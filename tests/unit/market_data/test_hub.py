@@ -14,7 +14,6 @@ from crypto_momentum_lab.market_data.hub import (
     MarketStateHubError,
     MarketStateHubReplayUnavailable,
     WebSocketMarketStateSource,
-    decode_market_state_batch,
     decode_market_state_batch_envelope,
     encode_market_state_batch,
 )
@@ -36,12 +35,12 @@ def test_market_state_batch_round_trips_decimal_and_timestamps() -> None:
         published_at=state.bucket_end,
     )
 
-    decoded = decode_market_state_batch(
+    decoded = decode_market_state_batch_envelope(
         encoded,
         expected_environment="research",
     )
 
-    assert decoded == (state,)
+    assert decoded.states == (state,)
 
 
 def test_market_state_batch_decoder_handles_is_backfill() -> None:
@@ -53,13 +52,13 @@ def test_market_state_batch_decoder_handles_is_backfill() -> None:
         sequence=1,
         published_at=state.bucket_end,
     )
-    decoded = decode_market_state_batch(encoded)
+    decoded = decode_market_state_batch_envelope(encoded).states
     assert decoded[0].is_backfill is True
 
     # Legacy payload without is_backfill defaults to False
     payload = json.loads(encoded)
     del payload["states"][0]["is_backfill"]
-    legacy_decoded = decode_market_state_batch(json.dumps(payload))
+    legacy_decoded = decode_market_state_batch_envelope(json.dumps(payload)).states
     assert legacy_decoded[0].is_backfill is False
 
 

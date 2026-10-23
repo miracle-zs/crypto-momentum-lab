@@ -32,7 +32,7 @@ async def execution():
     state = AccountState("live", "review", repository, rest)
     state.risk_config = risk_config(state.environment, state.account_label)
     state.set_system_mode(SystemMode.RUNNING)
-    state.set_ws_connected(True)
+    state.on_ws_status_change(True)
     executor = OrderExecutor(rest, state, repository)
     try:
         yield state, repository, rest, executor
@@ -163,7 +163,7 @@ async def test_dynamic_symbol_rules_are_shared_and_exit_leaves_no_dust(
     )
     state = daemon.state
     state.set_system_mode(SystemMode.RUNNING)
-    state.set_ws_connected(True)
+    state.on_ws_status_change(True)
     daemon.strategy_engine.symbol_rules.update_from_exchange_info(
         {
             "symbols": [

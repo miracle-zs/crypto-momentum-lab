@@ -93,17 +93,6 @@ def within(timestamp: float, start: datetime, end: datetime) -> bool:
     return start.timestamp() <= timestamp <= end.timestamp()
 
 
-def interval_stats(
-    timestamps: list[float],
-    values: list[float],
-    *,
-    start: datetime,
-    end: datetime,
-) -> dict[str, Any]:
-    selected = [value for timestamp, value in zip(timestamps, values) if within(timestamp, start, end)]
-    return {"count": len(selected), "sum": round(sum(selected), 8)}
-
-
 def load_actual_activity(
     fill_path: Path,
     order_path: Path,
@@ -252,11 +241,6 @@ def load_replay_activity(
 ) -> dict[str, Any]:
     events = read_csv(event_path)
     selected = [row for row in events if row.get("symbol")]
-    closed = [
-        row
-        for row in selected
-        if truthy(row.get("closed")) and row.get("exit_at")
-    ]
 
     def event_stats(rows: list[dict[str, str]]) -> dict[str, Any]:
         filled = [row for row in rows if row.get("entry_at")]

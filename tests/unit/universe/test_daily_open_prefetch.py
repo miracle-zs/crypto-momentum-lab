@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from crypto_momentum_lab.domain.universe.models import DailyOpen
+from crypto_momentum_lab.domain.universe.models import ContractMetadata, DailyOpen
 from crypto_momentum_lab.universe.daily_open_prefetch import DailyOpenPrefetcher
 
 
@@ -26,7 +26,12 @@ class FakeMarketData:
         )
 
     async def fetch_active_usdt_perpetuals(self):
-        return ()
+        return tuple(
+            ContractMetadata(
+                item.symbol, "PERPETUAL", "TRADING", "USDT", "USDT", item.open_time, {}
+            )
+            for item in self.opens
+        )
 
 
 class FakeRepository:
@@ -56,7 +61,7 @@ class FakeRepository:
 
 
 @pytest.mark.asyncio
-async def test_prefetch_now_batches_and_skips_stored_opens() -> None:
+async def test_bootstrap_batches_and_skips_stored_opens() -> None:
     utc_day = date(2026, 9, 12)
     observed_at = datetime(2026, 9, 12, 0, 1, tzinfo=UTC)
     market_data = FakeMarketData(
@@ -73,11 +78,7 @@ async def test_prefetch_now_batches_and_skips_stored_opens() -> None:
         batch_size=2,
     )
 
-    await prefetcher.prefetch_now(
-        ("AAAUSDT", "BBBUSDT", "CCCUSDT"),
-        utc_day,
-        captured_at=observed_at,
-    )
+    await prefetcher.bootstrap_current_day(observed_at)
 
     assert repository.opens[(utc_day, "AAAUSDT")] == Decimal("99")
     assert set(repository.opens) == {

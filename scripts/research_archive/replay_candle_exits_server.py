@@ -606,7 +606,6 @@ def subset_stats(
     closed = [trade for trade in trades if trade["closed"] and trade["pnl"] is not None]
     pnls = [trade["pnl"] for trade in closed]
     wins = [pnl for pnl in pnls if pnl > 0]
-    losses = [pnl for pnl in pnls if pnl < 0]
     result = {
         "trades": len(trades),
         "closed_trades": len(closed),

@@ -63,7 +63,7 @@ async def strategy_setup(account_config):
     state = AccountState("live", "a1", repository, rest)
     state.risk_config = risk_config(state.environment, state.account_label)
     state.set_system_mode(SystemMode.RUNNING)
-    state.set_ws_connected(True)
+    state.on_ws_status_change(True)
     executor = OrderExecutor(rest, state, repository)
     strategy = MomentumStrategyEngine(
         state,

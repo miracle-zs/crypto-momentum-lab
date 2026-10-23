@@ -6,7 +6,7 @@ Implements MarketBookRepository protocol defined in domain/market/market_book.py
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import func, null, select, update

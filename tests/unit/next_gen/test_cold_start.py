@@ -27,7 +27,7 @@ async def startup():
     )
     state = AccountState("live", "a1", repo, rest)
     state.risk_config = risk_config()
-    state.set_ws_connected(True)
+    state.on_ws_status_change(True)
     executor = OrderExecutor(rest, state, repo)
     try:
         yield state, repo, rest, executor

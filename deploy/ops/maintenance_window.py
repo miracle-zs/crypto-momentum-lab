@@ -11,7 +11,7 @@ Only the deploy knows the change is planned, so the deploy declares a
 maintenance window and the monitor honours it.
 
 The window always expires on its own: a deploy that dies mid-flight must not
-silence the monitor forever, and an expired window is itself worth reporting.
+silence the monitor forever.
 """
 
 from __future__ import annotations
@@ -127,25 +127,6 @@ def clear_maintenance_window(path: Path) -> None:
         path.unlink()
     except FileNotFoundError:
         return
-
-
-def expired_maintenance_window(
-    path: Path,
-    *,
-    now: datetime,
-    grace_seconds: float = 0.0,
-) -> MaintenanceWindow | None:
-    """Return a window that has expired by more than ``grace_seconds``.
-
-    A deploy that dies between writing and clearing the marker leaves it behind;
-    the monitor must not stay silent forever, so an overdue window is reported.
-    """
-
-    window = read_maintenance_window(path)
-    if window is None:
-        return None
-    overdue_by = (now - window.expires_at()).total_seconds()
-    return window if overdue_by > grace_seconds else None
 
 
 def default_maintenance_path() -> Path:

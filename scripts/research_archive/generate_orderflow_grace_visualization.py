@@ -45,17 +45,6 @@ def read_csv(path: Path) -> list[dict[str, Any]]:
         return list(csv.DictReader(handle))
 
 
-def numeric_rows(path: Path, fields: tuple[str, ...]) -> list[dict[str, Any]]:
-    rows = []
-    for source in read_csv(path):
-        row: dict[str, Any] = {"timestamp": source["timestamp"]}
-        for field in fields:
-            value = source.get(field)
-            row[field] = float(value) if value not in (None, "") else None
-        rows.append(row)
-    return rows
-
-
 def load_metrics(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):

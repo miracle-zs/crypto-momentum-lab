@@ -102,10 +102,6 @@ def pct(value: float | None) -> str:
     return "n/a" if value is None else f"{value * 100:.2f}%"
 
 
-def safe_float(value: Decimal | None) -> float | None:
-    return float(value) if value is not None else None
-
-
 def load_states(rows: Iterable[dict[str, str]]) -> dict[str, list[dict[str, Any]]]:
     by_symbol: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:

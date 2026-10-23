@@ -16,8 +16,7 @@ import json
 import math
 import statistics
 from bisect import bisect_left
-from collections import defaultdict
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 

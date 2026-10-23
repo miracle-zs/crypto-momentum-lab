@@ -429,36 +429,6 @@ class PostgresOperationalRetentionRepository:
                 break
         return deleted
 
-    async def _delete_batch(
-        self,
-        table_name: str,
-        timestamp_column: str,
-        *,
-        before: datetime,
-        batch_size: int,
-    ) -> int:
-        if batch_size <= 0:
-            raise ValueError("batch_size must be positive")
-        # PostgreSQL's ctid lets us bound each delete without requiring a
-        # materialized list of millions of primary keys.  The retention index
-        # makes the ordered candidate selection cheap.
-        statement = text(
-            f"WITH doomed AS ("
-            f"SELECT ctid FROM {table_name} "
-            f"WHERE {timestamp_column} < :before "
-            f"ORDER BY {timestamp_column} "
-            f"LIMIT :batch_size"
-            f") "
-            f"DELETE FROM {table_name} "
-            f"WHERE ctid IN (SELECT ctid FROM doomed)"
-        )
-        return await self._execute_delete(
-            statement,
-            before=before,
-            batch_size=batch_size,
-            dataset_name=table_name,
-        )
-
     async def _execute_delete(
         self,
         statement: TextClause,

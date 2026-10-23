@@ -172,7 +172,7 @@ def test_cli_drain_live_flow_cancels_and_sweeps() -> None:
 
     async def connect(*, on_event):
         state = on_event.__self__
-        state.set_ws_connected(True)
+        state.on_ws_status_change(True)
 
         async def cancel(**params):
             order = state.orders[params["client_order_id"]]

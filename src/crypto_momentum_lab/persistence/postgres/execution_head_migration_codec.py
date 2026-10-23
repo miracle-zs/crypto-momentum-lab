@@ -706,19 +706,6 @@ def _require_keys(
         )
 
 
-def _require_schema_version(
-    data: dict[str, object],
-    *,
-    version: int,
-    label: str,
-) -> None:
-    found = data.get("schema_version")
-    if type(found) is not int or found != version:
-        raise RecoverySchemaError(
-            f"unsupported {label} schema version {found!r}; expected {version}"
-        )
-
-
 def _array(data: dict[str, object], name: str) -> list[object]:
     value = data[name]
     if not isinstance(value, list):

@@ -1,12 +1,11 @@
-from collections.abc import Collection
-from dataclasses import dataclass
+"""Shared live strategy configuration and approval hash calculation."""
+
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
     deterministic_config_hash,
 )
-from crypto_momentum_lab.domain.strategy.position_exit import PositionExitMode
 from crypto_momentum_lab.live_rollout.profile import LiveOrderFlowImpulseProfile
 from crypto_momentum_lab.strategies.order_flow_impulse import OrderFlowImpulseConfig
 from crypto_momentum_lab.strategies.registry import build_runtime_config
@@ -16,11 +15,6 @@ _LIVE_ENTRY_PRICE_ABOVE_EMA5 = False
 _LIVE_ENTRY_PRICE_ABOVE_EMA10 = False
 _LIVE_ENTRY_ORDER_TYPE = EntryType.LIMIT
 _LIVE_ENTRY_LIMIT_TTL_SECONDS = 900
-_LIVE_MARKET_WEBSOCKET_URL = "wss://fstream.binance.com/market/ws"
-_DEFAULT_PERSIST_EXCHANGE_OPERATIONS = frozenset({"submit", "cancel"})
-_LIVE_STARTUP_BUFFER_LIMIT = 100_000
-_LIVE_STATUS_HEARTBEAT_INTERVAL_SECONDS = 15.0
-_LIVE_RUNTIME_SHUTDOWN_TIMEOUT_SECONDS = 15.0
 
 
 def _live_strategy_config(
@@ -84,106 +78,3 @@ def _live_strategy_config_hash(
             },
         }
     )
-
-
-@dataclass(frozen=True, slots=True)
-class LiveRuntimeDatabases:
-    execution_database_url: str
-    market_database_url: str
-    observability_database_url: str
-
-
-@dataclass(frozen=True, slots=True)
-class LiveRuntimeIdentity:
-    account_label: str
-    strategy_name: str
-    session_id: str
-    operator: str
-    strategy_config_hash: str
-    git_commit_hash: str
-
-
-@dataclass(frozen=True, slots=True)
-class LiveRuntimeMarket:
-    market_environment: str
-    market_state_source: str
-    market_state_hub_url: str
-    market_quote_hub_url: str
-    market_quote_volume_hub_url: str
-    market_websocket_url: str
-    account_event_hub_url: str | None = None
-    risk_control_hub_url: str | None = None
-    user_data_websocket_url: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class LiveRuntimeStrategy:
-    profile: LiveOrderFlowImpulseProfile
-    entry_positive_gainer_top_count: int | None
-    require_price_above_ema5: bool
-    require_price_above_ema10: bool
-    entry_order_type: EntryType
-    entry_limit_ttl_seconds: int
-
-
-@dataclass(frozen=True, slots=True)
-class LiveRuntimeExecution:
-    target_notional: Decimal
-    hedge_mode: bool
-    exit_mode: PositionExitMode
-    entry_long_only: bool
-    entry_leverage: int
-    margin_type: str
-    candle_grace_bars: int
-    candle_grace_decision_profit_pct: Decimal
-    candle_grace_profit_pct: Decimal
-    max_concurrency_per_symbol: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class LiveRuntimeLifecycle:
-    max_runtime_seconds: int
-    poll_interval_seconds: float
-    checkpoint_every_states: int
-    persist_exchange_operations: Collection[str] | None
-    checkpoint_every_seconds: float = 60.0
-    checkpoint_phase_seconds: float = 0.0
-
-
-@dataclass(frozen=True, slots=True)
-class LiveRuntimeCredentials:
-    base_url: str
-    api_key: str
-    api_secret: str
-    read_api_key: str | None = None
-    read_api_secret: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class LiveRuntimeConfig:
-    """Immutable inputs required to assemble one live daemon runtime.
-
-    The composition root owns CLI and environment resolution.  The runtime
-    receives this grouped value so its orchestration interface does not grow
-    with every newly supported live option.
-    """
-
-    databases: LiveRuntimeDatabases
-    identity: LiveRuntimeIdentity
-    market: LiveRuntimeMarket
-    strategy: LiveRuntimeStrategy
-    execution: LiveRuntimeExecution
-    lifecycle: LiveRuntimeLifecycle
-    credentials: LiveRuntimeCredentials
-
-
-__all__ = [
-    "LiveRuntimeConfig",
-    "LiveRuntimeCredentials",
-    "LiveRuntimeDatabases",
-    "LiveRuntimeExecution",
-    "LiveRuntimeIdentity",
-    "LiveRuntimeLifecycle",
-    "LiveRuntimeMarket",
-    "LiveRuntimeStrategy",
-]

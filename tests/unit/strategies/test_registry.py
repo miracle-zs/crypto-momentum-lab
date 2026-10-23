@@ -9,12 +9,7 @@ from crypto_momentum_lab.strategies.registry import (
     StrategyRegistryError,
     build_runtime_config,
     build_runtime_strategy,
-    supported_strategy_names,
 )
-
-
-def test_registry_lists_supported_strategy_names() -> None:
-    assert supported_strategy_names() == ("orderflow_impulse",)
 
 
 @pytest.mark.parametrize(

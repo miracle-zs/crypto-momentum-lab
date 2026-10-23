@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import bisect
-import statistics
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta

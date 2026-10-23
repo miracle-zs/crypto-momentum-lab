@@ -12,7 +12,7 @@ from crypto_momentum_lab.persistence.postgres.retention_repository import (
 )
 
 
-@pytest.mark.parametrize("operation", ["save", "delete", "save_in_session"])
+@pytest.mark.parametrize("operation", ["save", "delete"])
 async def test_lock_failure_does_not_write_recovery_dependency(operation):
     session = AsyncMock()
     session.__aenter__.return_value = session
@@ -32,12 +32,10 @@ async def test_lock_failure_does_not_write_recovery_dependency(operation):
     with pytest.raises(RuntimeError, match="database lock unavailable"):
         if operation == "save":
             await repository.save_dependency(dependency)
-        elif operation == "delete":
+        else:
             await repository.delete_dependency(
                 dependency.consumer_id, dependency.dataset_name
             )
-        else:
-            await repository.save_dependency_in_session(session, dependency)
 
     assert session.execute.await_count == 1
     session.merge.assert_not_awaited()

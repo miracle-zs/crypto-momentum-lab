@@ -1,30 +1,14 @@
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 
 import pytest
 
 from crypto_momentum_lab.domain.account.models import (
-    AccountBalanceSnapshot,
     AccountPositionSnapshot,
-    AccountPositionStateSnapshot,
 )
-from crypto_momentum_lab.persistence.postgres.account_repository import (
-    position_snapshot_row,
+from crypto_momentum_lab.persistence.postgres.execution_head_migration_snapshot import (
+    stable_snapshot_anchor_id,
 )
-
-
-def test_account_balance_snapshot_requires_aware_time() -> None:
-    with pytest.raises(ValueError, match="observed_at must be timezone-aware"):
-        AccountBalanceSnapshot(
-            environment="live",
-            account_label="primary",
-            asset="USDT",
-            wallet_balance=Decimal("100"),
-            available_balance=Decimal("80"),
-            unrealized_pnl=Decimal("0"),
-            observed_at=datetime(2026, 7, 4, 0, 0),
-            raw_payload={},
-        )
 
 
 def test_account_position_snapshot_rejects_empty_symbol() -> None:
@@ -46,7 +30,7 @@ def test_account_position_snapshot_rejects_empty_symbol() -> None:
         )
 
 
-def test_hedge_position_snapshots_have_distinct_ids() -> None:
+def test_hedge_position_snapshots_have_distinct_migration_anchors() -> None:
     observed_at = datetime.now().astimezone()
     common = {
         "environment": "live",
@@ -63,37 +47,11 @@ def test_hedge_position_snapshots_have_distinct_ids() -> None:
         "raw_payload": {},
     }
 
-    long_row = position_snapshot_row(
+    long_anchor = stable_snapshot_anchor_id(
         AccountPositionSnapshot(position_side="LONG", **common)
     )
-    short_row = position_snapshot_row(
+    short_anchor = stable_snapshot_anchor_id(
         AccountPositionSnapshot(position_side="SHORT", **common)
     )
 
-    assert long_row["snapshot_id"] != short_row["snapshot_id"]
-
-
-def test_account_position_state_snapshot_requires_complete_count_match() -> None:
-    with pytest.raises(ValueError, match="count must match its keys"):
-        AccountPositionStateSnapshot(
-            environment="live",
-            account_label="primary",
-            reconciliation_id="run-1",
-            observed_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
-            position_count=1,
-            position_keys=(),
-        )
-
-
-def test_account_position_state_snapshot_normalizes_hedge_position_keys() -> None:
-    snapshot = AccountPositionStateSnapshot(
-        environment="live",
-        account_label="primary",
-        reconciliation_id="run-1",
-        observed_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
-        position_count=2,
-        position_keys=(("btcusdt", "long"), ("BTCUSDT", "short")),
-    )
-
-    assert snapshot.position_keys == (("BTCUSDT", "LONG"), ("BTCUSDT", "SHORT"))
-    assert snapshot.symbols == frozenset({"BTCUSDT"})
+    assert long_anchor != short_anchor

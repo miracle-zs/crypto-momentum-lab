@@ -472,7 +472,6 @@ async def build(args: argparse.Namespace) -> dict[str, object]:
         """
     )
     config = relaxed_config()
-    fieldnames: list[str] | None = None
     rows_written = 0
     top10_candidates = 0
     current_baseline = 0

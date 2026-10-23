@@ -58,7 +58,7 @@ async def test_order_executor_network_error_keeps_order_in_doubt_and_locks_held(
     state = AccountState("live", "a1", db=repo)
     state.risk_config = risk_config(state.environment, state.account_label)
     state.set_system_mode(SystemMode.RUNNING)
-    state.set_ws_connected(True)
+    state.on_ws_status_change(True)
     order = state.create_entry_order(
         batch_id="b1",
         symbol="BTCUSDT",
@@ -204,7 +204,7 @@ async def test_exit_manager_waits_for_ws_terminal_before_market_sweep() -> None:
     state = AccountState("live", "a1", db=repo)
     state.risk_config = risk_config(state.environment, state.account_label)
     state.set_system_mode(SystemMode.RUNNING)
-    state.set_ws_connected(True)
+    state.on_ws_status_change(True)
 
     from datetime import UTC, datetime
 

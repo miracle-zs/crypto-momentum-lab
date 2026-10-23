@@ -18,10 +18,6 @@ class StrategyRegistryError(ValueError):
 type RuntimeConfig = OrderFlowImpulseRuntimeConfig
 
 
-def supported_strategy_names() -> tuple[str, ...]:
-    return ("orderflow_impulse",)
-
-
 def build_runtime_config(
     strategy_name: str,
     *,
