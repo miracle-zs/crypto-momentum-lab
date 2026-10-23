@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -102,6 +104,7 @@ class MarketDataFeed:
                 async for raw_msg in self._ws:
                     if stop_event and stop_event.is_set():
                         break
+                    frame_received_at = datetime.now(UTC)
                     try:
                         text_msg = (
                             raw_msg.decode("utf-8")
@@ -109,7 +112,9 @@ class MarketDataFeed:
                             else str(raw_msg)
                         )
                         payload = json.loads(text_msg)
-                        await self._dispatch_message(payload)
+                        await self._dispatch_message(
+                            payload, frame_received_at=frame_received_at
+                        )
                     except Exception as e:
                         log.warning(
                             "market_feed_dispatch_error",
@@ -144,28 +149,95 @@ class MarketDataFeed:
                 pass
             backoff = min(30.0, backoff * 2.0)
 
-    async def _dispatch_message(self, data: dict[str, Any]) -> None:
+    async def _dispatch_message(
+        self,
+        data: dict[str, Any],
+        *,
+        frame_received_at: datetime | None = None,
+    ) -> None:
         """Accept the canonical Hub schema, including all order-flow fields."""
         if "states" not in data:
             return
-        for payload in data["states"]:
-            try:
-                market_state = market_state_from_payload(payload)
-                if market_state.symbol not in self.symbols:
-                    continue
-                result = self.on_market_state(market_state)
-                if asyncio.iscoroutine(result):
-                    await result
-            except BinanceOrderRejectedError as error:
-                log.warning(
-                    "entry_order_rejected",
-                    symbol=market_state.symbol,
-                    code=error.code,
-                    reason=error.message,
-                )
-            except Exception:
-                log.exception(
-                    "market_state_processing_failed", symbol=payload.get("symbol")
+        received_at = frame_received_at or datetime.now(UTC)
+        dispatch_started = time.monotonic()
+        state_count = 0
+        minute_boundary = False
+        first_bucket_end: datetime | None = None
+        try:
+            for payload in data["states"]:
+                state_count += 1
+                try:
+                    market_state = market_state_from_payload(payload)
+                    if first_bucket_end is None:
+                        first_bucket_end = market_state.bucket_end
+                    minute_boundary |= (
+                        market_state.bucket_end.second == 0
+                        and market_state.bucket_end.microsecond == 0
+                    )
+                    if market_state.symbol not in self.symbols:
+                        continue
+                    result = self.on_market_state(market_state)
+                    if asyncio.iscoroutine(result):
+                        await result
+                except BinanceOrderRejectedError as error:
+                    log.warning(
+                        "entry_order_rejected",
+                        symbol=market_state.symbol,
+                        code=error.code,
+                        reason=error.message,
+                    )
+                except Exception:
+                    log.exception(
+                        "market_state_processing_failed", symbol=payload.get("symbol")
+                    )
+        finally:
+            dispatch_duration_ms = (time.monotonic() - dispatch_started) * 1000
+            published_at_raw = data.get("published_at")
+            published_at: datetime | None = None
+            if isinstance(published_at_raw, str):
+                try:
+                    parsed_published_at = datetime.fromisoformat(published_at_raw)
+                    if (
+                        parsed_published_at.tzinfo is not None
+                        and parsed_published_at.utcoffset() is not None
+                    ):
+                        published_at = parsed_published_at
+                except ValueError:
+                    pass
+
+            publish_delay_ms = None
+            publish_to_frame_ms = None
+            if published_at is not None and first_bucket_end is not None:
+                publish_delay_ms = (
+                    published_at - first_bucket_end
+                ).total_seconds() * 1000
+            if published_at is not None:
+                publish_to_frame_ms = (
+                    received_at - published_at
+                ).total_seconds() * 1000
+
+            if (
+                minute_boundary
+                or dispatch_duration_ms >= 100
+                or (publish_to_frame_ms is not None and publish_to_frame_ms >= 100)
+            ):
+                log.info(
+                    "market_feed_batch_timing",
+                    consumer_id=self.consumer_id,
+                    environment=self.environment,
+                    published_at=published_at_raw,
+                    bucket_end=first_bucket_end.isoformat()
+                    if first_bucket_end is not None
+                    else None,
+                    frame_received_at=received_at.isoformat(),
+                    publish_delay_ms=round(publish_delay_ms, 1)
+                    if publish_delay_ms is not None
+                    else None,
+                    publish_to_frame_ms=round(publish_to_frame_ms, 1)
+                    if publish_to_frame_ms is not None
+                    else None,
+                    state_count=state_count,
+                    dispatch_duration_ms=round(dispatch_duration_ms, 1),
                 )
 
     async def close(self) -> None:
