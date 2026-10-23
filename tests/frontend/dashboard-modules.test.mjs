@@ -14,7 +14,6 @@ import {
   liveAccountMetricChart,
   liveAccountMetricModel,
   maxDrawdown,
-  standaloneSparkline,
 } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-charts.js";
 import {
   buildChartOption,
@@ -200,14 +199,6 @@ test("global readiness uses database status for the overview section", () => {
   assert.equal(
     readinessStatusForSection("risk", { status: "READY", _cache_status: "STALE" }),
     "STALE",
-  );
-});
-
-test("sparklines render an empty state without a browser DOM", () => {
-  assert.equal(standaloneSparkline([]), '<div class="spark spark-empty">—</div>');
-  assert.match(
-    standaloneSparkline([{ equity: 1000 }, { equity: 1001 }]),
-    /<svg class="spark pos"/,
   );
 });
 

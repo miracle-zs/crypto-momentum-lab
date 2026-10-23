@@ -55,19 +55,8 @@ class CaptureMetricsSnapshot:
     state: MarketDataState
     monitoring_generation: int
     monitoring_symbols: int
-    desired_subscriptions: int
-    active_subscriptions: int
-    active_connections: int
-    reconnect_count: int
-    received_messages: int
-    received_bytes: int
     queue_events: int
     queue_bytes: int
-    archived_rows: int
-    archived_bytes: int
-    open_writers: int
-    pending_manifests: int
-    oldest_pending_manifest_seconds: float | None
     disk_free_bytes: int
     queue_coalesced_replacements: int = 0
     queue_dropped_events: int = 0
@@ -142,17 +131,6 @@ class MarketDataCaptureService:
         self._state = MarketDataState.STARTING
         self._monitoring_generation = 0
         self._monitoring_symbols = 0
-        self._desired_subscriptions = 0
-        self._active_subscriptions = 0
-        self._active_connections = 0
-        self._reconnect_count = 0
-        self._received_messages = 0
-        self._received_bytes = 0
-        self._archived_rows = 0
-        self._archived_bytes = 0
-        self._open_writers = 0
-        self._pending_manifests = 0
-        self._oldest_pending_manifest_seconds: float | None = None
         self._disk_free_bytes = 0
         self._halted_by_disk = False
         self._halted_by_queue_overflow = False
@@ -270,19 +248,12 @@ class MarketDataCaptureService:
         )
         self._monitoring_generation = generation
         self._monitoring_symbols = len(symbols)
-        self._desired_subscriptions = len(symbols) * len(streams)
 
     def metrics_snapshot(self) -> CaptureMetricsSnapshot:
         return CaptureMetricsSnapshot(
             state=self._state,
             monitoring_generation=self._monitoring_generation,
             monitoring_symbols=self._monitoring_symbols,
-            desired_subscriptions=self._desired_subscriptions,
-            active_subscriptions=self._active_subscriptions,
-            active_connections=self._active_connections,
-            reconnect_count=self._reconnect_count,
-            received_messages=self._received_messages,
-            received_bytes=self._received_bytes,
             queue_events=self._queue.size,
             queue_bytes=self._queue.current_bytes,
             queue_coalesced_replacements=self._queue.coalesced_replacements,
@@ -300,11 +271,6 @@ class MarketDataCaptureService:
                 if self._coordinator is None
                 else self._coordinator.filtered_book_ticker_events
             ),
-            archived_rows=self._archived_rows,
-            archived_bytes=self._archived_bytes,
-            open_writers=self._open_writers,
-            pending_manifests=self._pending_manifests,
-            oldest_pending_manifest_seconds=(self._oldest_pending_manifest_seconds),
             disk_free_bytes=self._disk_free_bytes,
         )
 

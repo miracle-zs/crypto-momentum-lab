@@ -4,6 +4,7 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
+from sqlalchemy import func, select
 
 from crypto_momentum_lab.domain.market.models import (
     ArchiveManifest,
@@ -12,6 +13,10 @@ from crypto_momentum_lab.domain.market.models import (
     MarketDataState,
     QualityCategory,
     QualityEvent,
+)
+from crypto_momentum_lab.persistence.postgres.models import (
+    MarketDataProcessStateRow,
+    MarketDataQualityEventRow,
 )
 
 
@@ -50,10 +55,23 @@ async def test_quality_and_process_state_are_persisted(
         reason="silence",
     )
 
-    assert await capture_repository.count_quality_events() == 1
+    async with capture_repository._session_factory() as session:
+        quality_count = await session.scalar(
+            select(func.count()).select_from(MarketDataQualityEventRow)
+        )
+        process_state = await session.scalar(
+            select(MarketDataProcessStateRow)
+            .order_by(
+                MarketDataProcessStateRow.occurred_at.desc(),
+                MarketDataProcessStateRow.state_id.desc(),
+            )
+            .limit(1)
+        )
+
+    assert quality_count == 1
     assert (
-        await capture_repository.latest_process_state()
-        is MarketDataState.DEGRADED
+        process_state is not None
+        and process_state.state == MarketDataState.DEGRADED.value
     )
 
 

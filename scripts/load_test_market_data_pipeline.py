@@ -139,7 +139,7 @@ async def run_load_test(
     coordinator = CaptureCoordinator(
         queue=queue,
         archive=_NoopArchive(),
-        quality=StreamQualityTracker(silence_timeout_seconds=30),
+        quality=StreamQualityTracker(),
         repository=capture_repository,
         realtime_envelope_sink=state_publisher.observe,
         envelope_recovery=recovery,

@@ -165,7 +165,6 @@ class SinkAppendResult:
 class SinkFlushResult:
     committed_rows: int
     committed_sequences: frozenset[int]
-    committed_state_keys: frozenset[_STATE_KEY]
     last_bucket_start: datetime | None
     last_symbol: str | None
     files_written: int
@@ -280,7 +279,10 @@ class ParquetWindowSink:
                         path=str(path),
                         environment=key[0],
                         symbol=key[1],
-                        message="additional conflicting state rows aggregated for this append",
+                        message=(
+                            "additional conflicting state rows aggregated "
+                            "for this append"
+                        ),
                     )
                 continue
             rows[key] = row
@@ -313,7 +315,6 @@ class ParquetWindowSink:
     def _flush_paths(self, paths: Iterable[Path]) -> SinkFlushResult:
         committed_rows = 0
         committed_sequences: set[int] = set()
-        committed_state_keys: set[_STATE_KEY] = set()
         committed_version_keys: set[_VERSION_KEY] = set()
         last_bucket_start: datetime | None = None
         last_symbol: str | None = None
@@ -337,7 +338,6 @@ class ParquetWindowSink:
             bytes_written += written
             for row in ordered_rows:
                 state_key = _row_key(row)
-                committed_state_keys.add(state_key)
                 committed_version_keys.add(
                     (
                         state_key[0],
@@ -361,7 +361,6 @@ class ParquetWindowSink:
         return SinkFlushResult(
             committed_rows=committed_rows,
             committed_sequences=frozenset(committed_sequences),
-            committed_state_keys=frozenset(committed_state_keys),
             committed_version_keys=frozenset(committed_version_keys),
             last_bucket_start=last_bucket_start,
             last_symbol=last_symbol,
@@ -638,7 +637,6 @@ class CapacityGuard:
             written = max(0, self._total_bytes_written - self._baseline_written_total)
             base_free = self._base_disk_free_bytes
             scan_mono = self._last_scan_monotonic
-            _scan_obs = self._last_scan_observed_at
 
         estimated_collector = base_col + written
         estimated_disk_free = max(0, base_free - written)

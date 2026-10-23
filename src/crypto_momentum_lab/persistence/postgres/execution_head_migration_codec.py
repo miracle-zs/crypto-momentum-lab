@@ -17,6 +17,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionKey,
 )
 from crypto_momentum_lab.domain.trading import TradeSide as StrategySide
+
 from . import (
     execution_head_migration_projection as projection_codec,
 )
@@ -31,7 +32,6 @@ from .execution_head_migration_projection import (
     LegacyPositionProjection,
     PositionDiscrepancy,
     _datetime,
-    _decimal,
 )
 from .execution_head_migration_snapshot import encode_position_snapshot
 
@@ -199,24 +199,6 @@ class PositionRecoveryCodec:
             symbol=_string(data, "symbol"),
             position_side=FuturesPositionSide(_string(data, "position_side")),
         )
-
-    @classmethod
-    def encode_fill(cls, fill: AccountFillEvent) -> dict[str, object]:
-        return {
-            "environment": fill.environment,
-            "account_label": fill.account_label,
-            "symbol": fill.symbol,
-            "trade_id": fill.trade_id,
-            "order_id": fill.order_id,
-            "side": fill.side,
-            "price": _decimal(fill.price),
-            "quantity": _decimal(fill.quantity),
-            "realized_pnl": _decimal(fill.realized_pnl),
-            "fee": _decimal(fill.fee),
-            "fee_asset": fill.fee_asset,
-            "trade_at": _datetime(fill.trade_at),
-            "raw_payload": fill.raw_payload,
-        }
 
     @classmethod
     def decode_fill(cls, value: object) -> AccountFillEvent:

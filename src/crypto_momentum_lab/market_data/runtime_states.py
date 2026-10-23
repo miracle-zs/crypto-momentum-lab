@@ -17,7 +17,6 @@ from crypto_momentum_lab.domain.market.models import (
     NormalizedBookTicker,
     NormalizedMarketEvent,
     RawEnvelope,
-    RealtimeMarketQuote,
 )
 from crypto_momentum_lab.domain.market.runtime_state_models import (
     RuntimeStateSequenceRange,
@@ -87,7 +86,6 @@ class ClosedStateRepository(Protocol):
 
 
 type RealtimeStateSink = Callable[[tuple[MarketState15s, ...]], Awaitable[None]]
-type RealtimeQuoteSink = Callable[[RealtimeMarketQuote], Awaitable[None]]
 type DurableStatePersistedCallback = Callable[[datetime], None]
 
 
@@ -227,12 +225,10 @@ class ClosedMarketStatePublisher:
         repository: ClosedStateRepository,
         config: ClosedMarketStatePublisherConfig = ClosedMarketStatePublisherConfig(),
         realtime_state_sink: RealtimeStateSink | None = None,
-        realtime_quote_sink: RealtimeQuoteSink | None = None,
         on_durable_state_persisted: DurableStatePersistedCallback | None = None,
     ) -> None:
         self._repository = repository
         self._realtime_state_sink = realtime_state_sink
-        self._realtime_quote_sink = realtime_quote_sink
         self._on_durable_state_persisted = on_durable_state_persisted
         self._config = config
         self._accumulators_by_bucket: dict[_BucketKey, MarketState15sAccumulator] = {}
@@ -258,7 +254,6 @@ class ClosedMarketStatePublisher:
         self._late_event_count = 0
         self._realtime_batch_count = 0
         self._realtime_sink_failure_count = 0
-        self._realtime_quote_failure_count = 0
         # Websocket real-time dispatch is deliberately independent from the
         # archival queue.  Keep its aggregate-trade cursor here too, so a gap
         # is reflected in the decision state before the current live trade is
@@ -395,7 +390,6 @@ class ClosedMarketStatePublisher:
             "configured_durable_closure_delay_seconds": (
                 self._config.durable_closure_delay_seconds
             ),
-            "realtime_quote_failure_count": self._realtime_quote_failure_count,
             "thresholds_seconds": _LATENESS_THRESHOLDS_SECONDS,
             "streams": {
                 stream.value: counters.snapshot()
@@ -428,33 +422,6 @@ class ClosedMarketStatePublisher:
             },
         }
 
-    async def observe_realtime_quote(self, envelope: RawEnvelope) -> None:
-        """Publish a book-ticker quote before capture coalescing/archive I/O."""
-        if (
-            self._realtime_quote_sink is None
-            or envelope.stream is not CaptureStream.BOOK_TICKER
-        ):
-            return
-        try:
-            event = normalize_binance_envelope(envelope)
-            if not isinstance(event, NormalizedBookTicker):
-                return
-            await self._realtime_quote_sink(
-                RealtimeMarketQuote(
-                    exchange=event.exchange,
-                    environment=event.environment,
-                    symbol=event.symbol,
-                    event_at=event.event_at,
-                    received_at=event.received_at,
-                    bid_price=event.bid_price,
-                    ask_price=event.ask_price,
-                )
-            )
-        except Exception:
-            # A quote consumer outage must not stop the primary capture
-            # connection. The state and durable paths remain independent.
-            self._realtime_quote_failure_count += 1
-
     async def observe_realtime(self, envelope: RawEnvelope) -> None:
         """Ingest a websocket envelope on the decision-time path.
 
@@ -469,7 +436,6 @@ class ClosedMarketStatePublisher:
                 return
             if gap is not None:
                 await self.mark_incomplete(gap)
-            await self.observe_realtime_quote(envelope)
             await self.observe(envelope)
 
     async def mark_incomplete(self, gap: AggTradeGap) -> None:

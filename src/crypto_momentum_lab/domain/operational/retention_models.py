@@ -165,7 +165,9 @@ class DatasetScope:
             names.add(self.custom_name)
         if self.account_label:
             names.add(f"{self.dataset_id.value}_{self.account_label}")
-            names.add(f"{self.dataset_id.value}_{self.environment}_{self.account_label}")
+            names.add(
+                f"{self.dataset_id.value}_{self.environment}_{self.account_label}"
+            )
 
         tables = DATASET_PHYSICAL_TABLES.get(self.dataset_id, ())
         for t in tables:
@@ -374,14 +376,3 @@ class PruneOutcome:
             details=summary_details,
             executed_at=executed_at or datetime.now(UTC),
         )
-
-
-@dataclass(frozen=True, slots=True)
-class RestoreReceipt:
-    """Verification receipt for recovery/restore dry-runs or executions."""
-
-    recovery_spec: RecoverySpec
-    restored_rows: int
-    verified_at: datetime
-    status: str
-    details: str = ""

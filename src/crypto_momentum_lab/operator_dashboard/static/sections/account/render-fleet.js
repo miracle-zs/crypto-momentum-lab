@@ -44,7 +44,7 @@ export function liveStrategyStateLabel(state) {
   }[normalized] || state || "状态未知";
 }
 
-export function liveAccountCard(account, index, selectedLabel) {
+function liveAccountCard(account, index, selectedLabel) {
   const selected = account.account_label === selectedLabel;
   const statusClass = liveAccountStatusClass(account.status);
   const readiness = liveAccountStatusLabel(account.readiness);
@@ -66,7 +66,7 @@ export function liveAccountCard(account, index, selectedLabel) {
   </button>`;
 }
 
-export function liveAccountSummary(accounts, overallStatus) {
+function liveAccountSummary(accounts, overallStatus) {
   const readyCount = accounts.filter((account) => String(account.status).toUpperCase() === "READY").length;
   const haltedCount = accounts.filter((account) => String(account.status).toUpperCase() === "HALTED").length;
   const reviewCount = accounts.length - readyCount - haltedCount;

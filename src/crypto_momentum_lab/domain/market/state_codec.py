@@ -103,15 +103,6 @@ def _require_int(payload: Mapping[str, object], name: str) -> int:
     return value
 
 
-def _optional_int(payload: Mapping[str, object], name: str) -> int | None:
-    value = payload.get(name)
-    if value is None:
-        return None
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise MarketStateCodecError(f"{name} must be an integer")
-    return value
-
-
 def _optional_bool_default(
     payload: Mapping[str, object],
     name: str,

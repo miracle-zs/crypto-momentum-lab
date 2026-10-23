@@ -8,8 +8,6 @@ from crypto_momentum_lab.persistence.raw_files.archive import (
 )
 from crypto_momentum_lab.persistence.raw_files.journal import (
     PendingManifestJournal,
-    PendingProcessState,
-    PendingProcessStateJournal,
 )
 from crypto_momentum_lab.persistence.raw_files.recovery import (
     RecoveryResult,
@@ -27,8 +25,6 @@ __all__ = [
     "KnownGapCountProvider",
     "PartitionKey",
     "PendingManifestJournal",
-    "PendingProcessState",
-    "PendingProcessStateJournal",
     "RecoveryResult",
     "ZstdJsonlArchive",
     "partition_key",

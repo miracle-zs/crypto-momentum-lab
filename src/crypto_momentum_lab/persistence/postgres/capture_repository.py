@@ -3,7 +3,7 @@ from datetime import UTC, date, datetime, timedelta
 from time import monotonic
 
 import structlog
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -168,25 +168,6 @@ class PostgresCaptureRepository:
                         reason=reason,
                     )
                 )
-
-    async def count_quality_events(self) -> int:
-        async with self._session_factory() as session:
-            count = await session.scalar(
-                select(func.count()).select_from(MarketDataQualityEventRow)
-            )
-        return int(count)
-
-    async def latest_process_state(self) -> MarketDataState | None:
-        async with self._session_factory() as session:
-            row = await session.scalar(
-                select(MarketDataProcessStateRow)
-                .order_by(
-                    MarketDataProcessStateRow.occurred_at.desc(),
-                    MarketDataProcessStateRow.state_id.desc(),
-                )
-                .limit(1)
-            )
-        return None if row is None else MarketDataState(row.state)
 
 
 def _manifest_row(manifest: ArchiveManifest) -> RawArchiveManifestRow:

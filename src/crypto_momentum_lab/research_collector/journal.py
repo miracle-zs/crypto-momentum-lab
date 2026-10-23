@@ -22,8 +22,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, BinaryIO
 
-import structlog
-
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.state_codec import (
     market_state_from_payload,
@@ -49,10 +47,6 @@ from crypto_momentum_lab.research_collector.storage import (
     _selection_from_payload,
     _selection_to_payload,
 )
-
-log = structlog.get_logger()
-
-_STATE_KEY = tuple[str, str, datetime]
 
 
 def _clean_temporary_files(root: Path) -> None:

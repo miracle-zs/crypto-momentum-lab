@@ -4,7 +4,7 @@
  */
 
 export const SECTION_FETCH_TIMEOUT_MS = 12 * 1000;
-export const SAFETY_READING_TTL_MS = 60 * 1000;
+const SAFETY_READING_TTL_MS = 60 * 1000;
 export const SAFETY_SECTIONS = new Set(["overview", "risk", "account", "universe"]);
 
 export const sectionInFlight = new Set();
@@ -16,7 +16,7 @@ export const forcedSectionRefreshes = new Set();
 export const sectionRenderKeys = new Map();
 
 export let latestLiveService = null;
-export let latestLiveMode = "UNKNOWN";
+let latestLiveMode = "UNKNOWN";
 
 export function setLiveService(service) {
   latestLiveService = service || null;

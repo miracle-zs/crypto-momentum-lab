@@ -10,13 +10,9 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+_PARTITIONED_INDEX_NAME = "ix_runtime_market_states_15s_latest_bucket"
+
 _INDEXES = (
-    (
-        "ix_runtime_market_states_15s_latest_bucket",
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
-        "ix_runtime_market_states_15s_latest_bucket "
-        "ON runtime_market_states_15s (bucket_start) INCLUDE (bucket_end)",
-    ),
     (
         "ix_execution_account_process_states_latest",
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
@@ -45,8 +41,14 @@ _INDEXES = (
 
 
 def upgrade() -> None:
-    # The market-state table is several gigabytes on the server. Concurrent
-    # builds keep writers running while the dashboard read-path is repaired.
+    # PostgreSQL does not support concurrent builds on partitioned parents.
+    op.create_index(
+        _PARTITIONED_INDEX_NAME,
+        "runtime_market_states_15s",
+        ["bucket_start"],
+        postgresql_include=["bucket_end"],
+        if_not_exists=True,
+    )
     with op.get_context().autocommit_block():
         for _name, statement in _INDEXES:
             op.execute(sa.text(statement))
@@ -56,3 +58,4 @@ def downgrade() -> None:
     with op.get_context().autocommit_block():
         for name, _statement in reversed(_INDEXES):
             op.execute(sa.text(f"DROP INDEX CONCURRENTLY IF EXISTS {name}"))
+    op.drop_index(_PARTITIONED_INDEX_NAME, if_exists=True)

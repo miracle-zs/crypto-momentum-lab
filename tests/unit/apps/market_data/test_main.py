@@ -32,22 +32,7 @@ from crypto_momentum_lab.universe.scheduler import run_scheduler_loop
 runner = CliRunner()
 
 
-def test_retired_checkpoint_run_ids_are_explicit(monkeypatch) -> None:
-    monkeypatch.setenv("CML_RETIRED_STRATEGY_RUN_IDS", "paper-retired, paper-retired-2")
-    assert main.parse_retired_strategy_run_ids() == frozenset(
-        {"paper-retired", "paper-retired-2"}
-    )
-    with pytest.raises(ValueError):
-        main.parse_retired_strategy_run_ids("paper-*")
-    with pytest.raises(ValueError):
-        main.parse_retired_strategy_run_ids("paper-retired,")
-
-
-async def test_market_retention_excludes_only_explicitly_retired_checkpoints(
-    monkeypatch,
-) -> None:
-    old = datetime(2026, 9, 2, tzinfo=UTC)
-    live = datetime(2026, 10, 7, tzinfo=UTC)
+async def test_market_retention_protects_live_positions() -> None:
     position = datetime(2026, 10, 6, tzinfo=UTC)
 
     class Session:
@@ -61,30 +46,13 @@ async def test_market_retention_excludes_only_explicitly_retired_checkpoints(
             return SimpleNamespace(all=lambda: [])
 
         async def scalar(self, statement):
-            if "live_position_batches" in str(statement):
-                return position
-            # Model the SQL predicate over persisted checkpoints, not age.
-            params = statement.compile().params
-            retired = next(
-                (set(v) for k, v in params.items() if k.startswith("run_id")), set()
-            )
-            return min(
-                at
-                for run, at in (("paper-retired", old), ("live-current", live))
-                if run not in retired
-            )
+            assert "live_position_batches" in str(statement)
+            return position
 
-    monkeypatch.setenv("CML_RETIRED_STRATEGY_RUN_IDS", "paper-retired")
     requirements = await main._resolve_market_data_consumer_requirements(Session)
     assert {r.consumer_id: r.min_required_watermark for r in requirements} == {
-        "active_strategy_checkpoints": live,
         "active_position_market_states": position,
     }
-    # An unclassified old run remains protected; absence of a heartbeat is not
-    # an operator decision to retire it.
-    monkeypatch.setenv("CML_RETIRED_STRATEGY_RUN_IDS", "")
-    requirements = await main._resolve_market_data_consumer_requirements(Session)
-    assert requirements[0].min_required_watermark == old
 
 
 def test_market_database_url_prefers_the_market_plane(monkeypatch) -> None:
@@ -374,9 +342,9 @@ async def test_operational_retention_records_consumer_cutoff_before_execution(
     now = datetime(2026, 10, 7, 11, tzinfo=UTC)
     watermark = datetime(2026, 9, 2, 13, tzinfo=UTC)
     requirement = RetentionConsumerRequirement(
-        consumer_id="active_strategy_checkpoints",
+        consumer_id="external_strategy_replay",
         min_required_watermark=watermark,
-        reason="checkpoint recovery baseline",
+        reason="registered replay recovery baseline",
     )
     storage = InMemoryRetentionRepository()
     authority = main.RetentionAuthority(storage)

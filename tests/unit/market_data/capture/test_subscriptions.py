@@ -103,9 +103,9 @@ def test_change_plan_adds_before_removing() -> None:
         }
     )
 
-    plan = plan_subscription_change(old, new, generation=2)
+    commands = plan_subscription_change(old, new, generation=2)
 
-    assert [step.method for step in plan.steps] == [
+    assert [step.method for step in commands] == [
         "SUBSCRIBE",
         "UNSUBSCRIBE",
     ]

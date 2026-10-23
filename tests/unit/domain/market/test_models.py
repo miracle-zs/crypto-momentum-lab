@@ -8,11 +8,9 @@ from crypto_momentum_lab.domain.market.models import (
     AggressorSide,
     CaptureRoute,
     CaptureStream,
-    MarketDataState,
     MarketState15s,
     NormalizedAggTrade,
     RawEnvelope,
-    transition_market_data_state,
 )
 
 
@@ -34,29 +32,6 @@ def test_raw_envelope_requires_aware_receive_time() -> None:
             subscription_generation=1,
             raw_payload={"e": "aggTrade"},
         )
-
-
-def test_halted_state_requires_explicit_recovery() -> None:
-    assert (
-        transition_market_data_state(
-            MarketDataState.READY,
-            MarketDataState.HALTED,
-        )
-        is MarketDataState.HALTED
-    )
-    with pytest.raises(ValueError, match="HALTED"):
-        transition_market_data_state(
-            MarketDataState.HALTED,
-            MarketDataState.READY,
-        )
-    assert (
-        transition_market_data_state(
-            MarketDataState.HALTED,
-            MarketDataState.SYNCING,
-            recovery=True,
-        )
-        is MarketDataState.SYNCING
-    )
 
 
 def test_raw_envelope_accepts_aware_event_times() -> None:

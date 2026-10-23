@@ -10,7 +10,6 @@ Hub, oldest first, so the trading strategy can warm up before its first live buc
 from __future__ import annotations
 
 from collections.abc import Collection
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Protocol
@@ -43,14 +42,6 @@ class HistoricalStatePublisher(Protocol):
         self,
         states: tuple[MarketState15s, ...],
     ) -> None: ...
-
-
-@dataclass(frozen=True, slots=True)
-class SymbolBackfillReport:
-    symbol: str
-    buckets: int
-    trades: int
-    failure: str | None = None
 
 
 def _as_dt(value: object) -> datetime:
@@ -186,12 +177,12 @@ class PromotionHistoryBackfiller:
         symbols: Collection[str],
         *,
         now: datetime | None = None,
-    ) -> tuple[SymbolBackfillReport, ...]:
+    ) -> None:
         ordered = sorted(
             {symbol.strip().upper() for symbol in symbols if symbol.strip()}
         )
         if not ordered:
-            return ()
+            return
         batch = ordered[: self._max_symbols_per_batch]
         if len(ordered) > self._max_symbols_per_batch:
             log.warning(
@@ -201,7 +192,6 @@ class PromotionHistoryBackfiller:
             )
         end = datetime.now(UTC) if now is None else now.astimezone(UTC)
         start = end - self._lookback
-        reports: list[SymbolBackfillReport] = []
         for symbol in batch:
             try:
                 trades = await self._fetch_window(symbol, start=start, end=end)
@@ -212,13 +202,6 @@ class PromotionHistoryBackfiller:
                 )
                 if states:
                     await self._publisher.publish(states)
-                reports.append(
-                    SymbolBackfillReport(
-                        symbol=symbol,
-                        buckets=len(states),
-                        trades=len(trades),
-                    )
-                )
                 log.info(
                     "promotion_backfill_completed",
                     symbol=symbol,
@@ -233,15 +216,6 @@ class PromotionHistoryBackfiller:
                     error_type=type(error).__name__,
                     error=str(error),
                 )
-                reports.append(
-                    SymbolBackfillReport(
-                        symbol=symbol,
-                        buckets=0,
-                        trades=0,
-                        failure=type(error).__name__,
-                    )
-                )
-        return tuple(reports)
 
     async def _fetch_window(
         self,

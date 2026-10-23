@@ -97,7 +97,7 @@ async def test_refresh_is_deterministic_and_persists_point_in_time(
 
     first = await service.refresh(observed_at=at)
     second = await service.refresh(observed_at=at)
-    loaded = await repository.load_snapshot(at)
+    loaded = await repository.load_snapshot_at(at)
 
     assert first == second
     assert loaded == first

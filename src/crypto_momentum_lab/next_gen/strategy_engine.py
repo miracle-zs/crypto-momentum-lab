@@ -76,7 +76,7 @@ class MomentumStrategyEngine:
     def is_ready(self) -> bool:
         if not self.market_connected:
             return False
-        checkpoint = self.runtime.checkpoint(include_market_state_buffers=False)
+        checkpoint = self.runtime.checkpoint()
         required = self.runtime.required_data().warmup_buckets
         now = datetime.now(UTC)
         return any(

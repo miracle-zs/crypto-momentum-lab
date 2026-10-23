@@ -9,13 +9,10 @@ WindowMaterializer is the sole writer to Parquet window datasets:
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-
-import structlog
 
 from crypto_momentum_lab.research_collector.journal import ArchiveJournal
 from crypto_momentum_lab.research_collector.models import (
@@ -28,26 +25,6 @@ from crypto_momentum_lab.research_collector.storage import (
     SinkAppendResult,
     SinkFlushResult,
 )
-
-log = structlog.get_logger()
-
-_STATE_KEY = tuple[str, str, datetime]
-
-
-@dataclass(frozen=True, slots=True)
-class MaterializerFlushResult:
-    committed_rows: int
-    files_written: int
-    bytes_written: int
-    committed_receipts: tuple[DurableReceipt, ...]
-    last_bucket_start: datetime | None
-    last_symbol: str | None
-    sink_result: SinkFlushResult
-    resolutions: tuple[Mapping[str, Any], ...] = ()
-
-    @property
-    def committed_sequences(self) -> frozenset[int]:
-        return self.sink_result.committed_sequences
 
 
 class WindowMaterializer:
@@ -66,23 +43,10 @@ class WindowMaterializer:
         self._empty_receipts: list[DurableReceipt] = []
         self._receipt_resolutions: dict[int | str, dict[str, Any]] = {}
         self._persisted_rows = 0
-        self._duplicate_rows = 0
-
-    @property
-    def sink(self) -> ParquetWindowSink:
-        return self._sink
-
-    @property
-    def journal(self) -> ArchiveJournal:
-        return self._journal
 
     @property
     def persisted_rows(self) -> int:
         return self._persisted_rows
-
-    @property
-    def duplicate_rows(self) -> int:
-        return self._duplicate_rows
 
     def stage_record(self, record: JournalRecord) -> SinkAppendResult | None:
         """Stage one journal record into the Parquet window sink."""
@@ -107,8 +71,6 @@ class WindowMaterializer:
             record.collection_batch,
             record.selection,
         )
-        self._duplicate_rows += append_result.duplicate_rows
-
         if append_result.superseded_version_keys:
             self._superseded_keys.update(append_result.superseded_version_keys)
 
@@ -174,12 +136,12 @@ class WindowMaterializer:
         for record in records:
             self.stage_record(record)
 
-    def flush_ready(self, latest_bucket_start: datetime) -> MaterializerFlushResult:
+    def flush_ready(self, latest_bucket_start: datetime) -> SinkFlushResult:
         """Flush windows older than the late tolerance and commit covered receipts."""
         sink_result = self._sink.flush_ready(latest_bucket_start)
         return self._process_flush_result(sink_result, flush_all=False)
 
-    def flush_all(self) -> MaterializerFlushResult:
+    def flush_all(self) -> SinkFlushResult:
         """Flush all buffered windows unconditionally and commit covered receipts."""
         sink_result = self._sink.flush_all()
         return self._process_flush_result(sink_result, flush_all=True)
@@ -189,7 +151,7 @@ class WindowMaterializer:
         sink_result: SinkFlushResult,
         *,
         flush_all: bool,
-    ) -> MaterializerFlushResult:
+    ) -> SinkFlushResult:
         self._persisted_rows += sink_result.committed_rows
         committed_keys = sink_result.committed_version_keys
 
@@ -267,13 +229,4 @@ class WindowMaterializer:
                 resolutions=ready_resolutions,
             )
 
-        return MaterializerFlushResult(
-            committed_rows=sink_result.committed_rows,
-            files_written=sink_result.files_written,
-            bytes_written=sink_result.bytes_written,
-            committed_receipts=tuple(ready_receipts),
-            last_bucket_start=sink_result.last_bucket_start,
-            last_symbol=sink_result.last_symbol,
-            sink_result=sink_result,
-            resolutions=tuple(ready_resolutions),
-        )
+        return sink_result

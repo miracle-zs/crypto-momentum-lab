@@ -10,11 +10,6 @@ from crypto_momentum_lab.domain.strategy.entry_policy import (
     UniverseRankingEntry,
     UniverseRankingSnapshot,
 )
-from crypto_momentum_lab.domain.strategy.entry_policy_evaluation import (
-    CandidatePolicyDecision,
-    evaluate_entry_candidate,
-    universe_snapshot_for_symbols,
-)
 from crypto_momentum_lab.domain.strategy.models import (
     EntryType,
     OrderIntentCandidate,
@@ -54,8 +49,6 @@ __all__ = [
     "EntryEligibilityDecision",
     "EntryEligibilityPolicy",
     "EntryGateResult",
-    "CandidatePolicyDecision",
-    "evaluate_entry_candidate",
     "EquityFractionSizingModel",
     "FixedNotionalSizingModel",
     "OrderIntentCandidate",
@@ -81,5 +74,4 @@ __all__ = [
     "deterministic_signal_id",
     "position_exit_reason",
     "quantize_lot_quantity",
-    "universe_snapshot_for_symbols",
 ]

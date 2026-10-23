@@ -1,6 +1,6 @@
 /** Marketplace tabs and table quick-filter wiring. */
 
-export function wireMarketTab(tab) {
+function wireMarketTab(tab) {
   if (!tab || tab.dataset.marketWired === "true") return;
   tab.dataset.marketWired = "true";
   tab.addEventListener("click", () => {
@@ -25,7 +25,7 @@ export function wireMarketTab(tab) {
   });
 }
 
-export function applyMarketView(board, view = "rankings") {
+function applyMarketView(board, view = "rankings") {
   if (!board) return;
   board.querySelectorAll("[data-market-view]").forEach((candidate) => {
     const active = candidate.dataset.marketView === view;

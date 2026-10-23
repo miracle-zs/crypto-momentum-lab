@@ -86,10 +86,6 @@ class Binance24hQuoteVolumePublisher:
         self._refresh_failure_count = 0
         self._last_refresh_at: datetime | None = None
 
-    @property
-    def refresh_failure_count(self) -> int:
-        return self._refresh_failure_count
-
     async def start(self) -> None:
         if self._task is None:
             self._task = asyncio.create_task(

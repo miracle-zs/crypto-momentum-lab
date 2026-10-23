@@ -239,32 +239,6 @@ class PostgresUniverseRepository:
                 for row in rows
             }
 
-    async def load_active_entry_symbols_at(
-        self,
-        observed_at: datetime | None,
-    ) -> frozenset[str]:
-        async with self._session_factory() as session:
-            snapshot_statement = (
-                select(UniverseSnapshotRow.snapshot_id)
-                .where(UniverseSnapshotRow.activated.is_(True))
-                .order_by(UniverseSnapshotRow.observed_at.desc())
-                .limit(1)
-            )
-            if observed_at is not None:
-                snapshot_statement = snapshot_statement.where(
-                    UniverseSnapshotRow.observed_at <= observed_at
-                )
-            snapshot_id = await session.scalar(snapshot_statement)
-            if snapshot_id is None:
-                return frozenset()
-            symbols = await session.scalars(
-                select(MonitoringMembershipRow.symbol).where(
-                    MonitoringMembershipRow.snapshot_id == snapshot_id,
-                    MonitoringMembershipRow.status != MembershipStatus.EXTENDED.value,
-                )
-            )
-            return frozenset(symbols)
-
     async def save_snapshot(self, snapshot: UniverseSnapshot) -> None:
         self._snapshot_cache.pop(snapshot.snapshot_id, None)
         returns = _return_by_symbol(snapshot)
@@ -340,41 +314,22 @@ class PostgresUniverseRepository:
                         insert(MonitoringMembershipRow).values(memberships)
                     )
 
-    async def load_snapshot(
-        self,
-        observed_at: datetime,
-    ) -> UniverseSnapshot | None:
-        return await self._load_snapshot(observed_at, at_or_before=False)
-
     async def load_snapshot_at(
         self,
         observed_at: datetime,
     ) -> UniverseSnapshot | None:
         """Load the latest activated snapshot available at ``observed_at``."""
 
-        return await self._load_snapshot(observed_at, at_or_before=True)
-
-    async def _load_snapshot(
-        self,
-        observed_at: datetime,
-        *,
-        at_or_before: bool,
-    ) -> UniverseSnapshot | None:
         async with self._session_factory() as session:
-            statement = select(UniverseSnapshotRow)
-            if at_or_before:
-                statement = (
-                    statement.where(
-                        UniverseSnapshotRow.activated.is_(True),
-                        UniverseSnapshotRow.observed_at <= observed_at,
-                    )
-                    .order_by(UniverseSnapshotRow.observed_at.desc())
-                    .limit(1)
+            statement = (
+                select(UniverseSnapshotRow)
+                .where(
+                    UniverseSnapshotRow.activated.is_(True),
+                    UniverseSnapshotRow.observed_at <= observed_at,
                 )
-            else:
-                statement = statement.where(
-                    UniverseSnapshotRow.observed_at == observed_at
-                )
+                .order_by(UniverseSnapshotRow.observed_at.desc())
+                .limit(1)
+            )
             snapshot_row = await session.scalar(statement)
             if snapshot_row is None:
                 return None

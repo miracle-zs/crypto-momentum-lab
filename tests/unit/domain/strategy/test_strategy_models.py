@@ -112,24 +112,15 @@ def test_strategy_records_validate_timestamps_and_relationships() -> None:
         bucket_start=detected_at,
         details={"state": "evaluated"},
     )
-    checkpoint = StrategyCheckpoint(
-        last_processed_at_by_symbol={"BTCUSDT": detected_at},
-        warmup_buckets_by_symbol={"BTCUSDT": 4},
-        cooldown_buckets_remaining_by_symbol={"BTCUSDT": 0},
-        payload={"signal_sequence": 4},
-    )
-
     decision = StrategyDecision(
         signals=(signal,),
         candidates=(candidate,),
         rejections=(rejection,),
-        checkpoint=checkpoint,
     )
 
     assert decision.signals == (signal,)
     assert decision.candidates == (candidate,)
     assert decision.rejections == (rejection,)
-    assert decision.checkpoint == checkpoint
 
 
 def test_strategy_decision_rejects_unknown_candidate_signal_id() -> None:
@@ -150,7 +141,6 @@ def test_strategy_decision_rejects_unknown_candidate_signal_id() -> None:
             signals=(signal,),
             candidates=(candidate,),
             rejections=(),
-            checkpoint=_checkpoint(detected_at),
         )
 
 
@@ -173,7 +163,6 @@ def test_strategy_decision_rejects_candidate_source_signal_mismatch() -> None:
             signals=(signal,),
             candidates=(candidate,),
             rejections=(),
-            checkpoint=_checkpoint(detected_at),
         )
 
 
@@ -435,15 +424,6 @@ def _candidate(
         created_at=detected_at,
         reason="compression_breakout",
         features={"range_high": "100"},
-    )
-
-
-def _checkpoint(detected_at: datetime) -> StrategyCheckpoint:
-    return StrategyCheckpoint(
-        last_processed_at_by_symbol={"BTCUSDT": detected_at},
-        warmup_buckets_by_symbol={"BTCUSDT": 4},
-        cooldown_buckets_remaining_by_symbol={"BTCUSDT": 0},
-        payload={"signal_sequence": 4},
     )
 
 

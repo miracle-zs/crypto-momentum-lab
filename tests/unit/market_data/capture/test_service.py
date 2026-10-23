@@ -112,8 +112,6 @@ def test_metrics_snapshot_reports_queue_and_state() -> None:
     assert snapshot.state is MarketDataState.STARTING
     assert snapshot.queue_events == 0
     assert snapshot.queue_bytes == 0
-    assert snapshot.desired_subscriptions == 0
-    assert snapshot.active_connections == 0
 
 
 def test_disk_halt_requires_recovery_threshold() -> None:

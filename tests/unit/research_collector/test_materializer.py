@@ -75,7 +75,7 @@ def test_materializer_stages_and_flushes_to_parquet(tmp_path: Path) -> None:
     flush_result = materializer.flush_all()
     assert flush_result.committed_rows == 2
     assert flush_result.files_written == 2
-    assert len(flush_result.committed_receipts) == 3
+    assert len(journal.read_resolutions()) == 3
     assert journal.materialized_sequence == 3
     assert len(journal.pending_records()) == 0
 
@@ -89,7 +89,9 @@ def test_materializer_stages_and_flushes_to_parquet(tmp_path: Path) -> None:
     assert rows[0]["symbol"] == "BTCUSDT"
 
 
-def test_materializer_handles_conflicting_revision_without_hanging_pending(tmp_path: Path) -> None:
+def test_materializer_handles_conflicting_revision_without_hanging_pending(
+    tmp_path: Path,
+) -> None:
     from dataclasses import replace
     from decimal import Decimal
 
@@ -132,18 +134,18 @@ def test_materializer_handles_conflicting_revision_without_hanging_pending(tmp_p
     assert len(append_res2.dropped_version_keys) == 1
 
     # Flush all
-    flush_result = materializer.flush_all()
+    materializer.flush_all()
 
     # Both receipts must be committed so rejected receipts do not hang pending forever
-    committed_seqs = {r.sequence for r in flush_result.committed_receipts}
+    resolutions = journal.read_resolutions()
+    committed_seqs = {r["sequence"] for r in resolutions}
     assert committed_seqs == {1, 2}
 
     # Journal advances without being blocked by dropped revision
     assert journal.materialized_sequence == 2
     assert len(journal.pending_records()) == 0
 
-    # Durable resolutions on disk prove whether each revision was materialized or rejected
-    resolutions = journal.read_resolutions()
+    # Durable resolutions prove whether each revision was materialized or rejected.
     assert len(resolutions) == 2
     res_map = {r["sequence"]: r for r in resolutions}
     assert res_map[1]["status"] == "materialized"
@@ -186,7 +188,9 @@ def test_materializer_commits_upgraded_backfill_revision(tmp_path: Path) -> None
     journal.accept(b1, selection, (s1,))
 
     # 2. Accept backfill revision with higher priority
-    s2_backfill = replace(s1, close_price=Decimal("105"), trade_count=s1.trade_count + 10)
+    s2_backfill = replace(
+        s1, close_price=Decimal("105"), trade_count=s1.trade_count + 10
+    )
     b2 = CollectionBatch(
         batch=MarketStateBatch(
             sequence=2,
@@ -210,8 +214,8 @@ def test_materializer_commits_upgraded_backfill_revision(tmp_path: Path) -> None
     assert len(append_res2.accepted_version_keys) == 1
 
     # Flush all
-    flush_result = materializer.flush_all()
-    committed_seqs = {r.sequence for r in flush_result.committed_receipts}
+    materializer.flush_all()
+    committed_seqs = {r["sequence"] for r in journal.read_resolutions()}
     assert committed_seqs == {1, 2}
     assert len(journal.pending_records()) == 0
 
@@ -224,7 +228,9 @@ def test_materializer_commits_upgraded_backfill_revision(tmp_path: Path) -> None
     assert rows[0]["source_kind"] == SourceKind.POSTGRES_BACKFILL.value
 
 
-def test_materializer_resolutions_persisted_before_journal_unlink(tmp_path: Path) -> None:
+def test_materializer_resolutions_persisted_before_journal_unlink(
+    tmp_path: Path,
+) -> None:
     journal = ArchiveJournal(
         tmp_path / "journal",
         environment="research",
@@ -250,7 +256,9 @@ def test_materializer_resolutions_persisted_before_journal_unlink(tmp_path: Path
     with unittest.mock.patch.object(Path, "unlink", mock_unlink):
         journal.commit_materialization(
             [r1],
-            resolutions=[{"sequence": 1, "status": "materialized", "reason": "accepted"}],
+            resolutions=[
+                {"sequence": 1, "status": "materialized", "reason": "accepted"}
+            ],
         )
 
     assert len(resolutions_seen_before_unlink) == 1
@@ -299,7 +307,7 @@ def test_journal_replay_idempotent_after_failed_unlink(tmp_path: Path) -> None:
     recovered = new_journal.recover()
     assert len(recovered) == 0
 
-    # Even if duplicate commit is attempted, resolutions.jsonl remains idempotent (1 entry)
+    # Even if commit repeats, resolutions.jsonl remains idempotent (1 entry).
     new_journal.commit_materialization(
         [r1],
         resolutions=[{

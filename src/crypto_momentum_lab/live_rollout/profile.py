@@ -50,19 +50,6 @@ class LiveOrderFlowImpulseProfile:
         if self.min_notional_5m_vs_30m < 0:
             raise ValueError("min_notional_5m_vs_30m must be non-negative")
 
-    def as_dict(self) -> dict[str, object]:
-        """Return canonical values suitable for a strategy hash."""
-
-        return {
-            "impulse_window_buckets": self.impulse_window_buckets,
-            "confirmation_buckets": self.confirmation_buckets,
-            "min_return_pct": str(self.min_return_pct),
-            "min_aggressive_imbalance": str(self.min_aggressive_imbalance),
-            "min_notional_intensity": str(self.min_notional_intensity),
-            "min_notional_5m_vs_30m": str(self.min_notional_5m_vs_30m),
-            "cooldown_buckets": self.cooldown_buckets,
-        }
-
     @classmethod
     def from_environment(
         cls,

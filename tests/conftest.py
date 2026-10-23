@@ -18,7 +18,6 @@ from crypto_momentum_lab.domain.universe.models import (
     ContractMetadata,
     DailyOpen,
     PricePoint,
-    TrackedMembership,
     UniverseSnapshot,
 )
 from crypto_momentum_lab.persistence.postgres.capture_repository import (
@@ -103,7 +102,6 @@ class FakeUniverseMarketData:
 class FakeUniverseRepository:
     def __init__(self) -> None:
         self.daily_opens: dict[str, Decimal] = {}
-        self.active_memberships: dict[str, TrackedMembership] = {}
         self.saved_snapshot: UniverseSnapshot | None = None
 
     async def save_contract_metadata(
@@ -135,28 +133,8 @@ class FakeUniverseRepository:
             {item.symbol: item.open_price for item in opens}
         )
 
-    async def load_active_memberships(
-        self,
-    ) -> dict[str, TrackedMembership]:
-        return self.active_memberships
-
     async def save_snapshot(self, snapshot: UniverseSnapshot) -> None:
         self.saved_snapshot = snapshot
-        if snapshot.activated:
-            self.active_memberships = {
-                item.symbol: item for item in snapshot.memberships
-            }
-
-    async def load_snapshot(
-        self,
-        observed_at: datetime,
-    ) -> UniverseSnapshot | None:
-        if (
-            self.saved_snapshot is not None
-            and self.saved_snapshot.observed_at == observed_at
-        ):
-            return self.saved_snapshot
-        return None
 
 
 _ALLOWED_TEST_HOSTS = {"localhost", "127.0.0.1", "::1"}
@@ -164,13 +142,14 @@ _ALLOWED_TEST_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
 def assert_safe_test_database_url(url: str) -> None:
-    """Validate that the test database target is strictly local and safe for destructive cleanup."""
+    """Validate that test cleanup targets a strictly local, disposable database."""
     parsed = urlsplit(url)
     hostname = (parsed.hostname or "").lower()
 
     if hostname not in _ALLOWED_TEST_HOSTS:
         raise RuntimeError(
-            f"SECURITY: Refusing destructive test execution on non-local database host: '{hostname}'. "
+            "SECURITY: Refusing destructive test execution on non-local database host: "
+            f"'{hostname}'. "
             "Tests may only run against localhost / 127.0.0.1."
         )
 
@@ -181,7 +160,8 @@ def assert_safe_test_database_url(url: str) -> None:
     for dangerous in ("prod", "production", "live", "mainnet"):
         if dangerous in database_name:
             raise RuntimeError(
-                f"SECURITY: Refusing destructive test cleanup on database with production keyword: '{database_name}'."
+                "SECURITY: Refusing destructive test cleanup on database with "
+                f"production keyword: '{database_name}'."
             )
 
     port = parsed.port
@@ -192,7 +172,8 @@ def assert_safe_test_database_url(url: str) -> None:
 
     if not is_test_named:
         raise RuntimeError(
-            f"SECURITY: Target database '{database_name}' on port {port} is not recognized as a disposable test database. "
+            f"SECURITY: Target database '{database_name}' on port {port} "
+            "is not recognized as a disposable test database. "
             "Database name must contain 'test', 'review', 'temp', or 'ci'."
         )
 

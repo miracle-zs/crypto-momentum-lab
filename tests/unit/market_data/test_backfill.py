@@ -45,7 +45,11 @@ def test_synthesize_states_buckets_trades_into_15s() -> None:
 
 
 class _Client:
+    def __init__(self) -> None:
+        self.requested_symbols: list[str] = []
+
     async def fetch_agg_trades_window(self, symbol, *, start, end, limit=1000):
+        self.requested_symbols.append(symbol)
         if symbol != "S1USDT":
             return ()
         t0 = datetime(2026, 9, 16, 12, 0, 0, tzinfo=UTC)
@@ -61,20 +65,19 @@ class _Publisher:
 
 
 async def test_backfill_publishes_oldest_first_states() -> None:
+    client = _Client()
     publisher = _Publisher()
     backfiller = PromotionHistoryBackfiller(
-        client=_Client(),
+        client=client,
         publisher=publisher,
         environment="research",
         lookback=timedelta(minutes=35),
     )
-    reports = await backfiller.backfill_symbols(
+    await backfiller.backfill_symbols(
         ["S1USDT", "S2USDT"],
         now=datetime(2026, 9, 16, 12, 35, tzinfo=UTC),
     )
-    assert len(reports) == 2
-    assert reports[0].symbol == "S1USDT"
-    assert reports[0].buckets == 1
-    assert reports[1].symbol == "S2USDT"
-    assert reports[1].buckets == 0
+    assert client.requested_symbols == ["S1USDT", "S2USDT"]
+    assert len(publisher.batches) == 1
+    assert len(publisher.batches[0]) == 1
     assert publisher.batches[0][0].symbol == "S1USDT"

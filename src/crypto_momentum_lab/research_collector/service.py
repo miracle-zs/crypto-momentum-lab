@@ -24,10 +24,7 @@ from crypto_momentum_lab.market_data.hub import (
 )
 from crypto_momentum_lab.research_collector.health import CollectorHealthStore
 from crypto_momentum_lab.research_collector.journal import ArchiveJournal
-from crypto_momentum_lab.research_collector.materializer import (
-    MaterializerFlushResult,
-    WindowMaterializer,
-)
+from crypto_momentum_lab.research_collector.materializer import WindowMaterializer
 from crypto_momentum_lab.research_collector.models import (
     CollectionBatch,
     CollectionReceipt,
@@ -54,6 +51,7 @@ from crypto_momentum_lab.research_collector.storage import (
     CapacityState,
     CheckpointStore,
     ParquetWindowSink,
+    SinkFlushResult,
 )
 
 log = structlog.get_logger()
@@ -714,7 +712,7 @@ class ResearchStateCollector:
                 return
             await asyncio.sleep(min(30.0, self._config.capacity_check_interval_seconds))
 
-    async def _flush_ready(self, latest_bucket: datetime) -> MaterializerFlushResult:
+    async def _flush_ready(self, latest_bucket: datetime) -> SinkFlushResult:
         self._ensure_capacity()
         result = await asyncio.to_thread(
             self._materializer.flush_ready,
@@ -723,7 +721,7 @@ class ResearchStateCollector:
         await self._apply_flush_result(result)
         return result
 
-    async def _flush_all_buffers(self) -> MaterializerFlushResult:
+    async def _flush_all_buffers(self) -> SinkFlushResult:
         self._ensure_capacity()
         if self._materializer_error is not None:
             raise RuntimeError(
@@ -738,7 +736,7 @@ class ResearchStateCollector:
         await self._save_checkpoint()
         return result
 
-    async def _apply_flush_result(self, result: MaterializerFlushResult) -> None:
+    async def _apply_flush_result(self, result: SinkFlushResult) -> None:
         if result.bytes_written > 0:
             self._capacity.record_written_bytes(result.bytes_written)
         if (

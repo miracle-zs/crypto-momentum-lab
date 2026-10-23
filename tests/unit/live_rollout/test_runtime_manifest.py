@@ -1,8 +1,10 @@
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 import yaml
 
+from crypto_momentum_lab.live_rollout.profile import LiveOrderFlowImpulseProfile
 from crypto_momentum_lab.live_rollout.runtime_manifest import (
     RuntimeManifestError,
     load_live_runtime_manifest,
@@ -20,10 +22,7 @@ def test_checked_in_live_runtime_manifest_resolves_account_identity() -> None:
 
     assert primary.strategy == "orderflow_impulse"
     assert primary.image_commit == "a" * 40
-    assert primary.migration_revision == "20261018_0067"
-    assert primary.services == ("nextgen-strategy-primary",)
     assert account_3.session_id == "live-account-3-v1"
-    assert account_3.migration_revision == "20261018_0067"
     assert len(primary.strategy_config_hash) == 64
     assert primary.strategy_config_hash != "unset"
     assert primary.execution_inputs.hedge_mode is True
@@ -32,50 +31,22 @@ def test_checked_in_live_runtime_manifest_resolves_account_identity() -> None:
     assert primary.execution_inputs.margin_type == "CROSSED"
     assert primary.execution_inputs.exit_mode.value == "candle_15m"
     assert primary.execution_inputs.candle_grace_bars == 8
-    assert primary.execution_inputs.persist_exchange_operations == ("cancel,submit")
 
-    expected_profiles = {
-        "primary": {
-            "impulse_window_buckets": 2,
-            "confirmation_buckets": 1,
-            "min_return_pct": "0.0075",
-            "min_aggressive_imbalance": "0.30",
-            "min_notional_intensity": "3.0",
-            "min_notional_5m_vs_30m": "1.25",
-            "cooldown_buckets": 0,
-        },
-        "account-2": {
-            "impulse_window_buckets": 2,
-            "confirmation_buckets": 1,
-            "min_return_pct": "0.0075",
-            "min_aggressive_imbalance": "0.30",
-            "min_notional_intensity": "3.0",
-            "min_notional_5m_vs_30m": "1.25",
-            "cooldown_buckets": 0,
-        },
-        "account-3": {
-            "impulse_window_buckets": 2,
-            "confirmation_buckets": 1,
-            "min_return_pct": "0.0075",
-            "min_aggressive_imbalance": "0.30",
-            "min_notional_intensity": "3.0",
-            "min_notional_5m_vs_30m": "1.25",
-            "cooldown_buckets": 0,
-        },
-        "account-4": {
-            "impulse_window_buckets": 2,
-            "confirmation_buckets": 1,
-            "min_return_pct": "0.0075",
-            "min_aggressive_imbalance": "0.30",
-            "min_notional_intensity": "3.0",
-            "min_notional_5m_vs_30m": "1.25",
-            "cooldown_buckets": 0,
-        },
-    }
-    assert {
-        label: manifest.account(label).strategy_inputs.profile.as_dict()
-        for label in expected_profiles
-    } == expected_profiles
+    expected_profile = LiveOrderFlowImpulseProfile(
+        impulse_window_buckets=2,
+        confirmation_buckets=1,
+        min_return_pct=Decimal("0.0075"),
+        min_aggressive_imbalance=Decimal("0.30"),
+        min_notional_intensity=Decimal("3.0"),
+        min_notional_5m_vs_30m=Decimal("1.25"),
+        cooldown_buckets=0,
+    )
+    for label in ("primary", "account-2", "account-3", "account-4"):
+        account = manifest.account(label)
+        assert account.strategy_inputs.profile == expected_profile
+        assert account.strategy_config_hash == (
+            "d0b133c89f80063a0e6c94418bdc463b0546daf136e160bfb2bcc6dd604f21e7"
+        )
 
 
 def test_runtime_manifest_expands_override_and_rejects_missing_required_value(
@@ -87,14 +58,10 @@ def test_runtime_manifest_expands_override_and_rejects_missing_required_value(
 schema_version: 1
 runtime:
   image_commit: "${IMAGE_COMMIT:?IMAGE_COMMIT is required}"
-  migration_revision: "20260911_0040"
 accounts:
   - label: primary
     strategy: "${STRATEGY:-invalid_default_strategy}"
     session_id: live-primary-v1
-    profile_ref: profile.yaml
-    limits_ref: postgres:risk_config/primary
-    services: [nextgen-strategy-primary]
     execution_config:
       target_notional: 100
       hedge_mode: true
@@ -105,7 +72,6 @@ accounts:
       candle_grace_bars: 8
       candle_grace_decision_profit_pct: 0.001
       candle_grace_profit_pct: 0.0088
-      persist_exchange_operations: submit,cancel
       max_concurrency_per_symbol: 2
     strategy_config:
       impulse_window_buckets: 4
@@ -142,14 +108,10 @@ def test_runtime_manifest_rejects_duplicate_account_labels(tmp_path: Path) -> No
 schema_version: 1
 runtime:
   image_commit: "a"
-  migration_revision: "b"
 accounts:
   - label: primary
     strategy: orderflow_impulse
     session_id: session-1
-    profile_ref: profile.yaml
-    limits_ref: limits.yaml
-    services: [nextgen-strategy-primary]
     execution_config:
       target_notional: 100
       hedge_mode: true
@@ -160,7 +122,6 @@ accounts:
       candle_grace_bars: 8
       candle_grace_decision_profit_pct: 0.001
       candle_grace_profit_pct: 0.0088
-      persist_exchange_operations: submit,cancel
       max_concurrency_per_symbol: 2
     strategy_config:
       impulse_window_buckets: 4
@@ -179,9 +140,6 @@ accounts:
   - label: primary
     strategy: orderflow_impulse
     session_id: session-2
-    profile_ref: profile.yaml
-    limits_ref: limits.yaml
-    services: [nextgen-strategy-account-2]
     execution_config:
       target_notional: 100
       hedge_mode: true
@@ -192,7 +150,6 @@ accounts:
       candle_grace_bars: 8
       candle_grace_decision_profit_pct: 0.001
       candle_grace_profit_pct: 0.0088
-      persist_exchange_operations: submit,cancel
       max_concurrency_per_symbol: 2
     strategy_config:
       impulse_window_buckets: 4
@@ -237,8 +194,6 @@ def test_runtime_manifest_requires_explicit_execution_config(tmp_path: Path) -> 
         RuntimeManifestError, match="execution_config must be an object"
     ):
         load_live_runtime_manifest(path, environment={})
-
-
 
 
 @pytest.mark.parametrize(
@@ -294,7 +249,6 @@ def _trading_manifest_document():
     document.pop("runtime")
     for account in document["accounts"]:
         account.pop("image_commit", None)
-        account.pop("migration_revision", None)
     return document
 
 

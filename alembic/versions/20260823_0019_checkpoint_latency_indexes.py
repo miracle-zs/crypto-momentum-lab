@@ -18,14 +18,14 @@ _INDEX_NAME = "ix_runtime_market_states_15s_symbol_time"
 
 
 def upgrade() -> None:
-    with op.get_context().autocommit_block():
-        op.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {_INDEX_NAME}")
+    # The index belongs to a partitioned parent, so CONCURRENTLY is unsupported.
+    op.drop_index(_INDEX_NAME, if_exists=True)
 
 
 def downgrade() -> None:
-    with op.get_context().autocommit_block():
-        op.execute(
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
-            f"{_INDEX_NAME} ON runtime_market_states_15s "
-            "(environment, symbol, bucket_start)"
-        )
+    op.create_index(
+        _INDEX_NAME,
+        "runtime_market_states_15s",
+        ["environment", "symbol", "bucket_start"],
+        if_not_exists=True,
+    )

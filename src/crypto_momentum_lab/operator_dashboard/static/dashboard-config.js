@@ -1,4 +1,3 @@
-export const SECTIONS = ["overview", "risk", "account", "universe", "collector", "reports", "performance"];
 export const POLL_MS = 15 * 1000;
 export const SECTION_POLL_MS = Object.freeze({
   overview: POLL_MS,

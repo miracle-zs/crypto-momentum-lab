@@ -165,54 +165,6 @@ class DatasetManifest:
 
 
 @dataclass(frozen=True, slots=True)
-class RunManifest:
-    """Immutable manifest establishing an authoritative strategy run or backtest."""
-
-    run_id: str
-    strategy_name: str
-    strategy_policy_version: str
-    dataset_manifest_id: str | None = None
-    policy_code_digest: str = ""
-    policy_parameters_digest: str = ""
-    risk_plan_digest: str = ""
-    initial_equity: Decimal = Decimal("0")
-    simulation_model: str = "live"
-    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-    run_manifest_hash: str = ""
-    tags: dict[str, str] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not self.run_id.strip():
-            raise ValueError("run_id must not be empty")
-        if not self.strategy_name.strip():
-            raise ValueError("strategy_name must not be empty")
-        if not self.strategy_policy_version.strip():
-            raise ValueError("strategy_policy_version must not be empty")
-        object.__setattr__(
-            self, "created_at", _require_aware(self.created_at, "created_at")
-        )
-        if not self.run_manifest_hash:
-            object.__setattr__(self, "run_manifest_hash", self.compute_manifest_hash())
-
-    def compute_manifest_hash(self) -> str:
-        payload = {
-            "run_id": self.run_id,
-            "strategy_name": self.strategy_name,
-            "strategy_policy_version": self.strategy_policy_version,
-            "dataset_manifest_id": self.dataset_manifest_id,
-            "policy_code_digest": self.policy_code_digest,
-            "policy_parameters_digest": self.policy_parameters_digest,
-            "risk_plan_digest": self.risk_plan_digest,
-            "initial_equity": str(self.initial_equity),
-            "simulation_model": self.simulation_model,
-            "created_at": self.created_at.isoformat(),
-            "tags": dict(sorted(self.tags.items())),
-        }
-        dumped = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(dumped.encode("utf-8")).hexdigest()
-
-
-@dataclass(frozen=True, slots=True)
 class DecisionTrace:
     """Record pinning exact market revision inputs and policy outputs."""
 

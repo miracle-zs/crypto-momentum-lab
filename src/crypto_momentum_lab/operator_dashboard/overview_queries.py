@@ -31,14 +31,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
 )
 
 
-def account_label_sort_key(account_label: str) -> tuple[int, int | str]:
-    """Keep the canonical fleet order while allowing custom labels."""
-    if account_label == "primary":
-        return (0, 0)
-    suffix = account_label.removeprefix("account-")
-    return (1, int(suffix)) if suffix.isdigit() else (2, account_label)
-
-
 def live_account_fleet_status(
     accounts: Sequence[LiveAccountSummaryResponse],
 ) -> OperationalStatus:
@@ -244,7 +236,6 @@ def universe_membership(
 
 __all__ = [
     "OverviewQueries",
-    "account_label_sort_key",
     "age",
     "live_account_fleet_status",
     "service",

@@ -4,7 +4,6 @@ from datetime import UTC, datetime, timedelta
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from crypto_momentum_lab.domain.market.models import (
-    CaptureRoute,
     CaptureStream,
     ConnectionLifecycleEvent,
     JsonValue,
@@ -18,26 +17,19 @@ type _StateKey = tuple[UUID, CaptureStream, str]
 
 @dataclass(slots=True)
 class _ObservedState:
-    route: CaptureRoute
     last_exchange_sequence: str | None
     last_exchange_event_at: datetime | None
-    last_received_at: datetime
     last_payload: bytes
-    silence_reported: bool = False
 
 
 class StreamQualityTracker:
     def __init__(
         self,
         *,
-        silence_timeout_seconds: float = 30,
         closed_session_retention_seconds: float = 3600,
     ) -> None:
-        if silence_timeout_seconds <= 0:
-            raise ValueError("silence_timeout_seconds must be positive")
         if closed_session_retention_seconds <= 0:
             raise ValueError("closed_session_retention_seconds must be positive")
-        self._silence_timeout_seconds = silence_timeout_seconds
         self._closed_session_retention = timedelta(
             seconds=closed_session_retention_seconds
         )
@@ -131,12 +123,9 @@ class StreamQualityTracker:
                 )
 
         self._observed[key] = _ObservedState(
-            route=envelope.route,
             last_exchange_sequence=envelope.exchange_sequence,
             last_exchange_event_at=envelope.exchange_event_at,
-            last_received_at=envelope.received_at,
             last_payload=current_payload,
-            silence_reported=False,
         )
         return tuple(events)
 
@@ -144,6 +133,7 @@ class StreamQualityTracker:
         self,
         event: ConnectionLifecycleEvent,
     ) -> tuple[QualityEvent, ...]:
+        self._prune_closed_sessions(now=event.occurred_at)
         if event.opened:
             self._closed_sessions.pop(event.session_id, None)
         else:
@@ -176,42 +166,6 @@ class StreamQualityTracker:
                 },
             ),
         )
-
-    def check_silence(self, *, now: datetime) -> tuple[QualityEvent, ...]:
-        self._prune_closed_sessions(now=now)
-        events = []
-        for (
-            connection_session_id,
-            stream,
-            symbol,
-        ), state in self._observed.items():
-            if connection_session_id in self._closed_sessions:
-                continue
-            elapsed = (
-                now.astimezone(UTC) - state.last_received_at.astimezone(UTC)
-            ).total_seconds()
-            if elapsed <= self._silence_timeout_seconds or state.silence_reported:
-                continue
-            state.silence_reported = True
-            events.append(
-                QualityEvent(
-                    event_id=_event_id(
-                        QualityCategory.SILENCE,
-                        connection_session_id,
-                        None,
-                        symbol,
-                    ),
-                    category=QualityCategory.SILENCE,
-                    occurred_at=now,
-                    route=state.route,
-                    stream=stream,
-                    symbol=None if symbol == "_global" else symbol,
-                    connection_session_id=connection_session_id,
-                    local_sequence=None,
-                    details={"seconds": elapsed},
-                )
-            )
-        return tuple(events)
 
     def _prune_closed_sessions(self, *, now: datetime) -> None:
         cutoff = now.astimezone(UTC) - self._closed_session_retention

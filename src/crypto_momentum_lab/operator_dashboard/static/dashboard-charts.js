@@ -88,21 +88,6 @@ function dailyAnchorAtOrAfter(referenceMs) {
     : dailyEquityAnchor(referenceMs + 24 * 60 * 60 * 1000);
 }
 
-export function standaloneSparkline(rows) {
-  const values = (rows || []).map((row) => asNumber(row.equity)).filter((value) => value != null);
-  if (values.length < 2) return '<div class="spark spark-empty">—</div>';
-  const width = 150;
-  const height = 40;
-  let min = Math.min(...values);
-  let max = Math.max(...values);
-  if (min === max) { min -= 1; max += 1; }
-  const stepX = width / (values.length - 1);
-  const y = (value) => 3 + ((max - value) / (max - min)) * (height - 6);
-  const line = values.map((value, i) => `${(i * stepX).toFixed(1)},${y(value).toFixed(1)}`).join(" ");
-  const dir = values.at(-1) >= values[0] ? "pos" : "neg";
-  return `<svg class="spark ${dir}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true"><polyline points="${line}"/></svg>`;
-}
-
 export function accountWindowDelta(account) {
   const values = (account.equity_curve || [])
     .map((row) => asNumber(row.equity))

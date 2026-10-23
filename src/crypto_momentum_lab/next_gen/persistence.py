@@ -57,9 +57,6 @@ class TradingRepositoryProtocol(Protocol):
     async def async_get_active_batches(
         self, environment: str, account_label: str
     ) -> list[PositionBatch]: ...
-    async def async_get_order(
-        self, environment: str, account_label: str, client_order_id: str
-    ) -> Order | None: ...
     async def async_get_recent_orders(
         self, environment: str, account_label: str, limit: int = 50
     ) -> list[Order]: ...
@@ -187,11 +184,6 @@ class InMemoryTradingRepository:
         self, environment: str, account_label: str, batch_id: str
     ) -> PositionBatch | None:
         return self.batches.get((environment, account_label, batch_id))
-
-    async def async_get_order(
-        self, environment: str, account_label: str, client_order_id: str
-    ) -> Order | None:
-        return self.get_order(environment, account_label, client_order_id)
 
     async def async_get_batch(
         self, environment: str, account_label: str, batch_id: str
@@ -606,43 +598,6 @@ class PostgresTradingRepository:
         async with self._engine.connect() as conn:
             result = await conn.execute(text(sql), {"env": environment})
             return frozenset(result.scalars().all())
-
-    async def async_get_order(
-        self, environment: str, account_label: str, client_order_id: str
-    ) -> Order | None:
-        sql = """
-        SELECT environment, account_label, client_order_id, exchange_order_id,
-               batch_id, symbol, side, position_side, order_type, quantity, price,
-               status, filled_quantity, average_price, created_at, updated_at
-        FROM live_orders
-        WHERE environment = :env AND account_label = :acc AND client_order_id = :cid;
-        """
-        async with self._engine.connect() as conn:
-            res = await conn.execute(
-                text(sql),
-                {"env": environment, "acc": account_label, "cid": client_order_id},
-            )
-            row = res.mappings().first()
-            if not row:
-                return None
-            return Order(
-                environment=row["environment"],
-                account_label=row["account_label"],
-                client_order_id=row["client_order_id"],
-                batch_id=row["batch_id"],
-                symbol=row["symbol"],
-                side=row["side"],
-                position_side=row["position_side"],
-                order_type=row["order_type"],
-                quantity=Decimal(str(row["quantity"])),
-                price=Decimal(str(row["price"])) if row["price"] is not None else None,
-                status=OrderStatus[row["status"]],
-                exchange_order_id=row["exchange_order_id"],
-                filled_qty=Decimal(str(row["filled_quantity"])),
-                avg_price=Decimal(str(row["average_price"])),
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
-            )
 
     async def async_get_recent_orders(
         self, environment: str, account_label: str, limit: int = 50

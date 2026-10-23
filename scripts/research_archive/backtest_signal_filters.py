@@ -128,11 +128,6 @@ def percentile(values: Iterable[float], fraction: float) -> float | None:
     return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
 
 
-def parse_utc_ms(value: str) -> int:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ValueError(f"timestamp must include a timezone: {value!r}")
-    return int(parsed.astimezone(UTC).timestamp() * 1000)
 
 
 def bucket_return(series: StateSeries, index: int) -> float:
@@ -594,7 +589,7 @@ def render_report(
         lines.extend(
             [
                 "",
-                f"当前建议观察组合：`persistence_plus_spread` + 同 symbol 不重叠；对应验证结果见 CSV/JSON，尚未写入实盘。",
+                "当前建议观察组合：`persistence_plus_spread` + 同 symbol 不重叠；对应验证结果见 CSV/JSON，尚未写入实盘。",
             ]
         )
     lines.extend(

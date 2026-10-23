@@ -9,7 +9,7 @@ from crypto_momentum_lab.market_data.binance.websocket import (
 )
 from crypto_momentum_lab.market_data.capture.subscriptions import (
     Subscription,
-    SubscriptionChangePlan,
+    SubscriptionCommand,
     SubscriptionGroup,
     build_subscription_groups,
     plan_subscription_change,
@@ -119,12 +119,12 @@ class BinanceConnectionPool:
                     if self._subscription_connections.get(subscription)
                     == group.group_id
                 )
-                plan = plan_subscription_change(
+                commands = plan_subscription_change(
                     current,
                     frozenset(group.subscriptions),
                     generation=generation,
                 )
-                await self._apply_plan(connection, plan)
+                await self._apply_plan(connection, commands)
 
             for group_id in sorted(set(self._connections) - set(desired_groups)):
                 connection = self._connections[group_id]
@@ -133,12 +133,12 @@ class BinanceConnectionPool:
                     for subscription in self._active_subscriptions
                     if self._subscription_connections.get(subscription) == group_id
                 )
-                plan = plan_subscription_change(
+                commands = plan_subscription_change(
                     current,
                     frozenset(),
                     generation=generation,
                 )
-                await self._apply_plan(connection, plan)
+                await self._apply_plan(connection, commands)
                 await connection.stop()
                 del self._connections[group_id]
             self._active_subscriptions = desired
@@ -200,9 +200,9 @@ class BinanceConnectionPool:
     async def _apply_plan(
         self,
         connection: PoolConnection,
-        plan: SubscriptionChangePlan,
+        commands: tuple[SubscriptionCommand, ...],
     ) -> None:
-        for step in plan.steps:
+        for step in commands:
             if step.method == "SUBSCRIBE":
                 await connection.subscribe(
                     step.names,

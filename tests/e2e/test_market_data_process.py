@@ -19,7 +19,10 @@ from crypto_momentum_lab.domain.universe.models import (
     TrackedMembership,
     UniverseSnapshot,
 )
-from crypto_momentum_lab.persistence.postgres.models import RawArchiveManifestRow
+from crypto_momentum_lab.persistence.postgres.models import (
+    MarketDataProcessStateRow,
+    RawArchiveManifestRow,
+)
 from crypto_momentum_lab.persistence.postgres.session import (
     create_async_database_engine,
 )
@@ -79,7 +82,19 @@ async def test_market_data_runtime_archives_and_updates_subscriptions(
 
     manifest_symbols = await _manifest_symbols(async_database_url)
     assert {"BTCUSDT", "ETHUSDT"}.issubset(manifest_symbols)
-    assert await capture_repository.latest_process_state() is (MarketDataState.STOPPED)
+    async with capture_repository._session_factory() as session:
+        process_state = await session.scalar(
+            select(MarketDataProcessStateRow)
+            .order_by(
+                MarketDataProcessStateRow.occurred_at.desc(),
+                MarketDataProcessStateRow.state_id.desc(),
+            )
+            .limit(1)
+        )
+    assert (
+        process_state is not None
+        and process_state.state == MarketDataState.STOPPED.value
+    )
     assert _control_event_index(
         fake_binance_server.control_events,
         method="SUBSCRIBE",

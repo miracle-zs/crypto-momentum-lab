@@ -2,7 +2,6 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.account.models import (
-    AccountFillEvent,
     AccountPositionSnapshot,
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
@@ -11,12 +10,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
 )
 from crypto_momentum_lab.domain.trading import TradeSide
 from crypto_momentum_lab.persistence.postgres import (
-    execution_head_migration_projection,
-)
-from crypto_momentum_lab.persistence.postgres.execution_head_migration_projection import (
-    AccountFactStreamScope,
-    LegacyPositionBatch,
-    LegacyPositionEpisode,
+    execution_head_migration_projection as projection_codec,
 )
 from crypto_momentum_lab.persistence.postgres.execution_head_migration import (
     convert_legacy_execution_head,
@@ -28,24 +22,6 @@ from crypto_momentum_lab.persistence.postgres.execution_head_migration_codec imp
 START = datetime(2026, 10, 1, tzinfo=UTC)
 
 
-def _fill(trade_id: str, side: str, second: int) -> AccountFillEvent:
-    return AccountFillEvent(
-        environment="live",
-        account_label="primary",
-        symbol="BTCUSDT",
-        trade_id=trade_id,
-        order_id=f"order-{trade_id}",
-        side=side,
-        price=Decimal("100"),
-        quantity=Decimal("1"),
-        realized_pnl=Decimal("0"),
-        fee=Decimal("0"),
-        fee_asset="USDT",
-        trade_at=START + timedelta(seconds=second),
-        raw_payload={"positionSide": "LONG"},
-    )
-
-
 def test_legacy_head_migration_keeps_only_the_new_current_state() -> None:
     key = PositionKey(
         environment="live",
@@ -53,15 +29,10 @@ def test_legacy_head_migration_keeps_only_the_new_current_state() -> None:
         symbol="BTCUSDT",
         position_side=FuturesPositionSide.LONG,
     )
-    scope = AccountFactStreamScope.for_position_key(
+    scope = projection_codec.AccountFactStreamScope.for_position_key(
         key, stream_id="trade-source", stream_epoch="epoch-1"
     )
-    fills = (
-        _fill("entry-1", "BUY", 1),
-        _fill("exit-1", "SELL", 2),
-        _fill("entry-2", "BUY", 3),
-    )
-    archived_episode = LegacyPositionEpisode(
+    archived_episode = projection_codec.LegacyPositionEpisode(
         episode_id="episode_1",
         position_key=key,
         side=TradeSide.LONG,
@@ -72,7 +43,7 @@ def test_legacy_head_migration_keeps_only_the_new_current_state() -> None:
         cumulative_sold=Decimal("1"),
         peak_quantity=Decimal("1"),
         batches=(
-            LegacyPositionBatch(
+            projection_codec.LegacyPositionBatch(
                 batch_id="episode_1_b1",
                 episode_id="episode_1",
                 quantity=Decimal("0"),
@@ -82,7 +53,7 @@ def test_legacy_head_migration_keeps_only_the_new_current_state() -> None:
             ),
         ),
     )
-    active_episode = LegacyPositionEpisode(
+    active_episode = projection_codec.LegacyPositionEpisode(
         episode_id="episode_2",
         position_key=key,
         side=TradeSide.LONG,
@@ -90,7 +61,7 @@ def test_legacy_head_migration_keeps_only_the_new_current_state() -> None:
         cumulative_bought=Decimal("1"),
         peak_quantity=Decimal("1"),
         batches=(
-            LegacyPositionBatch(
+            projection_codec.LegacyPositionBatch(
                 batch_id="episode_2_b1",
                 episode_id="episode_2",
                 quantity=Decimal("1"),
@@ -102,7 +73,7 @@ def test_legacy_head_migration_keeps_only_the_new_current_state() -> None:
             ),
         ),
     )
-    projection = execution_head_migration_projection.LegacyPositionProjection(
+    projection = projection_codec.LegacyPositionProjection(
         position_key=key,
         active_episode=active_episode,
         unallocated_quantity=Decimal("0"),
@@ -128,15 +99,34 @@ def test_legacy_head_migration_keeps_only_the_new_current_state() -> None:
     )
     legacy = {
         "schema_version": 1,
-        "position_key": execution_head_migration_projection.encode_position_key(
-            key
-        ),
+        "position_key": projection_codec.encode_position_key(key),
         "stream_scope": {
             "stream_id": scope.stream_id,
             "stream_epoch": scope.stream_epoch,
         },
         "projection": PositionRecoveryCodec.encode_projection(projection),
-        "active_fills": [PositionRecoveryCodec.encode_fill(item) for item in fills],
+        "active_fills": [
+            {
+                "environment": "live",
+                "account_label": "primary",
+                "symbol": "BTCUSDT",
+                "trade_id": trade_id,
+                "order_id": f"order-{trade_id}",
+                "side": side,
+                "price": "100",
+                "quantity": "1",
+                "realized_pnl": "0",
+                "fee": "0",
+                "fee_asset": "USDT",
+                "trade_at": (START + timedelta(seconds=second)).isoformat(),
+                "raw_payload": {"positionSide": "LONG"},
+            }
+            for trade_id, side, second in (
+                ("entry-1", "BUY", 1),
+                ("exit-1", "SELL", 2),
+                ("entry-2", "BUY", 3),
+            )
+        ],
         "active_snapshots": [PositionRecoveryCodec.encode_snapshot(snapshot)],
         "active_exit_boundaries": [],
         "coverage": None,

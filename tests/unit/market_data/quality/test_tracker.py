@@ -113,11 +113,11 @@ def test_tracker_preserves_continuity_for_symbols_still_monitored(
     assert [event.category for event in events] == [QualityCategory.SEQUENCE_GAP]
 
 
-def test_event_time_regression_and_silence_are_recorded(
+def test_event_time_regression_is_recorded(
     raw_envelope: RawEnvelope,
 ) -> None:
     assert raw_envelope.exchange_event_at is not None
-    tracker = StreamQualityTracker(silence_timeout_seconds=30)
+    tracker = StreamQualityTracker()
     tracker.observe(raw_envelope)
 
     regression = tracker.observe(
@@ -127,12 +127,7 @@ def test_event_time_regression_and_silence_are_recorded(
             exchange_event_at=raw_envelope.exchange_event_at - timedelta(seconds=1),
         )
     )
-    silence = tracker.check_silence(
-        now=raw_envelope.received_at + timedelta(seconds=31)
-    )
-
     assert regression[0].category is QualityCategory.EVENT_TIME_REGRESSION
-    assert silence[0].category is QualityCategory.SILENCE
 
 
 def test_connection_lifecycle_events_are_recorded() -> None:
@@ -160,30 +155,34 @@ def test_connection_lifecycle_events_are_recorded() -> None:
     assert events[1].details["reason"] == "closed"
 
 
-def test_closed_sessions_skip_silence_and_are_pruned_after_retention(
+def test_closed_sessions_are_pruned_by_lifecycle_after_retention(
     raw_envelope: RawEnvelope,
 ) -> None:
     assert raw_envelope.symbol is not None
-    tracker = StreamQualityTracker(
-        silence_timeout_seconds=1,
-        closed_session_retention_seconds=10,
-    )
+    tracker = StreamQualityTracker(closed_session_retention_seconds=10)
     tracker.observe(replace(raw_envelope, exchange_sequence="10"))
     tracker.observe(replace(raw_envelope, local_sequence=2, exchange_sequence="12"))
     closed_at = raw_envelope.received_at + timedelta(seconds=2)
+    closed_event = ConnectionLifecycleEvent(
+        session_id=raw_envelope.connection_session_id,
+        route=raw_envelope.route,
+        stream=raw_envelope.stream,
+        symbols=(raw_envelope.symbol,),
+        occurred_at=closed_at,
+        opened=False,
+        reason="closed",
+    )
+    tracker.observe_lifecycle(closed_event)
+
     tracker.observe_lifecycle(
-        ConnectionLifecycleEvent(
-            session_id=raw_envelope.connection_session_id,
-            route=raw_envelope.route,
-            stream=raw_envelope.stream,
-            symbols=(raw_envelope.symbol,),
-            occurred_at=closed_at,
-            opened=False,
-            reason="closed",
+        replace(
+            closed_event,
+            session_id=UUID(int=2),
+            occurred_at=closed_at + timedelta(seconds=5),
+            opened=True,
+            reason=None,
         )
     )
-
-    assert tracker.check_silence(now=closed_at + timedelta(seconds=5)) == ()
     assert (
         tracker.known_gap_count(
             connection_session_id=raw_envelope.connection_session_id,
@@ -193,7 +192,15 @@ def test_closed_sessions_skip_silence_and_are_pruned_after_retention(
         == 1
     )
 
-    tracker.check_silence(now=closed_at + timedelta(seconds=11))
+    tracker.observe_lifecycle(
+        replace(
+            closed_event,
+            session_id=UUID(int=3),
+            occurred_at=closed_at + timedelta(seconds=11),
+            opened=True,
+            reason=None,
+        )
+    )
     assert (
         tracker.known_gap_count(
             connection_session_id=raw_envelope.connection_session_id,
@@ -201,4 +208,15 @@ def test_closed_sessions_skip_silence_and_are_pruned_after_retention(
             symbol=raw_envelope.symbol,
         )
         == 0
+    )
+    assert (
+        tracker.observe(
+            replace(
+                raw_envelope,
+                local_sequence=3,
+                exchange_sequence="12",
+                received_at=closed_at + timedelta(seconds=11),
+            )
+        )
+        == ()
     )

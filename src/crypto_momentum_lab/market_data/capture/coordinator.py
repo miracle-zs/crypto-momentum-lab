@@ -28,8 +28,6 @@ class QualityTracker(Protocol):
 
 
 class QualityRepository(Protocol):
-    async def save_quality_event(self, event: QualityEvent) -> None: ...
-
     async def save_quality_events(self, events: Iterable[QualityEvent]) -> None: ...
 
     async def save_process_state(

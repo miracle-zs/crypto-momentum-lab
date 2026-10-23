@@ -1,4 +1,3 @@
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
@@ -70,10 +69,8 @@ async def test_save_snapshot_is_idempotent(
 
     await repository.save_snapshot(snapshot)
     await repository.save_snapshot(snapshot)
-    loaded = await repository.load_snapshot(observed_at)
-    loaded_at = await repository.load_snapshot_at(
-        observed_at + timedelta(minutes=1)
-    )
+    loaded = await repository.load_snapshot_at(observed_at)
+    loaded_at = await repository.load_snapshot_at(observed_at + timedelta(minutes=1))
 
     assert loaded is not None
     assert loaded.snapshot_id == snapshot.snapshot_id
@@ -113,9 +110,7 @@ async def test_save_contract_metadata_rehydrates_after_retention_delete(
             )
         ).all()
 
-    assert [(row.symbol, row.effective_at) for row in rows] == [
-        ("BTCUSDT", second_at)
-    ]
+    assert [(row.symbol, row.effective_at) for row in rows] == [("BTCUSDT", second_at)]
 
 
 async def test_load_active_memberships_ignores_unactivated_snapshot(
@@ -165,41 +160,3 @@ async def test_load_active_memberships_at_uses_latest_activated_snapshot(
     memberships = await repository.load_active_memberships_at(first.observed_at)
 
     assert set(memberships) == {"BTCUSDT"}
-
-
-async def test_load_active_entry_symbols_at_filters_extended_memberships_in_sql(
-    repository: PostgresUniverseRepository,
-    snapshot_factory,
-) -> None:
-    active = snapshot_factory(
-        day=14,
-        hour=22,
-        activated=True,
-        symbol="BTCUSDT",
-    )
-    active = replace(
-        active,
-        memberships=(
-            TrackedMembership(
-                "BTCUSDT",
-                MembershipStatus.TARGET,
-                RankingSide.GAINER,
-            ),
-            TrackedMembership(
-                "ETHUSDT",
-                MembershipStatus.EXTENDED,
-                RankingSide.GAINER,
-            ),
-            TrackedMembership(
-                "SOLUSDT",
-                MembershipStatus.RETAINED,
-                RankingSide.GAINER,
-            ),
-        ),
-    )
-
-    await repository.save_snapshot(active)
-
-    symbols = await repository.load_active_entry_symbols_at(active.observed_at)
-
-    assert symbols == frozenset({"BTCUSDT", "SOLUSDT"})

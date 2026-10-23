@@ -16,7 +16,7 @@ import math
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 
 def parse_time(value: str) -> datetime:
@@ -50,23 +50,6 @@ def fmt_time(value: datetime | None) -> str | None:
     return value.isoformat(timespec="seconds").replace("+00:00", "Z") if value else None
 
 
-def max_drawdown(values: Iterable[float]) -> tuple[float, float, int, int]:
-    peak = None
-    peak_index = 0
-    best_drawdown = 0.0
-    best_peak_index = 0
-    best_trough_index = 0
-    for index, value in enumerate(values):
-        if peak is None or value > peak:
-            peak = value
-            peak_index = index
-        drawdown = peak - value
-        if drawdown > best_drawdown:
-            best_drawdown = drawdown
-            best_peak_index = peak_index
-            best_trough_index = index
-    peak_value = 0.0
-    return best_drawdown, peak_value, best_peak_index, best_trough_index
 
 
 def sample_rows(rows: list[dict[str, Any]], limit: int = 900) -> list[dict[str, Any]]:

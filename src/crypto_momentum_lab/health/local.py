@@ -30,7 +30,6 @@ class LocalHealthWriter:
     """
 
     def __init__(self, directory: Path) -> None:
-        self._directory = directory
         self._status_path = directory / _STATUS_FILE
         self._database_path = directory / _DATABASE_FILE
         self._readiness_path = directory / _READINESS_FILE
@@ -45,24 +44,6 @@ class LocalHealthWriter:
         if not raw_directory:
             return None
         return cls(Path(raw_directory))
-
-    @classmethod
-    def for_directory(cls, directory: Path) -> LocalHealthWriter:
-        """Create a writer for tests and local process runners."""
-
-        return cls(directory)
-
-    @property
-    def status_path(self) -> Path:
-        return self._status_path
-
-    @property
-    def database_path(self) -> Path:
-        return self._database_path
-
-    @property
-    def readiness_path(self) -> Path:
-        return self._readiness_path
 
     def reset(self) -> None:
         """Remove stale readiness from a previous process and enter starting."""

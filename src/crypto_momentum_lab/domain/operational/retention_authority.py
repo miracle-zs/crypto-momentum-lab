@@ -4,7 +4,6 @@ Obeys Astra Architecture Blueprint 2026-09-25:
 - register_dependency(consumer, generation, recovery_spec) -> dependency_version
 - plan_prune(dataset, requested_range) -> immutable PrunePlan
 - execute_prune(plan_id, expected_dependency_version) -> PruneReceipt
-- restore(recovery_spec) -> verified RestoreReceipt
 - Atomic version fencing prevents deleting newly registered recovery windows.
 """
 
@@ -26,7 +25,6 @@ from crypto_momentum_lab.domain.operational.retention_models import (
     PruneReceipt,
     PruneReceiptStatus,
     RecoverySpec,
-    RestoreReceipt,
     resolve_dataset_scope,
 )
 
@@ -90,10 +88,6 @@ class InMemoryRetentionRepository:
 
 class DependencyVersionConflictError(Exception):
     """Raised when dependency version mismatches registered version."""
-
-
-class DependencyViolationError(Exception):
-    """Raised when prune range violates active consumer recovery watermarks."""
 
 
 class RetentionAuthority:
@@ -652,28 +646,3 @@ class RetentionAuthority:
             )
             self._repo.save_receipt(receipt)
             return receipt
-
-    def restore(
-        self,
-        *,
-        recovery_spec: RecoverySpec,
-        restore_fn: Callable[[RecoverySpec], int],
-    ) -> RestoreReceipt:
-        """Verifies or executes restore from archive given recovery specification."""
-        try:
-            restored_rows = restore_fn(recovery_spec)
-            return RestoreReceipt(
-                recovery_spec=recovery_spec,
-                restored_rows=restored_rows,
-                verified_at=datetime.now(UTC),
-                status="VERIFIED",
-                details=f"Successfully restored and verified {restored_rows} rows.",
-            )
-        except Exception as ex:
-            return RestoreReceipt(
-                recovery_spec=recovery_spec,
-                restored_rows=0,
-                verified_at=datetime.now(UTC),
-                status="FAILED",
-                details=f"Restore verification failed: {ex}",
-            )

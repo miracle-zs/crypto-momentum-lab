@@ -141,8 +141,8 @@ async def test_postgres_save_and_retrieve_order(
 
     await postgres_repo.async_save_order(order)
 
-    loaded = await postgres_repo.async_get_order(
-        ENVIRONMENT, ACCOUNT_LABEL, "cml_ord_001"
+    (loaded,) = await postgres_repo.async_get_recent_orders(
+        ENVIRONMENT, ACCOUNT_LABEL
     )
     assert loaded is not None
     assert loaded.client_order_id == "cml_ord_001"
@@ -161,8 +161,8 @@ async def test_postgres_save_and_retrieve_order(
     order.updated_at = datetime.now(UTC)
     await postgres_repo.async_save_order(order)
 
-    updated = await postgres_repo.async_get_order(
-        ENVIRONMENT, ACCOUNT_LABEL, "cml_ord_001"
+    (updated,) = await postgres_repo.async_get_recent_orders(
+        ENVIRONMENT, ACCOUNT_LABEL
     )
     assert updated is not None
     assert updated.status == OrderStatus.FILLED
@@ -235,8 +235,8 @@ async def test_postgres_atomic_save_order_and_batch(
 
     await postgres_repo.async_save_order_and_batch(order, batch)
 
-    loaded_order = await postgres_repo.async_get_order(
-        ENVIRONMENT, ACCOUNT_LABEL, "cml_ord_003"
+    (loaded_order,) = await postgres_repo.async_get_recent_orders(
+        ENVIRONMENT, ACCOUNT_LABEL
     )
     loaded_batch = await postgres_repo.async_get_batch(
         ENVIRONMENT, ACCOUNT_LABEL, "b_003"

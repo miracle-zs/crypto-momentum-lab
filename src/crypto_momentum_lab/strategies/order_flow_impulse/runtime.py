@@ -1,4 +1,3 @@
-from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -72,21 +71,11 @@ class OrderFlowImpulseRuntimeStrategy:
             allow_entries_before_warmup=False,
         )
 
-    def restore(self, checkpoint: StrategyCheckpoint) -> None:
-        self._runtime.restore(
-            checkpoint,
-            max_buffer_length=self.required_data().warmup_buckets + 16,
-        )
-
-    def restore_checkpoint(self, checkpoint: StrategyCheckpoint) -> None:
-        self.restore(checkpoint)
-
     def warm_market_state(self, state: MarketState15s) -> None:
         """Rebuild the derivable rolling buffer without evaluating signals.
 
-        Durable checkpoints keep only control state.  The canonical runtime
-        market-state table replays this method during restart so warming does
-        not advance cooldowns or signal-id sequences.
+        Startup feeds historical market states through this method so warming
+        does not advance cooldowns or signal-id sequences.
         """
         self._runtime.warm_market_state(
             state,
@@ -94,8 +83,7 @@ class OrderFlowImpulseRuntimeStrategy:
         )
 
     def clear_market_state_buffers(self) -> None:
-        """Drop checkpointed rolling data before a durable live rewarm."""
-
+        """Drop rolling market data without resetting signal or cooldown state."""
         self._runtime.clear_market_state_buffers()
 
     def reset_symbol(self, symbol: str) -> None:
@@ -103,70 +91,10 @@ class OrderFlowImpulseRuntimeStrategy:
         self._runtime.reset_symbol(symbol)
 
     @property
-    def buffered_symbol_count(self) -> int:
-        """Return the number of symbols with a derived rolling buffer."""
-
-        return len(self._runtime.buffers)
-
-    @property
     def buffered_state_count(self) -> int:
         """Return the total number of retained rolling states."""
 
         return sum(len(buffer) for buffer in self._runtime.buffers.values())
-
-    def cache_protected_symbols(self) -> frozenset[str]:
-        """Return symbols whose strategy cooldown must survive cache pruning."""
-
-        return frozenset(
-            symbol
-            for symbol, remaining in self._runtime.cooldown_remaining.items()
-            if remaining > 0
-        )
-
-    def prune_inactive_symbols(
-        self,
-        *,
-        now: datetime,
-        protected_symbols: Collection[str] = (),
-        inactive_after: timedelta = timedelta(minutes=15),
-    ) -> tuple[str, ...]:
-        """Drop derived state for symbols that have been idle long enough.
-
-        The strategy keeps account-independent rolling state locally, but the
-        live daemon owns the protection set.  An evicted symbol starts from an
-        empty buffer when it returns and therefore fails closed until it has
-        warmed again.  This is deliberately an inactivity policy rather than
-        a global byte cap: active symbols retain the existing buffer length.
-        """
-
-        _require_aware_datetime(now, "now")
-        if inactive_after <= timedelta(0):
-            raise ValueError("inactive_after must be positive")
-        protected = {
-            symbol.strip().upper() for symbol in protected_symbols if symbol.strip()
-        }
-        protected.update(self.cache_protected_symbols())
-        cutoff = now - inactive_after
-        candidates = (
-            set(self._runtime.buffers)
-            | set(self._runtime.warmup)
-            | set(self._runtime.cooldown_remaining)
-            | set(self._runtime.last_processed)
-        )
-        evicted: list[str] = []
-        for symbol in sorted(candidates):
-            if symbol in protected:
-                continue
-            last_processed = self._runtime.last_processed.get(symbol)
-            if last_processed is not None and last_processed >= cutoff:
-                continue
-            self.reset_symbol(symbol)
-            evicted.append(symbol)
-        return tuple(evicted)
-
-    def cooldown_buckets(self) -> int:
-        return self._config.event_config.cooldown_buckets
-
 
     def on_market_state(self, state: MarketState15s) -> StrategyDecision:
         requirement = self.required_data()
@@ -180,14 +108,8 @@ class OrderFlowImpulseRuntimeStrategy:
             build_signal_and_candidate=self._build_signal_and_candidate,
         )
 
-    def checkpoint(
-        self,
-        *,
-        include_market_state_buffers: bool = True,
-    ) -> StrategyCheckpoint:
-        return self._runtime.checkpoint(
-            include_market_state_buffers=include_market_state_buffers
-        )
+    def checkpoint(self) -> StrategyCheckpoint:
+        return self._runtime.checkpoint()
 
     def _build_signal_and_candidate(
         self,
@@ -308,8 +230,3 @@ def _features(event: OrderFlowImpulseEvent) -> dict[str, JsonValue]:
 
 def _optional_decimal(value: Decimal | None) -> str | None:
     return None if value is None else str(value)
-
-
-def _require_aware_datetime(value: datetime, field_name: str) -> None:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{field_name} must be timezone-aware")

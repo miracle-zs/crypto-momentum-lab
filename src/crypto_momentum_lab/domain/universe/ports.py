@@ -6,7 +6,6 @@ from crypto_momentum_lab.domain.universe.models import (
     ContractMetadata,
     DailyOpen,
     PricePoint,
-    TrackedMembership,
     UniverseSnapshot,
 )
 
@@ -32,21 +31,7 @@ class UniverseRepository(Protocol):
         captured_at: datetime,
     ) -> None: ...
 
-    async def load_active_memberships(
-        self,
-    ) -> dict[str, TrackedMembership]: ...
-
     async def save_snapshot(self, snapshot: UniverseSnapshot) -> None: ...
-
-    async def load_snapshot(
-        self,
-        observed_at: datetime,
-    ) -> UniverseSnapshot | None: ...
-
-    async def load_snapshot_at(
-        self,
-        observed_at: datetime,
-    ) -> UniverseSnapshot | None: ...
 
 
 class UniverseMarketData(Protocol):

@@ -251,31 +251,6 @@ class NormalizedBookTicker(NormalizedEventSource):
 
 
 @dataclass(frozen=True, slots=True)
-class RealtimeMarketQuote:
-    """Small, transport-independent quote contract for exit decisions."""
-
-    exchange: str
-    environment: str
-    symbol: str
-    event_at: datetime
-    received_at: datetime
-    bid_price: Decimal
-    ask_price: Decimal
-
-    def __post_init__(self) -> None:
-        if not self.exchange.strip() or not self.environment.strip():
-            raise ValueError("exchange and environment must not be empty")
-        if not self.symbol.strip():
-            raise ValueError("symbol must not be empty")
-        if not _is_aware(self.event_at):
-            raise ValueError("event_at must be timezone-aware")
-        if not _is_aware(self.received_at):
-            raise ValueError("received_at must be timezone-aware")
-        if self.bid_price <= 0 or self.ask_price <= 0:
-            raise ValueError("quote prices must be positive")
-
-
-@dataclass(frozen=True, slots=True)
 class NormalizedMarkPrice(NormalizedEventSource):
     mark_price: Decimal
     index_price: Decimal | None
@@ -425,20 +400,6 @@ class MarketState15s:
             self.closed_kline_1m_close_time
         ):
             raise ValueError("closed_kline_1m_close_time must be timezone-aware")
-
-
-def transition_market_data_state(
-    current: MarketDataState,
-    target: MarketDataState,
-    *,
-    recovery: bool = False,
-) -> MarketDataState:
-    if current is MarketDataState.HALTED:
-        if not recovery or target is not MarketDataState.SYNCING:
-            raise ValueError("HALTED state requires explicit recovery to SYNCING")
-    if current is MarketDataState.STOPPED:
-        raise ValueError("STOPPED state is terminal")
-    return target
 
 
 def _is_aware(value: datetime) -> bool:

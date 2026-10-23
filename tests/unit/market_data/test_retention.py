@@ -23,11 +23,9 @@ from crypto_momentum_lab.domain.operational.retention_contract import (
 async def test_resolve_market_data_consumer_requirements_collects_watermarks() -> None:
     session = AsyncMock()
     session.scalars.return_value = MagicMock(all=MagicMock(return_value=[]))
-    # Both the checkpoint and active-batch watermark are read from the current
-    # persistence tables, not the legacy account snapshots.
-    checkpoint_time = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+    # Read the active-batch watermark from NextGen persistence.
     position_time = datetime(2026, 9, 20, 9, 30, tzinfo=UTC)
-    session.scalar.side_effect = [checkpoint_time, position_time]
+    session.scalar.return_value = position_time
 
     session_ctx = AsyncMock()
     session_ctx.__aenter__.return_value = session
@@ -37,18 +35,16 @@ async def test_resolve_market_data_consumer_requirements_collects_watermarks() -
 
     requirements = await _resolve_market_data_consumer_requirements(factory)
 
-    assert len(requirements) == 2
-    assert requirements[0].consumer_id == "active_strategy_checkpoints"
-    assert requirements[0].min_required_watermark == checkpoint_time
-    assert requirements[1].consumer_id == "active_position_market_states"
-    assert requirements[1].min_required_watermark == position_time
+    assert len(requirements) == 1
+    assert requirements[0].consumer_id == "active_position_market_states"
+    assert requirements[0].min_required_watermark == position_time
 
 
 @pytest.mark.asyncio
 async def test_resolve_market_data_consumer_requirements_empty_when_no_rows() -> None:
     session = AsyncMock()
     session.scalars.return_value = MagicMock(all=MagicMock(return_value=[]))
-    session.scalar.side_effect = [None, None]
+    session.scalar.return_value = None
 
     session_ctx = AsyncMock()
     session_ctx.__aenter__.return_value = session

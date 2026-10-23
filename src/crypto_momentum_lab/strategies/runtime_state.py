@@ -3,7 +3,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from crypto_momentum_lab.domain.market.models import JsonValue, MarketState15s
+from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
     RejectionReason,
@@ -11,10 +11,6 @@ from crypto_momentum_lab.domain.strategy import (
     StrategyDecision,
     StrategyRejection,
     StrategySignal,
-)
-from crypto_momentum_lab.strategies.runtime_checkpoint import (
-    market_state_payload,
-    restore_market_state_buffers,
 )
 
 
@@ -27,37 +23,6 @@ class StrategyRuntimeState:
     cooldown_remaining: dict[str, int] = field(default_factory=dict)
     last_processed: dict[str, datetime] = field(default_factory=dict)
     signal_sequence: int = 0
-
-    def restore(
-        self,
-        checkpoint: StrategyCheckpoint,
-        *,
-        max_buffer_length: int,
-    ) -> None:
-        if max_buffer_length <= 0:
-            raise ValueError("max_buffer_length must be positive")
-
-        sequence = checkpoint.payload["signal_sequence"]
-        if type(sequence) is not int or sequence < 0:
-            raise ValueError("checkpoint signal_sequence must be a nonnegative integer")
-
-        self.warmup = dict(checkpoint.warmup_buckets_by_symbol)
-        self.cooldown_remaining = dict(checkpoint.cooldown_buckets_remaining_by_symbol)
-        self.last_processed = dict(checkpoint.last_processed_at_by_symbol)
-        if "market_state_buffers" in checkpoint.payload:
-            restored_buffers = checkpoint.payload["market_state_buffers"]
-            if not isinstance(restored_buffers, dict):
-                raise ValueError("checkpoint market_state_buffers must be a mapping")
-            self.buffers = restore_market_state_buffers(
-                restored_buffers,
-                maxlen=max_buffer_length,
-            )
-            for symbol, buffer in self.buffers.items():
-                self.warmup[symbol] = len(buffer)
-        else:
-            self.buffers = {}
-            self.warmup = {}
-        self.signal_sequence = sequence
 
     def append_market_state(
         self,
@@ -106,13 +71,7 @@ class StrategyRuntimeState:
             self.last_processed[state.symbol] = state.bucket_start
 
     def clear_market_state_buffers(self) -> None:
-        """Discard derived market data while preserving trading control state.
-
-        Live restart recovery must rebuild rolling features from the durable
-        market-state table.  Cooldowns, processed-watermarks, and signal
-        sequence numbers are control state and therefore remain intact.
-        """
-
+        """Drop rolling market data while preserving trading control state."""
         self.buffers = {}
         self.warmup = {}
 
@@ -122,22 +81,12 @@ class StrategyRuntimeState:
         self.cooldown_remaining.pop(symbol, None)
         self.last_processed.pop(symbol, None)
 
-    def checkpoint(
-        self,
-        *,
-        include_market_state_buffers: bool = True,
-    ) -> StrategyCheckpoint:
-        payload: dict[str, JsonValue] = {"signal_sequence": self.signal_sequence}
-        if include_market_state_buffers:
-            payload["market_state_buffers"] = {
-                symbol: [market_state_payload(state) for state in buffer]
-                for symbol, buffer in self.buffers.items()
-            }
+    def checkpoint(self) -> StrategyCheckpoint:
         return StrategyCheckpoint(
             last_processed_at_by_symbol=dict(self.last_processed),
             warmup_buckets_by_symbol=dict(self.warmup),
             cooldown_buckets_remaining_by_symbol=dict(self.cooldown_remaining),
-            payload=payload,
+            payload={"signal_sequence": self.signal_sequence},
         )
 
 

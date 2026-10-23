@@ -58,10 +58,6 @@ class WebSocketQuoteVolumeProvider:
         self._failure_count = 0
 
     @property
-    def refresh_failure_count(self) -> int:
-        return self._failure_count
-
-    @property
     def cached_symbol_count(self) -> int:
         return len(self._snapshots)
 

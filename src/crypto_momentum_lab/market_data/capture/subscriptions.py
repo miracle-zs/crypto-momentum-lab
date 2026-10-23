@@ -64,13 +64,6 @@ class SubscriptionCommand:
     generation: int
 
 
-@dataclass(frozen=True, slots=True)
-class SubscriptionChangePlan:
-    generation: int
-    desired: frozenset[Subscription]
-    steps: tuple[SubscriptionCommand, ...]
-
-
 def build_subscription_groups(
     subscriptions: frozenset[Subscription],
     *,
@@ -114,7 +107,7 @@ def plan_subscription_change(
     desired: frozenset[Subscription],
     *,
     generation: int,
-) -> SubscriptionChangePlan:
+) -> tuple[SubscriptionCommand, ...]:
     additions = tuple(sorted(desired - active))
     removals = tuple(sorted(active - desired))
     steps: list[SubscriptionCommand] = []
@@ -134,4 +127,4 @@ def plan_subscription_change(
                 generation=generation,
             )
         )
-    return SubscriptionChangePlan(generation, desired, tuple(steps))
+    return tuple(steps)

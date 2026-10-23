@@ -1,3 +1,4 @@
+from decimal import Decimal
 
 import pytest
 
@@ -17,15 +18,15 @@ def test_profile_resolves_account_specific_environment_values() -> None:
         }
     )
 
-    assert profile.as_dict() == {
-        "impulse_window_buckets": 4,
-        "confirmation_buckets": 1,
-        "min_return_pct": "0.01",
-        "min_aggressive_imbalance": "0.40",
-        "min_notional_intensity": "2",
-        "min_notional_5m_vs_30m": "1.50",
-        "cooldown_buckets": 0,
-    }
+    assert profile == LiveOrderFlowImpulseProfile(
+        impulse_window_buckets=4,
+        confirmation_buckets=1,
+        min_return_pct=Decimal("0.01"),
+        min_aggressive_imbalance=Decimal("0.40"),
+        min_notional_intensity=Decimal("2"),
+        min_notional_5m_vs_30m=Decimal("1.50"),
+        cooldown_buckets=0,
+    )
 
 
 def test_profile_fails_closed_when_environment_variable_missing() -> None:

@@ -2,7 +2,7 @@
 
 状态：业务决策 Q1–Q9 沿用已确认契约；T1–T3 已完成源码收敛，核心运行版本已部署；T4 按可测证据继续收敛。本轮审查基线及审查前的 origin/main 为 `0cd61b8b`。2026-10-22 仅更新 dashboard：dashboard 运行 `b656a7bb`，其余 6 个应用容器仍运行 `a4b092a8`；8 个 Compose 容器均 healthy，数据库迁移为 `20261021_0069`。本次没有重启账户、行情、研究采集或 PostgreSQL，也没有运行迁移。真实交易闭环与严格同负载的新旧性能对比仍未完成；本次 dashboard 查询测量及其限制记于文末。文末新增四个方向的审查，记录了互斥锁失效、监控漏报及性能收敛项；互斥锁和监控漏报已完成本地修复与相关回归，尚未部署，其余项目待修复或评估。
 
-**当前源码说明（2026-10-22）**：NextGen 是唯一部署的交易运行时，在线策略决策由 `next_gen` 路径完成。本文 §8 及后续章节保存了旧 `live_rollout`/`ExecutionBook` 的决策与历史验收记录；其中测试名、源码行号和运行时描述不代表当前代码清单。旧 `ExecutionBook` 领域编排、证据/命令写入与恢复流程、PostgreSQL 写入适配器及其专属测试已从工作树移除；没有运行时调用方的成交恢复来源查询和订单身份查询也已删除。`PositionView` 等账本值模型仅供确定性决策追踪与回放工具使用；研究寻优使用独立的 `local_optimization.SimulationLedger`。旧 `PositionBook` / `PositionLedger` 运行时实现已移除；0062 迁移通过投影 codec 与迁移专用 verification 编码转换 schema 1 head，`PositionLedgerBatch` 仍供决策追踪与回放使用。无生产调用方的模拟发单适配器、预留协调器、重复交易规则模型与运行时元数据快照及其专属测试也已清理。未部署的纸面策略写入仓库及其专属模型和测试已移除；Paper 模拟看板及专属查询、权益对比代码已退役；纸面历史数据仍保留供归档、保留策略和迁移使用，历史决策回放工具继续保留，行情服务不再查询纸面持仓。单账户旧绩效查询及未接入的 TWR/Dietz 审计展示与计算已移除；账户快照和资金流修正记录仍保留，实盘资金时序图读取 NextGen 运行记录。纸面运行检查点表 `strategy_checkpoints` 已由 0069 退役，生产迁移已应用；该表上线前确认为空，活跃行情检查点仍使用 `strategy_runtime_checkpoints`。看板、诊断、归档和独立运维工具仍使用其所需的共享表模型与查询逻辑。孤立的 PostgreSQL runtime-context 辅助函数、账户进程状态写入适配器及其领域类型已删除；看板当前权益查询改从 NextGen 运行清单枚举实盘账户。`execution_account_process_states` 和 `strategy_live_states` 已无当前 ORM 或查询调用方；旧表由 0068 归档校验后删除，历史内容保留在服务器归档目录。依赖已删除执行栈的历史诊断和性能探针仍有本机副本，但这些脚本位于 Git 忽略的归档目录，未纳入版本库，且不能在当前源码上运行；报告正文与采样输出继续保留。
+**当前源码说明（2026-10-22）**：NextGen 是唯一部署的交易运行时，在线策略决策由 `next_gen` 路径完成。本文 §8 及后续章节保存了旧 `live_rollout`/`ExecutionBook` 的决策与历史验收记录；其中测试名、源码行号和运行时描述不代表当前代码清单。旧 `ExecutionBook` 领域编排、证据/命令写入与恢复流程、PostgreSQL 写入适配器及其专属测试已从工作树移除；没有运行时调用方的成交恢复来源查询和订单身份查询也已删除。`PositionView` 等账本值模型仅供确定性决策追踪与回放工具使用；研究寻优使用独立的 `local_optimization.SimulationLedger`。旧 `PositionBook` / `PositionLedger` 运行时实现已移除；0062 迁移通过投影 codec 与迁移专用 verification 编码转换 schema 1 head，`PositionLedgerBatch` 仍供决策追踪与回放使用。无生产调用方的模拟发单适配器、预留协调器、重复交易规则模型与运行时元数据快照及其专属测试也已清理。未部署的纸面策略写入仓库及其专属模型和测试已移除；Paper 模拟看板及专属查询、权益对比代码已退役；纸面历史数据仍保留供归档、保留策略和迁移使用，历史决策回放工具继续保留，行情服务不再查询纸面持仓。单账户旧绩效查询及未接入的 TWR/Dietz 审计展示与计算已移除；账户快照和资金流修正记录仍保留，实盘资金时序图读取 NextGen 运行记录。纸面运行检查点表 `strategy_checkpoints` 已由 0069 退役，生产迁移已应用；该表上线前确认为空，旧共享检查点表 `strategy_runtime_checkpoints` 保留历史记录；当前策略从行情历史预热，不再读写这张表。看板、诊断、归档和独立运维工具仍使用其所需的共享表模型与查询逻辑。孤立的 PostgreSQL runtime-context 辅助函数、账户进程状态写入适配器及其领域类型已删除；看板当前权益查询改从 NextGen 运行清单枚举实盘账户。`execution_account_process_states` 和 `strategy_live_states` 已无当前 ORM 或查询调用方；旧表由 0068 归档校验后删除，历史内容保留在服务器归档目录。依赖已删除执行栈的历史诊断和性能探针仍有本机副本，但这些脚本位于 Git 忽略的归档目录，未纳入版本库，且不能在当前源码上运行；报告正文与采样输出继续保留。
 
 第一轮本地已修复的阻塞项（§8.6，含机制删除；第 5 项已被 §8.8 收敛取代）：
 
@@ -1409,3 +1409,201 @@ Docker 三次短采样、间隔约 10 秒：primary CPU 均值 0.50%、account-2
 随后核对旧账户对账仓库，确认 `PostgresAccountRepository` 及其所有行转换函数仅被专属测试引用；当前 NextGen 通过 `PostgresTradingRepository.async_save_fill()` 写成交，账户查询和归档直接使用 ORM 表模型。删除整个旧仓库及三个专属测试文件，并移除随之失去调用方的 `AccountBalanceSnapshot`、`AccountConfigSnapshot`、`AccountOpenOrderSnapshot`、`AccountPositionStateSnapshot`、`AccountReconciliationRun`、`AccountFillReconciliationCursor` 六个领域数据类型和对应测试。保留 0062 迁移仍依赖的 `AccountPositionSnapshot`，双向持仓身份断言改为验证迁移实际使用的 `stable_snapshot_anchor_id()`。同时删除无人引用的 `AccountFillEvent.raw_position_side` 与成交额发布器 `last_refresh_at` 两个属性；成交元数据提取和刷新日志仍使用原实现。ORM 表定义、数据库迁移、历史数据、归档脚本和回放工具没有删除。
 
 该批验证：`rtk proxy .venv/bin/pytest -q tests/unit` 为 993 passed、1 skipped，跳过项是需要本地回环 socket 权限的 Hub 测试；另有一条上游 Starlette/httpx 弃用警告。全量测试收集为 1095 tests collected，无收集错误，数据库集成测试未执行。修改文件 Ruff 和 `git diff --check` 通过；包含 Git 忽略研究目录在内的引用扫描未发现被删接口的残留调用。本地验证完成，尚未部署。
+
+后续批次以已推送的 `f4f09839` 为基线，移除无人调用的账户快照裁剪、策略事件分区裁剪包装及其专属测试，保留行情进程实际调用的合约元数据清理、行情分区清理和事件分区预建接口；每日归档仍由 `deploy/ops/archive_and_trim.py` 原入口执行。另删除无运行调用方的 `load_active_entry_symbols_at()` 查询及专属测试、无消费者的旧 `ExecutionAccountStatus` 枚举。没有变更数据库表结构、迁移或保留期限。
+
+质量跟踪器的 `check_silence()` 没有生产调用方，旧连接状态回收却只挂在该接口内。先将现有回归改为通过真实生命周期入口触发：旧实现中超过保留期后缺口计数仍为 1，测试失败；修正后，`observe_lifecycle()` 在下一条连接生命周期事件到来时按原保留期回收已关闭会话，保留期内的状态继续保留，过期会话的序列基线与缺口计数被释放，测试通过。没有增加定时任务或新轮询。删除未接入的逐标的静默检测及专属缓存字段、构造参数，同步更新行情装配和负载脚本；底层 `BinanceWebSocketConnection` 仍使用原 `silence_timeout_seconds` 配置执行实际静默保护。
+
+本批验证：`rtk proxy .venv/bin/pytest -q tests/unit` 为 988 passed、1 skipped；全量测试收集为 1086 tests collected，无收集错误，数据库集成测试未执行。修改的 src/tests 文件 Ruff、负载脚本 F 规则检查、11 个修改 Python 文件的语法检查及 `git diff --check` 通过。含 Git 忽略目录的引用扫描未发现已删接口残留调用。本批修改尚未提交、推送或部署。
+
+继续清理确认无调用方的 `load_symbols_at()` / `load_recovery_window()` 旧行情启动查询、事件分区删除底层函数、孤立的 PostgreSQL serialization 模块、未接入的资源监测协程、旧账户排序函数、协议解码私有辅助函数，以及三个历史研究脚本内的孤立函数。实际行情分页读取、归档脚本、事件分区预建和 `ProcessResourceSampler` 保留。旧报价客户端删除后，独立的 `decode_market_quote()` 也已无人使用，移除该解码器；服务端编码测试直接断言线上 JSON 格式，成交额客户端及其解码继续保留。
+
+移除无消费者的 `LiveOrderFlowImpulseProfile.as_dict()` 和迁移 codec 的 `encode_fill()`；策略参数验证改为直接比较类型化配置，历史成交迁移夹具使用独立的旧格式字面值，实际旧格式解码与 0062 迁移转换保留。四账户策略配置哈希逐一核对，与修改前一致（`d0b133c89f80063a0e6c94418bdc463b0546daf136e160bfb2bcc6dd604f21e7`）。前端移除无人导入的 `SECTIONS` 与 `standaloneSparkline`；38 个前端源码模块仍有入口可达，构建后 JS/CSS 产物哈希未变，没有新增产物差异。最后移除两处无人读取的 `refresh_failure_count` 属性；内部失败计数仍被告警日志使用，保留计数累加、失败日志与重试行为。
+
+前序实际验证：`.venv/bin/pytest -q tests/unit tests/integration/raw_files tests/e2e/test_websocket_connection.py tests/e2e/test_nextgen_lifecycle.py` 为 1007 passed、1 skipped（Hub 回环 socket 项），另有一条上游弃用警告；随后 profile、运行清单与迁移专项 24 项通过。`node --test tests/frontend/*.test.mjs` 为 57 passed，`npm run build` 成功。最后两个无引用属性删除后仅补做静态引用、语法和 Ruff 检查，没有额外重跑测试；上述结果不冒充最终代码的全量测试或生产验收。
+
+数据库验证限制：在专门创建的一次性本地 PostgreSQL 16 空库执行 `alembic upgrade head`，升级在未改动的 `20260822_0017` 失败：该迁移试图对分区父表 `runtime_market_states_15s` 执行 `CREATE INDEX CONCURRENTLY`，PostgreSQL 不支持此组合。`0004` 已将该表定义为分区表；本批没有修改任何 ORM 表定义或迁移文件，也没有绕过迁移或将数据库集成测试记为通过。临时容器 `cml-cleanup-review-pg-20261023` 已停止并自动删除，现有本地数据库容器和生产服务未操作。
+
+收尾静态扫描覆盖源码、测试、部署、迁移、本机寻优和含 Git 忽略目录的历史脚本，共解析 539 个 Python 文件；未直接命名引用的顶级定义仅剩由 `Base.metadata` 注册的 ORM 表模型，保留其迁移与表结构用途。Pydantic 校验器、CLI/HTTP 注册回调、原始归档读取、历史决策回放及有效测试辅助设施继续保留，不按引用次数机械删除。本批尚未提交、推送或部署。
+
+### 按实际消费者清理遗留报价广播（2026-10-23，尚未提交或部署）
+
+继续从装配入口追踪真实消费者：旧 `WebSocketMarketQuoteSource` 已退役，当前 NextGen 仅使用 `WebSocketMarketQuoteVolumeSource`，Compose 的 8768 端口只配置了成交额客户端。源码、测试、部署、迁移、本机寻优及含 Git 忽略目录的历史脚本中，已无 `subscribe_market_quotes` 的订阅调用方；行情服务却仍将 `quote_hub.publish` 接入逐条 `bookTicker` 处理，重复归一化、创建报价对象、编码 JSON、更新报价缓存并获取订阅者锁。
+
+已删除这条空广播链的装配参数、`observe_realtime_quote()`、`RealtimeMarketQuote`、报价编码与订阅分支、独立报价缓存，以及没有运行读取方的 Hub 统计接口和专属计数。Hub 继续在原端口提供 24 小时成交额：订阅/就绪消息类型、初始快照、按环境隔离、发送队列和重连客户端保留。`NormalizedBookTicker`、15 秒状态聚合所用买卖价、实时/持久化时钟、研究采集与独立退出 K 线流保留；本批没有改策略或退出规则。
+
+删除仅验证旧报价载荷的测试，原有实时/持久化双时钟测试连同夹具原样移至 `tests/unit/market_data/test_runtime_state_clocks.py`。静态 AST 比较确认成交额编码器、解码器、整个 `WebSocketMarketQuoteVolumeSource`、`ClosedMarketStatePublisher.observe()` 及迁移后的双时钟用例与原版本一致；这只证明对应源码未变，不替代运行验证。
+
+本批未新增或运行测试。33 个变更/新增 Python 文件语法检查通过，修改的 src/tests 文件 Ruff 检查通过，本批 5 个 Python 文件 Ruff 格式检查通过，`quote_hub.py` 的单模块 mypy（`--follow-imports=silent`）通过，`git diff --check` 通过；被删接口在运行代码、测试和脚本中未发现残留引用。没有测量部署后的性能收益，前序回归结果不记作本批验收。本批尚未提交、推送或部署。
+
+### 策略闲置恢复接口与旧健康模型清理（2026-10-23，尚未提交或部署）
+
+按当前 NextGen 消费者复核，策略启动只调用 `warm_market_state()` 从历史行情重建缓冲；`restore()` / `restore_checkpoint()` 及整段行情 checkpoint 编解码只有专属测试使用，未被当前运行时、历史回放工具、部署或本机寻优调用。已删除这些恢复入口、`strategies/runtime_checkpoint.py` 和专属测试；同时删除没有运行调用方的 `prune_inactive_symbols()`、冷却保护集、重复冷却值访问器及失去消费者的标的缓冲计数。实际信号冷却、行情预热、缺口后的 `reset_symbol()` 和有行为测试用途的 `buffered_state_count` 保留。`clear_market_state_buffers()` 仍用于现有 NextGen 过期行情准入测试，保留该接口和测试，不因其没有生产调用而机械删除。
+
+当前 `checkpoint()` 继续返回内存中的简要策略状态，供就绪判断读取预热数量；它不写数据库，也不增加持久 checkpoint。移除未被生产启用的 `include_market_state_buffers=True` 分支和相关参数，NextGen 原来的显式 False 调用改为无参。静态 AST 比较证明：简要状态返回与原 False 分支一致，策略 wrapper 和 `MomentumStrategyEngine.is_ready()` 的唯一逻辑差异是省略已移除的参数。信号计算、预热计算、冷却计算和订单/持仓恢复代码未变；原有简要状态及预热测试只同步调用签名，业务断言保留。
+
+另删除旧 `operational_read_model.py` 的五维健康汇总模型、包重导出和仅验证这套模型的专属测试。引用审计显示，当前 `/api/health/operational` 和 `/api/readiness` 直接读取 `NextGenDashboardQueries`，账户心跳、Docker 健康检查与 `cml_ops_monitor` 均不调用这套旧模型，现行健康及告警链路未修改。`RetentionAuthority.restore()` 只是没有任何调用方的回调包装，连同专属 `RestoreReceipt` 类型和导出移除；实际 `archive_market_revision_payloads` 恢复工具、原始归档读取器、保留水位、版本复核、归档校验及裁剪执行路径保留。
+
+收尾证据：静态扫描解析 534 个 Python 文件，范围包含 Git 忽略的本机寻优和历史脚本；已删模块与接口未发现残留调用。计入隐式包导入的生产/CLI/脚本/迁移导入图包含 173 个源码模块，其中 172 个可达；余下原始归档读取器有明确的历史格式读取与测试用途，保留。直接名称扫描剩余项是由 SQLAlchemy metadata 注册的 ORM 类型及由 Pydantic 注册的校验器，均保留。前端 37 个 JS 源码/构建文件与 7 个测试/驱动文件的标识符检查未发现单次出现的函数或类声明；该静态检查不等于证明所有动态路径都可达。
+
+绝对导入符号一致性审计另发现 `scripts/run_market_data_smoke.py` 仍导入早已不存在的 `run_market_data_for`。该脚本没有运行、部署、测试或研究调用方，删除失效的重复启动入口；现行 `cml-market-data run-market-data` CLI 与 `tests/smoke/test_live_capture_manifest.py` 的归档/质量验证保留，没有为旧脚本恢复计时包装。删除后重新检查 1989 处源码绝对导入，未发现缺失的导入符号；该检查不导入或执行应用代码。
+
+本批未新增或运行测试。41 个变更/新增 Python 文件语法检查、所有修改的 src/tests 文件 Ruff、修改脚本 F 规则和 `git diff --check` 通过；本批策略协议、策略状态、策略实现、NextGen 策略适配器及 operational 包入口共 5 个文件的 mypy（`--follow-imports=silent`）通过。账户状态引擎、发单器、退出管理器、运行清单、策略参数生成、信号算法、现行健康 API、ORM 表定义及迁移文件与 `HEAD` 一致。数据库空库迁移限制沿用前述记录，未将前序测试计作本批运行验证。当前所有清理改动尚未提交、推送或部署。
+
+### 包导出残留清理与本地回归（2026-10-23，尚未提交或部署）
+
+继续排除“仅被 import / `__all__` 重导出”造成的假引用，确认 `RunManifest` 领域类型没有源码、脚本或测试消费者；删除该类型及导出，当前部署运行清单和历史分析使用的 `DatasetManifest`、`DecisionTrace` 保留。`DependencyViolationError` 没有抛出、捕获或其他读取方，删除声明及导出；裁剪结果状态和实际使用的 `DependencyVersionConflictError` 保留。
+
+`PendingProcessStateJournal` 和 `PendingProcessState` 只被一项专属测试使用，当前行情服务没有向其写入或从其回放。删除旧进程状态日志类、数据类型、文件名/编解码辅助函数、导出及专属测试。仍在运行的 `PendingManifestJournal`、归档清单编解码与落盘/重放辅助函数保留；AST 比较确认该类、`DatasetManifest` 和 `DecisionTrace` 与 `HEAD` 一致。本批没有删除数据文件或数据库历史记录。
+
+按本次完成核验要求实际运行现有本地回归，没有新增测试。命令为 `rtk proxy env CML_RUN_HUB_NETWORK_TESTS=1 .venv/bin/pytest -q -m 'not live' tests/unit tests/smoke tests/acceptance tests/integration/raw_files tests/integration/persistence/parquet tests/e2e/test_websocket_connection.py tests/e2e/test_nextgen_lifecycle.py`：上述三处清理前为 1009 passed；删除唯一的旧进程状态日志专属用例后，最终为 **1008 passed、3 skipped、1 deselected**。3 个跳过项需要 Bash 4+，未在本机 Bash 上执行；1 个 deselected 为真实环境归档 smoke。另有一条上游 Starlette/httpx 弃用警告。`rtk proxy node --test tests/frontend/*.test.mjs` 为 **57 passed**。最终全量收集 **1057 tests collected**，无收集错误；收集结果不记作全量执行通过。
+
+另以本地回环随机端口验证真实 `MarketQuoteHub` 和四个 `WebSocketMarketQuoteVolumeSource`：四客户端都取得初始成交额快照和后续更新，`live` 环境快照没有进入 `research` 客户端，验证通过；客户端、服务端与后台 reader 均按现有关闭路径释放。该验证没有访问交易所或生产服务，没有增加仓库测试文件。
+
+最终 46 个变更/新增 Python 文件语法检查、所有修改的 src/tests 文件 Ruff、修改脚本 F 规则和 `git diff --check` 通过；本批 journal 和 revision_models 两个文件的 mypy（`--follow-imports=silent`）通过。对 5 个修改过的 PostgreSQL 模块逐一比较 76 个保留函数/方法，AST 均与 `HEAD` 一致；ORM 表定义、迁移、四账户部署配置及交易执行/退出代码未修改。数据库集成测试没有执行，空库历史迁移 `0017` 的限制仍按前述记录保留，本次本地回归不代表生产验收。剩余没有直接生产名称读取的类是测试替身与前向引用协议，保留其实际用途。本次全程没有使用子代理；所有清理改动仍未提交、推送或部署。
+
+### 公开函数与旧入口复核（2026-10-23，尚未提交或部署）
+
+对公开函数的真实名称读取复核发现，`entry_policy_evaluation.py` 中的 `evaluate_entry_candidate()`、`CandidatePolicyDecision` 和 `universe_snapshot_for_symbols()` 已无源码、测试、部署或研究消费者，只有包重导出；删除该模块及对应导出。NextGen 仍通过现有 `_submit_candidates()` 直接检查账户门控、方向、候选准备与正涨幅标的池，相关代码未修改。历史决策回放使用的 `EntryEligibilityPolicy`、EMA 与标的池值模型继续保留。
+
+删除无人调用的 `compact_fill_metadata()` / `extract_fill_position_side()` 及导出。当前成交写入由 `PostgresTradingRepository.async_save_fill()` 直接使用 `AccountFillEvent` 字段，未调用这组旧元数据整理函数；AST 比较确认 `AccountFillEvent` 与迁移仍需的 `AccountPositionSnapshot` 类型均未修改。另删除只有专属模型测试调用的 `transition_market_data_state()` 和该项测试；实际状态处理在 `MarketDataCaptureService._transition()`，该类及整个采集服务模块与 `HEAD` 一致。
+
+保留具有历史轨迹构造/校验、归档回放、Parquet 写入、离线聚合与协议解析用途的公开工具及其测试，包括 `compute_decision_input_hash()`、`decision_trace_from_result()`、`replay_envelopes()`、两个 Parquet 单次写入接口、事件统计、批量聚合和 Binance 消息解析入口。它们的测试用于生成真实数据或验证格式与算法，不以“没有生产名称读取”直接判定无用。
+
+本轮没有新增测试，实际重跑上一段列出的现有本地 pytest 命令（启用回环 Hub 测试、排除 live），结果为 **1007 passed、3 skipped、1 deselected**；前端仍为 **57 passed**。相较上一段减少的 1 项是旧状态转换函数的专属测试。3 个跳过项仍需 Bash 4+，未选中项为真实环境归档 smoke，另有一条上游 Starlette/httpx 弃用警告。全量收集 **1056 tests collected**，无收集错误；数据库集成测试没有执行。
+
+最终静态复核解析 533 个 Python 文件，检查 1963 处源码绝对导入，未发现缺失导入符号或本批删除入口的残留调用。48 个变更/新增 Python 文件语法、所有修改的 src/tests 文件 Ruff、修改脚本 F 规则和 `git diff --check` 通过；本批 account models、strategy 包入口及 market models 三个文件的 mypy（`--follow-imports=silent`）通过。四账户配置、交易所客户端、账户状态、发单/退出、成交仓库、采集服务、ORM 与迁移文件未修改。所有清理改动尚未提交、推送或部署，全程未使用子代理。
+
+### 持久化与服务入口补充核验（2026-10-23）
+
+本轮补齐前述清理的本地验证，没有继续修改运行源码。使用本机已有 PostgreSQL 16 镜像创建一次性容器 `cml-cleanup-sql-review-20261023`，只在随机回环端口开放测试库 `cml_cleanup_sql_review_20261023`。实际服务器版本为 PostgreSQL 16.14，按当前 ORM metadata 创建 42 张测试表，没有写入 `alembic_version`。因此本次验证当前表上的仓库 SQL 和读取行为，未验证历史迁移、线上分区 DDL 或生产索引与性能；历史迁移 `0017` 的空库失败仍是独立未解决项。
+
+将 `CML_TEST_DATABASE_URL` / `CML_TEST_ASYNC_DATABASE_URL` 显式指向该一次性库，并通过项目既有本地测试库安全检查后，运行 `tests/integration/persistence/test_repository.py`、`test_runtime_state_repository.py`、`test_capture_repository.py`、`test_operational_retention.py`、`test_nextgen_postgres_repository.py` 和 `tests/integration/test_operator_dashboard_api.py`，结果为 **27 passed**，另有一条上游 Starlette/httpx 弃用警告。覆盖真实 PostgreSQL 下的订单/批次写入读取、原子保存、会话锁与事务空闲超时、行情状态幂等与缺口、采集记录、保留策略和看板 API。测试结束后停止临时容器并自动删除，检查确认已不存在；原有本地数据库容器保持停止，未访问生产服务或数据库。
+
+核对五个发布 CLI：初始本地虚拟环境的 `cml-market-data`、`cml-research-collector`、`cml-operator-dashboard` 的 `--help` 成功；`cml-archive-market-revisions` 和 `cml-next-gen` 缺少 console 脚本。按当前 `pyproject.toml` 声明直接加载五个源码目标后，各自 `--help` 均以 0 退出。随后执行标准 `rtk proxy .venv/bin/python -m pip install --no-deps --editable .`，构建并重新安装本项目，刷新本地 console 注册；已安装入口元数据与 `pyproject.toml` 完全一致，五条实际 CLI 命令的 `--help` 均以 0 退出，安装后的 `tests/unit/test_package.py` 为 **2 passed**。该操作没有升级运行依赖或增加兼容包装。Dockerfile 当前通过安装项目生成 console 入口，本轮没有构建或发布镜像。
+
+使用本机已有 Linux Python 镜像运行 `CML_HOUSEKEEPING_TEST_IMAGE=e35f80b55877 .venv/bin/pytest -q tests/smoke/test_housekeeping_script.py`，结果为 **5 passed**，其中 3 项覆盖此前因本机 Bash 版本跳过的路径。测试使用假 Docker 命令和 `--network none`，没有执行真实主机清理。检查确认没有本轮遗留的运行容器。既有本地非 live Python 回归 1007 passed、前端 57 passed 及全量收集 1056 项的结果沿用上一段，本轮未重复执行这些集合。
+
+本轮补充验证全程未使用子代理，`git diff --check` 通过。当前未发现还可明确删除的运行路径；保留的回放、归档/数据工具、测试替身及注册模型均有已核对用途。所有清理改动仍未提交、推送或部署。
+
+### 空库历史迁移修正与分区表核验（2026-10-23，尚未提交或部署）
+
+本轮接续处理前述 `0017` 空库升级阻塞。使用已有 PostgreSQL 16.14 镜像创建一次性本地容器 `cml-migration-review-20261023`，只开放随机回环端口；重新执行 `alembic upgrade head`，稳定复现 `cannot create index on partitioned table "runtime_market_states_15s" concurrently`。最小 SQL 对照确认：同一 autocommit 连接可对普通表并发建索引，分区父表的并发创建和删除均失败，普通创建和删除成功。`0004` 的表定义确为分区父表；根因是索引操作使用了不支持的 `CONCURRENTLY`，不是事务模式或本轮清理改变表结构。此限制也见 [PostgreSQL 16 CREATE INDEX 文档](https://www.postgresql.org/docs/16/sql-createindex.html)。
+
+`0017` 将行情分区父表的索引单独用普通 `op.create_index()` / `op.drop_index()` 创建和删除，保留 `bucket_start INCLUDE (bucket_end)` 的定义；其余四个普通表索引仍沿用原来的并发操作。继续升级后，在 `0019` 复现 `cannot drop partitioned index "ix_runtime_market_states_15s_symbol_time" concurrently`；同样将该分区索引的删除及 downgrade 恢复改为普通 DDL，移除不再需要的 autocommit 包装。仅修改这两个历史迁移，没有新增数据库版本、兼容分支或运行时兜底。普通分区索引 DDL 会取得相应表锁；这里不承诺对繁忙旧库进行无阻塞升级。已应用 `0069` 的数据库不会重新运行这些历史步骤。
+
+在第二个独立空库 `cml_migration_fresh_test_20261023` 中，单次 `alembic upgrade head` 从 `0001` 完整升级到 `20261021_0069`，退出码为 0，没有 stamp、手工跳步或用 ORM 建表替代迁移。在第三个测试库先升级到 `0016` 并建立真实子分区，依次验证 `0017` 建索引、`0019` 删重复索引、回退 `0018` 恢复索引、回退 `0016` 删除新索引，再升级到 head；全部通过。查询系统目录确认父索引及子索引有效，`INCLUDE (bucket_end)` 在子索引中保留，重复索引按各版本预期存在或删除。
+
+在完整迁移生成的库上运行前述六个数据库集成测试文件，另加 `tests/integration/persistence/test_migrations.py` 和 `tests/unit/persistence/test_migration_guards.py`。首轮为 17 passed、12 failed：失败项均因测试写入日期未预建子分区，其中行情夹具使用 2026-07-03，NextGen 事件使用当前日期。随后调用现有 `ensure_runtime_state_partitions()` / `ensure_event_partitions()` 准备相应日期的分区，没有修改测试或断言；重跑结果为 **29 passed**（28 项 PostgreSQL 集成、1 项模型索引检查），另有一条上游 Starlette/httpx 弃用警告。这一准备步骤属于测试库运行初始化，不是迁移执行成功的前提。
+
+最终系统目录核验：版本为 `20261021_0069`，当前 ORM 的 42 张表全部存在，分区父表为 `runtime_market_states_15s` 和 `strategy_runtime_events`，没有无效索引。两个迁移文件的语法、Ruff 和格式检查通过；未新增测试文件，前序本地 Python/前端结果不冒充本轮重跑。一次性容器及其中三个测试库已停止并自动删除，原有本地数据库容器与生产服务未操作。本轮全程未使用子代理；所有累计清理及本轮迁移修正仍未提交、推送或部署。
+
+### 部署配置与闲置运行清单字段清理（2026-10-23，尚未提交或部署）
+
+继续按实际装配和消费者复核源码、测试、部署、迁移、本机寻优及含 Git 忽略目录的脚本。删除 `compose.server.yaml` 中无人读取的 `CML_LIVE_POSITION_ACCOUNT_LABELS`；当前持仓保护直接查询 NextGen 的 `live_position_batches`，不读取这项旧账户列表。删除 `binance-rest-pacer` 卷声明、唯一挂载和对应初始化 `chown` 路径；现行公共 REST 限速器是进程内 `_PublicRequestPacer`，NextGen 客户端也不读取该目录。这里只删除部署声明，没有删除任何已有 Docker 卷或数据。
+
+确认 `LiveRuntimeAccount` 的 `migration_revision`、`profile_ref`、`limits_ref`、`services`，以及 `LiveRuntimeExecutionInputs.persist_exchange_operations` 没有运行读取方，也没有整体反射序列化消费者；只剩清单解析和构造断言。删除这些字段、专属 `_services()` / `_operations()` 校验辅助函数、YAML 声明和 Compose 中对应的八个环境变量。`session_id`、`image_commit` 和策略哈希仍用于运行身份和信号记录，继续保留；真实风险参数仍由 `async_get_risk_config()` 按账户读取，实际订单与成交落盘路径没有修改。测试文件只删除已移除字段的四条构造断言和对应 YAML 夹具项，其余身份、策略哈希、执行参数、非法配置及重复账户断言保留，没有删除测试用例或新增测试。
+
+静态 AST 对比确认，运行清单模块相对 `HEAD` 的变化恰为上述五个字段及专属解析逻辑删除；策略哈希计算、策略参数解析以及保留执行参数的校验和构造均一致。YAML 结构对比确认四账户保留的身份、策略和执行配置值一致，两个 Compose 文件除所列环境变量和闲置卷初始化外一致。`docker compose --env-file /dev/null -f compose.server.yaml -f compose.next_gen.yaml --profile nextgen config --no-interpolate --quiet` 成功，没有加载服务器凭证或启动服务。修改 Python 文件的 Ruff、格式检查、清单模块 mypy（`--follow-imports=silent`）与 `git diff --check` 通过，引用扫描未发现被删字段或目录的残留使用。
+
+方法声明扫描解析 533 个 Python 文件，没有直接名称或属性读取的七个方法均为由 Pydantic 注册的校验器，保留。`strategy_runtime_checkpoints` 仍被保留策略查询，因此没有仅因缺少当前写入方就删除其保护逻辑、退役名单或历史表；其存量记录用途需另行核对。本轮未运行测试，前序 29 项数据库验证不计作这批配置清理的回归结果。未使用子代理，所有累计改动仍未提交、推送或部署。
+
+### 旧共享检查点的保留分支清理（2026-10-23，尚未提交或部署）
+
+本轮补齐上一段的用途核对：`strategy_runtime_checkpoints` 没有当前写入方或恢复读取方。NextGen 从 `live_orders`、`live_position_batches` 恢复交易责任，从最近的 `runtime_market_states_15s` 预热策略；保留的历史回放工具读取 `DecisionTrace`、固定的 `MarketRevisionRef`、策略状态证据及校验后的冷归档，不读取该检查点表。全库扫描（含本机寻优与 Git 忽略的历史脚本）确认，除 ORM 定义与历史迁移外，该表唯一的运行引用是行情保留策略对 `saved_at` 的最小值查询。
+
+已移除这条旧检查点查询及 `active_strategy_checkpoints` 水位派生，删除 `parse_retired_strategy_run_ids()`、`CML_RETIRED_STRATEGY_RUN_IDS` 和 Compose 中十个旧纸面 run ID 的退役名单。保留已注册消费者的恢复水位与 NextGen 当前未平仓批次的保护。生效后，旧检查点记录不再单独阻止按既有期限清理行情；其他消费者和持仓仍限制实际截止时间，没有调整 12 小时行情、6 小时合约元数据的配置期限。`StrategyRuntimeCheckpointRow`、历史建表/索引迁移、旧表及其数据继续保留；本轮没有连接数据库、执行清理任务或操作生产服务。
+
+删除退役名单解析器的唯一专属用例；原水位解析用例保留当前持仓断言，移除旧检查点夹具、第二次 scalar 读取及旧水位断言。空记录、消费者查询失败时不执行清理、传递受保护截止时间等用例继续保留。通用消费者保护用例中的旧检查点名称改成 `external_strategy_replay`，原恢复水位、外部依赖、计划和回执断言均保留。没有新增测试，本轮未运行测试。
+
+静态 AST 对比确认 `_resolve_market_data_consumer_requirements()` 的执行逻辑仅删除旧检查点分支；注册消费者与当前持仓查询/保护保持一致，`prune_operational_database_once()` 和保留循环与 `HEAD` 一致。NextGen daemon、发单器、账户状态、成交仓库、历史回放/证据仓库、ORM 表定义及每日归档脚本与 `HEAD` 一致。533 个 Python 文件语法、修改 Python 文件 Ruff、Compose 合并配置校验及 `git diff --check` 通过；被删配置、解析器和水位名称没有残留运行引用。文首当前源码说明已同步更正。前序测试结果不计作本轮验收；全程未使用子代理，所有累计改动仍未提交、推送或部署。
+
+### 无消费者的返回字段与订阅包装清理（2026-10-23，尚未提交或部署）
+
+沿返回值逐项核对实际消费者，删除 `StrategyDecision.checkpoint`：当前策略的五条决策构造路径均不传入该字段，唯一赋值和读取来自模型构造测试。相关测试只删除该字段的夹具、构造参数、断言及失去用途的 `_checkpoint()` 辅助函数；信号/候选关系校验和其他模型断言保留。`StrategyCheckpoint` 类型、策略 `checkpoint()`、预热水位与冷却状态仍有就绪判断及行为测试用途，继续保留。
+
+研究采集删除无人读取的 `SinkFlushResult.committed_state_keys` 及每轮 flush 为它单独创建的集合，实际确认覆盖仍使用 `committed_version_keys` 中带摘要的版本身份。删除 `MaterializerFlushResult.resolutions` 这份无人读取的返回副本；`ready_resolutions` 仍传给 `ArchiveJournal.commit_materialization()`，确认日志及回执继续正常持久化。另删除 materializer、journal 中各一处无引用的 `_STATE_KEY` 类型别名；storage 和 service 中实际使用的同名类型别名保留。
+
+订阅变更的消费者只读取 `SubscriptionChangePlan.steps`，包装中的 `generation` 与 `desired` 没有读取方；代次已经保存在每条 `SubscriptionCommand` 中，连接池也自行维护期望订阅。删除该包装类型及重导出，`plan_subscription_change()` 直接返回有序命令元组，连接池直接迭代该元组。原“先订阅、再退订”的用例只同步返回值访问，命令顺序断言保留；没有新增或删除测试用例。
+
+静态 AST 对比确认：订阅分组、命令计算/顺序/代次和连接池的网络操作仅发生包装访问及相应类型/局部变量变更；Parquet 写入、版本覆盖、日志提交、序列推进和持久数据格式的执行逻辑一致；策略模型仅删除闲置字段，原校验、哈希和 `StrategyCheckpoint` 一致。顺手修正修改文件中原有的一处导入空行和一条过长日志字符串的换行，字符串内容不变。533 个 Python 文件语法、修改的九个 Python 文件 Ruff、六个源码模块 mypy（`--follow-imports=silent`）及 `git diff --check` 通过；全库引用扫描未发现被删类型、字段或旧访问形式残留。以上为静态证据，本轮未运行测试，没有访问生产、修改数据或部署；前序回归不计作本轮验收。全程未使用子代理，所有累计改动仍未提交、推送或部署。
+
+### 采集服务闲置指标清理（2026-10-23，尚未提交或部署）
+
+核对 `CaptureMetricsSnapshot` 的构造和全部消费者，发现 `active_subscriptions`、`active_connections`、`reconnect_count`、`received_messages`、`received_bytes`、`archived_rows`、`archived_bytes`、`open_writers`、`pending_manifests`、`oldest_pending_manifest_seconds` 十个字段只在采集服务初始化为 0 / None，随后从未更新，且没有运行读取方。`desired_subscriptions` 另有一份按标的数乘流数量计算的值，也只有测试读取。实际连接数、订阅数、重连数和消息速率来自连接池；采集健康日志、看板及 watchdog 没有读取这些闲置字段。
+
+已删除上述十一个字段、对应服务成员、闲置目标订阅数计算及快照构造参数。队列、监控标的、代次、磁盘空间及过滤统计继续提供真实值。观测测试夹具仅同步删除旧构造参数，采集快照测试仅删除两个闲置字段的零值断言；其余队列/状态、磁盘保护、恢复、连接故障和健康日志断言保留，没有新增或删除测试用例。
+
+静态 AST 对比确认采集服务的变化恰为上述字段、存储和参数删除；采集提交、订阅变更、磁盘检查、队列背压及启停状态逻辑一致。`observability.py`、看板 API/schema、NextGen daemon/client/executor 和运维监控脚本与 `HEAD` 一致，日志输出与现行接口未修改。533 个 Python 文件语法、三个修改 Python 文件 Ruff、采集服务和监控两个模块的 mypy（`--follow-imports=silent`）及 `git diff --check` 通过。本轮未运行测试，静态证据不记作运行验收；未访问生产或修改数据，全程未使用子代理。所有累计改动仍未提交、推送或部署。
+
+### 晋级补历史的闲置报告与适配包装清理（2026-10-23，尚未提交或部署）
+
+继续核对调用链，`PromotionHistoryBackfiller.backfill_symbols()` 返回的 `SymbolBackfillReport` 仅被一项测试读取，唯一运行调用方通过 `_ignore_backfill_result()` 丢弃整个返回值。已删除报告类型、逐标的报告构造及返回元组，将方法明确返回 None，并把它直接连接到 `on_trade_symbols_promoted`。随之删除丢弃返回值的包装函数及无用的 `Any` / `dataclass` 导入。现有测试改为记录真实查询的标的并检查实际发布批次与状态数量，保留原来的标的处理、有效桶发布和空结果不发布语义；没有新增或删除测试用例。
+
+静态 AST 对比确认，补历史模块相对 `HEAD` 仅删除闲置报告及返回处理，原窗口分页、成交去重、状态合成、发布和成功/失败日志逻辑一致。`CaptureUniverseObserver` 的调度、取消及失败处理与 `HEAD` 一致。533 个 Python 文件语法、三个修改文件 Ruff、补历史模块 mypy（`--follow-imports=silent`）及 `git diff --check` 通过，被删报告和包装函数没有残留引用。本轮未运行测试。
+
+入口模块 mypy 另报告一处 `RetentionAuthority(AsyncPostgresRetentionRepository(...))` 的协议标注不匹配：构造参数声明为同步 `RetentionRepository`，实际传入异步仓库。用临时 shadow 文件还原本轮改动前的补历史模块、包装函数和装配后重新检查，仍只有同一错误，确认并非本轮新增；临时文件自动删除。本轮未修改该仓库协议，也未把入口模块的完整 mypy 记作通过。未访问生产、修改数据或部署，全程未使用子代理；所有累计改动仍未提交、推送或部署。
+
+### 研究采集写入返回包装清理（2026-10-23，尚未提交或部署）
+
+接续核对保留仓库：每日归档使用同步 `PsqlRetentionRepository`，行情保留任务使用异步 `AsyncPostgresRetentionRepository`；两条路径都有运行调用，不能将其中一套当作旧代码删除。本轮保留现有实现，前段记录的构造参数协议标注错误仍未修复，不将入口模块的完整 mypy 记作通过。
+
+研究采集的 `MaterializerFlushResult` 复制 `SinkFlushResult` 的写入行数、文件数、字节数和末尾水位，并额外返回一份只有测试读取的 `committed_receipts`。已删除该包装类型、委托属性、回执副本构造和无用导入；`WindowMaterializer` 在完成原来的回执提交后直接返回底层 `SinkFlushResult`。采集服务仅同步导入和类型标注，实际容量更新、启动日志、水位保存和检查点处理一致。`ready_receipts` 与 `ready_resolutions` 仍原样传入 `ArchiveJournal.commit_materialization()`，确认日志、版本覆盖与序列推进继续使用原逻辑。
+
+现有测试将三处返回副本断言改为读取 `journal.read_resolutions()`：核对三条确认记录及两组 `{1, 2}` 序列集合。Parquet 行内容、冲突处理、日志清空、序列推进和落盘顺序断言保留；仍是原来的 5 个用例、41 条断言，没有新增或删除测试用例。同步整理测试文件中六处原有超长行，执行语义一致。本轮未运行测试。
+
+以本轮修改前的工作区源码作静态 AST 对照，确认 materializer 仅删除包装并更换返回值，采集服务仅变更导入与类型标注，测试仅变更所列回执读取方式；journal 和 storage 文件与本轮开始时逐字一致。533 个 Python 文件语法、三个修改文件 Ruff、两个研究采集源码模块 mypy（`--follow-imports=silent`）及 `git diff --check` 通过。包含 Git 忽略目录的源码引用扫描未发现旧包装、`.committed_receipts` 或 `.sink_result` 的残留调用。以上是静态证据，前序测试结果不计作本轮验收；全程未使用子代理，所有累计改动仍未提交、推送或部署。
+
+### 无读取方的局部变量清理（2026-10-23，尚未提交或部署）
+
+继续筛查私有成员、返回模型和局部变量。将 Ruff 的未使用变量规则临时设为只豁免单独的 `_`，在 `src`、`scripts` 和 `deploy` 中找到两处被下划线命名掩盖的无用赋值：行情 Hub 客户端 `_iterate_batches()` 的 `_unavailable_since`，以及研究采集 `CapacityGuard.current_snapshot()` 的 `_scan_obs`。已删除这两行。实际断线预算仍由 `StreamAvailabilityClock` 管理，容量过期仍读取 `_last_scan_monotonic`，快照仍使用 `_last_scan_observed_at` 输出观测时间。
+
+对照本轮开始时保存的工作区内容，两个源码文件逐字变化恰为上述两行删除。相关时钟测试的替身返回由用例显式推进的固定时间，不依赖时钟函数的调用次数；这里只阅读用例，没有执行测试。533 个 Python 文件语法、两个修改文件 Ruff、两个源码模块 mypy（`--follow-imports=silent`）及 `git diff --check` 通过；`src scripts deploy` 在仅豁免 `_` 的 F841 检查下通过。没有修改测试、部署配置、依赖或数据；未使用子代理，所有累计改动仍未提交、推送或部署。
+
+### 采集仓库的测试查询与闲置协议清理（2026-10-23，尚未提交或部署）
+
+继续核对公开符号及仅在本模块使用的协议。`EnvelopeRecoveryBatch` 通过字符串前向引用参与补缺口接口，CLI 函数由装饰器注册，历史表模型由 ORM metadata 注册；这些不能按缺少直接名称读取删除。`QualityRepository.save_quality_event()` 则没有协调器调用方，协调器始终通过 `save_quality_events()` 写入，因此删除这项多余的协议要求。具体 `PostgresCaptureRepository.save_quality_event()` 仍被应用装配的缺口记录回调使用，继续保留。
+
+`PostgresCaptureRepository.count_quality_events()` 和 `latest_process_state()` 只有一个数据库集成用例、一个端到端用例调用，没有运行、部署或研究消费者。删除两个方法及失去用途的 `func` 导入；将相同查询放入原有测试，通过现有测试仓库的会话读取结果。质量事件数量、最新状态的时间/ID 倒序排序与 LIMIT 1 保持一致，仍核对 DEGRADED / STOPPED；原来的 3 个用例、9 条断言均保留，没有新增或删除测试用例，本轮未运行测试。
+
+静态 AST 对照确认，两个运行源码文件仅删除所列协议方法、查询方法与导入，全部保留方法的实现一致；测试中的三个 SQL 表达式与被移除方法中的表达式一致。533 个 Python 文件语法、四个修改文件 Ruff、协调器模块 mypy（`--follow-imports=silent`）及 `git diff --check` 通过，含 Git 忽略目录的引用扫描没有发现被删查询名称残留。
+
+仓库模块 mypy 仍报告 `delete_manifests()` 中 `Result[Any]` 没有 `rowcount` 属性的既有标注错误。以本轮修改前源码作临时 shadow 检查，原来除同一错误外，计数辅助方法另有 `int(int | None)` 标注错误；后者随无调用方的方法删除而消失。临时文件已自动清理，没有为静态检查改动实际清理 SQL、返回值或异常路径，也未将仓库模块的完整 mypy 记作通过。本轮没有连接数据库或生产服务，未使用子代理，所有累计改动仍未提交、推送或部署。
+
+### 研究写盘器与健康标记的闲置接口清理（2026-10-23，尚未提交或部署）
+
+删除 `WindowMaterializer` 无读取方的 `sink`、`journal`、`duplicate_rows` 属性、仅为该属性维护的重复行计数及从未使用的 logger。实际重复行数仍由 `ResearchStateCollector` 从 append 结果累计并输出健康状态，该服务文件与本轮开始时逐字一致；保留实际写入行数、版本覆盖、回执提交和序列推进逻辑。
+
+删除 `LocalHealthWriter` 只有测试使用的 `for_directory()` 工厂、三个路径属性，以及无人读取的 `_directory` 成员。现有两个测试直接使用构造器并检查 `status`、`database`、`readiness` 文件，原 11 条断言均保留。环境变量入口、文件名、标记内容、原子替换和重启复位逻辑一致，没有新增或删除测试用例，本轮未运行测试。
+
+以本轮修改前的工作区源码作 AST 对照，变化仅为上述闲置代码删除与测试调用调整。533 个 Python 文件语法、三个修改文件 Ruff、写盘器/采集服务/健康写入器三个源码模块 mypy（`--follow-imports=silent`）及 `git diff --check` 通过；含 Git 忽略目录的引用扫描无旧接口残留。以上为本批静态检查，前段已记录的其他模块类型错误不计作通过；未使用子代理，所有累计改动仍未提交、推送或部署。
+
+### 闲置单订单读取接口与采集成员清理（2026-10-23，尚未提交或部署）
+
+`async_get_order()` 仅被两项 PostgreSQL 集成用例调用，没有运行、部署或研究调用方。删除交易仓库协议中的声明及内存、PostgreSQL 两份实现；后者与实际 CLI 使用的 `async_get_recent_orders()` 重复了整段订单字段映射。保留的所有仓库方法与本轮开始时 AST 一致，订单/批次写入、原子事务、恢复查询和会话锁逻辑没有修改。
+
+原有两项用例的三处单订单读取改用现有 `async_get_recent_orders()`。这些用例的夹具按测试环境清空订单，场景中只写入一个订单，因此用单元素解包取回该订单；原有 19 条受影响场景断言均保留。整个测试文件仍为原来的 9 个用例、65 条断言，没有新增或删除用例；静态对照确认除三处调用与接收方式外，测试 AST 一致。旧、新读取方法的列投影和订单构造表达式一致；实际保留查询的实现没有改变。本轮未运行测试。
+
+另删除 `PostgresTop30Selector` 无人读取的 `_environment` 成员；`environment` 参数仍参与校验及持仓环境取值，因此继续保留参数与这两段逻辑。删除 `ArchiveJournal` 从未使用的 logger 及对应导入，确认日志文件的写入、读取、索引和序列推进逻辑一致。
+
+三个修改源码模块的 mypy（`--follow-imports=silent`）在修改前后均通过；四个修改文件 Ruff、533 个 Python 文件语法及 `git diff --check` 通过。包含 Git 忽略目录的引用扫描未发现旧单订单接口残留。以上是本批静态证据，前段记录的其他模块类型错误不计作通过；没有连接数据库或生产服务，未使用子代理，所有累计改动仍未提交、推送或部署。
+
+### 标的池快照闲置查询分支清理（2026-10-23，尚未提交或部署）
+
+`PostgresUniverseRepository.load_snapshot()` 的精确时间查询只有两处测试调用；实际采集使用 `load_snapshot_at()` 查指定时刻前最新的已激活快照。删除精确查询入口及 `_load_snapshot(..., at_or_before=...)` 的布尔分支，把保留路径直接放入 `load_snapshot_at()`。静态 AST 对照确认，激活过滤、时间上界、倒序/LIMIT 1、缓存、候选/成员解码及其他仓库方法一致。
+
+`UniverseRepository` 协议只被标的池刷新和日开盘价预取使用，两者都不调用三个快照/成员读取方法，因此删除这三项多余要求；具体仓库的成员读取方法仍供行情启动使用，继续保留。同步删除测试替身中无调用方的读取方法和成员缓存。两个测试读取改用保留入口，原场景均保存已激活快照；两个测试文件仍为原来的 6 个用例、15 条断言，没有新增或删除用例。本轮未运行测试。
+
+顺手整理测试夹具中四处原有超长行；测试数据库安全检查的条件和错误消息 AST 一致，只改写说明字符串及换行。刷新、预取、采集选择器三个运行消费者与本轮开始时逐字一致。五个修改文件 Ruff、五个相关源码模块 mypy（`--follow-imports=silent`，修改前后均通过）、533 个 Python 文件语法及 `git diff --check` 通过。旧精确读取入口和私有包装没有残留调用；研究脚本其他同名时间查询继续保留。本批仅作静态检查，没有连接数据库或生产服务，未使用子代理，所有累计改动仍未提交、推送或部署。
+
+### 前端多余导出清理（2026-10-23，尚未提交或部署）
+
+核对 37 个前端源码模块的导出及调用方，将五个模块中仅本模块使用、且没有测试读取的 11 个符号改为内部声明：poller 的 `setSectionStatus`；section-state 的 `SAFETY_READING_TTL_MS`、`latestLiveMode`；wire-widgets 的 `wireMarketTab`、`applyMarketView`；账户 loaders 的四个展示辅助函数；render-fleet 的账户卡片和汇总函数。逐字对照本轮开始时的源码，变化恰为 11 个 `export` 关键字删除，所有函数、变量、事件绑定和请求逻辑一致。测试实际读取的其他导出继续保留，没有修改测试。
+
+沿用现有构建脚本的 bundle/iife/minify/browser/es2022 参数，以 `write: false` 作修改前后两次内存构建；结果均为 109596 字节、零警告，完整 SHA-256 同为 `580ae6652af2e76a96b5caaea13f6d87cdd079d812933be606229a5fdc247a73`，也与现有 `dashboard-580ae6652af2e76a.js` 一致。三个带哈希静态产物、index、合并 CSS 和 vendor 文件的哈希保持一致，没有重写发布产物。
+
+37 个前端模块 `node --check`、完整入口的内存打包及 `git diff --check` 通过；本轮没有运行测试或浏览器交互验收。保留具有当前客户端调用的独立应急运维工具及明确测试/回放用途的接口，不按日期或缺少 Python 直接调用机械删除。未使用子代理，所有累计改动仍未提交、推送或部署。
+
+### 本批 Git 提交范围（2026-10-24）
+
+用户已授权提交并推送本批全部累计改动，范围包含闲置运行代码、接口和配置清理，历史分区索引迁移修正，以及相应测试维护和本文记录。前文“尚未提交”描述的是各轮记录时的状态。提交前再次通过 533 个 Python 文件语法检查及 `git diff --check`；功能回归没有在本次重新执行，既有类型标注问题及各批次验证边界仍以上文记录为准。本次授权范围为 Git 提交和推送，未执行生产部署。

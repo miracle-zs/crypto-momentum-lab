@@ -33,11 +33,7 @@ class LiveRuntimeAccount:
     strategy: str
     session_id: str
     image_commit: str
-    migration_revision: str
     strategy_config_hash: str
-    profile_ref: str
-    limits_ref: str
-    services: tuple[str, ...]
     strategy_inputs: LiveRuntimeStrategyInputs
     execution_inputs: LiveRuntimeExecutionInputs
 
@@ -68,7 +64,6 @@ class LiveRuntimeExecutionInputs:
     candle_grace_bars: int
     candle_grace_decision_profit_pct: Decimal
     candle_grace_profit_pct: Decimal
-    persist_exchange_operations: str
     max_concurrency_per_symbol: int | None = None
 
 
@@ -169,10 +164,6 @@ def _parse_manifest(document: Any, *, path: Path) -> LiveRuntimeManifest:
     default_image_commit = _text(
         runtime.get("image_commit", "unknown"), "runtime.image_commit"
     )
-    default_migration_revision = _text(
-        runtime.get("migration_revision", "unknown"),
-        "runtime.migration_revision",
-    )
     raw_accounts = root.get("accounts")
     if not isinstance(raw_accounts, list) or not raw_accounts:
         raise RuntimeManifestError(
@@ -188,7 +179,6 @@ def _parse_manifest(document: Any, *, path: Path) -> LiveRuntimeManifest:
         if label in labels:
             raise RuntimeManifestError(f"duplicate runtime account label: {label}")
         labels.add(label)
-        services = _services(account.get("services"), prefix)
         strategy = _text(account.get("strategy"), f"{prefix}.strategy")
         strategy_inputs = _strategy_inputs(
             account.get("strategy_config"),
@@ -219,20 +209,7 @@ def _parse_manifest(document: Any, *, path: Path) -> LiveRuntimeManifest:
                     account.get("image_commit", default_image_commit),
                     f"{prefix}.image_commit",
                 ),
-                migration_revision=_text(
-                    account.get("migration_revision", default_migration_revision),
-                    f"{prefix}.migration_revision",
-                ),
                 strategy_config_hash=strategy_config_hash,
-                profile_ref=_text(
-                    account.get("profile_ref"),
-                    f"{prefix}.profile_ref",
-                ),
-                limits_ref=_text(
-                    account.get("limits_ref"),
-                    f"{prefix}.limits_ref",
-                ),
-                services=services,
                 strategy_inputs=strategy_inputs,
                 execution_inputs=execution_inputs,
             )
@@ -255,17 +232,6 @@ def _text(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise RuntimeManifestError(f"{field} must be a non-empty string")
     return value.strip()
-
-
-def _services(value: Any, prefix: str) -> tuple[str, ...]:
-    if not isinstance(value, list) or not value:
-        raise RuntimeManifestError(f"{prefix}.services must be a non-empty list")
-    services = tuple(
-        _text(item, f"{prefix}.services[{index}]") for index, item in enumerate(value)
-    )
-    if len(set(services)) != len(services):
-        raise RuntimeManifestError(f"{prefix}.services must not contain duplicates")
-    return services
 
 
 def _computed_strategy_config_hash(
@@ -428,10 +394,6 @@ def _execution_inputs(
                 raise RuntimeManifestError(
                     f"{field}.{name} must be finite and in [0, 1)"
                 )
-        persist_exchange_operations = _operations(
-            config.get("persist_exchange_operations"),
-            f"{field}.persist_exchange_operations",
-        )
         if "max_concurrency_per_symbol" not in config:
             raise RuntimeManifestError(
                 f"{field}.max_concurrency_per_symbol is required"
@@ -459,7 +421,6 @@ def _execution_inputs(
             candle_grace_bars=candle_grace_bars,
             candle_grace_decision_profit_pct=candle_grace_decision_profit_pct,
             candle_grace_profit_pct=candle_grace_profit_pct,
-            persist_exchange_operations=persist_exchange_operations,
             max_concurrency_per_symbol=max_concurrency_per_symbol,
         )
     except (InvalidOperation, ValueError) as error:
@@ -484,26 +445,6 @@ def _decimal(value: Any, field: str) -> Decimal:
         return Decimal(str(value))
     except (InvalidOperation, ValueError) as error:
         raise RuntimeManifestError(f"{field} must be a decimal") from error
-
-
-def _operations(value: Any, field: str) -> str:
-    if not isinstance(value, str):
-        raise RuntimeManifestError(f"{field} must be a comma-separated string")
-    normalized = value.strip()
-    if not normalized:
-        raise RuntimeManifestError(f"{field} must not be empty")
-    if normalized.lower() == "all":
-        return "all"
-    operations = tuple(item.strip() for item in normalized.split(","))
-    if any(not item for item in operations):
-        raise RuntimeManifestError(
-            f"{field} must contain only non-empty operation names"
-        )
-    if any(item.lower() == "all" for item in operations):
-        raise RuntimeManifestError(f"{field} accepts 'all' only by itself")
-    if len(set(operations)) != len(operations):
-        raise RuntimeManifestError(f"{field} must not contain duplicates")
-    return ",".join(sorted(operations))
 
 
 def _boolean(value: Any, field: str) -> bool:

@@ -90,7 +90,6 @@ class PostgresTop30Selector:
             raise ValueError("position_environment must not be empty")
         self._universe_repository = universe_repository
         self._position_repository = position_repository
-        self._environment = environment
         self._top_count = top_count
         self._position_environment = position_environment or environment
         self._refresh_interval = timedelta(seconds=refresh_interval_seconds)

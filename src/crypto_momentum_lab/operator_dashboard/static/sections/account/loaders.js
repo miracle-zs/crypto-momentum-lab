@@ -44,7 +44,7 @@ function rememberRenderedPayload(slot, payload) {
   slot.__cmlRenderedPayload = JSON.stringify(payload);
 }
 
-export function markRefreshStale(root, message) {
+function markRefreshStale(root, message) {
   const state = root.querySelector(sel.refreshState());
   if (!state) return;
   state.hidden = false;
@@ -53,11 +53,11 @@ export function markRefreshStale(root, message) {
   root.dataset.refreshState = "stale";
 }
 
-export function detailContentSlot(slot) {
+function detailContentSlot(slot) {
   return slot.querySelector(sel.liveAccountDetailContent()) || slot;
 }
 
-export function setLiveAccountDetailHeader(slot, accountLabel, data = {}, loadingMessage = "") {
+function setLiveAccountDetailHeader(slot, accountLabel, data = {}, loadingMessage = "") {
   const label = slot.querySelector(sel.selectedAccountLabel());
   if (label) label.textContent = accountLabel || "交易所账户";
   const status = slot.querySelector(`.${K.liveAccountDetailStatus}`);
@@ -72,7 +72,7 @@ export function setLiveAccountDetailHeader(slot, accountLabel, data = {}, loadin
   }
 }
 
-export function setLiveAccountTabState(root, accountLabel) {
+function setLiveAccountTabState(root, accountLabel) {
   root.querySelectorAll(sel.accountCards()).forEach((button) => {
     const active = button.dataset.liveAccountLabel === accountLabel;
     button.classList.toggle("is-selected", active);

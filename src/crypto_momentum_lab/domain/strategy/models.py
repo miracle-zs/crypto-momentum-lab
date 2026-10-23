@@ -12,7 +12,6 @@ from uuid import NAMESPACE_URL, uuid5
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.domain.trading import OrderType, TradeSide
 
-
 StrategySide = TradeSide
 EntryType = OrderType
 
@@ -222,7 +221,6 @@ class StrategyDecision:
     signals: tuple[StrategySignal, ...]
     candidates: tuple[OrderIntentCandidate, ...]
     rejections: tuple[StrategyRejection, ...]
-    checkpoint: StrategyCheckpoint | None = None
 
     def __post_init__(self) -> None:
         signals_by_id = {signal.signal_id: signal for signal in self.signals}

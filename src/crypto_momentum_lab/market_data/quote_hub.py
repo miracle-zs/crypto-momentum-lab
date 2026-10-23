@@ -1,10 +1,4 @@
-"""Latest-value fan-out for realtime executable quotes.
-
-The quote hub is deliberately separate from the closed-state hub.  Quotes are
-not replayed as an ordered audit log: a reconnecting consumer only needs the
-latest bid/ask for each symbol and then the next live update.  Durable event
-ordering remains the responsibility of the capture and runtime-state paths.
-"""
+"""Latest-value fan-out for shared 24-hour quote-volume snapshots."""
 
 from __future__ import annotations
 
@@ -22,7 +16,6 @@ from websockets.asyncio.client import ClientConnection, connect
 from websockets.asyncio.server import Server, ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
-from crypto_momentum_lab.domain.market.models import RealtimeMarketQuote
 from crypto_momentum_lab.health.stream_availability import (
     StreamAvailabilityClock,
     StreamAvailabilityConfig,
@@ -36,16 +29,13 @@ from crypto_momentum_lab.market_data.quote_volume import QuoteVolume24hSnapshot
 log = structlog.get_logger()
 
 _SCHEMA_VERSION = 1
-_SUBSCRIBE_MESSAGE = "subscribe_market_quotes"
 _SUBSCRIBE_VOLUME_MESSAGE = "subscribe_market_quote_volumes"
-_READY_MESSAGE = "market_quote_hub_ready"
 _VOLUME_READY_MESSAGE = "market_quote_volume_hub_ready"
-_QUOTE_MESSAGE = "market_quote"
 _VOLUME_MESSAGE = "market_quote_volume"
 
 
 class MarketQuoteHubError(RuntimeError):
-    """Base error for the realtime quote hub."""
+    """Base error for the shared quote-volume hub."""
 
 
 class MarketQuoteHubProtocolError(MarketQuoteHubError):
@@ -110,13 +100,12 @@ class MarketQuoteHubConfig:
 class _Subscriber:
     connection: ServerConnection
     environment: str
-    kind: str
     queue: asyncio.Queue[str]
     writer_task: asyncio.Task[None] | None = None
 
 
 class MarketQuoteHub:
-    """Fan out the newest quote without coupling consumers to persistence."""
+    """Fan out the newest quote-volume snapshot to account consumers."""
 
     def __init__(self, config: MarketQuoteHubConfig = MarketQuoteHubConfig()) -> None:
         self._config = config
@@ -125,11 +114,7 @@ class MarketQuoteHub:
         self._bound_port: int | None = None
         self._subscribers: dict[int, _Subscriber] = {}
         self._subscriber_lock = asyncio.Lock()
-        self._latest: dict[tuple[str, str], RealtimeMarketQuote] = {}
         self._latest_volumes: dict[tuple[str, str], QuoteVolume24hSnapshot] = {}
-        self._published_quote_count = 0
-        self._published_volume_count = 0
-        self._dropped_quote_count = 0
 
     @property
     def url(self) -> str:
@@ -184,25 +169,6 @@ class MarketQuoteHub:
         self._bound_host = None
         self._bound_port = None
 
-    async def publish(
-        self,
-        quote: RealtimeMarketQuote | tuple[RealtimeMarketQuote, ...],
-    ) -> None:
-        quotes = (quote,) if isinstance(quote, RealtimeMarketQuote) else quote
-        for item in quotes:
-            self._latest[(item.environment, item.symbol)] = item
-            self._published_quote_count += 1
-            message = encode_market_quote(item)
-            async with self._subscriber_lock:
-                subscribers = tuple(
-                    subscriber
-                    for subscriber in self._subscribers.values()
-                    if subscriber.environment == item.environment
-                )
-            for subscriber in subscribers:
-                if subscriber.kind == "quote":
-                    self._enqueue_latest(subscriber, message)
-
     async def publish_volume(
         self,
         snapshot: QuoteVolume24hSnapshot | tuple[QuoteVolume24hSnapshot, ...],
@@ -212,33 +178,18 @@ class MarketQuoteHub:
         )
         for item in snapshots:
             self._latest_volumes[(item.environment, item.symbol)] = item
-            self._published_volume_count += 1
             message = encode_quote_volume(item)
             async with self._subscriber_lock:
                 subscribers = tuple(
                     subscriber
                     for subscriber in self._subscribers.values()
-                    if (
-                        subscriber.kind == "volume"
-                        and subscriber.environment == item.environment
-                    )
+                    if subscriber.environment == item.environment
                 )
             for subscriber in subscribers:
                 self._enqueue_latest(subscriber, message)
 
-    def metrics_snapshot(self) -> dict[str, int]:
-        return {
-            "connected_subscriber_count": len(self._subscribers),
-            "published_quote_count": self._published_quote_count,
-            "published_volume_count": self._published_volume_count,
-            "dropped_quote_count": self._dropped_quote_count,
-            "latest_quote_count": len(self._latest),
-            "latest_volume_count": len(self._latest_volumes),
-        }
-
     def _enqueue_latest(self, subscriber: _Subscriber, message: str) -> None:
         if subscriber.queue.full():
-            self._dropped_quote_count += 1
             while True:
                 try:
                     subscriber.queue.get_nowait()
@@ -249,22 +200,9 @@ class MarketQuoteHub:
                 for latest_message in latest_messages:
                     subscriber.queue.put_nowait(latest_message)
                 return
-        try:
-            subscriber.queue.put_nowait(message)
-        except asyncio.QueueFull:
-            self._dropped_quote_count += 1
+        subscriber.queue.put_nowait(message)
 
     def _latest_messages(self, subscriber: _Subscriber) -> tuple[str, ...]:
-        if subscriber.kind == "quote":
-            quotes = (
-                (symbol, quote)
-                for (environment, symbol), quote in self._latest.items()
-                if environment == subscriber.environment
-            )
-            return tuple(
-                encode_market_quote(quote)
-                for _symbol, quote in sorted(quotes, key=lambda item: item[0])
-            )
         volumes = (
             (symbol, volume)
             for (environment, symbol), volume in self._latest_volumes.items()
@@ -283,44 +221,23 @@ class MarketQuoteHub:
                 timeout=self._config.handshake_timeout_seconds,
             )
             request = _decode_object(raw_message)
-            request_type = request.get("type")
-            if request_type == _SUBSCRIBE_MESSAGE:
-                kind = "quote"
-                ready_message = _READY_MESSAGE
-            elif request_type == _SUBSCRIBE_VOLUME_MESSAGE:
-                kind = "volume"
-                ready_message = _VOLUME_READY_MESSAGE
-            else:
+            if request.get("type") != _SUBSCRIBE_VOLUME_MESSAGE:
                 raise MarketQuoteHubProtocolError("invalid subscription message")
             environment = _require_string(request, "environment")
             consumer_id = _require_string(request, "consumer_id")
             async with self._subscriber_lock:
-                if kind == "quote":
-                    quote_snapshot = tuple(
-                        quote
-                        for (quote_environment, _symbol), quote in sorted(
-                            self._latest.items(),
-                            key=lambda item: item[0][1],
-                        )
-                        if quote_environment == environment
+                volume_snapshot = tuple(
+                    volume
+                    for (volume_environment, _symbol), volume in sorted(
+                        self._latest_volumes.items(),
+                        key=lambda item: item[0][1],
                     )
-                    encoded_snapshot = tuple(
-                        encode_market_quote(quote) for quote in quote_snapshot
-                    )
-                    snapshot_size = len(quote_snapshot)
-                else:
-                    volume_snapshot = tuple(
-                        volume
-                        for (volume_environment, _symbol), volume in sorted(
-                            self._latest_volumes.items(),
-                            key=lambda item: item[0][1],
-                        )
-                        if volume_environment == environment
-                    )
-                    encoded_snapshot = tuple(
-                        encode_quote_volume(volume) for volume in volume_snapshot
-                    )
-                    snapshot_size = len(volume_snapshot)
+                    if volume_environment == environment
+                )
+                encoded_snapshot = tuple(
+                    encode_quote_volume(volume) for volume in volume_snapshot
+                )
+                snapshot_size = len(volume_snapshot)
                 queue: asyncio.Queue[str] = asyncio.Queue(
                     maxsize=max(
                         self._config.subscriber_queue_size,
@@ -332,18 +249,17 @@ class MarketQuoteHub:
                 subscriber = _Subscriber(
                     connection=connection,
                     environment=environment,
-                    kind=kind,
                     queue=queue,
                 )
                 self._subscribers[id(connection)] = subscriber
             # Register the subscriber before the handshake completes so a
-            # quote published during the network send is queued after the
-            # initial snapshot.  The send itself stays outside the global
-            # subscriber lock; a slow client must not pause the Binance reader.
+            # volume snapshot published during the network send is queued
+            # after the initial snapshot. The send itself stays outside the
+            # subscriber lock; a slow client must not pause the publisher.
             await connection.send(
                 json.dumps(
                     {
-                        "type": ready_message,
+                        "type": _VOLUME_READY_MESSAGE,
                         "schema_version": _SCHEMA_VERSION,
                         "environment": environment,
                         "snapshot_count": snapshot_size,
@@ -546,47 +462,6 @@ class WebSocketMarketQuoteVolumeSource:
         except Exception as error:
             reader_error[0] = error
             available.set()
-
-
-def encode_market_quote(quote: RealtimeMarketQuote) -> str:
-    return json.dumps(
-        {
-            "type": _QUOTE_MESSAGE,
-            "schema_version": _SCHEMA_VERSION,
-            "exchange": quote.exchange,
-            "environment": quote.environment,
-            "symbol": quote.symbol,
-            "event_at": quote.event_at.isoformat(),
-            "received_at": quote.received_at.isoformat(),
-            "bid_price": str(quote.bid_price),
-            "ask_price": str(quote.ask_price),
-        },
-        separators=(",", ":"),
-    )
-
-
-def decode_market_quote(
-    payload: dict[str, object] | str | bytes,
-    *,
-    expected_environment: str | None = None,
-) -> RealtimeMarketQuote:
-    message = _decode_object(payload)
-    if message.get("type") != _QUOTE_MESSAGE:
-        raise MarketQuoteHubProtocolError("unexpected market quote message type")
-    if message.get("schema_version") != _SCHEMA_VERSION:
-        raise MarketQuoteHubProtocolError("unsupported market quote schema")
-    environment = _require_string(message, "environment")
-    if expected_environment is not None and environment != expected_environment:
-        raise MarketQuoteHubProtocolError("market quote environment mismatch")
-    return RealtimeMarketQuote(
-        exchange=_require_string(message, "exchange"),
-        environment=environment,
-        symbol=_require_string(message, "symbol"),
-        event_at=_require_datetime(message, "event_at"),
-        received_at=_require_datetime(message, "received_at"),
-        bid_price=_require_decimal(message, "bid_price"),
-        ask_price=_require_decimal(message, "ask_price"),
-    )
 
 
 def encode_quote_volume(snapshot: QuoteVolume24hSnapshot) -> str:

@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Callable
 from pathlib import Path
-
-import structlog
 
 _CGROUP_CPU_STAT = Path("/sys/fs/cgroup/cpu.stat")
 _CGROUP_MEMORY_STAT = Path("/sys/fs/cgroup/memory.stat")
@@ -18,7 +15,6 @@ _PSI_PATHS = {
     "memory": Path("/proc/pressure/memory"),
     "io": Path("/proc/pressure/io"),
 }
-_log = structlog.get_logger(__name__)
 
 
 class ProcessResourceSampler:
@@ -98,34 +94,6 @@ class ProcessResourceSampler:
         self._previous_cgroup_usage_usec = usage_usec
         self._previous_cgroup_throttled_usec = throttled_usec
         return snapshot
-
-
-async def monitor_process_resources(
-    *,
-    service: str,
-    interval_seconds: float = 60.0,
-    dimensions: Mapping[str, str] | None = None,
-    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-    sampler: ProcessResourceSampler | None = None,
-) -> None:
-    """Emit a low-frequency process snapshot until the task is cancelled."""
-    if not service.strip():
-        raise ValueError("service must not be empty")
-    if interval_seconds <= 0:
-        raise ValueError("interval_seconds must be positive")
-    observe = (sampler or ProcessResourceSampler()).snapshot
-    fields = {} if dimensions is None else dict(dimensions)
-    while True:
-        await sleep(interval_seconds)
-        try:
-            _log.info(
-                "process_resource_snapshot",
-                service=service,
-                **fields,
-                **observe(),
-            )
-        except Exception:
-            _log.exception("process_resource_snapshot_failed", service=service)
 
 
 def _read_text(path: Path) -> str:
@@ -214,4 +182,4 @@ def _rate_percent(
     return round(max(0, current - previous) * scale / elapsed * 100, 3)
 
 
-__all__ = ["ProcessResourceSampler", "monitor_process_resources"]
+__all__ = ["ProcessResourceSampler"]

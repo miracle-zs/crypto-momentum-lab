@@ -21,7 +21,6 @@ from crypto_momentum_lab.domain.market.models import (
     QualityCategory,
     QualityEvent,
     RawEnvelope,
-    transition_market_data_state,
 )
 from crypto_momentum_lab.domain.market.ports import (
     RawArchive,
@@ -32,7 +31,6 @@ from crypto_momentum_lab.domain.market.revision_models import (
     MarketEnvelope,
     MarketRevisionRef,
     MarketVisibilityMode,
-    RunManifest,
 )
 
 __all__ = [
@@ -60,8 +58,6 @@ __all__ = [
     "RawEnvelope",
     "RevisionConflictError",
     "RevisionNotFoundError",
-    "RunManifest",
     "UnreproducibleError",
     "compute_market_state_hash",
-    "transition_market_data_state",
 ]

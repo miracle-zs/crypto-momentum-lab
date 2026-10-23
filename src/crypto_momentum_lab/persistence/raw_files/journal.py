@@ -3,7 +3,6 @@ import json
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -15,17 +14,9 @@ from crypto_momentum_lab.domain.market.models import (
     ArchiveManifest,
     CaptureRoute,
     CaptureStream,
-    MarketDataState,
 )
 
 log = structlog.get_logger()
-
-
-@dataclass(frozen=True, slots=True)
-class PendingProcessState:
-    state: MarketDataState
-    occurred_at: datetime
-    reason: str | None
 
 
 class PendingManifestJournal:
@@ -115,44 +106,10 @@ class PendingManifestJournal:
                 await asyncio.gather(task, return_exceptions=True)
 
 
-class PendingProcessStateJournal:
-    def __init__(self, directory: Path) -> None:
-        self._directory = directory
-
-    async def append(self, record: PendingProcessState) -> None:
-        await asyncio.to_thread(
-            _write_json_atomic,
-            self._directory,
-            _process_state_filename(record),
-            _process_state_to_payload(record),
-        )
-
-    async def replay(
-        self,
-        save: Callable[[PendingProcessState], Awaitable[None]],
-    ) -> int:
-        count = 0
-        for path in await asyncio.to_thread(_journal_entries, self._directory):
-            record = await asyncio.to_thread(
-                _process_state_from_payload,
-                _read_json(path),
-            )
-            await save(record)
-            await asyncio.to_thread(_delete_journal_entry, path)
-            count += 1
-        return count
-
-
 def _manifest_filename(manifest: ArchiveManifest) -> str:
     created_at = manifest.created_at.astimezone(UTC)
     timestamp = created_at.strftime("%Y%m%dT%H%M%S.%fZ")
     return f"{timestamp}-{manifest.manifest_id}.json"
-
-
-def _process_state_filename(record: PendingProcessState) -> str:
-    occurred_at = record.occurred_at.astimezone(UTC)
-    timestamp = occurred_at.strftime("%Y%m%dT%H%M%S.%fZ")
-    return f"{timestamp}-{record.state.value}.json"
 
 
 def _manifest_to_payload(manifest: ArchiveManifest) -> dict[str, Any]:
@@ -210,26 +167,6 @@ def _manifest_from_payload(payload: dict[str, Any]) -> ArchiveManifest:
         recovery_status=payload["recovery_status"],
         known_gap_count=payload["known_gap_count"],
         created_at=datetime.fromisoformat(payload["created_at"]),
-    )
-
-
-def _process_state_to_payload(
-    record: PendingProcessState,
-) -> dict[str, str | None]:
-    return {
-        "state": record.state.value,
-        "occurred_at": record.occurred_at.isoformat(),
-        "reason": record.reason,
-    }
-
-
-def _process_state_from_payload(
-    payload: dict[str, Any],
-) -> PendingProcessState:
-    return PendingProcessState(
-        state=MarketDataState(payload["state"]),
-        occurred_at=datetime.fromisoformat(payload["occurred_at"]),
-        reason=payload["reason"],
     )
 
 

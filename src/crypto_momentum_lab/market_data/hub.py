@@ -15,7 +15,6 @@ from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
@@ -684,7 +683,6 @@ class WebSocketMarketStateSource:
         # transport unavailability. Retain the clock across later reconnects.
         availability_clock = self.availability_clock
         self._notify_connection_change(False, "connecting")
-        _unavailable_since: float | None = time.monotonic()
         reconnect_attempt = 0
         while not self._stopping:
             try:
@@ -1221,20 +1219,6 @@ def _optional_int(payload: dict[str, object], name: str) -> int | None:
     return value
 
 
-def _optional_bool_default(
-    payload: dict[str, object],
-    name: str,
-    *,
-    default: bool,
-) -> bool:
-    if name not in payload:
-        return default
-    value = payload[name]
-    if not isinstance(value, bool):
-        raise MarketStateHubProtocolError(f"{name} must be a boolean")
-    return value
-
-
 def _require_datetime(payload: dict[str, object], name: str) -> datetime:
     return require_datetime(
         payload,
@@ -1244,31 +1228,3 @@ def _require_datetime(payload: dict[str, object], name: str) -> datetime:
         invalid_message="is not a valid timestamp",
         timezone_message="must include a timezone",
     )
-
-
-def _optional_datetime(
-    payload: dict[str, object],
-    name: str,
-) -> datetime | None:
-    if payload.get(name) is None:
-        return None
-    return _require_datetime(payload, name)
-
-
-def _require_decimal(payload: dict[str, object], name: str) -> Decimal:
-    value = payload.get(name)
-    if not isinstance(value, str | int | float) or isinstance(value, bool):
-        raise MarketStateHubProtocolError(f"{name} must be numeric")
-    try:
-        return Decimal(str(value))
-    except Exception as error:
-        raise MarketStateHubProtocolError(f"{name} is not numeric") from error
-
-
-def _optional_decimal(
-    payload: dict[str, object],
-    name: str,
-) -> Decimal | None:
-    if payload.get(name) is None:
-        return None
-    return _require_decimal(payload, name)

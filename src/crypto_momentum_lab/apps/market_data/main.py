@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Protocol
 
 import structlog
 import typer
@@ -95,7 +95,6 @@ from crypto_momentum_lab.persistence.postgres.capture_repository import (
 )
 from crypto_momentum_lab.persistence.postgres.models import (
     ConsumerDependencyRow,
-    StrategyRuntimeCheckpointRow,
 )
 from crypto_momentum_lab.persistence.postgres.operational_retention import (
     PostgresOperationalRetentionRepository,
@@ -196,28 +195,6 @@ def _market_database_url(default_url: str) -> str:
     """Use the market plane when configured, otherwise the shared database."""
 
     return resolve_database_url(None, "CML_MARKET_DATABASE_URL") or default_url
-
-
-def parse_retired_strategy_run_ids(value: str | None = None) -> frozenset[str]:
-    """Exact operator-retired checkpoint owners; never infer retirement by age."""
-    raw = os.environ.get("CML_RETIRED_STRATEGY_RUN_IDS", "") if value is None else value
-    if not raw.strip():
-        return frozenset()
-    run_ids = tuple(item.strip() for item in raw.split(","))
-    if any(not item or any(char in item for char in "*?[]") for item in run_ids):
-        raise ValueError(
-            "CML_RETIRED_STRATEGY_RUN_IDS requires exact non-empty run IDs"
-        )
-    return frozenset(run_ids)
-
-
-def _ignore_backfill_result(
-    fn: Callable[[Any], Awaitable[Any]],
-) -> Callable[[Any], Awaitable[None]]:
-    async def _run(symbols: Any) -> None:
-        await fn(symbols)
-
-    return _run
 
 
 async def _load_live_position_symbols(
@@ -541,8 +518,7 @@ class CaptureUniverseObserver:
                 ),
             )[: self._max_prewarm_symbols]
             self._prewarm_until_by_symbol = {
-                symbol: self._prewarm_until_by_symbol[symbol]
-                for symbol in retained
+                symbol: self._prewarm_until_by_symbol[symbol] for symbol in retained
             }
         self._previous_trade_tier = current_trade_tier
 
@@ -975,9 +951,7 @@ async def run_operational_database_retention_loop(
 async def _resolve_market_data_consumer_requirements(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> tuple[RetentionConsumerRequirement, ...]:
-    """Resolve consumer watermarks to protect downstream strategy replay
-    and positions.
-    """
+    """Protect registered consumers and currently open positions."""
     requirements: list[RetentionConsumerRequirement] = []
     async with session_factory() as session:
         # 1. Authoritative registered external consumer dependencies (Fail-Closed)
@@ -997,23 +971,6 @@ async def _resolve_market_data_consumer_requirements(
                 )
             )
 
-        # A stopped process can still need recovery. Only an explicit operator
-        # retirement removes its checkpoint from protection; no heartbeat TTL.
-        retired_run_ids = parse_retired_strategy_run_ids()
-        checkpoint_statement = select(func.min(StrategyRuntimeCheckpointRow.saved_at))
-        if retired_run_ids:
-            checkpoint_statement = checkpoint_statement.where(
-                StrategyRuntimeCheckpointRow.run_id.not_in(sorted(retired_run_ids))
-            )
-        earliest_checkpoint = await session.scalar(checkpoint_statement)
-        if earliest_checkpoint is not None:
-            requirements.append(
-                RetentionConsumerRequirement(
-                    consumer_id="active_strategy_checkpoints",
-                    min_required_watermark=earliest_checkpoint,
-                    reason="protect active strategy replay and checkpoint baseline",
-                )
-            )
         earliest_position = await session.scalar(
             select(func.min(LivePositionBatchRow.entry_bar_time)).where(
                 LivePositionBatchRow.environment == "live",
@@ -1174,9 +1131,9 @@ async def build_market_data_runtime(
             ),
         ),
         realtime_state_sink=state_hub.publish,
-        realtime_quote_sink=quote_hub.publish,
         on_durable_state_persisted=on_durable_state_persisted,
     )
+
     async def load_protected_symbols() -> frozenset[str]:
         return await _load_live_position_symbols(
             trading_repository=trading_repository,
@@ -1209,9 +1166,7 @@ async def build_market_data_runtime(
     manifest_journal = PendingManifestJournal(
         archive_config.root / ".pending-manifests"
     )
-    quality = StreamQualityTracker(
-        silence_timeout_seconds=runtime.capture.silence_timeout_seconds
-    )
+    quality = StreamQualityTracker()
     archive_streams = (
         None
         if archive_config.streams is None
@@ -1436,9 +1391,7 @@ async def build_market_data_runtime(
                 must_warm_max_gainer_rank=runtime.universe.top_count,
                 protected_symbol_loader=load_protected_symbols,
                 on_symbols_changed=runtime_state_publisher.set_expected_symbols,
-                on_trade_symbols_promoted=_ignore_backfill_result(
-                    promotion_backfiller.backfill_symbols
-                ),
+                on_trade_symbols_promoted=promotion_backfiller.backfill_symbols,
             )
             universe = UniverseRefreshService(
                 market_data=rest_client,
@@ -1786,7 +1739,6 @@ async def run_market_data_with_signal_handlers(config_path: Path) -> None:
     finally:
         for shutdown_signal in registered_signals:
             loop.remove_signal_handler(shutdown_signal)
-
 
 
 @app.command()

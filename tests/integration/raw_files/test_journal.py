@@ -10,12 +10,9 @@ from crypto_momentum_lab.domain.market.models import (
     ArchiveManifest,
     CaptureRoute,
     CaptureStream,
-    MarketDataState,
 )
 from crypto_momentum_lab.persistence.raw_files.journal import (
     PendingManifestJournal,
-    PendingProcessState,
-    PendingProcessStateJournal,
 )
 
 
@@ -127,26 +124,6 @@ async def test_journal_replays_manifests_in_order(
 
     assert saved == list(fixture_manifests)
     assert not list((tmp_path / "pending").glob("*.json"))
-
-
-async def test_process_state_journal_replays_critical_transition(
-    tmp_path: Path,
-) -> None:
-    journal = PendingProcessStateJournal(tmp_path / "pending-state")
-    record = PendingProcessState(
-        state=MarketDataState.HALTED,
-        occurred_at=datetime(2026, 6, 15, 2, 0, tzinfo=UTC),
-        reason="archive failure",
-    )
-    await journal.append(record)
-    saved: list[PendingProcessState] = []
-
-    async def save(item: PendingProcessState) -> None:
-        saved.append(item)
-
-    assert await journal.replay(save) == 1
-
-    assert saved == [record]
 
 
 def _manifest(manifest_id: UUID, sha256: str) -> ArchiveManifest:

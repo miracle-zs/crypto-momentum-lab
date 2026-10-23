@@ -1,16 +1,10 @@
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from uuid import UUID
 
 from crypto_momentum_lab.domain.market.models import (
     CaptureRoute,
     CaptureStream,
     RawEnvelope,
-    RealtimeMarketQuote,
-)
-from crypto_momentum_lab.market_data.quote_hub import (
-    decode_market_quote,
-    encode_market_quote,
 )
 from crypto_momentum_lab.market_data.runtime_states import (
     ClosedMarketStatePublisher,
@@ -62,23 +56,6 @@ async def test_realtime_and_durable_clocks_are_independent() -> None:
     )
     assert durable_state.trade_count == 2
     assert publisher.metrics.late_event_count == 0
-
-
-def test_quote_hub_round_trip() -> None:
-    event_at = datetime(2026, 8, 23, 0, 0, tzinfo=UTC)
-    quote = RealtimeMarketQuote(
-        exchange="binance-usdm",
-        environment="research",
-        symbol="BTCUSDT",
-        event_at=event_at,
-        received_at=event_at + timedelta(milliseconds=20),
-        bid_price=Decimal("100"),
-        ask_price=Decimal("101"),
-    )
-
-    decoded = decode_market_quote(encode_market_quote(quote))
-
-    assert decoded == quote
 
 
 def _trade(offset_seconds: int, *, sequence: int, price: str) -> RawEnvelope:

@@ -13,7 +13,6 @@ from crypto_momentum_lab.market_data.capture.service import (
 )
 from crypto_momentum_lab.market_data.capture.subscriptions import (
     Subscription,
-    SubscriptionChangePlan,
     SubscriptionCommand,
     SubscriptionGroup,
     build_subscription_groups,
@@ -29,7 +28,6 @@ __all__ = [
     "DiskStatus",
     "MarketDataCaptureService",
     "Subscription",
-    "SubscriptionChangePlan",
     "SubscriptionCommand",
     "SubscriptionGroup",
     "build_subscription_groups",

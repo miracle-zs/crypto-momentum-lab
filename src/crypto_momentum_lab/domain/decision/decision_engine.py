@@ -15,7 +15,7 @@ import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -54,12 +54,6 @@ from crypto_momentum_lab.domain.strategy.position_exit import PositionExitPolicy
 from crypto_momentum_lab.domain.strategy.sizing import SizingModel, SymbolLotRules
 
 log = logging.getLogger(__name__)
-
-
-def _require_aware(dt: datetime, name: str) -> datetime:
-    if dt.tzinfo is None or dt.utcoffset() is None:
-        raise ValueError(f"{name} must be timezone-aware (UTC)")
-    return dt.astimezone(UTC)
 
 
 @dataclass(frozen=True, slots=True)

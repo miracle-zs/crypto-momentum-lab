@@ -38,7 +38,7 @@ function resolveApiUrl(endpoint) {
   }
 }
 
-export function setSectionStatus(id, status, cacheStatus = null) {
+function setSectionStatus(id, status, cacheStatus = null) {
   const section = document.getElementById(id);
   if (!section) return;
   const badge = section.querySelector(".section-state");

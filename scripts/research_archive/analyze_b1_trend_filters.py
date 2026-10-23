@@ -260,25 +260,6 @@ def candidate_rows(
     return output
 
 
-def feature_rows(
-    rows: list[dict[str, Any]], dataset: str, feature: str, edges: tuple[float, ...]
-) -> list[dict[str, Any]]:
-    output: list[dict[str, Any]] = []
-    for split, base in split_rows(rows).items():
-        groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        for row in base:
-            groups[feature_bucket(row[feature], edges)].append(row)
-        for bucket, items in sorted(groups.items()):
-            output.append(
-                {
-                    "dataset": dataset,
-                    "feature": feature,
-                    "bucket": bucket,
-                    "split": split,
-                    **stats(items),
-                }
-            )
-    return output
 
 
 def serialise_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

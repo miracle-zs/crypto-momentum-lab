@@ -7,7 +7,6 @@ import pytest
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import (
     RejectionReason,
-    StrategyCheckpoint,
     StrategyRunIdentity,
     StrategySide,
     deterministic_config_hash,
@@ -108,36 +107,11 @@ def test_volume_filter_does_not_recompute_impossible_historical_candidates(
     assert len(candidate_calls) <= 17
 
 
-def test_orderflow_impulse_restores_checkpoint() -> None:
-    strategy = _strategy()
-    checkpoint = StrategyCheckpoint(
-        last_processed_at_by_symbol={"BTCUSDT": datetime(2026, 7, 4, 0, 1, tzinfo=UTC)},
-        warmup_buckets_by_symbol={"BTCUSDT": 7},
-        cooldown_buckets_remaining_by_symbol={"BTCUSDT": 2},
-        payload={"signal_sequence": 0},
-    )
-
-    strategy.restore_checkpoint(checkpoint)
-
-    assert strategy.checkpoint().cooldown_buckets_remaining_by_symbol == {"BTCUSDT": 2}
-
-
-def test_orderflow_impulse_restores_market_buffer_from_checkpoint() -> None:
-    original = _strategy()
-    _last_decision(original, _impulse_states())
-    checkpoint = original.checkpoint()
-
-    restored = _strategy()
-    restored.restore_checkpoint(checkpoint)
-
-    assert restored.buffered_state_count == 7
-
-
-def test_orderflow_impulse_compact_checkpoint_omits_market_buffer_payload() -> None:
+def test_orderflow_impulse_checkpoint_omits_market_buffer_payload() -> None:
     strategy = _strategy()
     _last_decision(strategy, _impulse_states())
 
-    checkpoint = strategy.checkpoint(include_market_state_buffers=False)
+    checkpoint = strategy.checkpoint()
 
     assert checkpoint.warmup_buckets_by_symbol == {"BTCUSDT": 7}
     assert "market_state_buffers" not in checkpoint.payload
@@ -150,7 +124,7 @@ def test_orderflow_impulse_warm_recovery_advances_last_processed_watermark() -> 
 
     strategy.warm_market_state(state)
 
-    checkpoint = strategy.checkpoint(include_market_state_buffers=False)
+    checkpoint = strategy.checkpoint()
 
     assert checkpoint.last_processed_at_by_symbol == {
         "BTCUSDT": state.bucket_start,
@@ -175,7 +149,7 @@ def test_orderflow_impulse_warm_recovery_advances_over_missing_price_bucket() ->
 
     strategy.warm_market_state(state)
 
-    checkpoint = strategy.checkpoint(include_market_state_buffers=False)
+    checkpoint = strategy.checkpoint()
 
     assert checkpoint.last_processed_at_by_symbol == {
         "BTCUSDT": state.bucket_start,
@@ -198,7 +172,7 @@ def test_orderflow_impulse_warm_recovery_keeps_missing_close_with_midpoint() -> 
 
     strategy.warm_market_state(state)
 
-    checkpoint = strategy.checkpoint(include_market_state_buffers=False)
+    checkpoint = strategy.checkpoint()
 
     assert checkpoint.last_processed_at_by_symbol == {
         "BTCUSDT": state.bucket_start,
@@ -219,35 +193,6 @@ def test_orderflow_impulse_resets_symbol_after_a_market_data_gap() -> None:
     assert decision.signals == ()
     assert decision.rejections[0].reason is RejectionReason.INSUFFICIENT_WARMUP
     assert strategy.buffered_state_count == 1
-
-
-def test_orderflow_impulse_prunes_only_inactive_unprotected_symbols() -> None:
-    strategy = _strategy()
-    strategy.on_market_state(_state(0, Decimal("100.00")))
-    strategy.on_market_state(replace(_state(0, Decimal("200.00")), symbol="ETHUSDT"))
-
-    evicted = strategy.prune_inactive_symbols(
-        now=datetime(2026, 7, 4, 0, 10, tzinfo=UTC),
-        protected_symbols={"BTCUSDT"},
-        inactive_after=timedelta(minutes=5),
-    )
-
-    assert evicted == ("ETHUSDT",)
-    assert strategy.buffered_symbol_count == 1
-    assert strategy.buffered_state_count == 1
-
-
-def test_orderflow_impulse_keeps_symbol_while_cooldown_is_active() -> None:
-    strategy = _strategy()
-    _last_decision(strategy, _impulse_states())
-
-    evicted = strategy.prune_inactive_symbols(
-        now=datetime(2026, 7, 4, 0, 10, tzinfo=UTC),
-        inactive_after=timedelta(minutes=5),
-    )
-
-    assert evicted == ()
-    assert strategy.buffered_symbol_count == 1
 
 
 def _strategy(
@@ -346,27 +291,3 @@ def _state(
         first_received_at=bucket_start,
         last_received_at=bucket_start + timedelta(seconds=15),
     )
-
-
-@pytest.mark.parametrize("sequence", [-1, "2", None, True])
-def test_checkpoint_invalid_signal_sequence_does_not_reset_identity(sequence):
-    strategy = _strategy()
-    _last_decision(strategy, _impulse_states())
-    checkpoint = strategy.checkpoint()
-    bad_checkpoint = replace(
-        checkpoint, payload={**checkpoint.payload, "signal_sequence": sequence}
-    )
-    with pytest.raises(ValueError, match="signal_sequence"):
-        strategy.restore_checkpoint(bad_checkpoint)
-    assert strategy.checkpoint() == checkpoint
-
-
-def test_checkpoint_missing_signal_sequence_is_not_a_fresh_run():
-    strategy = _strategy()
-    _last_decision(strategy, _impulse_states())
-    checkpoint = strategy.checkpoint()
-    payload = dict(checkpoint.payload)
-    del payload["signal_sequence"]
-    with pytest.raises(KeyError, match="signal_sequence"):
-        strategy.restore_checkpoint(replace(checkpoint, payload=payload))
-    assert strategy.checkpoint() == checkpoint
