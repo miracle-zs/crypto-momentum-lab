@@ -2,7 +2,6 @@ import { DISPLAY_TIME_ZONE_LABEL } from "../dashboard-config.js";
 import {
   dayTime,
   esc,
-  statusClass,
   normalizedStatus,
 } from "../dashboard-formatters.js";
 import { blockTitle, tile } from "../dashboard-ui.js";
@@ -11,6 +10,7 @@ const GIB = 1024 ** 3;
 const MIB = 1024 ** 2;
 
 function bytes(value) {
+  if (value == null || value === "") return "—";
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) return "—";
   if (parsed >= GIB) return `${(parsed / GIB).toFixed(2)} GiB`;
@@ -28,22 +28,9 @@ function meterCard(label, valText, percent, note, tone = "good") {
   </div>`;
 }
 
-const DECISION_PIPELINE_STAGES = new Set([
-  "market_state_received->context_ready",
-  "context_ready->candidate_accepted",
-  "candidate_accepted->risk_approved",
-  "candidate_accepted->intent_saved",
-  "risk_approved->intent_saved",
-  "intent_saved->submitting",
-  "submitting->exchange_request_started",
-  "exchange_request_started->exchange_response_received",
-  "signal_recorded->candidate_accepted",
-]);
-
 export function renderPerformance(data) {
   const status = normalizedStatus(data?.status || "UNKNOWN") || "UNKNOWN";
 
-  const decisionSlo = data?.decision_slo || {};
   const marketData = data?.market_data || {};
   const hostResources = data?.host_resources || {};
 
@@ -64,44 +51,16 @@ export function renderPerformance(data) {
   const swapUsed = bytes(hostResources.swap_used_bytes);
   const memSub = hostResources.mem_usage_percent != null
     ? `内存已用 ${hostResources.mem_usage_percent}% · Swap ${swapUsed}`
-    : `Swap 已用 ${swapUsed}`;
-
-  // Decision SLO summary (Decision & Order Placement Pipeline)
-  let maxDecisionP95 = null;
-  const rawPhaseLatencies = decisionSlo.phase_latency && typeof decisionSlo.phase_latency === "object"
-    ? decisionSlo.phase_latency
-    : {};
-  const phaseLatencies = Object.entries(rawPhaseLatencies).filter(
-    ([_, v]) => v != null && typeof v === "object",
-  );
-  if (phaseLatencies.length) {
-    const decisionP95s = phaseLatencies
-      .filter(([transition]) => DECISION_PIPELINE_STAGES.has(transition))
-      .map(([_, v]) => Number(v.p95_ms))
-      .filter((n) => Number.isFinite(n));
-    if (decisionP95s.length) {
-      maxDecisionP95 = Math.max(...decisionP95s);
-    }
-  }
-  const decisionP95Text = maxDecisionP95 != null
-    ? `${maxDecisionP95.toFixed(1)} ms`
-    : "未接入";
-  const decisionSub = maxDecisionP95 != null
-    ? `核心决策与报单链路 · 窗口 ${decisionSlo.window || "6h"}`
-    : "尚未采集决策链路耗时";
-  const decisionTone = maxDecisionP95 != null
-    ? (maxDecisionP95 < 500 ? "pos" : maxDecisionP95 < 1500 ? "warn" : "neg")
-    : "neut";
+    : "暂无主机资源采样";
 
   const kpis = `<div class="kpi-grid performance-kpi-grid">
-    ${tile("决策链路最高 P95", decisionP95Text, decisionSub, decisionTone)}
     ${tile("行情端到端时延", marketDelay, marketSub, marketTone)}
     ${tile("宿主机可用内存", memAvail, memSub, "pos")}
   </div>`;
 
   // 2. Host & Database Resource Meters
   const loadText = hostResources.cpu_load_1m != null
-    ? `${Number(hostResources.cpu_load_1m).toFixed(2)} (1m) · ${Number(hostResources.cpu_load_5m).toFixed(2)} (5m)`
+    ? `${Number(hostResources.cpu_load_1m).toFixed(2)} (1m) · ${hostResources.cpu_load_5m == null ? "—" : Number(hostResources.cpu_load_5m).toFixed(2)} (5m)`
     : "—";
   const cpuTone = hostResources.cpu_load_1m != null && hostResources.cpu_load_1m > 1.8 ? "warning" : "good";
   const cpuMeter = meterCard("CPU 负载 (LoadAvg)", loadText, (hostResources.cpu_load_1m || 0) * 50, "双核系统负载指标", cpuTone);
@@ -126,7 +85,6 @@ export function renderPerformance(data) {
 
   const body = `
     ${kpis}
-    <p class="muted">决策耗时暂无采样时会显示为未接入。</p>
     <div class="block" style="margin-top: 14px;">
       ${blockTitle("系统基础设施稳态", "HOST & DATABASE RESOURCES")}
       <div class="performance-meter-grid">

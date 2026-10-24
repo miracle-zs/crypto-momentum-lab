@@ -27,7 +27,7 @@ export function globalReadinessModel(now = Date.now()) {
       uncertain: "—",
       halts: "—",
       ambiguous: "—",
-      reconciliation: "—",
+      accountsReady: "—",
     };
   }
 
@@ -52,12 +52,8 @@ export function globalReadinessModel(now = Date.now()) {
   const uncertainServices = services.filter((service) => hasUncertainStatus(service.status)).length;
   const uncertain = uncertainSections + uncertainServices;
   const ambiguous = riskReliable ? risk?.ambiguous_orders?.length || 0 : 0;
-  const accountSnapshots = accountReliable
-    ? Array.isArray(account?.accounts)
-      ? account.accounts
-      : account
-        ? [account]
-        : []
+  const accountSnapshots = accountReliable && Array.isArray(account?.accounts)
+    ? account.accounts
     : [];
   const haltedAccounts = accountSnapshots.filter(
     (snapshot) => normalizedStatus(snapshot.status) === "HALTED",
@@ -67,23 +63,13 @@ export function globalReadinessModel(now = Date.now()) {
     riskReliable ? risk?.active_halts?.length || 0 : 0,
     haltedAccounts,
   );
-  const mismatch = accountSnapshots.reduce(
-    (total, snapshot) => total + (asNumber(snapshot.reconciliation?.mismatch_count) || 0),
-    0,
-  );
-  const accountStatus = normalizedStatus(account?.status);
-  let reconciliation = "—";
-  if (accountReliable) {
-    reconciliation = hasUncertainStatus(accountStatus)
-      ? "UNKNOWN"
-      : haltedAccounts > 0
-        ? `${haltedAccounts} 停止`
-        : mismatch != null && mismatch > 0
-          ? `${mismatch} 差异`
-          : accountSnapshots.length > 1
-            ? (accountSnapshots.every((snapshot) => snapshot.reconciliation?.status === "ready") ? "READY" : "未接入")
-            : String(account.reconciliation?.status || "未接入").toUpperCase();
-  }
+  const readyAccounts = accountSnapshots.filter(
+    (snapshot) => normalizedStatus(snapshot.status) === "READY"
+      && normalizedStatus(snapshot.readiness) === "READY",
+  ).length;
+  const accountsReady = accountReliable && accountSnapshots.length
+    ? `${readyAccounts}/${accountSnapshots.length}`
+    : "—";
 
   const hasRisk = Boolean(risk);
   const hasAccount = Boolean(account);
@@ -105,9 +91,6 @@ export function globalReadinessModel(now = Date.now()) {
   } else if (ambiguous > 0) {
     status = "REVIEW";
     detail = `存在未决订单 · 需要交易所对账${staleNote}`;
-  } else if (mismatch != null && mismatch > 0) {
-    status = "REVIEW";
-    detail = `账户对账存在差异 · 暂不视为安全${staleNote}`;
   } else if (liveMode === "LIVE" && !hasLiveReadings) {
     status = "UNKNOWN";
     const missing = [
@@ -140,7 +123,7 @@ export function globalReadinessModel(now = Date.now()) {
     uncertain: String(uncertain),
     halts: readingsExpired && activeHalts === 0 ? "—" : String(activeHalts),
     ambiguous: readingsExpired && ambiguous === 0 ? "—" : String(ambiguous),
-    reconciliation: readingsExpired && reconciliation === "READY" ? "—" : reconciliation,
+    accountsReady,
   };
 }
 
@@ -155,7 +138,7 @@ export function renderGlobalReadiness() {
     "global-uncertain": model.uncertain,
     "global-halts": model.halts,
     "global-ambiguous": model.ambiguous,
-    "global-reconciliation": model.reconciliation,
+    "global-accounts-ready": model.accountsReady,
   };
   Object.entries(values).forEach(([id, value]) => {
     const element = document.getElementById(id);

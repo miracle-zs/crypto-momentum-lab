@@ -42,7 +42,6 @@ test("dashboard polling keeps safety sections fresh and backs off cold sections"
     performance: 15000,
     universe: 30000,
     collector: 30000,
-    reports: 30000,
   });
 });
 
@@ -357,75 +356,71 @@ test("universe renderer keeps ranking and monitoring views distinct", () => {
   assert.doesNotMatch(html, /class="chip/);
 });
 
-test("risk renderer separates confirmed pending orders from uncertain orders", () => {
+test("risk renderer shows account, status and observed time for pending orders", () => {
   const [status, html] = renderRisk({
     status: "READY",
+    observed_at: "2026-08-16T16:33:04Z",
     active_halts: [],
-    latest_risk_decisions: [],
     pending_orders: [{
+      account_label: "account-4",
       symbol: "龙虾USDT",
       client_order_id: "cml-order",
       side: "SELL",
-      state: "acknowledged",
-      updated_at: "2026-08-16T16:33:04Z",
+      status: "ACKNOWLEDGED",
+      observed_at: "2026-08-16T16:33:04Z",
     }],
     ambiguous_orders: [],
   });
   assert.equal(status, "READY");
   assert.match(html, /待完成订单/);
-  assert.match(html, /RESTING \/ PARTIALLY FILLED/);
+  assert.match(html, /已提交、挂单或部分成交/);
   assert.match(html, /龙虾USDT/);
-  assert.match(html, /无不确定订单/);
-  assert.match(html, /risk-order-grid-single/);
-  assert.match(html, /先完成交易所对账，再决定恢复执行或人工处理/);
-  assert.match(html, /chip-source/);
-  assert.match(html, /数据年龄/);
-  assert.match(html, /chip-coverage/);
-  assert.match(html, /覆盖范围/);
+  assert.match(html, /account-4/);
+  assert.match(html, /ACKNOWLEDGED/);
+  assert.match(html, /08-17 00:33:04/);
+  assert.match(html, /无状态待确认的订单/);
 });
 
-test("risk renderer displays required symbols, missing symbols, and coverage alert", () => {
+test("risk renderer separates reconciling orders and preserves their account", () => {
   const [status, html] = renderRisk({
-    status: "STALE",
+    status: "DEGRADED",
     active_halts: [],
-    latest_risk_decisions: [],
     pending_orders: [],
-    ambiguous_orders: [],
-    required_symbols: ["BTCUSDT", "ETHUSDT"],
-    missing_symbols: ["ETHUSDT"],
-    coverage_scope: "1/2 covered",
+    ambiguous_orders: [{
+      account_label: "account-2",
+      symbol: "ETHUSDT",
+      client_order_id: "cml-uncertain",
+      side: "BUY",
+      status: "RECONCILING",
+      observed_at: "2026-08-16T16:33:04Z",
+    }],
   });
-  assert.equal(status, "STALE");
-  assert.match(html, /必需品种未覆盖/);
-  assert.match(html, /alert-missing-symbols/);
+  assert.equal(status, "DEGRADED");
+  assert.match(html, /未决订单/);
+  assert.match(html, /需核实交易所订单状态/);
+  assert.match(html, /account-2/);
   assert.match(html, /ETHUSDT/);
-  assert.match(html, /1\/2 covered/);
-  assert.match(html, /risk-coverage-bar/);
-  assert.doesNotMatch(html, /alert-coverage-error/);
-  assert.doesNotMatch(html, /覆盖查询异常/);
+  assert.match(html, /RECONCILING/);
+  assert.match(html, /无待完成订单/);
+  assert.doesNotMatch(html, /无状态待确认的订单/);
 });
 
-test("risk renderer distinguishes UNKNOWN/QUERY_ERROR coverage error from real market missing alert", () => {
+test("risk renderer identifies the account associated with an active halt", () => {
   const [status, html] = renderRisk({
-    status: "UNKNOWN",
-    source_status: "QUERY_ERROR",
-    coverage_scope: "QUERY_ERROR",
-    coverage_error: "UNIVERSE_QUERY_FAILED (ref: cov_3f8a12bc)",
-    coverage_error_code: "UNIVERSE_QUERY_FAILED",
-    coverage_trace_id: "cov_3f8a12bc",
-    required_symbols: [],
-    missing_symbols: [],
-    active_halts: [],
-    latest_risk_decisions: [],
+    status: "DEGRADED",
+    active_halts: [{
+      account_label: "primary",
+      reason: "operator_pause",
+      created_at: "2026-08-16T16:33:04Z",
+    }],
     pending_orders: [],
     ambiguous_orders: [],
   });
-  assert.equal(status, "UNKNOWN");
-  assert.match(html, /alert-coverage-error/);
-  assert.match(html, /覆盖查询异常 \(QUERY_ERROR\)/);
-  assert.match(html, /UNIVERSE_QUERY_FAILED \(ref: cov_3f8a12bc\)/);
-  assert.doesNotMatch(html, /alert-missing-symbols/);
-  assert.doesNotMatch(html, /行情缺失/);
+  assert.equal(status, "HALTED");
+  assert.match(html, /primary/);
+  assert.match(html, /operator_pause/);
+  assert.match(html, /08-17 00:33:04/);
+  assert.doesNotMatch(html, /无活跃停机/);
 });
 
 test("chartPayloadSignature detects series.values and point mutations without object coercion", () => {

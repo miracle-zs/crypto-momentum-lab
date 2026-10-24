@@ -14,13 +14,16 @@ test("fresh heartbeat cannot hide degraded NextGen trading", () => {
   assert.equal(liveModeForService(service("READY"), 1), "HALTED");
 });
 
-test("missing reconciliation evidence is never labelled READY", () => {
+test("account readiness reflects current runtime evidence", () => {
   try {
     markSectionStored("overview", { database_status: "READY", services: [] });
     markSectionStored("risk", { status: "READY", active_halts: [], ambiguous_orders: [] });
-    markSectionStored("account", { status: "READY", reconciliation: {} });
+    markSectionStored("account", { status: "READY", accounts: [
+      { account_label: "primary", status: "READY", readiness: "READY" },
+      { account_label: "account-2", status: "DEGRADED", readiness: "DEGRADED" },
+    ] });
     setLiveMode("LIVE");
-    assert.equal(globalReadinessModel().reconciliation, "未接入");
+    assert.equal(globalReadinessModel().accountsReady, "1/2");
     setLiveMode("DEGRADED");
     assert.equal(globalReadinessModel().status, "DEGRADED");
   } finally {

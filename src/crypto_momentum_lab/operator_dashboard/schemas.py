@@ -217,24 +217,10 @@ class LiveAccountsResponse(DashboardSchema):
 class RiskExecutionResponse(DashboardSchema):
     status: OperationalStatus
     active_halts: list[dict[str, JsonValue]]
-    latest_risk_decisions: list[dict[str, JsonValue]]
-    exchange_orders: list[dict[str, JsonValue]]
-    pending_orders: list[dict[str, JsonValue]] = Field(default_factory=list)
+    pending_orders: list[dict[str, JsonValue]]
     ambiguous_orders: list[dict[str, JsonValue]]
     observed_at: datetime | None = None
     source_status: str | None = None
-    data_age_seconds: float | None = None
-    required_symbols: list[str] = Field(default_factory=list)
-    missing_symbols: list[str] = Field(default_factory=list)
-    coverage_scope: str | None = None
-    coverage_error: str | None = None
-    coverage_error_code: str | None = None
-    coverage_trace_id: str | None = None
-
-
-class RunReportSummaryResponse(DashboardSchema):
-    status: OperationalStatus
-    live_sessions: list[dict[str, JsonValue]]
 
 
 class MarketDataPerformanceResponse(DashboardSchema):

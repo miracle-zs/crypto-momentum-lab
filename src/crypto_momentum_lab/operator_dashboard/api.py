@@ -34,7 +34,6 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
     LiveAccountsResponse,
     ResearchCollectorResponse,
     RiskExecutionResponse,
-    RunReportSummaryResponse,
     SystemOverviewResponse,
     SystemPerformanceResponse,
     SystemReadinessResponse,
@@ -607,18 +606,6 @@ def create_dashboard_app(
             query_service().risk_execution,
             ttl_seconds=_RISK_EXECUTION_CACHE_TTL_SECONDS,
             stale_while_revalidate_seconds=0.0,
-        )
-
-    @dashboard.get(
-        "/api/reports",
-        response_model=RunReportSummaryResponse,
-        dependencies=[Depends(require_dashboard_auth)],
-    )
-    async def reports() -> RunReportSummaryResponse:
-        return await response_cache.get(
-            "reports",
-            query_service().reports,
-            stale_while_revalidate_seconds=default_stale_grace_seconds,
         )
 
     return dashboard

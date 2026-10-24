@@ -8,7 +8,6 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
     LiveAccountsResponse,
     ResearchCollectorResponse,
     RiskExecutionResponse,
-    RunReportSummaryResponse,
     SystemOverviewResponse,
     SystemPerformanceResponse,
     SystemReadinessResponse,
@@ -44,8 +43,6 @@ class DashboardQueryProtocol(Protocol):
     ) -> LiveAccountMetricsResponse: ...
 
     async def risk_execution(self) -> RiskExecutionResponse: ...
-
-    async def reports(self) -> RunReportSummaryResponse: ...
 
     async def performance(
         self,

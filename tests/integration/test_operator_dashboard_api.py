@@ -25,7 +25,6 @@ def test_operator_dashboard_reads_local_postgres(
             "/api/universe",
             "/api/account",
             "/api/risk-execution",
-            "/api/reports",
         ):
             response = client.get(route, auth=auth)
             assert response.status_code == 200, response.text

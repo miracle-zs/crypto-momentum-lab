@@ -38,7 +38,6 @@ def test_all_read_only_dashboard_routes_are_available() -> None:
             "/api/live-accounts",
             "/api/live-account-metrics",
             "/api/risk-execution",
-            "/api/reports",
             "/api/performance",
             "/api/readiness",
             "/api/health/operational",

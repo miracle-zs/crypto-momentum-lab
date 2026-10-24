@@ -33,7 +33,23 @@ const GATE_LABELS = {
   notional_limit: "超过风险额度",
   batch_limit: "达到持仓批次上限",
   submission_failed: "提交未完成",
+  max_concurrency_per_symbol_exceeded: "该币种已达到开仓并发上限",
+  entry_concurrency_unproven: "该币种的开仓记录尚未确认完整",
+  exchange_reject_cooldown: "交易所拒单后的冷却期",
+  entry_sizing_persistence_failed: "开仓金额记录保存失败",
 };
+
+function gateLabel(reason) {
+  if (GATE_LABELS[reason]) return GATE_LABELS[reason];
+  if (reason.startsWith("entry_sizing_unavailable:")) {
+    return `暂时无法计算开仓金额：${reason.slice("entry_sizing_unavailable:".length)}`;
+  }
+  if (reason.startsWith("exchange_reject:")) {
+    const [, code, ...message] = reason.split(":");
+    return `交易所拒单（${code}）：${message.join(":")}`;
+  }
+  return reason;
+}
 
 function liveSignalFilterSummary(row) {
   const context = row.filter_context || {};
@@ -48,13 +64,13 @@ function liveSignalFilterSummary(row) {
     parts.push("只减仓退出");
   }
   if (Array.isArray(context.gate_reasons)) {
-    parts.push(...context.gate_reasons.filter(Boolean).map((value) => `门控：${GATE_LABELS[value] || value}`));
+    parts.push(...context.gate_reasons.filter(Boolean).map((value) => `门控：${gateLabel(value)}`));
   }
   const candidateResults = context.candidate_filter_results;
   if (candidateResults && typeof candidateResults === "object") {
     Object.values(candidateResults)
       .filter((result) => result && result.passed === false && result.rejection_reason)
-      .forEach((result) => parts.push(`拒绝：${GATE_LABELS[result.rejection_reason] || result.rejection_reason}`));
+      .forEach((result) => parts.push(`拒绝：${gateLabel(result.rejection_reason)}`));
   }
   if (candidateResults && Object.values(candidateResults).some((result) => result?.passed === true)) {
     parts.push("已通过过滤并提交订单");

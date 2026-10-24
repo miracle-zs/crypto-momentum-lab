@@ -18,8 +18,7 @@ const WORKSPACES = Object.freeze({
 const VIEW_PURPOSES = Object.freeze({
   overview: "系统状态与心跳监控",
   risk: "风控闸门与待核订单",
-  account: "资金权益与持仓对账",
-  reports: "运行会话与状态迁移",
+  account: "资金模式、余额与持仓",
   performance: "链路时延与系统性能监控",
   universe: "UTC 动量排名与监控池",
   collector: "数据采集与窗口归档",
@@ -47,7 +46,7 @@ export function createShell({ onNavigate }) {
   }
 
   function normalizedView(value) {
-    const id = String(value || "").replace(/^#/, "");
+    const id = String(value || "").replace(/^#/, "").split("?")[0];
     return viewIds.has(id) ? id : "overview";
   }
 
@@ -87,6 +86,11 @@ export function createShell({ onNavigate }) {
 
   function selectView(value, { updateHistory = true, userInitiated = false } = {}) {
     const id = normalizedView(value);
+    const route = String(value || "").replace(/^#/, "");
+    const hash = `#${route.split("?")[0] === id ? route : id}`;
+    if (updateHistory && window.location.hash !== hash) {
+      window.history.pushState(null, "", hash);
+    }
     const currentId = document.body.dataset.activeView;
     const currentCard = currentId ? document.getElementById(currentId) : null;
     // A repeated select (hashchange after pushState, poll-driven resize, etc.)
@@ -114,9 +118,6 @@ export function createShell({ onNavigate }) {
     if (skipLink) skipLink.href = `#${id}`;
     const workspace = WORKSPACES[workspaceForView.get(id)] || WORKSPACES.ops;
     document.title = `CML · ${workspace.label} · ${viewLabel(id)} · Flight Deck`;
-    if (updateHistory && window.location.hash !== `#${id}`) {
-      window.history.pushState(null, "", `#${id}`);
-    }
     if (userInitiated && window.scrollY > 0) {
       window.scrollTo({
         top: 0,
@@ -166,7 +167,7 @@ export function createShell({ onNavigate }) {
   // "auto jump" when something cleared or rewrote location.hash.
   window.addEventListener("hashchange", () => {
     const raw = String(window.location.hash || "").replace(/^#/, "");
-    if (!raw || !viewIds.has(raw)) return;
+    if (!raw || !viewIds.has(raw.split("?")[0])) return;
     selectView(raw, { updateHistory: false });
   });
 
@@ -177,7 +178,7 @@ export function createShell({ onNavigate }) {
     storedWorkspace,
     initialView() {
       const initialHash = String(window.location.hash || "").replace(/^#/, "");
-      return viewIds.has(initialHash)
+      return viewIds.has(initialHash.split("?")[0])
         ? initialHash
         : WORKSPACES[storedWorkspace()].defaultView;
     },

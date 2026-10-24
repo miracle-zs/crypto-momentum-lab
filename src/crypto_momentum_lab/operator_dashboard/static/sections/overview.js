@@ -26,7 +26,7 @@ export function renderOverview(data) {
       ${pill(service.status)}
     </div>`;
   }).join("");
-  const accountRows = accountStatuses.map((account, index) => `<a class="overview-account-status-card" href="#account" aria-label="查看${esc(account.account_label)}账户详情">
+  const accountRows = accountStatuses.map((account, index) => `<a class="overview-account-status-card" href="#account?account=${esc(encodeURIComponent(account.account_label))}" aria-label="查看${esc(account.account_label)}账户详情">
     <span class="overview-account-status-top"><span>LIVE ${String(index + 1).padStart(2, "0")}</span>${pill(account.status)}</span>
     <strong>${esc(account.account_label)}</strong>
     <small>${esc(account.strategy_name || "未关联策略")} · ${esc(account.strategy_state || account.readiness || "状态未知")}</small>
@@ -37,7 +37,7 @@ export function renderOverview(data) {
     : "";
   const body = `${tiles}
     ${accountBlock}
-    ${blockTitle("服务心跳", "SERVICES", `<span class="num muted">${services.length} 个进程</span>`)}
+    ${blockTitle("服务心跳", "SERVICES", `<span class="num muted">${services.length} 个监控项</span>`)}
     <div class="service-list">${serviceRows || emptyBox("暂无活跃心跳")}</div>`;
   return [haltCount ? "HALTED" : data.database_status, body];
 }

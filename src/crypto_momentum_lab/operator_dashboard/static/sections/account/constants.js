@@ -4,6 +4,7 @@ import {
   DISPLAY_TIME_ZONE_LABEL,
 } from "../../dashboard-config.js";
 import { asNumber, dayTime } from "../../dashboard-formatters.js";
+import { liveAccountMetricWindow } from "../../dashboard-charts.js";
 
 export { DEFAULT_EQUITY_BUCKET_SECONDS, DISPLAY_TIME_ZONE_LABEL };
 
@@ -25,7 +26,8 @@ export function equitySampleLabel(seconds) {
 
 export function windowRangeText(data) {
   if (!(data?.equity_window_start && data?.equity_window_end)) return "等待时间窗口";
-  return `${dayTime(data.equity_window_start)} → ${dayTime(data.equity_window_end)} ${DISPLAY_TIME_ZONE_LABEL}`;
+  const { chartStart, requestedEnd } = liveAccountMetricWindow(data.equity_window_start, data.equity_window_end);
+  return `${dayTime(new Date(chartStart))} → ${dayTime(new Date(requestedEnd))} ${DISPLAY_TIME_ZONE_LABEL}`;
 }
 
 export function anchorLabel() {

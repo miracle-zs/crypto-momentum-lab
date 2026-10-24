@@ -53,8 +53,7 @@ test("live account renderer shows the online 24h window without archived range c
 
   assert.doesNotMatch(html, /data-account-equity-range/);
   assert.match(html, /ROLLING 24H/);
-  assert.match(html, /仅显示最近 24 小时在线权益/);
-  assert.match(html, /本页不读取归档/);
+  assert.match(html, /最近 24 小时权益，曲线只展示已有采样/);
   const payload = getChartPayload("live-account-equity");
   const option = buildChartOption(payload);
   assert.equal(
@@ -79,15 +78,15 @@ test("live account directory renders every account against shared market data", 
   });
 
   assert.equal(status, "READY");
-  assert.match(html, /实盘账户矩阵/);
-  assert.match(html, /共享行情接入 · 各账户独立执行/);
+  assert.match(html, /4 个账户/);
+  assert.match(html, /4 正常 · 0 停止 · 0 需检查/);
   for (const accountLabel of ["primary", "account-2", "account-3", "account-4"]) {
     assert.match(html, new RegExp(`>${accountLabel}<`));
   }
   assert.match(html, /data-live-account-detail/);
 });
 
-test("live account cards show strategy state without lease status", () => {
+test("live account cards show current execution gates without lease status", () => {
   const [, html] = renderLiveAccounts({
     status: "READY",
     accounts: [
@@ -98,11 +97,13 @@ test("live account cards show strategy state without lease status", () => {
         readiness: "ready_readonly",
         strategy_name: "orderflow_impulse",
         strategy_state: null,
+        runtime_tradeability: { entry_gate_open: false, exit_gate_open: true },
       },
     ],
   });
 
-  assert.match(html, /orderflow_impulse · 状态未知/);
+  assert.match(html, /开仓 <b>暂停<\/b>/);
+  assert.match(html, /退出 <b>可用<\/b>/);
   assert.doesNotMatch(html, /未关联策略/);
   assert.doesNotMatch(html, /租约/);
 });
@@ -112,18 +113,15 @@ test("updateLiveAccountsDynamic updates execution cards and fleet status in-plac
     status: { className: "", textContent: "" },
     state: { innerHTML: "" },
     detail: { innerHTML: "" },
-    footer: { innerHTML: "" },
   };
   const fleetElements = {
     status: { innerHTML: "" },
-    kpis: { innerHTML: "" },
   };
   const mockCard = {
     querySelector(selector) {
       if (selector === ".live-account-card-status") return cardElements.status;
       if (selector === ".live-account-card-state") return cardElements.state;
       if (selector === ".live-account-card-state-detail") return cardElements.detail;
-      if (selector === ".live-account-card-footer") return cardElements.footer;
       return null;
     },
   };
@@ -131,7 +129,6 @@ test("updateLiveAccountsDynamic updates execution cards and fleet status in-plac
     querySelector(selector) {
       if (selector === '[data-live-account-label="primary"]') return mockCard;
       if (selector === ".live-account-fleet-status") return fleetElements.status;
-      if (selector === ".live-account-fleet-kpis") return fleetElements.kpis;
       return null;
     },
   };
@@ -145,6 +142,7 @@ test("updateLiveAccountsDynamic updates execution cards and fleet status in-plac
         strategy_name: "orderflow_impulse",
         strategy_state: "running",
         startup_baseline: { status: "MATCHED" },
+        runtime_tradeability: { entry_gate_open: true, exit_gate_open: true },
         observed_at: "2026-09-27T10:00:00Z",
         summary: {
           usdt_wallet_balance: "1500.50",
@@ -160,13 +158,11 @@ test("updateLiveAccountsDynamic updates execution cards and fleet status in-plac
 
   assert.equal(cardElements.status.className, "live-account-card-status status-READY");
   assert.equal(cardElements.status.textContent, "正常");
-  assert.match(cardElements.state.innerHTML, /同步/);
-  assert.match(cardElements.detail.innerHTML, /orderflow_impulse · 运行中/);
-  assert.match(cardElements.detail.innerHTML, /启动基线一致/);
-  assert.match(cardElements.footer.innerHTML, /进入账户详情/);
+  assert.match(cardElements.state.innerHTML, /开仓 <b>可用<\/b>/);
+  assert.match(cardElements.state.innerHTML, /退出 <b>可用<\/b>/);
+  assert.match(cardElements.detail.innerHTML, /同步/);
+  assert.doesNotMatch(cardElements.detail.innerHTML, /启动基线待确认/);
   assert.match(fleetElements.status.innerHTML, /1 正常 · 0 停止 · 0 需检查/);
-  assert.match(fleetElements.kpis.innerHTML, /实盘账户.*1 个/);
-  assert.match(fleetElements.kpis.innerHTML, /正常账户.*1 个/);
 });
 
 test("same-structure live-account polls refresh selected details and fleet metrics without dropping last-good DOM", async () => {
@@ -200,12 +196,10 @@ test("same-structure live-account polls refresh selected details and fleet metri
     setAttribute() {},
   };
   const fleetStatus = { innerHTML: "" };
-  const fleetKpis = { innerHTML: "" };
   const mockRoot = {
     querySelector(selector) {
       if (selector === '[data-live-account-label="primary"]') return card;
       if (selector === ".live-account-fleet-status") return fleetStatus;
-      if (selector === ".live-account-fleet-kpis") return fleetKpis;
       if (selector === "[data-live-account-detail]") return detailSlot;
       if (selector === "[data-live-account-metrics]") return metricsSlot;
       return null;
@@ -270,7 +264,7 @@ test("live account detail settles before fleet metrics starts a second scroll-se
   const mockRoot = {
     querySelector(selector) {
       if (selector === '[data-live-account-label="primary"]') return card;
-      if (selector === ".live-account-fleet-status" || selector === ".live-account-fleet-kpis") return { innerHTML: "" };
+      if (selector === ".live-account-fleet-status") return { innerHTML: "" };
       if (selector === "[data-live-account-detail]") return detailSlot;
       if (selector === "[data-live-account-metrics]") return metricsSlot;
       return null;

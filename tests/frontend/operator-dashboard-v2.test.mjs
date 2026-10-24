@@ -15,14 +15,7 @@ const populatedAccount = {
   environment: "live",
   account_label: "primary",
   account_config: { hedge_mode: false, multi_assets_mode: false, fee_tier: 0 },
-  reconciliation: {
-    status: "ready",
-    mismatch_count: 0,
-    balance_count: 1,
-    position_count: 1,
-    open_order_count: 1,
-    fill_count: 1,
-  },
+  startup_baseline: { status: "MATCHED" },
   summary: {
     usdt_wallet_balance: "1250",
     usdt_available_balance: "980",
@@ -73,7 +66,7 @@ test("account v2 keeps populated evidence behind stable disclosures", () => {
   assert.match(html, /实盘策略信号/);
   assert.match(html, /24H 成交额/);
   assert.match(html, /过滤 \/ 门控/);
-  assert.match(html, /data-state-key="live-strategy-signals" open/);
+  assert.doesNotMatch(html, /data-state-key="live-strategy-signals"[^>]* open/);
   assert.match(html, /data-state-key="account-balances"/);
   assert.match(html, /data-state-key="exchange-positions"/);
   assert.match(html, /data-state-key="account-positions"/);
@@ -83,15 +76,15 @@ test("account v2 keeps populated evidence behind stable disclosures", () => {
   assert.doesNotMatch(html, /data-state-key="account-fills"[^>]* open/);
 });
 
-test("account v2 opens the reconciliation evidence when the posture needs review", () => {
+test("account v2 opens configuration evidence when the posture needs review", () => {
   const [status, html] = renderAccount({
     ...populatedAccount,
     status: "UNKNOWN",
-    reconciliation: { ...populatedAccount.reconciliation, status: "degraded", mismatch_count: 2 },
+    startup_baseline: { status: "UNKNOWN" },
   });
 
   assert.equal(status, "UNKNOWN");
-  assert.match(html, /data-state-key="account-reconciliation" open/);
+  assert.match(html, /data-state-key="account-settings" open/);
 });
 
 test("live account fleet keeps four accounts visible and selects one detail", () => {
@@ -114,12 +107,10 @@ test("live account fleet keeps four accounts visible and selects one detail", ()
 
   assert.equal(status, "READY");
   assert.equal((html.match(/data-live-account-label=/g) || []).length, 4);
-  assert.match(html, /四账户实盘总览/);
-  assert.match(html, /实盘账户.*4 个/);
+  assert.match(html, /4 个账户/);
   assert.match(html, /class="live-account-card is-selected"[^>]*data-live-account-label="account-3"/);
   assert.match(html, /<h3 data-selected-account-label>account-3<\/h3>/);
-  assert.match(html, /正常账户.*4 个/);
-  assert.match(html, /共享行情接入 · 各账户独立执行/);
+  assert.match(html, /4 正常 · 0 停止 · 0 需检查/);
 });
 
 test("live account fleet renders six comparable metric charts", () => {
@@ -182,7 +173,7 @@ test("overview surfaces the four live account statuses", () => {
 
   assert.match(html, /四账户实盘状态/);
   assert.equal((html.match(/class="overview-account-status-card"/g) || []).length, 4);
-  assert.match(html, /href="#account"/);
+  assert.match(html, /href="#account\?account=account-4"/);
 });
 
 test("disclosure helper preserves the default collapsed state", () => {

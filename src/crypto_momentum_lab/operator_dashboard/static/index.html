@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>CML · 运行控制 · 总览 · Flight Deck</title>
-  <link rel="stylesheet" href="static/assets/dashboard-03d8171bb323a07a.css">
+  <link rel="stylesheet" href="static/assets/dashboard-1c15dda75cbb7fa4.css">
 </head>
 <body>
   <a class="skip-link" href="#overview">跳到当前工作视图</a>
@@ -35,8 +35,7 @@
           <a href="#overview" data-nav="overview" data-label="总览"><kbd class="nav-key">1</kbd><span>总览</span><em class="nav-dot status-UNKNOWN" data-nav-dot="overview"></em></a>
           <a href="#risk" data-nav="risk" data-label="执行"><kbd class="nav-key">2</kbd><span>执行风控</span><em class="nav-dot status-UNKNOWN" data-nav-dot="risk"></em></a>
           <a href="#account" data-nav="account" data-label="账户"><kbd class="nav-key">3</kbd><span>实盘账户</span><em class="nav-dot status-UNKNOWN" data-nav-dot="account"></em></a>
-          <a href="#reports" data-nav="reports" data-label="台账"><kbd class="nav-key">4</kbd><span>运行台账</span><em class="nav-dot status-UNKNOWN" data-nav-dot="reports"></em></a>
-          <a href="#performance" data-nav="performance" data-label="性能"><kbd class="nav-key">5</kbd><span>系统性能</span><em class="nav-dot status-UNKNOWN" data-nav-dot="performance"></em></a>
+          <a href="#performance" data-nav="performance" data-label="性能"><kbd class="nav-key">4</kbd><span>系统性能</span><em class="nav-dot status-UNKNOWN" data-nav-dot="performance"></em></a>
         </div>
         <div class="nav-workspace" data-workspace-nav="data" hidden>
           <span class="nav-group-label">MARKET &amp; DATA</span>
@@ -88,7 +87,7 @@
             <span class="readiness-metric"><b id="global-uncertain">—</b><small>需确认</small></span>
             <span class="readiness-metric"><b id="global-halts">—</b><small>活跃停机</small></span>
             <span class="readiness-metric"><b id="global-ambiguous">—</b><small>未决订单</small></span>
-            <span class="readiness-metric"><b id="global-reconciliation">—</b><small>账户对账</small></span>
+            <span class="readiness-metric"><b id="global-accounts-ready">—</b><small>账户就绪</small></span>
           </div>
         </div>
         <div id="emergency-triage-hud" class="emergency-triage-hud" hidden></div>
@@ -119,7 +118,7 @@
 
         <section id="account" class="card" data-workspace="ops" data-view-title="账户" data-endpoint="api/live-accounts" aria-labelledby="account-title" hidden>
           <header class="card-head">
-            <div class="card-title"><div><h2 id="account-title">实盘账户</h2><small>资金持仓与对账同步</small></div></div>
+            <div class="card-title"><div><h2 id="account-title">实盘账户</h2><small>资金模式、余额与持仓</small></div></div>
             <span class="section-state status-UNKNOWN" aria-label="当前页面数据状态：待确认">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
@@ -147,19 +146,9 @@
           </div>
         </section>
 
-        <section id="reports" class="card" data-workspace="ops" data-view-title="台账" data-endpoint="api/reports" aria-labelledby="reports-title" hidden>
-          <header class="card-head">
-            <div class="card-title"><div><h2 id="reports-title">运行台账</h2><small>会话与实盘状态迁移</small></div></div>
-            <span class="section-state status-UNKNOWN" aria-label="当前页面数据状态：待确认">UNKNOWN</span>
-          </header>
-          <div class="panel-body loading" aria-busy="true">
-            <div class="skeleton"><s style="width:33%"></s><s style="width:87%"></s><s style="width:73%"></s></div>
-          </div>
-        </section>
-
         <section id="performance" class="card card-performance" data-workspace="ops" data-view-title="性能" data-endpoint="api/performance" aria-labelledby="performance-title" hidden>
           <header class="card-head">
-            <div class="card-title"><div><h2 id="performance-title">系统性能</h2><small>DECISION PIPELINE · MARKET DATA · HOST RESOURCES</small></div></div>
+            <div class="card-title"><div><h2 id="performance-title">系统性能</h2><small>行情时延与主机资源</small></div></div>
             <span class="section-state status-UNKNOWN" aria-label="当前页面数据状态：待确认">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
@@ -175,6 +164,6 @@
     </div>
   </div>
   <script src="static/assets/echarts-dae720e256d2461b.js"></script>
-  <script type="module" src="static/assets/dashboard-a9fc03dc257014c4.js" defer></script>
+  <script type="module" src="static/assets/dashboard-e5b964c7a28c353c.js" defer></script>
 </body>
 </html>

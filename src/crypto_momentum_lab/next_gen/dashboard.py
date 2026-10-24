@@ -755,6 +755,7 @@ class NextGenDashboardQueries:
     @staticmethod
     def _order(row: LiveOrderRow) -> dict[str, Any]:
         return {
+            "account_label": row.account_label,
             "symbol": row.symbol,
             "client_order_id": row.client_order_id,
             "order_id": row.exchange_order_id,
@@ -803,8 +804,9 @@ class NextGenDashboardQueries:
                 }
                 for row in halts
             ],
-            latest_risk_decisions=[],
-            exchange_orders=[self._order(row) for row in rows],
+            pending_orders=[
+                self._order(row) for row in rows if row.status != "RECONCILING"
+            ],
             ambiguous_orders=[
                 self._order(row) for row in rows if row.status == "RECONCILING"
             ],

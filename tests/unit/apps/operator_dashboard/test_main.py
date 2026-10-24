@@ -14,7 +14,6 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
     MarketDataPerformanceResponse,
     ResearchCollectorResponse,
     RiskExecutionResponse,
-    RunReportSummaryResponse,
     StreamReadinessDetailResponse,
     SystemOverviewResponse,
     SystemPerformanceResponse,
@@ -206,16 +205,8 @@ class FakeQueries:
         return RiskExecutionResponse(
             status=OperationalStatus.READY,
             active_halts=[],
-            latest_risk_decisions=[],
-            exchange_orders=[],
             pending_orders=[],
             ambiguous_orders=[],
-        )
-
-    async def reports(self) -> RunReportSummaryResponse:
-        return RunReportSummaryResponse(
-            status=OperationalStatus.NO_DATA,
-            live_sessions=[],
         )
 
     async def performance(

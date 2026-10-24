@@ -166,8 +166,8 @@ export function wireGlobalShortcuts(shell, poller) {
       return;
     }
 
-    if (e.key >= "1" && e.key <= "5" && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      const opsViews = ["overview", "risk", "account", "reports", "performance"];
+    if (e.key >= "1" && e.key <= "4" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const opsViews = ["overview", "risk", "account", "performance"];
       const targetView = opsViews[Number(e.key) - 1];
       if (targetView && shell?.viewIds?.has(targetView)) {
         e.preventDefault();

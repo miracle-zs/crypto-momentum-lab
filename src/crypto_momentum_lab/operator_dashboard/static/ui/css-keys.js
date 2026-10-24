@@ -35,9 +35,7 @@ export const K = {
   liveAccountCardStatus: "live-account-card-status",
   liveAccountCardState: "live-account-card-state",
   liveAccountCardStateDetail: "live-account-card-state-detail",
-  liveAccountCardFooter: "live-account-card-footer",
   liveAccountFleetStatus: "live-account-fleet-status",
-  liveAccountFleetKpis: "live-account-fleet-kpis",
   // overview
   serviceAge: "data-service-age",
   serviceMeter: "data-service-meter",

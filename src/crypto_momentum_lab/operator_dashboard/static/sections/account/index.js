@@ -1,8 +1,4 @@
-import {
-  esc,
-  relToNow,
-} from "../../dashboard-formatters.js";
-import { pill, tile } from "../../dashboard-ui.js";
+import { pill } from "../../dashboard-ui.js";
 import { K, sel } from "../../ui/css-keys.js";
 import { createAccountSectionState } from "./state.js";
 import {
@@ -13,7 +9,8 @@ import {
 import {
   liveAccountStatusLabel,
   liveAccountStatusClass,
-  liveStrategyStateLabel,
+  liveAccountGateSummary,
+  liveAccountObservationSummary,
   renderLiveAccounts as renderLiveAccountsInternal,
 } from "./render-fleet.js";
 
@@ -22,6 +19,15 @@ const state = createAccountSectionState();
 
 export function renderLiveAccounts(data) {
   return renderLiveAccountsInternal(state, data);
+}
+
+export function selectLiveAccount(root, accountLabel) {
+  if (root?.__liveAccountData?.length
+      && !root.__liveAccountData.some((account) => account.account_label === accountLabel)) return;
+  state.selectedLiveAccount = accountLabel;
+  if (root?.__liveAccountData?.some((account) => account.account_label === accountLabel)) {
+    return loadLiveAccountDetail(state, root, accountLabel, root.__requestJson || defaultAccountRequestJson);
+  }
 }
 
 export function wireLiveAccounts(root, data, { requestJson = defaultAccountRequestJson } = {}) {
@@ -34,6 +40,9 @@ export function wireLiveAccounts(root, data, { requestJson = defaultAccountReque
     button.addEventListener("click", () => {
       const accountLabel = button.dataset.liveAccountLabel;
       if (accountLabel) {
+        if (typeof window !== "undefined") {
+          window.history.replaceState(null, "", `#account?account=${encodeURIComponent(accountLabel)}`);
+        }
         void loadLiveAccountDetail(
           state,
           root,
@@ -85,25 +94,14 @@ export async function updateLiveAccountsDynamic(root, data) {
       statusEl.className = `live-account-card-status ${liveAccountStatusClass(account.status)}`;
       statusEl.textContent = liveAccountStatusLabel(account.status);
     }
-    const readiness = liveAccountStatusLabel(account.readiness);
-    const baseline = String(account.startup_baseline?.status || "").toUpperCase();
-    const baselineLabel = baseline === "MATCHED" ? "启动基线一致" : "启动基线未提供";
-
     const stateEl = card.querySelector(`.${K.liveAccountCardState}`);
     if (stateEl) {
-      stateEl.innerHTML = `<span>同步 <b>${esc(relToNow(account.observed_at))}</b></span><span>${esc(readiness)}</span>`;
+      stateEl.innerHTML = liveAccountGateSummary(account);
     }
 
     const stateDetailEl = card.querySelector(`.${K.liveAccountCardStateDetail}`);
     if (stateDetailEl) {
-      const strategy = account.strategy_name || "未关联策略";
-      const strategyState = liveStrategyStateLabel(account.strategy_state);
-      stateDetailEl.innerHTML = `<span>${esc(strategy)} · ${esc(strategyState)}</span><span>${esc(baselineLabel)}</span>`;
-    }
-
-    const footerEl = card.querySelector(`.${K.liveAccountCardFooter}`);
-    if (footerEl) {
-      footerEl.innerHTML = `进入账户详情<span aria-hidden="true">→</span>`;
+      stateDetailEl.innerHTML = liveAccountObservationSummary(account);
     }
   });
 
@@ -114,17 +112,7 @@ export async function updateLiveAccountsDynamic(root, data) {
 
   const fleetStatusEl = root.querySelector(`.${K.liveAccountFleetStatus}`);
   if (fleetStatusEl) {
-    fleetStatusEl.innerHTML = `<small>集群状态</small>${pill(overallStatus)}<span>${readyCount} 正常 · ${haltedCount} 停止 · ${reviewCount} 需检查</span>`;
-  }
-  const fleetKpisEl = root.querySelector(`.${K.liveAccountFleetKpis}`);
-  if (fleetKpisEl) {
-    const tiles = [
-      tile("实盘账户", `${accounts.length} 个`, "NextGen 账户进程状态"),
-      tile("正常账户", `${readyCount} 个`, "可继续观察"),
-      tile("停止账户", `${haltedCount} 个`, "需要检查"),
-      tile("需检查", `${reviewCount} 个`, "降级、过期或未知"),
-    ];
-    fleetKpisEl.innerHTML = tiles.join("");
+    fleetStatusEl.innerHTML = `${pill(overallStatus)}<span>${readyCount} 正常 · ${haltedCount} 停止 · ${reviewCount} 需检查</span>`;
   }
 
   const isSectionHidden = root?.hidden === true || Boolean(root?.closest?.("[hidden]")) || root?.isConnected === false;
@@ -146,8 +134,7 @@ export async function updateLiveAccountsDynamic(root, data) {
       requestJson,
     )
     : Promise.resolve();
-  // These regions are stacked: fleet metrics sit above the selected-account
-  // detail.  Each patch captures/restores page reading position, so concurrent
+  // Each patch captures/restores page reading position, so concurrent
   // writes can replay stale offsets. Keep one DOM mutation transaction active
   // at a time; the poller awaits this whole function before its final guard.
   await detailRefresh;

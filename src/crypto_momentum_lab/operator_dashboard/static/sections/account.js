@@ -6,6 +6,7 @@ export {
   renderAccount,
   renderLiveAccountMetrics,
   renderLiveAccounts,
+  selectLiveAccount,
   updateLiveAccountsDynamic,
   wireLiveAccounts,
 } from "./account/index.js";

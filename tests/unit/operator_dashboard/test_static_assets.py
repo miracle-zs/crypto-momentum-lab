@@ -40,7 +40,6 @@ def test_static_index_contains_dashboard_mount() -> None:
         "universe",
         "account",
         "risk",
-        "reports",
         "collector",
         "performance",
     ):
@@ -95,7 +94,9 @@ def test_dashboard_loads_stable_frontend_modules() -> None:
         )
         for source in markup.module_scripts
     )
-    assert "import" in javascript, "source entrypoint must remain modular before bundling"
+    assert "import" in javascript, (
+        "source entrypoint must remain modular before bundling"
+    )
 
 
 def test_degraded_status_labels_are_visible() -> None:

@@ -92,6 +92,7 @@ export async function loadLiveAccountDetail(
   const contentSlot = detailContentSlot(slot);
   const selectedCard = [...root.querySelectorAll(sel.accountCards())]
     .find((button) => button.dataset.liveAccountLabel === accountLabel);
+  if (selectedCard?.id) slot.setAttribute("aria-labelledby", selectedCard.id);
   const accountData = selectedCard ? (root.__liveAccountData || []).find(
     (account) => account.account_label === accountLabel,
   ) : null;

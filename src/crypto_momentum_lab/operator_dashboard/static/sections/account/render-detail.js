@@ -9,7 +9,6 @@ import {
   num,
   pnlClass,
   price,
-  relToNow,
   shortHash,
   signedMoney,
   signedPercent,
@@ -32,46 +31,32 @@ import {
 } from "./constants.js";
 import { renderLiveSignalsContent } from "./signals.js";
 
-function renderAccountHero(data, syncStatus) {
-  const accountHeroDescription = `NextGen 账户进程 · 私有 WebSocket 更新 · ${syncStatus === "ready" ? "策略就绪" : "策略状态待确认"}`;
+const SIZING_LABELS = {
+  fixed: "固定金额（单利）",
+  daily: "每日复利（北京时间 08:00 换日）",
+  per_trade: "逐笔实时复利",
+  flat_reset: "全账户空仓重置复利",
+};
 
-  return `<div class="account-hero">
-    <div>
-      <div class="account-eyebrow">${esc(String(data.environment || "LIVE").toUpperCase())} · EXECUTION ACCOUNT</div>
-      <h3>${esc(data.account_label || "交易所账户")}</h3>
-      <p>${esc(accountHeroDescription)}</p>
-    </div>
-    <div class="account-hero-meta">
-      <div class="account-hero-status"><small>同步状态</small>${pill(data.status)}</div>
-      <span>同步 <b class="num">${esc(dayTime(data.observed_at))}</b></span>
-      <small>${esc(relToNow(data.observed_at))}</small>
-    </div>
-  </div>`;
-}
-
-function renderAccountStateGrid(syncState, configState, executionState, baselineState, freshnessState) {
-  const stateCard = (label, state) => `<div class="account-state-card ${state.className}">
-    <span>${esc(label)}</span>
-    <strong>${esc(state.label)}</strong>
-    <small>${esc(state.detail)}</small>
-  </div>`;
-
-  return `<div class="account-state-grid" aria-label="实盘账户状态">
-    ${stateCard("同步服务", syncState)}
-    ${stateCard("账户配置", configState)}
-    ${stateCard("实盘执行", executionState)}
-    ${stateCard("启动基线", baselineState)}
-    ${stateCard("数据新鲜度", freshnessState)}
+function renderAccountSizing(config) {
+  const sizing = config.entry_sizing;
+  const fraction = asNumber(sizing?.equity_fraction);
+  const fractionLabel = sizing?.mode !== "fixed" && fraction != null
+    ? `<span>权益占比 <b class="num">${esc(num(fraction * 100, 2))}%</b></span>`
+    : "";
+  return `<div class="account-sizing-rule">
+    <span>资金模式 <strong>${esc(SIZING_LABELS[sizing?.mode] || "待确认")}</strong></span>
+    ${fractionLabel}
+    <span>最近单笔目标 <b class="num">${esc(money(sizing?.target_notional))}</b></span>
   </div>`;
 }
 
 function renderAccountKpiGrid(summary) {
   return `<div class="tile-grid account-kpi-grid">
     ${tile("USDT 钱包余额", money(summary.usdt_wallet_balance), "账户钱包余额", "hero")}
-    ${tile("USDT 可用余额", money(summary.usdt_available_balance), `交易所快照 · ${summary.available_balance_observed_at ? esc(fullDateTime(summary.available_balance_observed_at)) : "时间未知"}`)}
+    ${tile("USDT 可用余额", money(summary.usdt_available_balance), `更新于 ${summary.available_balance_observed_at ? esc(dayTime(summary.available_balance_observed_at)) : "时间未知"}`)}
     ${tile("持仓浮动盈亏（估算）", signedMoney(summary.total_unrealized_pnl), `${summary.position_count || 0} 个策略持仓批次`, pnlClass(summary.total_unrealized_pnl))}
     ${tile("持仓名义价值", money(summary.gross_position_notional), "按近期行情估算的策略持仓暴露")}
-    ${tile("挂单 / 最近成交", `${summary.open_order_count ?? 0} / ${summary.recent_trade_count ?? 0}`, "当前挂单 / 最近成交订单")}
   </div>`;
 }
 
@@ -86,10 +71,11 @@ function renderAccountEquityBlock(data, accountEquity, accountSample, accountEqu
   const equityCoverage = hasPartialHistory
     ? `<p class="equity-coverage-note">可用历史始于 <b class="num">${esc(fullDateTime(equityDataStart))} ${DISPLAY_TIME_ZONE_LABEL}</b>（随实盘运行持续沉淀）。</p>`
     : "";
-  const equityValue = `<span class="account-equity-value"><small>24H 期末权益</small><strong class="num ${pnlClass(accountEquityDelta)}">${esc(money(latestAccountEquity))}</strong></span>`;
+  const equityValue = `<span class="account-equity-value"><small>最新采样权益</small><strong class="num ${pnlClass(accountEquityDelta)}">${esc(money(latestAccountEquity))}</strong></span>`;
 
   return `<div class="block account-equity-block">
     ${blockTitle("实盘账户权益", `ROLLING 24H · ${accountSample} BUCKETS`, equityValue)}
+    <p class="account-history-note muted">最近 24 小时权益，曲线只展示已有采样。</p>
     <div class="chart-context"><span>${esc(`${dayTime(data.equity_window_start)} → ${dayTime(data.equity_window_end)} ${DISPLAY_TIME_ZONE_LABEL}`)}</span><b class="num">${accountEquity.length} 个采样点</b></div>
     ${equityCoverage}
     ${equityChart(accountEquity, "live-account-equity", data.equity_window_start, data.equity_window_end)}
@@ -98,12 +84,6 @@ function renderAccountEquityBlock(data, accountEquity, accountSample, accountEqu
 
 function renderAccountFacts(config, startupBaseline, modeLabel) {
   const sizing = config.entry_sizing;
-  const sizingLabels = {
-    fixed: "固定金额（单利）",
-    daily: "每日复利（北京时间 08:00 换日）",
-    per_trade: "逐笔实时复利",
-    flat_reset: "全账户空仓重置复利",
-  };
   const fraction = asNumber(sizing?.equity_fraction);
   const fractionLabel = sizing?.mode === "fixed"
     ? "固定名义金额"
@@ -115,7 +95,7 @@ function renderAccountFacts(config, startupBaseline, modeLabel) {
   return `<div class="account-facts">
     <div><span>实盘下单通道</span><b class="pos">NextGen 账户进程</b></div>
     <div><span>同步服务模式</span><b class="muted">账户私有 WebSocket</b></div>
-    <div><span>资金模式</span><b>${esc(sizingLabels[sizing?.mode] || "—")}</b></div>
+    <div><span>资金模式</span><b>${esc(SIZING_LABELS[sizing?.mode] || "—")}</b></div>
     <div><span>开仓金额规则</span><b>${esc(fractionLabel)}</b></div>
     <div><span>最近计算的单笔名义金额</span><b class="num">${esc(money(sizing?.target_notional))}</b></div>
     <div><span>定额基准权益</span><b class="num">${esc(money(sizing?.basis_equity))}</b></div>
@@ -236,36 +216,14 @@ export function renderAccount(data) {
   );
   const runtimeReadiness = normalized(runtimeAccount?.readiness);
   const runtimeTradeability = runtimeAccount?.runtime_tradeability;
-  const syncState = syncStatus === "ready"
-    ? { className: "status-READY", label: "同步正常", detail: "NextGen · 私有 WebSocket" }
-    : syncStatus === "halted"
-      ? { className: "status-HALTED", label: "同步已停止", detail: "NextGen · 需要检查" }
-      : syncStatus === "degraded"
-        ? { className: "status-ATTENTION", label: "状态降级", detail: "NextGen · 账户进程未就绪" }
-        : syncStatus === "stale"
-          ? { className: "status-STALE", label: "数据过期", detail: "NextGen · 最近心跳超过 180 秒" }
-          : { className: "status-UNKNOWN", label: "等待同步", detail: "NextGen · 暂无可靠状态" };
   const accountConfigAvailable = config.hedge_mode != null
     && config.multi_assets_mode != null
     && config.fee_tier != null;
-  const configState = {
-    className: accountConfigAvailable ? "status-READY" : "status-UNKNOWN",
-    label: "交易所账户配置",
-    detail: accountConfigAvailable ? "持仓模式 · 保证金模式 · 手续费等级" : "等待交易所账户信息",
-  };
   const baselineMatched = normalized(startupBaseline.status) === "matched";
-  const baselineState = baselineMatched
-    ? { className: "status-READY", label: "启动时一致", detail: `${startupBaseline.position_count} 个持仓 · ${startupBaseline.open_order_count} 个挂单` }
-    : { className: "status-UNKNOWN", label: "未提供", detail: "当前进程没有启动基线记录" };
   const observedAtMs = new Date(data.observed_at || "").getTime();
   const freshnessSeconds = Number.isFinite(observedAtMs)
     ? Math.max(0, (Date.now() - observedAtMs) / 1000)
     : null;
-  const freshnessState = freshnessSeconds == null
-    ? { className: "status-UNKNOWN", label: "未知", detail: "没有可用同步时间" }
-    : freshnessSeconds <= 180
-      ? { className: "status-FRESH", label: "数据新鲜", detail: `${relToNow(data.observed_at)} · 最近一次同步` }
-      : { className: "status-STALE", label: "数据过期", detail: `${relToNow(data.observed_at)} · 请检查同步服务` };
   const executionDetail = runtimeTradeability
     ? `开仓${runtimeTradeability.entry_gate_open ? "可用" : "暂停"} · 退出${runtimeTradeability.exit_gate_open ? "可用" : "暂停"}`
     : "当前账户没有交易通道状态";
@@ -282,8 +240,12 @@ export function renderAccount(data) {
     ? `<span class="account-strategy">${esc(value)}</span>`
     : `<span class="muted">未关联</span>`;
 
-  const hero = renderAccountHero(data, syncStatus);
-  const stateGrid = renderAccountStateGrid(syncState, configState, executionState, baselineState, freshnessState);
+  const warnings = [
+    baselineMatched ? null : "启动基线待确认",
+    accountConfigAvailable ? null : "账户配置待确认",
+    freshnessSeconds == null ? "同步时间待确认" : freshnessSeconds > 180 ? "数据已过期" : null,
+  ].filter(Boolean);
+  const executionLine = `<div class="account-execution-line ${executionState.className}"><strong>${esc(executionState.label)}</strong><span>${esc(executionState.detail)}</span>${warnings.map((warning) => `<span class="warn">${esc(warning)}</span>`).join("")}</div>`;
   const kpis = renderAccountKpiGrid(summary);
   const equityChartBlock = renderAccountEquityBlock(
     data,
@@ -310,19 +272,19 @@ export function renderAccount(data) {
   const liveSignalContent = renderLiveSignalsContent(liveSignals);
 
   const accountNeedsReview = !baselineMatched
+    || !accountConfigAvailable
     || hasUncertainStatus(syncStatus)
     || !data.observed_at;
 
-  const retentionNote = '<p class="muted">账户页仅显示最近 24 小时在线权益；更早数据已转入归档，本页不读取归档。曲线仅展示实际覆盖的时间。</p>';
-  const body = `${retentionNote}<div class="detail-meta"><span>同步时间 <b class="num">${esc(dayTime(data.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</b></span><span>${esc(relToNow(data.observed_at))}</span><small class="muted" data-refresh-state hidden></small></div>
-    ${hero}${stateGrid}${kpis}${equityChartBlock}
-    ${disclosure("实盘策略信号", "LIVE SIGNALS · LATEST 30", liveSignalContent,
-      `<strong class="num">${liveSignals.length}</strong>`, { open: liveSignals.length > 0, stateKey: "live-strategy-signals" })}
-    ${disclosure("账户配置与启动基线", "ACCOUNT CONFIGURATION / STARTUP BASELINE", accountFacts, "", { open: accountNeedsReview, stateKey: "account-reconciliation" })}
-    ${disclosure("USDT 资产余额", "USDT BALANCE · ACCOUNT COLLATERAL", balancesTable, `<strong class="num">${usdtBalances.length}</strong>`, { open: usdtBalances.length > 0, stateKey: "account-balances" })}
+  const body = `<small class="account-refresh-note muted" data-refresh-state hidden></small>
+    ${renderAccountSizing(config)}${executionLine}${kpis}
     ${disclosure("交易所实际持仓", "EXCHANGE POSITIONS · PRIVATE USER DATA STREAM", exchangePositionsTable, `<strong class="num">${exchangePositions.length}</strong>`, { open: exchangePositions.length > 0, stateKey: "exchange-positions" })}
-    ${disclosure("策略归因持仓", "LOCAL STRATEGY POSITION BATCHES", positionsTable, `<strong class="num">${positions.length}</strong>`, { open: positions.length > 0, stateKey: "account-positions" })}
     ${disclosure("当前挂单", "OPEN ORDERS · PRIVATE USER DATA STREAM", ordersTable, `<strong class="num">${openOrders.length}</strong>`, { open: openOrders.length > 0, stateKey: "account-open-orders" })}
-    ${disclosure("最近成交订单", "RECENT TRADES · ONE ORDER PER ROW", fillsTable, `<strong class="num">${fills.length}</strong>`, { stateKey: "account-fills" })}`;
+    ${equityChartBlock}
+    ${disclosure("最近成交订单", "RECENT TRADES · ONE ORDER PER ROW", fillsTable, `<strong class="num">${fills.length}</strong>`, { stateKey: "account-fills" })}
+    ${disclosure("实盘策略信号", "LIVE SIGNALS · LATEST 30", liveSignalContent, `<strong class="num">${liveSignals.length}</strong>`, { stateKey: "live-strategy-signals" })}
+    ${disclosure("策略归因持仓", "LOCAL STRATEGY POSITION BATCHES", positionsTable, `<strong class="num">${positions.length}</strong>`, { stateKey: "account-positions" })}
+    ${disclosure("账户配置与启动基线", "ACCOUNT CONFIGURATION / STARTUP BASELINE", accountFacts, "", { open: accountNeedsReview, stateKey: "account-settings" })}
+    ${disclosure("USDT 资产余额", "USDT BALANCE · ACCOUNT COLLATERAL", balancesTable, `<strong class="num">${usdtBalances.length}</strong>`, { stateKey: "account-balances" })}`;
   return [data.status, body];
 }

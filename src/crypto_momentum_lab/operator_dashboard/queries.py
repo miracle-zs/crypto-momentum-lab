@@ -3,9 +3,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import (
-    select,
-)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.live_rollout.runtime_manifest import LiveRuntimeAccount
@@ -28,7 +25,6 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
     LiveAccountsResponse,
     ResearchCollectorResponse,
     RiskExecutionResponse,
-    RunReportSummaryResponse,
     SystemOverviewResponse,
     SystemPerformanceResponse,
     SystemReadinessResponse,
@@ -36,9 +32,6 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
 )
 from crypto_momentum_lab.operator_dashboard.status import (
     OperationalStatus,
-)
-from crypto_momentum_lab.persistence.postgres.models import (
-    LiveSessionTransitionRow,
 )
 
 DecisionSLOQueries = _telemetry_queries.DecisionSLOQueries
@@ -195,24 +188,3 @@ class DashboardQueries:
 
     async def risk_execution(self) -> RiskExecutionResponse:
         return await self._nextgen_queries.risk_execution()
-
-    async def reports(self) -> RunReportSummaryResponse:
-        async with self._session_factory() as session:
-            live = (
-                await session.scalars(
-                    select(LiveSessionTransitionRow)
-                    .order_by(LiveSessionTransitionRow.occurred_at.desc())
-                    .limit(10)
-                )
-            ).all()
-        return RunReportSummaryResponse(
-            status=OperationalStatus.READY if live else OperationalStatus.NO_DATA,
-            live_sessions=[
-                {
-                    "session_id": row.session_id,
-                    "state": row.state,
-                    "occurred_at": row.occurred_at.isoformat(),
-                }
-                for row in live
-            ],
-        )

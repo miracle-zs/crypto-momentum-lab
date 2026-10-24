@@ -666,3 +666,8 @@ details.secondary[open] summary { margin-bottom: 10px; }
   font: 500 8px var(--sans);
   letter-spacing: 0;
 }
+
+@media (max-width: 760px) {
+  .view-tabs { margin-top: 0; }
+  .view-tab { flex: 1 1 150px; justify-content: center; }
+}

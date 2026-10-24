@@ -35,7 +35,7 @@ export function renderLiveAccountMetrics(data) {
   const windowText = windowRangeText(data);
   const dailyAnchor = anchorLabel();
   return `<div class="block live-account-metrics-block">
-    ${blockTitle("四账户资金与风险时序", `DAILY ${dailyAnchor} · 24H · ${equitySampleLabel(interval)} BUCKETS`)}
+    ${blockTitle("四账户资金与风险时序", `每日 ${dailyAnchor} 起 · ${equitySampleLabel(interval)} 采样`)}
     <div class="live-metrics-context"><span>${esc(windowText)}</span><span>${accounts.length} 个账户 · ${interval >= 86400 ? `${Math.round(interval / 86400)} 天` : `${Math.round(interval / 60)} 分钟`}采样</span><small class="muted" data-refresh-state hidden></small></div>
     <div class="live-metrics-note">每日 ${esc(dailyAnchor)} 起算 · 首点归零 (0 USDT / 0%) · 交易所初始保证金 · 相对窗口峰值回撤</div>
     <div class="live-metrics-grid">${charts}</div>

@@ -181,17 +181,7 @@ function metricValueFormat(metricKey) {
     : "signed-money";
 }
 
-export function liveAccountMetricModel(
-  accounts,
-  metricKey,
-  intervalSeconds = DEFAULT_EQUITY_BUCKET_SECONDS,
-  windowStart = null,
-  windowEnd = null,
-) {
-  const normalizedAccounts = (accounts || []).filter(
-    (account) => Array.isArray(account.metrics_curve),
-  );
-  if (!normalizedAccounts.length) return null;
+export function liveAccountMetricWindow(windowStart, windowEnd) {
   const requestedStart = windowStart
     ? new Date(windowStart).getTime()
     : Number.NaN;
@@ -204,6 +194,21 @@ export function liveAccountMetricModel(
   const anchoredWindow = Number.isFinite(dailyAnchor)
     && (!Number.isFinite(requestedEnd) || dailyAnchor <= requestedEnd);
   const chartStart = anchoredWindow ? dailyAnchor : requestedStart;
+  return { chartStart, requestedEnd, dailyAnchor, anchoredWindow };
+}
+
+export function liveAccountMetricModel(
+  accounts,
+  metricKey,
+  intervalSeconds = DEFAULT_EQUITY_BUCKET_SECONDS,
+  windowStart = null,
+  windowEnd = null,
+) {
+  const normalizedAccounts = (accounts || []).filter(
+    (account) => Array.isArray(account.metrics_curve),
+  );
+  if (!normalizedAccounts.length) return null;
+  const { chartStart, requestedEnd, dailyAnchor, anchoredWindow } = liveAccountMetricWindow(windowStart, windowEnd);
   const equityMetric = [
     "equity", "equity_change_ratio", "drawdown", "drawdown_ratio",
   ].includes(metricKey);

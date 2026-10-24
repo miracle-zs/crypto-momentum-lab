@@ -7,10 +7,10 @@ import { renderRisk } from "./sections/risk.js";
 import { renderCollector } from "./sections/collector.js";
 import {
   renderLiveAccounts,
+  selectLiveAccount,
   wireLiveAccounts,
   updateLiveAccountsDynamic,
 } from "./sections/account.js";
-import { renderReports } from "./sections/reports.js";
 import { renderPerformance } from "./sections/performance.js";
 import { latestSectionData } from "./app/section-state.js";
 import { renderLiveRuntime } from "./app/runtime-badge.js";
@@ -31,7 +31,6 @@ const renderers = {
   collector: renderCollector,
   risk: renderRisk,
   account: renderLiveAccounts,
-  reports: renderReports,
   performance: renderPerformance,
 };
 
@@ -65,7 +64,15 @@ const poller = createPoller({
 });
 
 const shell = createShell({
-  onNavigate: (id) => poller.maybeRefresh(id),
+  onNavigate: (id) => {
+    if (id === "account") {
+      const label = new URLSearchParams(window.location.hash.split("?")[1]).get("account");
+      if (label) {
+        void selectLiveAccount(document.getElementById("account")?.querySelector(".panel-body"), label);
+      }
+    }
+    poller.maybeRefresh(id);
+  },
 });
 
 const refreshBtn = document.getElementById("manual-refresh-btn");
