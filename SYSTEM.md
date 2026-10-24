@@ -1654,3 +1654,77 @@ CML_LIVE_EQUITY_FRACTION_ACCOUNT_4=0.40
 账户分配确认后，已用清单加载器读取四账户配置，结果依次为 `fixed/100.00`、`flat_reset/0.40`、`daily/0.40`、`per_trade/0.40`；Compose YAML 语法与 `git diff --check` 通过。只读核对服务器 `.env.server`，目前仅显式设置 primary 固定金额 `100.00`，没有资金模式或复利比例覆盖值，因此下次部署会采用上述默认配置。四账户现有单笔名义价值上限均为 10000 USDT，高于最近账户权益按 40% 计算的金额，本次没有修改风控上限。以上是配置解析与服务器只读核查，未运行功能测试，也未更新服务器文件或重启服务。
 
 用户已授权提交并推送本轮完整改动，包括三种复利计算、0070 定额基准迁移、四账户指定配置、看板展示及构建资源和本文说明。本次仅执行 Git 提交和推送，不执行生产部署；上述功能回归与生产验证仍待完成。
+
+### 旧准入模块与闲置配置清理（2026-10-24，尚未提交或部署）
+
+扫描运行源码、测试、部署、历史脚本及本地寻优的引用，确认 `domain/strategy/entry_policy.py` 的旧入场准入、EMA 状态及排名快照模型只在本模块、包重导出和专属测试中使用。删除该 328 行模块、190 行专属测试（7 个用例）及 10 个包导出。当前 NextGen 入场路径、保留的历史决策引擎和回放工具均未调用该模块。
+
+删除无人读取的 `ArchiveConfig.disk_check_interval_seconds`、两份采集 YAML 中的对应键及现有配置/端到端夹具中的旧值。该 YAML 配置原本没有装配到服务，实际磁盘检测继续使用 `MarketDataCaptureService` 已有的构造参数和缓存逻辑，服务代码未改；`pending_manifest_max_age_seconds` 仍被实盘归档 smoke 使用，继续保留。完整采集配置的 `behavior_hash` 会因删除字段而更新，已有历史记录不改写。
+
+删除 `LiveRuntimeStrategyInputs` 中无人读取的 `entry_policy_mode` 存储字段及构造实参；清单仍严格校验输入只能为 `enforce`，策略哈希计算及其余清单解析逻辑保持一致。前端 `latestLiveService` 仅本模块持有，通过既有 getter/setter 使用，因此移除多余的 `export`，变量和调用逻辑保留。
+
+静态 AST 对照确认，配置模型与清单模块仅删除所列字段/实参；两个保留测试文件仅删除旧配置键，仍为原来的 7 个配置用例/27 条断言、1 个端到端用例/7 条断言。533 个 Python 文件语法、全部项目配置 YAML 语法、5 个修改 Python 文件 Ruff、3 个源码模块 mypy（`--follow-imports=silent`）及 `git diff --check` 通过。前端内存构建无警告，110593 字节输出与现有发布资源逐字节一致，SHA-256 为 `587259b6e693c3bebedceadb60fe4a34066eef58ce14b85e6fe358f27bff9e9f`，没有重写构建资源。
+
+被删模块和符号没有源码残留引用；装饰器注册入口、Pydantic 校验器、ORM 表模型、补缺口协议、测试替身和已有回放/研究工具继续保留。本轮未新增或运行测试，没有访问生产、删除数据、提交、推送或部署，全程未使用子代理。
+
+### 旧滚动切分重置与闲置退出字段清理（2026-10-24，尚未提交或部署）
+
+继续核对仅被测试读取的接口。`PolicyState.reset_for_split()` 没有实盘、回放或研究调用方，唯一消费者是测试它本身的用例；当前本地滚动寻优使用 `SimulationLedger`。删除该 17 行方法及其 36 行专属用例，保留 `PolicyState` 的全部持久字段、其他方法、决策函数和历史回放工具。该用例原有 16 条断言随退役接口一同删除；其余 17 个策略转换用例/111 条断言的 AST 与修改前一致。
+
+`LiveRuntimeExecutionInputs.exit_mode` 仅有一条测试读取，没有运行消费者。删除字段、构造实参和对应字段断言，仍执行原来的 `PositionExitMode(...)` 校验，清单继续只接受 `candle_15m`。退出枚举、真实 15m 退出策略、宽限参数及配置文件均保留，未改变策略哈希。清单测试仍有原来的 9 个用例，余下 15 条断言保留。
+
+静态 AST 对照确认，决策模块仅删除 `reset_for_split()`，清单模块除本轮与上一轮已列出的闲置字段/实参外结构一致；退出模式校验调用仍在。533 个 Python 文件语法、本轮 4 个 Python 文件 Ruff、2 个源码模块 mypy（`--follow-imports=silent`）及 `git diff --check` 通过，被删接口和字段访问没有残留调用。本轮未新增或运行测试，未访问生产、修改本地寻优或数据；累计改动仍未提交、推送或部署，全程未使用子代理。
+
+### 研究采集回执闲置字段清理（2026-10-24，尚未提交或部署）
+
+删除 `SinkFlushResult.committed_sequences` 及刷盘时无人读取的序号集合计算；真正用于确认落盘覆盖的 `committed_version_keys` 和 journal 游标推进逻辑保留。删除 `DurableReceipt.state_keys` 及恢复时仅为这个字段构造的重复元组；原始批次仍保存行情状态，接收记录时用于生成 `record_id` 的 `state_keys` 哈希输入保留。删除 `CollectionReceipt` 中始终使用默认零值、无人读取的 `duplicate_rows` 和 `committed_rows`；实际去重计数、异步落盘统计和健康指标仍由原有 sink/materializer 路径产生。
+
+静态 AST 对照确认，三个源码文件除所列四个字段、构造实参和无用计算外完全一致；schema 2 journal JSON 载荷、身份哈希输入、Parquet schema、状态版本键及其他恢复代码均未修改。采集测试没有读取被删字段，原测试文件全部保留。本轮删除 14 行源码；533 个 Python 文件语法、3 个修改源码文件 Ruff、全部 9 个研究采集模块 mypy（`--follow-imports=silent`）及 `git diff --check` 通过。本轮未新增或运行测试，未访问生产、修改本地寻优或数据；累计改动仍未提交、推送或部署，全程未使用子代理。
+
+### 开仓批次闲置序号缓存清理（2026-10-24，尚未提交或部署）
+
+移除 `PositionBatch.order_counter` 及开仓时多余的批次读取/字段写入。开仓 client order ID 的序号由当前订单账本中该批次的订单数计算，该缓存字段从未参与读取；数据库恢复也不加载或保存它。`exit_order_counter` 继续保留，因为平仓订单生成和恢复会实际使用它。全仓引用扫描确认开仓字段没有其他代码调用方。本轮不改变订单身份或计数逻辑；尚未运行测试。
+
+### 策略数据需求契约闲置描述字段清理（2026-10-24，尚未提交或部署）
+
+将 `StrategyDataRequirement` 收敛到运行时确实读取的 `warmup_buckets` 与 `max_gap_seconds`。删除从未被运行代码消费的固定采样间隔、必需字段列表，以及从未实现消费者的 `allow_entries_before_warmup` 开关和对应校验；移除相关构造实参与只检查该描述字段的断言。实际预热数量、预热拦截及最大缺口检查保留，策略信号和入场行为不变。源码引用扫描未发现旧字段残留；本轮未运行测试。
+
+### 未接线的本地降级状态写入清理（2026-10-24，尚未提交或部署）
+
+删除 `LocalHealthWriter.degraded()` 及其专属断言：运行代码没有调用方，market-data 服务按已有事件写 `ready` 与停止态，NextGen daemon 用自己的 status 文件，Docker 健康检查只接受 `ready` 并检查标记时效。保留现有心跳、数据库成功标记、业务 readiness、启动重置及优雅停止写入。
+
+### 本轮清理范围复核
+
+重新扫描运行源码、测试、脚本和保留的本地研究工具后，没有发现下一项具备足够证据且能安全删除的生产实现。低引用候选已按调用链分类：Typer/FastAPI 命令或路由、Pydantic 校验器、SQLAlchemy 注册模型、Protocol 实现、实际调用的一次性辅助函数、监控指标，以及保留的回放/离线数据接口。只由测试引用的剩余方法用于确定性状态构造、真实数据解析/聚合/Parquet 接口、回放核验及测试替身，或验证实际安全边界，继续保留。此结论只针对可证实的当前调用关系；不因名称旧或依赖低频而删除历史读取与迁移能力。
+
+本轮全量 AST 语法扫描覆盖 480 个相关 Python 文件；当前修改 Python 文件 Ruff 通过，修改源模块 mypy 通过，`git diff --check` 通过。未运行测试或构建；全部改动仍未提交、推送或部署。
+
+### Dashboard 重复 SLO 路由清理（2026-10-24，尚未提交或部署）
+
+前端性能面板通过 `/api/performance` 使用 `decision_slo`，该接口内部会执行 SLO 查询；全仓前端、发布脚本、监控及文档均没有调用独立的 `/api/decision-slo`。移除这个重复 HTTP 路由及仅供该路由使用的 Dashboard facade/Protocol 方法和两项专属 API 测试。保留 `DecisionSLOQueries`、性能响应里的 `decision_slo` 及其读取逻辑，性能页数据不变。该改动会撤掉一个仓内无消费者且未记录为外部契约的 HTTP 路径；如果仓外调用方直接依赖它，需改用 `/api/performance`。
+
+4 个修改 Python 文件 AST 解析通过；Ruff 检查通过；`api.py` 和 `ports.py` 的 mypy 检查通过；`git diff --check` 通过。将 `queries.py` 也作为 mypy 目标时，报告该文件未改动区段的 4 个类型错误（可空运行时间的 `min`/`max` 及 JSON 字典类型），因此整体查询 facade mypy 仍非干净。本轮未运行测试，不接触生产或执行部署。
+
+### 入口与前端导出复核（2026-10-24，尚未提交或部署）
+
+继续检查 Python 模块引用和前端导出：在源代码、测试、scripts/deploy 与 `pyproject.toml` CLI 目标范围内扫描了 172 个 Python 模块，没有发现无引用模块；排查其余五条已注册命令，目标均存在。Dashboard 的 38 个自有 JS 模块没有只定义一次、没有内部引用的导出；不统计 vendored `node_modules`。全 `src` 的 Ruff `F401`/`F841` 规则通过，没有未使用导入或局部变量的新增候选。
+
+全量 `ruff check src` 另报告 10 项已有格式问题（`E501` 长行及 `execution_head_migration.py` 的 `I001` 导入排序），不属于闲置代码，未顺带修改。没有发现新的安全删除项；历史迁移、回放工具、ORM 注册类和已注册 CLI 均继续保留。本轮未运行测试、不访问生产。
+
+### `PolicyState` 未使用更新辅助方法清理（2026-10-24，尚未提交或部署）
+
+全仓引用确认 `PolicyState.with_cooldown()`、`with_grace_until()`、`with_signal_memory()`、`with_cleared_symbol()` 仅由单元测试调用，没有实盘、决策转换、历史回放或研究代码调用。删除这四个通用副本更新方法；保留运行转换使用的 `is_in_cooldown()`、`with_anchor_and_intent()`、`with_exit()`、`with_holding_deadline()` 和 `with_sizing_state()`。`PolicyState` 的 cooldown、grace、signal memory 等字段不变，测试改为直接构造输入状态并继续覆盖实际使用的转换。
+
+旧方法名的源码/测试调用扫描为空。3 个修改文件 AST 解析通过；`decision_engine.py` 与 `test_policy_transition.py` Ruff 通过，`test_decision_engine.py` 除其未改动文件头的 12 项既有 `E402` 外 Ruff 通过；`decision_engine.py` mypy 通过；`git diff --check` 通过。按用户要求未运行测试；未访问生产或部署。
+
+### 采集 journal 全量读取包装清理（2026-10-24，尚未提交或部署）
+
+`ArchiveJournal.read_resolutions()` 在仓内只被单元测试调用，功能只是把内部 `_iter_resolutions()` 完整物化为列表；删除此包装，并将测试改为使用已有迭代器。没有删除 `resolutions.jsonl`、日志解析器或身份索引：materializer 提交、崩溃恢复及去重核对逻辑未改，避免提供一个没有运行消费者且可能一次读入整份增长日志的 API。
+
+6 个修改 Python 文件 AST 解析通过；2 个源模块 mypy 通过；Ruff 对修改文件忽略既有 `test_journal.py` 长行规则 `E501` 后通过；`git diff --check` 通过。全仓 `read_resolutions` 与四个退役 `PolicyState` 方法名均无源码/测试引用。按用户要求未运行测试，未访问生产或部署。
+
+### 低引用候选最终分类（2026-10-24）
+
+当前静态引用扫描剩余 `open_dataset()`、`replay_envelopes()`、`InMemoryTradingRepository.fail_next_n_writes()` 和 `.get_order()` 四个低引用项，均按已有用途保留：数据集打开/完整性校验是历史复现接口；原始事件重放是保留的回放工具；后两者是 NextGen 单元测试故障注入及内存测试仓库能力。`convert_legacy_execution_head()` 也保留，因为 Alembic `20261015_0062_convert_execution_heads.py` 实际调用。未发现新的、能在不移除这些受支持能力的前提下安全删除的候选。
+
+本次是源码和调用图审查结论，不以测试结果代替；测试按现有要求未运行。现有累计清理未提交、推送或部署。

@@ -75,7 +75,7 @@ def test_materializer_stages_and_flushes_to_parquet(tmp_path: Path) -> None:
     flush_result = materializer.flush_all()
     assert flush_result.committed_rows == 2
     assert flush_result.files_written == 2
-    assert len(journal.read_resolutions()) == 3
+    assert len(list(journal._iter_resolutions())) == 3
     assert journal.materialized_sequence == 3
     assert len(journal.pending_records()) == 0
 
@@ -137,7 +137,7 @@ def test_materializer_handles_conflicting_revision_without_hanging_pending(
     materializer.flush_all()
 
     # Both receipts must be committed so rejected receipts do not hang pending forever
-    resolutions = journal.read_resolutions()
+    resolutions = list(journal._iter_resolutions())
     committed_seqs = {r["sequence"] for r in resolutions}
     assert committed_seqs == {1, 2}
 
@@ -215,7 +215,7 @@ def test_materializer_commits_upgraded_backfill_revision(tmp_path: Path) -> None
 
     # Flush all
     materializer.flush_all()
-    committed_seqs = {r["sequence"] for r in journal.read_resolutions()}
+    committed_seqs = {r["sequence"] for r in journal._iter_resolutions()}
     assert committed_seqs == {1, 2}
     assert len(journal.pending_records()) == 0
 
@@ -263,7 +263,7 @@ def test_materializer_resolutions_persisted_before_journal_unlink(
 
     assert len(resolutions_seen_before_unlink) == 1
     assert resolutions_seen_before_unlink[0] is True
-    assert len(journal.read_resolutions()) == 1
+    assert len(list(journal._iter_resolutions())) == 1
 
 
 def test_journal_replay_idempotent_after_failed_unlink(tmp_path: Path) -> None:
@@ -296,7 +296,7 @@ def test_journal_replay_idempotent_after_failed_unlink(tmp_path: Path) -> None:
         )
 
     # Resolution was written once
-    assert len(journal.read_resolutions()) == 1
+    assert len(list(journal._iter_resolutions())) == 1
 
     # Restart: recover() should detect that the un-deleted record is already resolved
     new_journal = ArchiveJournal(
@@ -319,5 +319,5 @@ def test_journal_replay_idempotent_after_failed_unlink(tmp_path: Path) -> None:
             "reason": "accepted",
         }],
     )
-    assert len(new_journal.read_resolutions()) == 1
+    assert len(list(new_journal._iter_resolutions())) == 1
 

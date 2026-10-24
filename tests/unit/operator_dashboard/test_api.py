@@ -8,7 +8,6 @@ from crypto_momentum_lab.operator_dashboard.api import (
     create_dashboard_app,
 )
 from crypto_momentum_lab.operator_dashboard.schemas import (
-    DecisionSLOResponse,
     SystemOverviewResponse,
 )
 from tests.unit.apps.operator_dashboard.test_main import (
@@ -33,7 +32,6 @@ def test_all_read_only_dashboard_routes_are_available() -> None:
         create_dashboard_app(queries=FakeQueries(), **DASHBOARD_AUTH_KWARGS)
     ) as client:
         for route in (
-            "/api/decision-slo",
             "/api/research-collector",
             "/api/universe",
             "/api/account",
@@ -76,14 +74,6 @@ def test_readiness_endpoint_returns_layered_state() -> None:
     assert payload["tradeability"]["entry_gate_open"] is True
     assert payload["stream_readiness"]["overall"] == "READY"
     assert "account" in payload["stream_readiness"]["streams"]
-
-
-def test_decision_slo_endpoint_accepts_a_bounded_window() -> None:
-    with TestClient(create_dashboard_app(queries=FakeQueries())) as client:
-        response = client.get("/api/decision-slo?window=7d")
-
-    assert response.status_code == 200
-    assert response.json()["window"] == "7d"
 
 
 def test_account_endpoint_accepts_an_account_label_and_fixed_window() -> None:
@@ -240,28 +230,6 @@ def test_static_assets_cache_headers() -> None:
         html_res = client.get("/static/index.html")
         assert html_res.status_code == 200
         assert "max-age" not in html_res.headers.get("Cache-Control", "")
-
-
-def test_decision_slo_caches_response() -> None:
-    calls = 0
-
-    class CountingQueries(FakeQueries):
-        async def decision_slo(
-            self,
-            window: str = "24h",
-        ) -> DecisionSLOResponse:
-            nonlocal calls
-            calls += 1
-            return await super().decision_slo(window)
-
-    with TestClient(create_dashboard_app(queries=CountingQueries())) as client:
-        res1 = client.get("/api/decision-slo?window=24h")
-        assert res1.status_code == 200
-        assert calls == 1
-
-        res2 = client.get("/api/decision-slo?window=24h")
-        assert res2.status_code == 200
-        assert calls == 1
 
 
 async def test_response_cache_bounded_entries_and_lock_reclamation() -> None:

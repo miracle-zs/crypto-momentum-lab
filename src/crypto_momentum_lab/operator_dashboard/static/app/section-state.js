@@ -15,7 +15,7 @@ export const latestSectionUpdatedAt = new Map();
 export const forcedSectionRefreshes = new Set();
 export const sectionRenderKeys = new Map();
 
-export let latestLiveService = null;
+let latestLiveService = null;
 let latestLiveMode = "UNKNOWN";
 
 export function setLiveService(service) {

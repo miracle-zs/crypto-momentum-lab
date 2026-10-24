@@ -126,22 +126,6 @@ class PolicyState:
         until = self.cooldown_until_by_symbol.get(symbol)
         return until is not None and current_time < until
 
-    def with_cooldown(self, symbol: str, until: datetime) -> PolicyState:
-        new_cd = dict(self.cooldown_until_by_symbol)
-        new_cd[symbol] = until
-        return PolicyState(
-            policy_version=self.policy_version + 1,
-            cooldown_until_by_symbol=new_cd,
-            anchor_prices_by_symbol=dict(self.anchor_prices_by_symbol),
-            active_intent_ids_by_symbol=dict(self.active_intent_ids_by_symbol),
-            custom_state=dict(self.custom_state),
-            signal_memory=dict(self.signal_memory),
-            warmup_status=dict(self.warmup_status),
-            grace_until_by_symbol=dict(self.grace_until_by_symbol),
-            holding_deadline_by_symbol=dict(self.holding_deadline_by_symbol),
-            sizing_state_by_symbol=dict(self.sizing_state_by_symbol),
-        )
-
     def with_anchor_and_intent(
         self,
         symbol: str,
@@ -161,22 +145,6 @@ class PolicyState:
             cooldown_until_by_symbol=dict(self.cooldown_until_by_symbol),
             anchor_prices_by_symbol=new_anchors,
             active_intent_ids_by_symbol=new_intents,
-            custom_state=dict(self.custom_state),
-            signal_memory=dict(self.signal_memory),
-            warmup_status=dict(self.warmup_status),
-            grace_until_by_symbol=new_grace,
-            holding_deadline_by_symbol=dict(self.holding_deadline_by_symbol),
-            sizing_state_by_symbol=dict(self.sizing_state_by_symbol),
-        )
-
-    def with_grace_until(self, symbol: str, until: datetime) -> PolicyState:
-        new_grace = dict(self.grace_until_by_symbol)
-        new_grace[symbol] = until
-        return PolicyState(
-            policy_version=self.policy_version + 1,
-            cooldown_until_by_symbol=dict(self.cooldown_until_by_symbol),
-            anchor_prices_by_symbol=dict(self.anchor_prices_by_symbol),
-            active_intent_ids_by_symbol=dict(self.active_intent_ids_by_symbol),
             custom_state=dict(self.custom_state),
             signal_memory=dict(self.signal_memory),
             warmup_status=dict(self.warmup_status),
@@ -212,23 +180,6 @@ class PolicyState:
             sizing_state_by_symbol=new_sizing,
         )
 
-    def reset_for_split(self, carry_sizing: bool = False) -> PolicyState:
-        """Clean slate reset across walk-forward train/eval split boundaries."""
-        return PolicyState(
-            policy_version=self.policy_version + 1,
-            cooldown_until_by_symbol={},
-            anchor_prices_by_symbol={},
-            active_intent_ids_by_symbol={},
-            custom_state={},
-            signal_memory={},
-            warmup_status={},
-            grace_until_by_symbol={},
-            holding_deadline_by_symbol={},
-            sizing_state_by_symbol=(
-                dict(self.sizing_state_by_symbol) if carry_sizing else {}
-            ),
-        )
-
     def with_holding_deadline(self, symbol: str, deadline: datetime) -> PolicyState:
         new_deadline = dict(self.holding_deadline_by_symbol)
         new_deadline[symbol] = deadline
@@ -242,22 +193,6 @@ class PolicyState:
             warmup_status=dict(self.warmup_status),
             grace_until_by_symbol=dict(self.grace_until_by_symbol),
             holding_deadline_by_symbol=new_deadline,
-            sizing_state_by_symbol=dict(self.sizing_state_by_symbol),
-        )
-
-    def with_signal_memory(self, key: str, value: Any) -> PolicyState:
-        new_mem = dict(self.signal_memory)
-        new_mem[key] = value
-        return PolicyState(
-            policy_version=self.policy_version + 1,
-            cooldown_until_by_symbol=dict(self.cooldown_until_by_symbol),
-            anchor_prices_by_symbol=dict(self.anchor_prices_by_symbol),
-            active_intent_ids_by_symbol=dict(self.active_intent_ids_by_symbol),
-            custom_state=dict(self.custom_state),
-            signal_memory=new_mem,
-            warmup_status=dict(self.warmup_status),
-            grace_until_by_symbol=dict(self.grace_until_by_symbol),
-            holding_deadline_by_symbol=dict(self.holding_deadline_by_symbol),
             sizing_state_by_symbol=dict(self.sizing_state_by_symbol),
         )
 
@@ -276,33 +211,6 @@ class PolicyState:
             holding_deadline_by_symbol=dict(self.holding_deadline_by_symbol),
             sizing_state_by_symbol=new_sizing,
         )
-
-    def with_cleared_symbol(self, symbol: str) -> PolicyState:
-        new_cd = dict(self.cooldown_until_by_symbol)
-        new_cd.pop(symbol, None)
-        new_anchors = dict(self.anchor_prices_by_symbol)
-        new_anchors.pop(symbol, None)
-        new_intents = dict(self.active_intent_ids_by_symbol)
-        new_intents.pop(symbol, None)
-        new_grace = dict(self.grace_until_by_symbol)
-        new_grace.pop(symbol, None)
-        new_deadline = dict(self.holding_deadline_by_symbol)
-        new_deadline.pop(symbol, None)
-        new_sizing = dict(self.sizing_state_by_symbol)
-        new_sizing.pop(symbol, None)
-        return PolicyState(
-            policy_version=self.policy_version + 1,
-            cooldown_until_by_symbol=new_cd,
-            anchor_prices_by_symbol=new_anchors,
-            active_intent_ids_by_symbol=new_intents,
-            custom_state=dict(self.custom_state),
-            signal_memory=dict(self.signal_memory),
-            warmup_status=dict(self.warmup_status),
-            grace_until_by_symbol=new_grace,
-            holding_deadline_by_symbol=new_deadline,
-            sizing_state_by_symbol=new_sizing,
-        )
-
 
 @dataclass(frozen=True, slots=True)
 class EffectivePolicy:

@@ -339,9 +339,6 @@ class AccountState:
         ]
         seq = len(existing_orders_for_batch) + 1
 
-        batch = self.batches.get(batch_id)
-        if batch:
-            batch.order_counter = seq
         client_order_id = generate_entry_order_id(batch_id, seq)
 
         order = Order(

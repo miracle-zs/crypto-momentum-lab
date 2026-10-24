@@ -112,7 +112,6 @@ class DurableReceipt:
     sequence: int
     stream_id: str | None
     source_kind: SourceKind
-    state_keys: tuple[tuple[str, str, datetime], ...]
     accepted_at: datetime
     is_empty: bool = False
     record_bytes: int = 0
@@ -220,8 +219,6 @@ class CollectionReceipt:
     source_kind: SourceKind
     sequence: int | None
     selected_rows: int
-    duplicate_rows: int = 0
-    committed_rows: int = 0
     skipped_rows: int = 0
     durable_receipt: DurableReceipt | None = None
 

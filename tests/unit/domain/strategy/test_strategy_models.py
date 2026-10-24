@@ -352,11 +352,8 @@ def test_non_finite_float_is_rejected_from_payload_and_config_hash() -> None:
 def test_data_requirement_rejects_invalid_values() -> None:
     with pytest.raises(ValueError, match="warmup_buckets must be positive"):
         StrategyDataRequirement(
-            base_state_interval_seconds=15,
             warmup_buckets=0,
-            required_fields=("close_price",),
             max_gap_seconds=30,
-            allow_entries_before_warmup=False,
         )
 
 

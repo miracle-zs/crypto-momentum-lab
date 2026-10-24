@@ -29,7 +29,6 @@ def test_checked_in_live_runtime_manifest_resolves_account_identity() -> None:
     assert primary.execution_inputs.entry_long_only is True
     assert primary.execution_inputs.entry_leverage == 5
     assert primary.execution_inputs.margin_type == "CROSSED"
-    assert primary.execution_inputs.exit_mode.value == "candle_15m"
     assert primary.execution_inputs.candle_grace_bars == 8
 
     expected_profile = LiveOrderFlowImpulseProfile(

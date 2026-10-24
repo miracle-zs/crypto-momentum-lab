@@ -164,7 +164,6 @@ class SinkAppendResult:
 @dataclass(frozen=True, slots=True)
 class SinkFlushResult:
     committed_rows: int
-    committed_sequences: frozenset[int]
     last_bucket_start: datetime | None
     last_symbol: str | None
     files_written: int
@@ -314,7 +313,6 @@ class ParquetWindowSink:
 
     def _flush_paths(self, paths: Iterable[Path]) -> SinkFlushResult:
         committed_rows = 0
-        committed_sequences: set[int] = set()
         committed_version_keys: set[_VERSION_KEY] = set()
         last_bucket_start: datetime | None = None
         last_symbol: str | None = None
@@ -346,9 +344,6 @@ class ParquetWindowSink:
                         state_payload_digest(row),
                     )
                 )
-                sequence = row.get("hub_sequence")
-                if isinstance(sequence, int):
-                    committed_sequences.add(sequence)
                 bucket_start = _required_datetime(row, "bucket_start")
                 symbol = _require_string(row.get("symbol"), "symbol")
                 if last_bucket_start is None or (bucket_start, symbol) > (
@@ -360,7 +355,6 @@ class ParquetWindowSink:
             self._buffers.pop(path, None)
         return SinkFlushResult(
             committed_rows=committed_rows,
-            committed_sequences=frozenset(committed_sequences),
             committed_version_keys=frozenset(committed_version_keys),
             last_bucket_start=last_bucket_start,
             last_symbol=last_symbol,

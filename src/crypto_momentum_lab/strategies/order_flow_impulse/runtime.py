@@ -59,16 +59,8 @@ class OrderFlowImpulseRuntimeStrategy:
     def required_data(self) -> StrategyDataRequirement:
         event_config = self._config.event_config
         return StrategyDataRequirement(
-            base_state_interval_seconds=15,
             warmup_buckets=_warmup_buckets(event_config),
-            required_fields=(
-                "effective_price",
-                "trade_notional",
-                "aggressive_buy_notional",
-                "aggressive_sell_notional",
-            ),
             max_gap_seconds=30,
-            allow_entries_before_warmup=False,
         )
 
     def warm_market_state(self, state: MarketState15s) -> None:

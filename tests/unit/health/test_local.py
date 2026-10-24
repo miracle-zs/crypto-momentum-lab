@@ -23,9 +23,6 @@ def test_local_health_writer_resets_and_publishes_markers(tmp_path) -> None:
         "warmup_complete_symbols": 0,
     }
 
-    health.degraded()
-    assert (directory / "status").read_text() == "degraded\n"
-
     health.stopped()
     assert (directory / "status").read_text() == "stopped\n"
 

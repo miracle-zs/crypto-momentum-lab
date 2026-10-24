@@ -716,37 +716,30 @@ def test_grace_period_timer_emission_on_entry() -> None:
 def test_policy_state_immutability_and_versioning() -> None:
     """PolicyState methods return new instances with incremented version."""
     t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
-    s0 = PolicyState(policy_version=1)
+    s0 = PolicyState(
+        policy_version=1,
+        cooldown_until_by_symbol={"BTCUSDT": t0 + timedelta(minutes=15)},
+    )
 
-    s1 = s0.with_cooldown("BTCUSDT", t0 + timedelta(minutes=15))
+    assert s0.is_in_cooldown("BTCUSDT", t0) is True
+    assert s0.is_in_cooldown("ETHUSDT", t0) is False
+
+    s1 = s0.with_anchor_and_intent("BTCUSDT", Decimal("65000.00"), "cand_01")
     assert s1.policy_version == 2
     assert s0.policy_version == 1
+    assert s1.anchor_prices_by_symbol["BTCUSDT"] == Decimal("65000.00")
+    assert s1.active_intent_ids_by_symbol["BTCUSDT"] == "cand_01"
     assert s1.is_in_cooldown("BTCUSDT", t0) is True
-    assert s0.is_in_cooldown("BTCUSDT", t0) is False
 
-    s2 = s1.with_anchor_and_intent("BTCUSDT", Decimal("65000.00"), "cand_01")
+    s2 = s1.with_holding_deadline("BTCUSDT", t0 + timedelta(hours=1))
     assert s2.policy_version == 3
-    assert s2.anchor_prices_by_symbol["BTCUSDT"] == Decimal("65000.00")
-    assert s2.active_intent_ids_by_symbol["BTCUSDT"] == "cand_01"
-    # Cooldown preserved
-    assert s2.is_in_cooldown("BTCUSDT", t0) is True
+    assert s2.holding_deadline_by_symbol["BTCUSDT"] == t0 + timedelta(hours=1)
+    assert "BTCUSDT" not in s1.holding_deadline_by_symbol
 
-    s3 = s2.with_holding_deadline("BTCUSDT", t0 + timedelta(hours=1))
+    s3 = s2.with_sizing_state("BTCUSDT", {"quantity": "1.0"})
     assert s3.policy_version == 4
-    assert s3.holding_deadline_by_symbol["BTCUSDT"] == t0 + timedelta(hours=1)
-
-    s4 = s3.with_signal_memory("ema_fast", Decimal("65100.00"))
-    assert s4.policy_version == 5
-    assert s4.signal_memory["ema_fast"] == Decimal("65100.00")
-
-    s5 = s4.with_cleared_symbol("BTCUSDT")
-    assert s5.policy_version == 6
-    assert "BTCUSDT" not in s5.cooldown_until_by_symbol
-    assert "BTCUSDT" not in s5.anchor_prices_by_symbol
-    assert "BTCUSDT" not in s5.active_intent_ids_by_symbol
-    assert "BTCUSDT" not in s5.holding_deadline_by_symbol
-    # Global signal memory preserved
-    assert s5.signal_memory["ema_fast"] == Decimal("65100.00")
+    assert s3.sizing_state_by_symbol["BTCUSDT"] == {"quantity": "1.0"}
+    assert s2.sizing_state_by_symbol == {}
 
 
 def test_short_position_holding_exit_and_reversal_command() -> None:
@@ -950,48 +943,11 @@ def test_short_breakout_entry_generation() -> None:
     assert t_short.entry_candidate.side == StrategySide.SHORT
 
 
-def test_walk_forward_split_state_reset_and_carry() -> None:
-    """PolicyState.reset_for_split cleans symbol state and optionally carries sizing."""
-    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
-    s0 = (
-        PolicyState(policy_version=10)
-        .with_cooldown("BTCUSDT", t0 + timedelta(minutes=15))
-        .with_anchor_and_intent("BTCUSDT", Decimal("65000.00"), "cand_01")
-        .with_grace_until("BTCUSDT", t0 + timedelta(minutes=5))
-        .with_holding_deadline("BTCUSDT", t0 + timedelta(hours=1))
-        .with_sizing_state("BTCUSDT", {"target_quantity": "0.1"})
-        .with_signal_memory("ema_diff", Decimal("12.5"))
-    )
-
-    # 1. Clean slate split (carry_sizing=False)
-    s_clean = s0.reset_for_split(carry_sizing=False)
-    assert s_clean.policy_version == s0.policy_version + 1
-    assert s_clean.cooldown_until_by_symbol == {}
-    assert s_clean.anchor_prices_by_symbol == {}
-    assert s_clean.active_intent_ids_by_symbol == {}
-    assert s_clean.grace_until_by_symbol == {}
-    assert s_clean.holding_deadline_by_symbol == {}
-    assert s_clean.sizing_state_by_symbol == {}
-    assert s_clean.signal_memory == {}
-
-    # 2. Split with sizing carry (carry_sizing=True)
-    s_carry = s0.reset_for_split(carry_sizing=True)
-    assert s_carry.policy_version == s0.policy_version + 1
-    assert s_carry.cooldown_until_by_symbol == {}
-    assert s_carry.anchor_prices_by_symbol == {}
-    assert s_carry.active_intent_ids_by_symbol == {}
-    assert s_carry.grace_until_by_symbol == {}
-    assert s_carry.holding_deadline_by_symbol == {}
-    assert s_carry.sizing_state_by_symbol == {"BTCUSDT": {"target_quantity": "0.1"}}
-    assert s_carry.signal_memory == {}
-
-
 def test_sizing_state_overwrites_each_symbol_without_accumulating_history() -> None:
     state = PolicyState()
     for sequence in range(1000):
         state = state.with_sizing_state("BTCUSDT", {"quantity": str(sequence)})
     assert state.sizing_state_by_symbol == {"BTCUSDT": {"quantity": "999"}}
-    assert state.with_cleared_symbol("BTCUSDT").sizing_state_by_symbol == {}
 
 
 def test_policy_state_with_exit_atomic_purge() -> None:
@@ -1001,13 +957,15 @@ def test_policy_state_with_exit_atomic_purge() -> None:
     t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
     cd_due = t0 + timedelta(minutes=15)
     s0 = (
-        PolicyState(policy_version=1)
+        PolicyState(
+            policy_version=1,
+            grace_until_by_symbol={"BTCUSDT": t0 + timedelta(minutes=5)},
+            signal_memory={"ema_trend": Decimal("1.0")},
+        )
         .with_anchor_and_intent("BTCUSDT", Decimal("65000.00"), "cand_btc")
-        .with_grace_until("BTCUSDT", t0 + timedelta(minutes=5))
         .with_holding_deadline("BTCUSDT", t0 + timedelta(hours=1))
         .with_sizing_state("BTCUSDT", {"qty": "1.0"})
         .with_anchor_and_intent("ETHUSDT", Decimal("3500.00"), "cand_eth")
-        .with_signal_memory("ema_trend", Decimal("1.0"))
     )
 
     s1 = s0.with_exit("BTCUSDT", cd_due)

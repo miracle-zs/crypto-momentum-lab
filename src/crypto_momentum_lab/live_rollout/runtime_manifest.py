@@ -49,7 +49,6 @@ class LiveRuntimeStrategyInputs:
     entry_positive_gainer_top_count: int
     require_price_above_ema5: bool
     require_price_above_ema10: bool
-    entry_policy_mode: str
     entry_order_type: EntryType
     entry_limit_ttl_seconds: int
 
@@ -63,7 +62,6 @@ class LiveRuntimeExecutionInputs:
     entry_long_only: bool
     entry_leverage: int
     margin_type: str
-    exit_mode: PositionExitMode
     candle_grace_bars: int
     candle_grace_decision_profit_pct: Decimal
     candle_grace_profit_pct: Decimal
@@ -327,7 +325,6 @@ def _strategy_inputs(value: Any, prefix: str) -> LiveRuntimeStrategyInputs:
                 config.get("require_price_above_ema10"),
                 f"{field}.require_price_above_ema10",
             ),
-            entry_policy_mode=policy_mode,
             entry_order_type=order_type,
             entry_limit_ttl_seconds=ttl_seconds,
         )
@@ -367,7 +364,7 @@ def _execution_inputs(
             raise RuntimeManifestError(
                 f"{field}.margin_type must be CROSSED or ISOLATED"
             )
-        exit_mode = PositionExitMode(
+        PositionExitMode(
             _text(config.get("exit_mode"), f"{field}.exit_mode").lower()
         )
         candle_grace_bars = _integer(
@@ -443,7 +440,6 @@ def _execution_inputs(
             entry_long_only=entry_long_only,
             entry_leverage=entry_leverage,
             margin_type=margin_type,
-            exit_mode=exit_mode,
             candle_grace_bars=candle_grace_bars,
             candle_grace_decision_profit_pct=candle_grace_decision_profit_pct,
             candle_grace_profit_pct=candle_grace_profit_pct,

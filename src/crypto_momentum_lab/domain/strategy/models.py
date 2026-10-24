@@ -63,23 +63,14 @@ class StrategyRunIdentity:
 
 @dataclass(frozen=True, slots=True)
 class StrategyDataRequirement:
-    base_state_interval_seconds: int
     warmup_buckets: int
-    required_fields: tuple[str, ...]
     max_gap_seconds: int
-    allow_entries_before_warmup: bool
 
     def __post_init__(self) -> None:
-        if self.base_state_interval_seconds <= 0:
-            raise ValueError("base_state_interval_seconds must be positive")
         if self.warmup_buckets <= 0:
             raise ValueError("warmup_buckets must be positive")
         if self.max_gap_seconds <= 0:
             raise ValueError("max_gap_seconds must be positive")
-        if not self.required_fields:
-            raise ValueError("required_fields must not be empty")
-        for required_field in self.required_fields:
-            _require_non_empty(required_field, "required_field")
 
 
 @dataclass(frozen=True, slots=True)

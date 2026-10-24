@@ -243,7 +243,6 @@ class ArchiveJournal:
             sequence=collection_batch.sequence,
             stream_id=collection_batch.stream_id,
             source_kind=collection_batch.source_kind,
-            state_keys=state_keys,
             accepted_at=now,
             is_empty=is_empty,
             record_bytes=record_bytes,
@@ -467,10 +466,6 @@ class ArchiveJournal:
                 except OSError:
                     pass
                 self._pending_bytes = max(0, self._pending_bytes - size)
-
-    def read_resolutions(self) -> list[dict[str, Any]]:
-        """Read all durable materialization resolutions from disk."""
-        return list(self._iter_resolutions())
 
     def _resolution_stamp(self) -> tuple[int, int, int, int] | None:
         try:
@@ -759,9 +754,6 @@ class ArchiveJournal:
         except OSError:
             record_bytes = 0
 
-        state_keys = tuple(
-            (state.environment, state.symbol, state.bucket_start) for state in states
-        )
         record_id = payload.get("record_id")
         if not record_id or not isinstance(record_id, str):
             raise CollectorStateConflict(f"journal record_id is invalid: {path}")
@@ -770,7 +762,6 @@ class ArchiveJournal:
             sequence=sequence,
             stream_id=stream_id,
             source_kind=source_kind,
-            state_keys=state_keys,
             accepted_at=accepted_at,
             is_empty=is_empty,
             record_bytes=record_bytes,

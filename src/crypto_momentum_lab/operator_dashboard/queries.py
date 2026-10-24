@@ -24,7 +24,6 @@ from crypto_momentum_lab.operator_dashboard.performance_queries import (
 )
 from crypto_momentum_lab.operator_dashboard.schemas import (
     AccountOverviewResponse,
-    DecisionSLOResponse,
     LiveAccountMetricsResponse,
     LiveAccountsResponse,
     ResearchCollectorResponse,
@@ -117,12 +116,6 @@ class DashboardQueries:
 
     async def readiness(self) -> SystemReadinessResponse:
         return await self._nextgen_queries.readiness(await self.health())
-
-    async def decision_slo(
-        self,
-        window: str = "24h",
-    ) -> DecisionSLOResponse:
-        return await self._telemetry_queries.decision_slo(window)
 
     async def performance(
         self,

@@ -4,7 +4,6 @@ from typing import Any, Protocol
 
 from crypto_momentum_lab.operator_dashboard.schemas import (
     AccountOverviewResponse,
-    DecisionSLOResponse,
     LiveAccountMetricsResponse,
     LiveAccountsResponse,
     ResearchCollectorResponse,
@@ -23,11 +22,6 @@ class DashboardQueryProtocol(Protocol):
     async def operational_health(self) -> dict[str, Any]: ...
 
     async def readiness(self) -> SystemReadinessResponse: ...
-
-    async def decision_slo(
-        self,
-        window: str = "24h",
-    ) -> DecisionSLOResponse: ...
 
     async def overview(self) -> SystemOverviewResponse: ...
 

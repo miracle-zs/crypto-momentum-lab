@@ -51,7 +51,6 @@ def test_load_runtime_config_is_frozen_and_hash_is_stable(
                 "  warning_free_bytes: 300",
                 "  halt_free_bytes: 200",
                 "  recovery_free_bytes: 250",
-                "  disk_check_interval_seconds: 10",
                 "  pending_manifest_max_age_seconds: 300",
             ]
         ),
@@ -123,7 +122,6 @@ def test_rejects_loser_target_count_larger_than_ranking_depth(
                 "  warning_free_bytes: 300",
                 "  halt_free_bytes: 200",
                 "  recovery_free_bytes: 250",
-                "  disk_check_interval_seconds: 10",
                 "  pending_manifest_max_age_seconds: 300",
             ]
         ),
@@ -231,7 +229,6 @@ def test_research_and_server_capture_configs_keep_shared_defaults_aligned(
         "zstd_level",
         "group_commit_max_events",
         "group_commit_max_milliseconds",
-        "disk_check_interval_seconds",
         "pending_manifest_max_age_seconds",
         "retention_days",
         "retention_check_interval_seconds",
@@ -278,7 +275,6 @@ def test_capture_config_rejects_invalid_disk_hysteresis() -> None:
                     "warning_free_bytes": 300,
                     "halt_free_bytes": 200,
                     "recovery_free_bytes": 100,
-                    "disk_check_interval_seconds": 10,
                     "pending_manifest_max_age_seconds": 300,
                 },
             }
@@ -315,7 +311,6 @@ def test_capture_config_rejects_non_websocket_urls() -> None:
                     "warning_free_bytes": 300,
                     "halt_free_bytes": 200,
                     "recovery_free_bytes": 250,
-                    "disk_check_interval_seconds": 10,
                     "pending_manifest_max_age_seconds": 300,
                 },
             }

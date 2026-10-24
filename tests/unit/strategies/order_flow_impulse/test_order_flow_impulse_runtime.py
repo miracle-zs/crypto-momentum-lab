@@ -53,7 +53,6 @@ def test_orderflow_impulse_accepts_missing_midpoint_when_trade_price_exists() ->
 
     assert decision.signals == ()
     assert decision.rejections[0].reason is RejectionReason.INSUFFICIENT_WARMUP
-    assert "effective_price" in strategy.required_data().required_fields
 
 
 def test_orderflow_impulse_keeps_missing_close_when_midpoint_exists() -> None:

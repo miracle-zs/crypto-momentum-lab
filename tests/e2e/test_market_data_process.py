@@ -158,7 +158,6 @@ def _write_config(
                 "  warning_free_bytes: 300",
                 "  halt_free_bytes: 100",
                 "  recovery_free_bytes: 200",
-                "  disk_check_interval_seconds: 1",
                 "  pending_manifest_max_age_seconds: 30",
                 "",
             ]

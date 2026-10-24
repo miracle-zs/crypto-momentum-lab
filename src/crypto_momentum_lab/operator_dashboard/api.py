@@ -30,7 +30,6 @@ from crypto_momentum_lab.operator_dashboard.queries import (
 )
 from crypto_momentum_lab.operator_dashboard.schemas import (
     AccountOverviewResponse,
-    DecisionSLOResponse,
     LiveAccountMetricsResponse,
     LiveAccountsResponse,
     ResearchCollectorResponse,
@@ -452,21 +451,6 @@ def create_dashboard_app(
             query_service().readiness,
             ttl_seconds=5.0,
             stale_while_revalidate_seconds=0.0,
-        )
-
-    @dashboard.get(
-        "/api/decision-slo",
-        response_model=DecisionSLOResponse,
-        dependencies=[Depends(require_dashboard_auth)],
-    )
-    async def decision_slo(
-        window: Literal["1h", "6h", "24h", "7d"] = "24h",
-    ) -> DecisionSLOResponse:
-        return await response_cache.get(
-            f"decision-slo:{window}",
-            lambda: query_service().decision_slo(window),
-            ttl_seconds=15.0,
-            stale_while_revalidate_seconds=default_stale_grace_seconds,
         )
 
     @dashboard.get(

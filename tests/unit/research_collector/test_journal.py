@@ -361,7 +361,9 @@ def test_recover_fails_closed_on_corrupted_manifest(tmp_path: Path) -> None:
         journal.recover()
 
 
-def test_recover_and_read_resolutions_fails_closed_on_corrupted_resolutions(tmp_path: Path) -> None:
+def test_recover_and_iter_resolutions_fail_closed_on_corrupted_records(
+    tmp_path: Path,
+) -> None:
     journal_dir = tmp_path / "journal"
     journal = ArchiveJournal(
         journal_dir,
@@ -375,7 +377,7 @@ def test_recover_and_read_resolutions_fails_closed_on_corrupted_resolutions(tmp_
     with pytest.raises(CollectorStateConflict, match="corrupted materialization resolution.*line 2"):
         journal.recover()
     with pytest.raises(CollectorStateConflict, match="corrupted materialization resolution.*line 2"):
-        journal.read_resolutions()
+        list(journal._iter_resolutions())
 
     # 2. Non-dict JSON on a line
     res_file.write_text('["not", "a", "dict"]\n', encoding="utf-8")

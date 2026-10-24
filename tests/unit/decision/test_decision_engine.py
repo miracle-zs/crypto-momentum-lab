@@ -169,7 +169,11 @@ def test_decision_engine_cooldown_enforcement() -> None:
     )
 
     # Active cooldown for next 10 minutes
-    state = PolicyState().with_cooldown("BTCUSDT", clock_time + timedelta(minutes=10))
+    state = PolicyState(
+        cooldown_until_by_symbol={
+            "BTCUSDT": clock_time + timedelta(minutes=10),
+        },
+    )
     policy = EffectivePolicy(
         policy_id="pol_test_01",
         strategy_name="orderflow_impulse",

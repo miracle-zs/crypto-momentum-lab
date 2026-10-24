@@ -53,7 +53,6 @@ class PositionBatch:
     entry_bar_time: datetime  # 15m K线入场时间戳 (对应 TIMESTAMPTZ)
     status: str = "ACTIVE"  # ACTIVE / EXITING / CLOSED
     exit_order_submitted_at: datetime | None = None
-    order_counter: int = 0  # 批次内发单顺序计数器
     exit_order_counter: int = 0  # 批次内平仓单顺序计数器 (保证每次平仓尝试 ID 唯一)
     realized_pnl: Decimal = Decimal("0")  # 批次关闭时的名义毛盈亏 (USDT)
     exiting_quantity: Decimal = Decimal(

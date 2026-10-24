@@ -80,11 +80,6 @@ class LocalHealthWriter:
         )
         self._write_atomic(self._readiness_path, f"{content}\n")
 
-    def degraded(self) -> None:
-        """Stop advertising readiness while allowing the process to recover."""
-
-        self._write_atomic(self._status_path, "degraded\n")
-
     def stopped(self) -> None:
         """Publish a terminal state for graceful shutdowns."""
 
