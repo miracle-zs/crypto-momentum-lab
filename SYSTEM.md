@@ -1752,3 +1752,9 @@ CML_LIVE_EQUITY_FRACTION_ACCOUNT_4=0.40
 全局状态栏现在将缓存过期明确显示为 `STALE`，并列出受影响的系统分区或服务，提示可用右上角按钮刷新；其他不确定读数仍显示 `UNKNOWN` 并带上对应名称。账户持仓、挂单、成交和执行风控表格将常见方向、订单类型、订单状态及保证金模式映射为中文，未识别值保留原值。仅改 Dashboard 展示，不修改交易逻辑、接口或数据库。
 
 前端资源构建及 `git diff --check` 通过，未运行测试。提交 `dc37c6c35c0a0fb3f33e8669ec54352f57841b5f` 已推送并通过 `CML_DEPLOY_SCOPE=dashboard` 发布；dashboard 容器 healthy，`/api/health` 的应用与数据库状态均为 UP，入口引用新 JS 资源且返回 HTTP 200。部署仅重建 dashboard，没有运行迁移或重启交易账户、行情和研究采集服务。
+
+### 采集页不可用状态误报修复（2026-10-24）
+
+采集查询在数据卷或 checkpoint 不可读取时返回 `UNKNOWN`，同时以 0 作为数值占位并返回空告警列表。此前前端把占位 0 展示为实际容量、空积压和零缺口，并显示绿色“没有告警”。现在 UNKNOWN 时这些指标显示待确认，告警区说明无法核实；无数据的封存窗口和最后标的也不再描述成“没有”。`STALE` 等非正常状态且没有告警明细时同样不显示绿色正常提示。把容量状态的已知值翻译为中文。改动限 Dashboard 展示，没有改采集行为、API 或数据库。
+
+前端构建及 `git diff --check` 通过，未运行测试。代码提交 `8eaee234e490688f473935e998c05e7a796568a5` 已推送并通过 `CML_DEPLOY_SCOPE=dashboard` 发布；dashboard healthy，`/api/health` 返回应用与数据库 UP，新静态资源 HTTP 200。发布时采集接口为 FRESH、checkpoint 年龄约 7 秒。仅重建 dashboard，没有执行迁移或重启交易账户、行情和研究采集。
