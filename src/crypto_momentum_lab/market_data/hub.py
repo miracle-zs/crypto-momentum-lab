@@ -48,6 +48,8 @@ from crypto_momentum_lab.market_data.protocol_parsing import (
 log = structlog.get_logger()
 
 _HUB_SCHEMA_VERSION = 1
+_MAX_MESSAGE_SIZE_BYTES = 4 * 1024 * 1024
+_LARGE_BATCH_WARNING_BYTES = 3 * 1024 * 1024
 _SUBSCRIBE_MESSAGE = "subscribe_market_states"
 _READY_MESSAGE = "market_state_hub_ready"
 _BATCH_MESSAGE = "market_state_batch"
@@ -300,7 +302,7 @@ class MarketStateHub:
             self._handle_connection,
             self._config.host,
             self._config.port,
-            max_size=4 * 1024 * 1024,
+            max_size=_MAX_MESSAGE_SIZE_BYTES,
             max_queue=16,
         )
         socket = next(iter(self._server.sockets), None)
@@ -366,6 +368,21 @@ class MarketStateHub:
                     published_at=published_at,
                     stream_id=self._stream_id,
                 )
+                payload_size_bytes = len(message.encode("utf-8"))
+                if payload_size_bytes >= _LARGE_BATCH_WARNING_BYTES:
+                    log.warning(
+                        "market_state_hub_large_batch",
+                        environment=environment,
+                        sequence=sequence,
+                        payload_size_bytes=payload_size_bytes,
+                        state_count=len(environment_states),
+                        symbol_count=len(
+                            {state.symbol for state in environment_states}
+                        ),
+                        backfill_state_count=sum(
+                            state.is_backfill for state in environment_states
+                        ),
+                    )
                 self._sequence_by_environment[environment] = sequence
                 replay_buffer = self._replay_buffers.setdefault(
                     environment,
@@ -691,7 +708,7 @@ class WebSocketMarketStateSource:
                     open_timeout=self._config.handshake_timeout_seconds,
                     ping_interval=20,
                     ping_timeout=20,
-                    max_size=4 * 1024 * 1024,
+                    max_size=_MAX_MESSAGE_SIZE_BYTES,
                     max_queue=16,
                     proxy=None,
                 ) as connection:
