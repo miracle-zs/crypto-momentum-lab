@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>CML · 运行控制 · 总览 · Flight Deck</title>
-  <link rel="stylesheet" href="static/assets/dashboard-dba095e304e98d8f.css">
+  <link rel="stylesheet" href="static/assets/dashboard-03d8171bb323a07a.css">
 </head>
 <body>
   <a class="skip-link" href="#overview">跳到当前工作视图</a>
@@ -69,7 +69,7 @@
         </div>
         <div class="topbar-meta">
           <div id="global-mode" class="mode-badge runtime-line status-UNKNOWN" aria-label="执行模式">
-            <small>MODE</small><strong data-mode-value>UNKNOWN</strong><span data-mode-detail>等待数据</span>
+            <small>运行模式</small><strong data-mode-value>UNKNOWN</strong><span data-mode-detail>等待数据</span>
           </div>
           <button type="button" id="manual-refresh-btn" class="poll-state poll-refresh-btn" title="点击立即强制刷新 (当前 15s 自动轮询)" aria-label="立即强制刷新">
             <span class="pulse" aria-hidden="true"></span>
@@ -78,8 +78,9 @@
           </button>
           <div class="clock"><small>UTC+8</small><strong id="utc-clock">--:--:--</strong></div>
         </div>
-        <div id="readiness-strip" class="readiness-strip status-UNKNOWN">
+        <div id="readiness-strip" class="readiness-strip status-UNKNOWN" aria-label="全局运行就绪状态与摘要">
           <div class="readiness-lead">
+            <small class="readiness-scope">全局</small>
             <strong id="global-readiness">UNKNOWN</strong>
             <span id="global-readiness-detail">检测中</span>
           </div>
@@ -99,7 +100,7 @@
         <section id="overview" class="card is-active-view" data-workspace="ops" data-view-title="总览" data-endpoint="api/overview" aria-labelledby="overview-title">
           <header class="card-head">
             <div class="card-title"><div><h2 id="overview-title">系统总览</h2><small>15S 轮询刷新</small></div></div>
-            <span class="section-state status-UNKNOWN">UNKNOWN</span>
+            <span class="section-state status-UNKNOWN" aria-label="当前页面数据状态：待确认">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
             <div class="skeleton"><s style="width:38%"></s><s style="width:92%"></s><s style="width:74%"></s><s style="width:83%"></s></div>
@@ -109,7 +110,7 @@
         <section id="risk" class="card card-risk" data-workspace="ops" data-view-title="执行" data-endpoint="api/risk-execution" aria-labelledby="risk-title" hidden>
           <header class="card-head">
             <div class="card-title"><div><h2 id="risk-title">执行风控</h2><small>风控闸门与订单流水</small></div></div>
-            <span class="section-state status-UNKNOWN">UNKNOWN</span>
+            <span class="section-state status-UNKNOWN" aria-label="当前页面数据状态：待确认">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
             <div class="skeleton"><s style="width:29%"></s><s style="width:76%"></s><s style="width:81%"></s></div>
@@ -119,7 +120,7 @@
         <section id="account" class="card" data-workspace="ops" data-view-title="账户" data-endpoint="api/live-accounts" aria-labelledby="account-title" hidden>
           <header class="card-head">
             <div class="card-title"><div><h2 id="account-title">实盘账户</h2><small>资金持仓与对账同步</small></div></div>
-            <span class="section-state status-UNKNOWN">UNKNOWN</span>
+            <span class="section-state status-UNKNOWN" aria-label="当前页面数据状态：待确认">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
             <div class="skeleton"><s style="width:35%"></s><s style="width:82%"></s><s style="width:69%"></s></div>
@@ -129,7 +130,7 @@
         <section id="universe" class="card" data-workspace="data" data-view-title="市场" data-endpoint="api/universe" aria-labelledby="universe-title" hidden>
           <header class="card-head">
             <div class="card-title"><div><h2 id="universe-title">市场行情</h2><small>UTC 动量排名与监控池</small></div></div>
-            <span class="section-state status-UNKNOWN">UNKNOWN</span>
+            <span class="section-state status-UNKNOWN" aria-label="当前页面数据状态：待确认">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
             <div class="skeleton"><s style="width:42%"></s><s style="width:85%"></s><s style="width:85%"></s><s style="width:58%"></s></div>
@@ -139,7 +140,7 @@
         <section id="collector" class="card card-collector" data-workspace="data" data-view-title="数据采集" data-endpoint="api/research-collector" aria-labelledby="collector-title" hidden>
           <header class="card-head">
             <div class="card-title"><div><h2 id="collector-title">数据采集</h2><small>15S 状态归档监控</small></div></div>
-            <span class="section-state status-UNKNOWN">UNKNOWN</span>
+            <span class="section-state status-UNKNOWN" aria-label="当前页面数据状态：待确认">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
             <div class="skeleton"><s style="width:38%"></s><s style="width:92%"></s><s style="width:74%"></s><s style="width:83%"></s></div>
@@ -149,7 +150,7 @@
         <section id="reports" class="card" data-workspace="ops" data-view-title="台账" data-endpoint="api/reports" aria-labelledby="reports-title" hidden>
           <header class="card-head">
             <div class="card-title"><div><h2 id="reports-title">运行台账</h2><small>会话与实盘状态迁移</small></div></div>
-            <span class="section-state status-UNKNOWN">UNKNOWN</span>
+            <span class="section-state status-UNKNOWN" aria-label="当前页面数据状态：待确认">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
             <div class="skeleton"><s style="width:33%"></s><s style="width:87%"></s><s style="width:73%"></s></div>
@@ -159,7 +160,7 @@
         <section id="performance" class="card card-performance" data-workspace="ops" data-view-title="性能" data-endpoint="api/performance" aria-labelledby="performance-title" hidden>
           <header class="card-head">
             <div class="card-title"><div><h2 id="performance-title">系统性能</h2><small>DECISION PIPELINE · MARKET DATA · HOST RESOURCES</small></div></div>
-            <span class="section-state status-UNKNOWN">UNKNOWN</span>
+            <span class="section-state status-UNKNOWN" aria-label="当前页面数据状态：待确认">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
             <div class="skeleton"><s style="width:36%"></s><s style="width:85%"></s><s style="width:72%"></s><s style="width:90%"></s></div>
@@ -174,6 +175,6 @@
     </div>
   </div>
   <script src="static/assets/echarts-dae720e256d2461b.js"></script>
-  <script type="module" src="static/assets/dashboard-587259b6e693c3be.js" defer></script>
+  <script type="module" src="static/assets/dashboard-a9fc03dc257014c4.js" defer></script>
 </body>
 </html>

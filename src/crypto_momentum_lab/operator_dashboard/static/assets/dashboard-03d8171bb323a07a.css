@@ -1093,6 +1093,20 @@ body[data-active-workspace="data"] .topbar-workspace-kicker { color: var(--info)
 
 .nav-workspace .nav-group-label { margin-top: 0; }
 
+.nav-workspace[data-workspace-nav="data"] > a { grid-template-columns: minmax(0, 1fr) auto; }
+
+.readiness-scope {
+  flex: none;
+  color: var(--faint);
+  font-size: 9px;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+@media (max-width: 1023px) {
+  .nav-workspace[data-workspace-nav="data"] > a { grid-template-columns: 1fr; }
+}
+
 .topbar-heading {
   display: flex;
   align-items: baseline;
@@ -1772,6 +1786,17 @@ details.secondary[open] summary { margin-bottom: 10px; }
   font-size: 8.5px;
   color: var(--brand);
   margin-left: 4px;
+}
+
+.section-state::before {
+  content: "本页";
+  width: auto;
+  height: auto;
+  border-radius: 0;
+  background: none;
+  color: var(--muted);
+  font: 500 8px var(--sans);
+  letter-spacing: 0;
 }
 
 /* --- Module: ./styles/charts.css --- */

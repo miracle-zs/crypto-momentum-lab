@@ -45,8 +45,10 @@ function setSectionStatus(id, status, cacheStatus = null) {
   const isStale = cacheStatus === "STALE";
   const displayStatus = isStale ? "STALE" : (status || "UNKNOWN");
   if (badge) {
+    const badgeStatus = isStale ? `${status || "READY"} (STALE)` : (status || "UNKNOWN");
     badge.className = `section-state ${statusClass(displayStatus)}`;
-    badge.textContent = isStale ? `${status || "READY"} (STALE)` : (status || "UNKNOWN");
+    badge.textContent = badgeStatus;
+    badge.setAttribute("aria-label", `当前页面数据状态：${badgeStatus}`);
     if (isStale) {
       badge.setAttribute("title", "响应来源于过期的后台缓存 (X-Cache-Status: STALE)");
     } else {

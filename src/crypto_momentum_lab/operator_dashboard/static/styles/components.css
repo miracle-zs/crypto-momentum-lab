@@ -655,3 +655,14 @@ details.secondary[open] summary { margin-bottom: 10px; }
   color: var(--brand);
   margin-left: 4px;
 }
+
+.section-state::before {
+  content: "本页";
+  width: auto;
+  height: auto;
+  border-radius: 0;
+  background: none;
+  color: var(--muted);
+  font: 500 8px var(--sans);
+  letter-spacing: 0;
+}

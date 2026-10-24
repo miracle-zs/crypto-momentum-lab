@@ -113,5 +113,5 @@ export function renderLiveAccounts(state, data) {
     <div ${K.liveAccountDetailContent}>${selectedDetail}</div>
   </div>`;
   const metrics = `<div ${K.liveAccountMetrics} aria-live="polite">${emptyBox("加载四账户时序", "正在读取权益、保证金和回撤历史")}</div>`;
-  return [overallStatus, `<div class="live-account-fleet" data-live-account-directory>${liveAccountSummary(accounts, overallStatus)}${cards}${metrics}${detail}</div>`];
+  return [overallStatus, `<div class="live-account-fleet" data-live-account-directory>${liveAccountSummary(accounts, overallStatus)}${cards}${detail}${metrics}</div>`];
 }
