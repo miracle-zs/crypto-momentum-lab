@@ -7,7 +7,50 @@ import {
   statusClass,
 } from "./dashboard-formatters.js";
 
-export const pill = (status) => `<span class="pill ${statusClass(status)}"><i></i>${esc(status || "UNKNOWN")}</span>`;
+export const POSITION_SIDE_LABELS = Object.freeze({
+  LONG: "多",
+  SHORT: "空",
+  BOTH: "单向持仓",
+});
+
+export const ORDER_SIDE_LABELS = Object.freeze({
+  BUY: "买入",
+  SELL: "卖出",
+});
+
+export const ORDER_TYPE_LABELS = Object.freeze({
+  LIMIT: "限价",
+  MARKET: "市价",
+});
+
+export const ORDER_STATUS_LABELS = Object.freeze({
+  PENDING: "待发送",
+  SUBMITTED: "待交易所确认",
+  OPEN: "挂单中",
+  NEW: "挂单中",
+  RECONCILING: "核对中",
+  PARTIALLY_FILLED: "部分成交",
+  FILLED: "已成交",
+  CANCELED: "已取消/过期",
+  EXPIRED: "已过期",
+  REJECTED: "已拒绝",
+});
+
+export const MARGIN_TYPE_LABELS = Object.freeze({
+  CROSSED: "全仓",
+  ISOLATED: "逐仓",
+});
+
+export const enumLabel = (value, labels) => {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "—";
+  return labels[String(raw).toUpperCase()] || raw;
+};
+
+export const pill = (status, labels) => {
+  const label = labels ? enumLabel(status, labels) : status || "UNKNOWN";
+  return `<span class="pill ${statusClass(status)}"><i></i>${esc(label)}</span>`;
+};
 
 export const sideTag = (side) => {
   // "LONG" / "Long" / null / undefined must never be rendered as 空.

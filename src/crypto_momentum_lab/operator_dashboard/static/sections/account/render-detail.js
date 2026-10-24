@@ -21,7 +21,13 @@ import {
   blockTitle,
   dataTable,
   disclosure,
+  enumLabel,
+  MARGIN_TYPE_LABELS,
+  ORDER_SIDE_LABELS,
+  ORDER_STATUS_LABELS,
+  ORDER_TYPE_LABELS,
   pill,
+  POSITION_SIDE_LABELS,
   tile,
 } from "../../dashboard-ui.js";
 import {
@@ -126,12 +132,12 @@ function renderPositionsTable(positions, strategy) {
   }));
   return dataTable([
     { label: "币种", key: "symbol", cls: "sym" },
-    { label: "方向", value: (row) => pill(row.position_side || "BOTH"), html: true },
+    { label: "方向", value: (row) => pill(row.position_side || "BOTH", POSITION_SIDE_LABELS), html: true },
     { label: "策略", value: (row) => strategy(row.strategy_name), html: true },
     { label: "持仓量", value: (row) => num(row.position_amt, 4), align: "right" },
     { label: "开仓 / 标记", value: (row) => `${price(row.entry_price)} / ${price(row.mark_price)}`, align: "right" },
     { label: "策略杠杆", value: (row) => row.leverage ? `${esc(row.leverage)}x` : "—", align: "right", cls: "muted" },
-    { label: "保证金配置", value: (row) => row.margin_type || "—", cls: "muted" },
+    { label: "保证金配置", value: (row) => enumLabel(row.margin_type, MARGIN_TYPE_LABELS), cls: "muted" },
     { label: "名义价值（估算）", value: (row) => money(row.notional), align: "right" },
     { label: "未实现盈亏（估算）", value: (row) => signedMoney(row.unrealized_pnl), align: "right", cls: (row) => pnlClass(row.unrealized_pnl) },
     { label: "ROI（估算）", value: (row) => signedPercent(row.roi), align: "right", cls: (row) => pnlClass(row.roi) },
@@ -148,7 +154,7 @@ function renderExchangePositionsTable(positions, observedAt) {
     : "暂无交易所持仓快照；当前进程状态尚未提供此字段";
   const table = dataTable([
     { label: "币种", key: "symbol", cls: "sym" },
-    { label: "方向", value: (row) => pill(row.direction || row.position_side || "BOTH"), html: true },
+    { label: "方向", value: (row) => pill(row.direction || row.position_side || "BOTH", POSITION_SIDE_LABELS), html: true },
     { label: "持仓量", value: (row) => num(row.position_amt, 4), align: "right" },
     { label: "开仓均价", value: (row) => price(row.entry_price), align: "right" },
     { label: "标记价格", value: (row) => price(row.mark_price), align: "right" },
@@ -166,10 +172,10 @@ function renderOrdersTable(openOrders, strategy) {
   return dataTable([
     { label: "币种", key: "symbol", cls: "sym" },
     { label: "策略", value: (row) => strategy(row.strategy_name), html: true },
-    { label: "方向", key: "side", cls: (row) => row.side === "BUY" ? "pos" : "neg" },
-    { label: "类型 / 价格", value: (row) => `${row.order_type || "—"} / ${price(row.price)}`, align: "right" },
+    { label: "方向", value: (row) => enumLabel(row.side, ORDER_SIDE_LABELS), cls: (row) => row.side === "BUY" ? "pos" : "neg" },
+    { label: "类型 / 价格", value: (row) => `${enumLabel(row.order_type, ORDER_TYPE_LABELS)} / ${price(row.price)}`, align: "right" },
     { label: "数量", value: (row) => `${num(row.executed_quantity, 4)} / ${num(row.original_quantity, 4)}`, align: "right" },
-    { label: "状态", value: (row) => pill(row.status), html: true },
+    { label: "状态", value: (row) => pill(row.status, ORDER_STATUS_LABELS), html: true },
     { label: "开 / 平仓", value: (row) => row.is_exit ? "平仓" : "开仓", cls: "muted" },
     { label: "更新时间", value: (row) => dayTime(row.observed_at), align: "right", cls: "muted" },
   ], openOrders, {
@@ -186,7 +192,7 @@ function renderFillsTable(fills, strategy) {
     { label: "币种", key: "symbol", cls: "sym" },
     { label: "订单", value: (row) => shortHash(row.order_id), cls: "num cut" },
     { label: "策略", value: (row) => strategy(row.strategy_name), html: true },
-    { label: "方向", key: "side", cls: (row) => row.side === "BUY" ? "pos" : "neg" },
+    { label: "方向", value: (row) => enumLabel(row.side, ORDER_SIDE_LABELS), cls: (row) => row.side === "BUY" ? "pos" : "neg" },
     { label: "均价", value: (row) => price(row.price), align: "right" },
     { label: "数量", value: (row) => num(row.quantity, 4), align: "right" },
     { label: "已实现盈亏", value: (row) => signedMoney(row.realized_pnl), align: "right", cls: (row) => pnlClass(row.realized_pnl) },

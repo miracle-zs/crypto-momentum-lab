@@ -1,6 +1,13 @@
 import { DISPLAY_TIME_ZONE_LABEL } from "../dashboard-config.js";
 import { dayTime, esc } from "../dashboard-formatters.js";
-import { blockTitle, dataTable, pill } from "../dashboard-ui.js";
+import {
+  blockTitle,
+  dataTable,
+  enumLabel,
+  ORDER_SIDE_LABELS,
+  ORDER_STATUS_LABELS,
+  pill,
+} from "../dashboard-ui.js";
 
 export function renderRisk(data) {
   const activeHalts = data.active_halts || [];
@@ -14,8 +21,8 @@ export function renderRisk(data) {
     { label: "账户", key: "account_label" },
     { label: "币种", key: "symbol", cls: "sym notranslate" },
     { label: "客户端订单号", key: "client_order_id", cls: "num cut notranslate" },
-    { label: "方向", key: "side", cls: (row) => row.side === "BUY" ? "pos" : "neg" },
-    { label: "状态", value: (row) => pill(row.status), html: true },
+    { label: "方向", value: (row) => enumLabel(row.side, ORDER_SIDE_LABELS), cls: (row) => row.side === "BUY" ? "pos" : "neg" },
+    { label: "状态", value: (row) => pill(row.status, ORDER_STATUS_LABELS), html: true },
     { label: "更新时间", value: (row) => dayTime(row.observed_at), align: "right", cls: "muted" },
   ];
   const rowKey = (row) => `${row.account_label}:${row.client_order_id}`;

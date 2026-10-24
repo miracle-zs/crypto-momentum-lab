@@ -15,6 +15,19 @@ import {
   readingReliable,
 } from "./section-state.js";
 
+const SECTION_LABELS = Object.freeze({
+  overview: "系统总览",
+  risk: "执行风控",
+  account: "实盘账户",
+  universe: "市场行情",
+});
+
+const SERVICE_LABELS = Object.freeze({
+  "market-data": "行情服务",
+  "strategy-runner": "策略服务",
+  database: "数据库",
+});
+
 export function globalReadinessModel(now = Date.now()) {
   const overview = latestSectionData.get("overview");
   const risk = latestSectionData.get("risk");
@@ -42,15 +55,24 @@ export function globalReadinessModel(now = Date.now()) {
     .filter((id) => SAFETY_SECTIONS.has(id))
     .length;
   const staleNote = staleSafetySections > 0 ? " · 读数可能过期" : "";
-  const uncertainSections = [...latestSectionData.entries()]
+  const uncertainSectionReadings = [...latestSectionData.entries()]
     .filter(([id, data]) => (
       SAFETY_SECTIONS.has(id)
       && readingReliable(id, now)
       && hasUncertainStatus(readinessStatusForSection(id, data))
     ))
-    .length;
-  const uncertainServices = services.filter((service) => hasUncertainStatus(service.status)).length;
-  const uncertain = uncertainSections + uncertainServices;
+    .map(([id, data]) => ({
+      label: SECTION_LABELS[id] || id,
+      status: normalizedStatus(readinessStatusForSection(id, data)),
+    }));
+  const uncertainServiceReadings = services
+    .filter((service) => hasUncertainStatus(service.status))
+    .map((service) => ({
+      label: SERVICE_LABELS[service.name] || service.name,
+      status: normalizedStatus(service.status),
+    }));
+  const uncertainReadings = [...uncertainSectionReadings, ...uncertainServiceReadings];
+  const uncertain = uncertainReadings.length;
   const ambiguous = riskReliable ? risk?.ambiguous_orders?.length || 0 : 0;
   const accountSnapshots = accountReliable && Array.isArray(account?.accounts)
     ? account.accounts
@@ -99,8 +121,15 @@ export function globalReadinessModel(now = Date.now()) {
     ].filter(Boolean);
     detail = `实盘会话缺少新鲜读数 · ${missing.join("、")}`;
   } else if (uncertain > 0) {
-    status = "UNKNOWN";
-    detail = `${uncertain} 个关键读数需要确认`;
+    const staleReadings = uncertainReadings.filter((reading) => reading.status === "STALE");
+    const labels = uncertainReadings.map((reading) => reading.label).join("、");
+    if (staleReadings.length === uncertainReadings.length) {
+      status = "STALE";
+      detail = `数据已过期：${labels} · 点击右上角刷新`;
+    } else {
+      status = "UNKNOWN";
+      detail = `${uncertain} 个关键读数待确认：${labels}`;
+    }
   } else if (expiredSafetySections > 0) {
     status = "STALE";
     detail = `${expiredSafetySections} 个关键分区读数已过期 · 尚未确认安全`;
