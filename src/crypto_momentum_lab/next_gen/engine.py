@@ -216,9 +216,19 @@ class AccountState:
             )
         )
 
-    def can_submit_exit_order(self) -> bool:
-        has_in_doubt = any(
-            o.status == OrderStatus.RECONCILING for o in self.orders.values()
+    def can_submit_exit_order(
+        self,
+        symbol: str | None = None,
+        position_side: str | None = None,
+    ) -> bool:
+        """Check shared exit readiness and scoped unknown orders when provided."""
+        if (symbol is None) != (position_side is None):
+            return False
+        has_in_doubt = symbol is not None and any(
+            o.status == OrderStatus.RECONCILING
+            and o.symbol == symbol
+            and o.position_side == position_side
+            for o in self.orders.values()
         )
         if (
             has_in_doubt

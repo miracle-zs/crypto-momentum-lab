@@ -337,7 +337,10 @@ class OrderExecutor:
                     "Symbol preparation completed after entry gate closed"
                 )
         else:
-            if not self._state.can_submit_exit_order():
+            if not self._state.can_submit_exit_order(
+                order.symbol,
+                order.position_side,
+            ):
                 raise RuntimeError(
                     f"安全门阻断平仓单: {order.client_order_id}, "
                     f"mode={self._state.system_mode.name}"

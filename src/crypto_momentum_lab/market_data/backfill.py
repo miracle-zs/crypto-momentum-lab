@@ -183,39 +183,46 @@ class PromotionHistoryBackfiller:
         )
         if not ordered:
             return
-        batch = ordered[: self._max_symbols_per_batch]
         if len(ordered) > self._max_symbols_per_batch:
-            log.warning(
-                "promotion_backfill_batch_truncated",
+            log.info(
+                "promotion_backfill_batch_split",
                 requested=len(ordered),
-                running=len(batch),
+                batch_size=self._max_symbols_per_batch,
             )
         end = datetime.now(UTC) if now is None else now.astimezone(UTC)
         start = end - self._lookback
-        for symbol in batch:
-            try:
-                trades = await self._fetch_window(symbol, start=start, end=end)
-                states = synthesize_states_from_trades(
-                    symbol,
-                    trades,
-                    environment=self._environment,
-                )
-                if states:
-                    await self._publisher.publish(states)
-                log.info(
-                    "promotion_backfill_completed",
-                    symbol=symbol,
-                    buckets=len(states),
-                    trades=len(trades),
-                    lookback_seconds=self._lookback.total_seconds(),
-                )
-            except Exception as error:
-                log.warning(
-                    "promotion_backfill_failed",
-                    symbol=symbol,
-                    error_type=type(error).__name__,
-                    error=str(error),
-                )
+        failed_symbols: list[str] = []
+        for offset in range(0, len(ordered), self._max_symbols_per_batch):
+            batch = ordered[offset : offset + self._max_symbols_per_batch]
+            for symbol in batch:
+                try:
+                    trades = await self._fetch_window(symbol, start=start, end=end)
+                    states = synthesize_states_from_trades(
+                        symbol,
+                        trades,
+                        environment=self._environment,
+                    )
+                    if states:
+                        await self._publisher.publish(states)
+                    log.info(
+                        "promotion_backfill_completed",
+                        symbol=symbol,
+                        buckets=len(states),
+                        trades=len(trades),
+                        lookback_seconds=self._lookback.total_seconds(),
+                    )
+                except Exception as error:
+                    failed_symbols.append(symbol)
+                    log.warning(
+                        "promotion_backfill_failed",
+                        symbol=symbol,
+                        error_type=type(error).__name__,
+                        error=str(error),
+                    )
+        if failed_symbols:
+            raise RuntimeError(
+                f"promotion history backfill failed for {len(failed_symbols)} symbols"
+            )
 
     async def _fetch_window(
         self,

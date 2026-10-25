@@ -131,6 +131,7 @@ _UNIVERSE_REFRESH_TIMEOUT_SECONDS = 120.0
 # Cap the symbol lists on the membership-churn log so a first snapshot (where
 # every symbol looks "added") cannot flood the journal.
 _SYMBOL_LOG_LIMIT = 20
+_TRADE_TIER_HISTORY_LOOKBACK = timedelta(minutes=35)
 _MARKET_DATA_STARTUP_GRACE_SECONDS = 120.0
 _MARKET_DATA_STALE_AFTER_SECONDS = 120.0
 _MARKET_DATA_WATCHDOG_INTERVAL_SECONDS = 15.0
@@ -435,6 +436,7 @@ class CaptureUniverseObserver:
         self._trade_tier_joined_at: dict[str, datetime] = {}
         self._must_warm_symbols: frozenset[str] = frozenset()
         self._backfill_task: asyncio.Task[None] | None = None
+        self._pending_backfill_symbols: set[str] = set()
 
     async def snapshot_updated(
         self,
@@ -598,8 +600,6 @@ class CaptureUniverseObserver:
         symbols: frozenset[str],
         previous: frozenset[str] | None,
         now: datetime,
-        lookback: timedelta,
-        backfilled: frozenset[str],
     ) -> None:
         if previous is None:
             for symbol in symbols:
@@ -609,10 +609,16 @@ class CaptureUniverseObserver:
             self._trade_tier_joined_at[symbol] = now
         for symbol in previous - symbols:
             self._trade_tier_joined_at.pop(symbol, None)
-        # Treat a successful backfill as if the symbol had been subscribed for
-        # the full window so the next universe refresh does not re-fetch.
-        warm_at = now - lookback
-        for symbol in backfilled:
+
+    def _mark_history_backfilled(
+        self,
+        symbols: frozenset[str],
+        *,
+        now: datetime,
+    ) -> None:
+        """Mark symbols warm only after the complete backfill callback succeeds."""
+        warm_at = now - _TRADE_TIER_HISTORY_LOOKBACK
+        for symbol in symbols & (self._applied_symbols or frozenset()):
             joined_at = self._trade_tier_joined_at.get(symbol)
             if joined_at is None or joined_at > warm_at:
                 self._trade_tier_joined_at[symbol] = warm_at
@@ -626,22 +632,32 @@ class CaptureUniverseObserver:
         if not symbols or self._on_trade_symbols_promoted is None:
             return
         callback = self._on_trade_symbols_promoted
+        self._pending_backfill_symbols.update(symbols)
         if self._backfill_task is not None and not self._backfill_task.done():
             log.warning(
                 "promotion_backfill_still_running",
-                pending_symbols=sorted(symbols)[:_SYMBOL_LOG_LIMIT],
+                pending_symbols=sorted(self._pending_backfill_symbols)[
+                    :_SYMBOL_LOG_LIMIT
+                ],
             )
             return
 
         async def _run() -> None:
-            try:
-                await callback(symbols)
-            except Exception as error:
-                log.warning(
-                    "promotion_backfill_task_failed",
-                    error_type=type(error).__name__,
-                    error=str(error),
-                )
+            while self._pending_backfill_symbols:
+                batch = frozenset(self._pending_backfill_symbols)
+                self._pending_backfill_symbols.difference_update(batch)
+                try:
+                    await callback(batch)
+                except Exception as error:
+                    self._pending_backfill_symbols.update(batch)
+                    log.warning(
+                        "promotion_backfill_task_failed",
+                        symbols=sorted(batch)[:_SYMBOL_LOG_LIMIT],
+                        error_type=type(error).__name__,
+                        error=str(error),
+                    )
+                    return
+                self._mark_history_backfilled(batch, now=datetime.now(UTC))
 
         self._backfill_task = asyncio.create_task(
             _run(),
@@ -664,7 +680,8 @@ class CaptureUniverseObserver:
             protected_symbols=protected_symbols,
             observed_at=observed_at,
         )
-        lookback = timedelta(minutes=35)
+        self._pending_backfill_symbols.intersection_update(symbols)
+        lookback = _TRADE_TIER_HISTORY_LOOKBACK
         previous_symbols = self._applied_symbols
         added_symbols = (
             frozenset() if previous_symbols is None else symbols - previous_symbols
@@ -680,19 +697,19 @@ class CaptureUniverseObserver:
             lookback=lookback,
         )
         current_must_warm = self._compute_must_warm_symbols(trade_symbols=symbols)
-        # Optimistically mark membership before the async task finishes so a
-        # concurrent refresh does not enqueue the same symbols twice.
+        # Record current membership now; mark history warm only after backfill
+        # succeeds.
         self._remember_trade_tier_membership(
             symbols=symbols,
             previous=previous_symbols,
             now=observed_at,
-            lookback=lookback,
-            backfilled=needing_backfill,
         )
         self._must_warm_symbols = current_must_warm
         if symbols == self._applied_symbols:
-            if needing_backfill:
-                self._schedule_history_backfill(needing_backfill)
+            if previous_symbols is not None:
+                self._schedule_history_backfill(
+                    needing_backfill | frozenset(self._pending_backfill_symbols)
+                )
             return
         # A symbol only produces market-state buckets while it is subscribed, so
         # a symbol that leaves and later re-enters the monitored set shows up
@@ -732,8 +749,10 @@ class CaptureUniverseObserver:
             )
         # Startup applies the whole monitoring set in one shot; only later
         # universe refreshes represent a real promotion into the trade tier.
-        if previous_symbols is not None and needing_backfill:
-            self._schedule_history_backfill(needing_backfill)
+        if previous_symbols is not None:
+            self._schedule_history_backfill(
+                needing_backfill | frozenset(self._pending_backfill_symbols)
+            )
 
 
 async def prune_expired_raw_archives(

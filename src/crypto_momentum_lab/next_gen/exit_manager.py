@@ -104,7 +104,10 @@ class ExitManager:
             ).total_seconds() >= grace_sec
             immediate = immediate or expired
         immediate = immediate or self._scheduled_flatten_due(datetime.now(UTC))
-        if not self._state.can_submit_exit_order():
+        if not self._state.can_submit_exit_order(
+            batch.symbol,
+            batch.position_side,
+        ):
             return
 
         # 0. 先确保撤销本批次所有尚未成交的开仓挂单，防止边平仓边被撮合成交
@@ -193,7 +196,7 @@ class ExitManager:
             return False
         except RuntimeError as error:
             # A closed gate is temporary. Other RuntimeErrors are real faults.
-            if self._state.can_submit_exit_order():
+            if self._state.can_submit_exit_order(order.symbol, order.position_side):
                 raise
             log.warning(
                 "exit_order_blocked_by_gate",
@@ -302,7 +305,10 @@ class ExitManager:
         if (
             remaining_batch
             and remaining_batch.quantity > Decimal("0")
-            and self._state.can_submit_exit_order()
+            and self._state.can_submit_exit_order(
+                remaining_batch.symbol,
+                remaining_batch.position_side,
+            )
         ):
             sweep_qty = self.symbol_rules.round_quantity(
                 remaining_batch.symbol, remaining_batch.quantity
@@ -342,6 +348,11 @@ class ExitManager:
             if batch.status == "CLOSED" or batch.quantity <= Decimal("0"):
                 self._pending_exits.pop(batch.batch_id, None)
                 self._rejected_exit_until.pop(batch.batch_id, None)
+                continue
+            if not self._state.can_submit_exit_order(
+                batch.symbol,
+                batch.position_side,
+            ):
                 continue
 
             reject_until = self._rejected_exit_until.get(batch.batch_id)
