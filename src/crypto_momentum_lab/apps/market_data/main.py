@@ -50,7 +50,6 @@ from crypto_momentum_lab.market_data.agg_trade_recovery import (
     AggTradeGapRecoverer,
     agg_trade_gap_quality_event,
 )
-from crypto_momentum_lab.market_data.backfill import PromotionHistoryBackfiller
 from crypto_momentum_lab.market_data.binance.connection_pool import (
     BinanceConnectionPool,
 )
@@ -131,7 +130,6 @@ _UNIVERSE_REFRESH_TIMEOUT_SECONDS = 120.0
 # Cap the symbol lists on the membership-churn log so a first snapshot (where
 # every symbol looks "added") cannot flood the journal.
 _SYMBOL_LOG_LIMIT = 20
-_TRADE_TIER_HISTORY_LOOKBACK = timedelta(minutes=35)
 _MARKET_DATA_STARTUP_GRACE_SECONDS = 120.0
 _MARKET_DATA_STALE_AFTER_SECONDS = 120.0
 _MARKET_DATA_WATCHDOG_INTERVAL_SECONDS = 15.0
@@ -396,14 +394,10 @@ class CaptureUniverseObserver:
         prewarm_retention_minutes: int = 0,
         max_prewarm_symbols: int = 0,
         full_stream_max_gainer_rank: int = 0,
-        must_warm_max_gainer_rank: int = 0,
         protected_symbol_loader: (
             Callable[[], Awaitable[frozenset[str]]] | None
         ) = None,
         on_symbols_changed: Callable[[frozenset[str]], None] | None = None,
-        on_trade_symbols_promoted: (
-            Callable[[frozenset[str]], Awaitable[None]] | None
-        ) = None,
     ) -> None:
         self._capture = capture
         self._streams = streams
@@ -414,15 +408,11 @@ class CaptureUniverseObserver:
             raise ValueError("max_prewarm_symbols must be non-negative")
         if full_stream_max_gainer_rank < 0:
             raise ValueError("full_stream_max_gainer_rank must be non-negative")
-        if must_warm_max_gainer_rank < 0:
-            raise ValueError("must_warm_max_gainer_rank must be non-negative")
         self._prewarm_retention = timedelta(minutes=prewarm_retention_minutes)
         self._max_prewarm_symbols = max_prewarm_symbols
         self._full_stream_max_gainer_rank = full_stream_max_gainer_rank
-        self._must_warm_max_gainer_rank = must_warm_max_gainer_rank
         self._protected_symbol_loader = protected_symbol_loader
         self._on_symbols_changed = on_symbols_changed
-        self._on_trade_symbols_promoted = on_trade_symbols_promoted
         self._lock = asyncio.Lock()
         self._universe_symbols: frozenset[str] | None = None
         self._universe_forced_symbols: frozenset[str] = frozenset()
@@ -430,13 +420,6 @@ class CaptureUniverseObserver:
         self._applied_symbols: frozenset[str] | None = None
         self._prewarm_until_by_symbol: dict[str, datetime] = {}
         self._previous_trade_tier: frozenset[str] | None = None
-        # First wall-clock time the symbol entered the per-symbol trade tier.
-        # Used to decide whether a T1→T0 promotion already has enough local
-        # 15s history or still needs a REST backfill.
-        self._trade_tier_joined_at: dict[str, datetime] = {}
-        self._must_warm_symbols: frozenset[str] = frozenset()
-        self._backfill_task: asyncio.Task[None] | None = None
-        self._pending_backfill_symbols: set[str] = set()
 
     async def snapshot_updated(
         self,
@@ -550,120 +533,6 @@ class CaptureUniverseObserver:
         prewarm = frozenset(self._prewarm_until_by_symbol)
         return active_trade_tier | prewarm
 
-    def _compute_must_warm_symbols(
-        self,
-        *,
-        trade_symbols: frozenset[str],
-    ) -> frozenset[str]:
-        if self._must_warm_max_gainer_rank <= 0:
-            return frozenset()
-        return frozenset(
-            symbol
-            for symbol in trade_symbols
-            if self._gainer_rank_by_symbol.get(symbol, 10**9)
-            <= self._must_warm_max_gainer_rank
-        )
-
-    def _symbols_needing_history_backfill(
-        self,
-        *,
-        trade_symbols: frozenset[str],
-        added_symbols: frozenset[str],
-        previous_must_warm: frozenset[str],
-        now: datetime,
-        lookback: timedelta,
-    ) -> frozenset[str]:
-        """Return trade-tier symbols that cannot yet trade on local history.
-
-        Two cases:
-        1. Newly entered the trade tier (T2 → T0/T1).
-        2. Already in the trade tier but just crossed into the must-warm rank
-           band (T1 → T0) before accumulating a full lookback window.
-        """
-
-        needing: set[str] = set(added_symbols & trade_symbols)
-        if self._must_warm_max_gainer_rank <= 0 or lookback <= timedelta(0):
-            return frozenset(needing)
-        current_must_warm = self._compute_must_warm_symbols(trade_symbols=trade_symbols)
-        newly_must_warm = current_must_warm - previous_must_warm
-        for symbol in newly_must_warm:
-            if symbol in needing:
-                continue
-            joined_at = self._trade_tier_joined_at.get(symbol)
-            if joined_at is None or now - joined_at < lookback:
-                needing.add(symbol)
-        return frozenset(needing)
-
-    def _remember_trade_tier_membership(
-        self,
-        *,
-        symbols: frozenset[str],
-        previous: frozenset[str] | None,
-        now: datetime,
-    ) -> None:
-        if previous is None:
-            for symbol in symbols:
-                self._trade_tier_joined_at[symbol] = now
-            return
-        for symbol in symbols - previous:
-            self._trade_tier_joined_at[symbol] = now
-        for symbol in previous - symbols:
-            self._trade_tier_joined_at.pop(symbol, None)
-
-    def _mark_history_backfilled(
-        self,
-        symbols: frozenset[str],
-        *,
-        now: datetime,
-    ) -> None:
-        """Mark symbols warm only after the complete backfill callback succeeds."""
-        warm_at = now - _TRADE_TIER_HISTORY_LOOKBACK
-        for symbol in symbols & (self._applied_symbols or frozenset()):
-            joined_at = self._trade_tier_joined_at.get(symbol)
-            if joined_at is None or joined_at > warm_at:
-                self._trade_tier_joined_at[symbol] = warm_at
-
-    def _schedule_history_backfill(
-        self,
-        symbols: frozenset[str],
-    ) -> None:
-        """Run REST backfill off the observer lock so refreshes stay live."""
-
-        if not symbols or self._on_trade_symbols_promoted is None:
-            return
-        callback = self._on_trade_symbols_promoted
-        self._pending_backfill_symbols.update(symbols)
-        if self._backfill_task is not None and not self._backfill_task.done():
-            log.warning(
-                "promotion_backfill_still_running",
-                pending_symbols=sorted(self._pending_backfill_symbols)[
-                    :_SYMBOL_LOG_LIMIT
-                ],
-            )
-            return
-
-        async def _run() -> None:
-            while self._pending_backfill_symbols:
-                batch = frozenset(self._pending_backfill_symbols)
-                self._pending_backfill_symbols.difference_update(batch)
-                try:
-                    await callback(batch)
-                except Exception as error:
-                    self._pending_backfill_symbols.update(batch)
-                    log.warning(
-                        "promotion_backfill_task_failed",
-                        symbols=sorted(batch)[:_SYMBOL_LOG_LIMIT],
-                        error_type=type(error).__name__,
-                        error=str(error),
-                    )
-                    return
-                self._mark_history_backfilled(batch, now=datetime.now(UTC))
-
-        self._backfill_task = asyncio.create_task(
-            _run(),
-            name="promotion-history-backfill",
-        )
-
     async def _apply_symbols(self, *, now: datetime | None = None) -> None:
         if self._universe_symbols is None:
             return
@@ -680,8 +549,6 @@ class CaptureUniverseObserver:
             protected_symbols=protected_symbols,
             observed_at=observed_at,
         )
-        self._pending_backfill_symbols.intersection_update(symbols)
-        lookback = _TRADE_TIER_HISTORY_LOOKBACK
         previous_symbols = self._applied_symbols
         added_symbols = (
             frozenset() if previous_symbols is None else symbols - previous_symbols
@@ -689,27 +556,7 @@ class CaptureUniverseObserver:
         removed_symbols = (
             frozenset() if previous_symbols is None else previous_symbols - symbols
         )
-        needing_backfill = self._symbols_needing_history_backfill(
-            trade_symbols=symbols,
-            added_symbols=added_symbols,
-            previous_must_warm=self._must_warm_symbols,
-            now=observed_at,
-            lookback=lookback,
-        )
-        current_must_warm = self._compute_must_warm_symbols(trade_symbols=symbols)
-        # Record current membership now; mark history warm only after backfill
-        # succeeds.
-        self._remember_trade_tier_membership(
-            symbols=symbols,
-            previous=previous_symbols,
-            now=observed_at,
-        )
-        self._must_warm_symbols = current_must_warm
         if symbols == self._applied_symbols:
-            if previous_symbols is not None:
-                self._schedule_history_backfill(
-                    needing_backfill | frozenset(self._pending_backfill_symbols)
-                )
             return
         # A symbol only produces market-state buckets while it is subscribed, so
         # a symbol that leaves and later re-enters the monitored set shows up
@@ -733,10 +580,8 @@ class CaptureUniverseObserver:
             total=len(symbols),
             watch_only=len(watch_symbols),
             full_stream_max_gainer_rank=self._full_stream_max_gainer_rank,
-            must_warm_max_gainer_rank=self._must_warm_max_gainer_rank,
             added=len(added_symbols),
             removed=len(removed_symbols),
-            needing_backfill=len(needing_backfill),
         )
         if added_symbols or removed_symbols:
             log.info(
@@ -747,14 +592,6 @@ class CaptureUniverseObserver:
                 added_symbols=sorted(added_symbols)[:_SYMBOL_LOG_LIMIT],
                 removed_symbols=sorted(removed_symbols)[:_SYMBOL_LOG_LIMIT],
             )
-        # Startup applies the whole monitoring set in one shot; only later
-        # universe refreshes represent a real promotion into the trade tier.
-        if previous_symbols is not None:
-            self._schedule_history_backfill(
-                needing_backfill | frozenset(self._pending_backfill_symbols)
-            )
-
-
 async def prune_expired_raw_archives(
     repository: PostgresCaptureRepository,
     root: Path,
@@ -1391,11 +1228,6 @@ async def build_market_data_runtime(
                 ),
                 coordinator=coordinator,
             )
-            promotion_backfiller = PromotionHistoryBackfiller(
-                client=rest_client,
-                publisher=state_hub,
-                environment=runtime.environment,
-            )
             observer = CaptureUniverseObserver(
                 capture,
                 streams=enabled_streams,
@@ -1405,12 +1237,8 @@ async def build_market_data_runtime(
                 full_stream_max_gainer_rank=(
                     runtime.universe.full_stream_max_gainer_rank
                 ),
-                # TARGET / entry-adjacent band: T1→T0 must already have a full local
-                # 15s window, not merely be subscribed.
-                must_warm_max_gainer_rank=runtime.universe.top_count,
                 protected_symbol_loader=load_protected_symbols,
                 on_symbols_changed=runtime_state_publisher.set_expected_symbols,
-                on_trade_symbols_promoted=promotion_backfiller.backfill_symbols,
             )
             universe = UniverseRefreshService(
                 market_data=rest_client,
