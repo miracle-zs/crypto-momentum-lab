@@ -54,7 +54,9 @@ export function renderLiveRuntime() {
   heartbeat.textContent = age == null
     ? "UNKNOWN · 等待数据"
     : `${freshness} · ${relAge(age)}`;
-  if (heartbeatRow) heartbeatRow.className = `poll-state ${statusClass(freshness)}`;
+  if (heartbeatRow) {
+    heartbeatRow.className = `poll-state poll-refresh-btn ${statusClass(freshness)}`;
+  }
 
   const announcement = `执行模式 ${mode}，${freshness === "UNKNOWN" ? "心跳未知" : `心跳${freshness}`}`;
   const announcer = document.getElementById("runtime-announcer");

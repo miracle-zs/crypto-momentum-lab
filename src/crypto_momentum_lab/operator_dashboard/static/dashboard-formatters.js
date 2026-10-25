@@ -133,6 +133,14 @@ export const elapsedTime = (start, end) => {
   const minutes = Math.max(0, Math.round((endAt - startAt) / 60000));
   const hours = Math.floor(minutes / 60);
   const remainder = minutes % 60;
+  if (hours >= 24) {
+    const days = Math.floor(hours / 24);
+    const remainingHours = hours % 24;
+    const parts = [`${days} 天`];
+    if (remainingHours) parts.push(`${remainingHours} 小时`);
+    if (remainder) parts.push(`${remainder} 分`);
+    return parts.join(" ");
+  }
   if (hours === 0) return `${remainder} 分钟`;
   return remainder ? `${hours} 小时 ${remainder} 分` : `${hours} 小时`;
 };
