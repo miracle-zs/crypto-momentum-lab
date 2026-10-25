@@ -288,20 +288,28 @@ class ClosedMarketStatePublisher:
         expected_symbols = frozenset(
             symbol.strip() for symbol in symbols if symbol.strip()
         )
-        removed_symbols = self._expected_symbols - expected_symbols
-        if removed_symbols:
+        changed_symbols = self._expected_symbols ^ expected_symbols
+        if changed_symbols:
             for symbol_key in tuple(self._last_materialized_bucket_by_symbol):
-                if symbol_key[1] in removed_symbols:
+                if symbol_key[1] in changed_symbols:
                     self._last_materialized_bucket_by_symbol.pop(
                         symbol_key,
                         None,
                     )
-            # Drop the materialization fallback for symbols that left the
-            # dense set.  A later re-entry is a new baseline, not a gap, so a
-            # stale last state would be misleading as well as unbounded.
+            # Membership changes start a new dense-state baseline. In
+            # particular, a re-entering symbol must not synthesize empty
+            # buckets across the period when it was outside the monitored
+            # set; promotion history is handled separately by the backfiller.
             for symbol_key in tuple(self._last_state_by_symbol):
-                if symbol_key[1] in removed_symbols:
+                if symbol_key[1] in changed_symbols:
                     self._last_state_by_symbol.pop(symbol_key, None)
+            for quote_cache in (
+                self._durable_latest_quotes,
+                self._realtime_latest_quotes,
+            ):
+                for symbol_key in tuple(quote_cache):
+                    if symbol_key[1] in changed_symbols:
+                        quote_cache.pop(symbol_key, None)
         self._expected_symbols = expected_symbols
         self._realtime_continuity.set_monitored_symbols(expected_symbols)
         self._last_materialized_empty_buckets_through = None
@@ -886,6 +894,17 @@ class ClosedMarketStatePublisher:
                 raise
             except Exception as error:
                 self._durable_sink_failure_count += 1
+                sqlstate = getattr(error, "sqlstate", None)
+                if not isinstance(sqlstate, str):
+                    original_error = getattr(error, "orig", None)
+                    sqlstate = getattr(original_error, "sqlstate", None)
+                if isinstance(sqlstate, str) and sqlstate.startswith("23"):
+                    self._log.exception(
+                        "runtime_state_persistence_constraint_failed",
+                        error=str(error),
+                        sqlstate=sqlstate,
+                    )
+                    raise
                 self._log.exception(
                     "runtime_state_persistence_failed",
                     error=str(error),
