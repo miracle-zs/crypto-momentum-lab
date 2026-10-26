@@ -29,7 +29,7 @@ from crypto_momentum_lab.next_gen.client import (
 from crypto_momentum_lab.next_gen.engine import AccountState
 from crypto_momentum_lab.next_gen.executor import OrderExecutor
 from crypto_momentum_lab.next_gen.exit_manager import ExitManager
-from crypto_momentum_lab.next_gen.models import SystemMode
+from crypto_momentum_lab.next_gen.models import OrderStatus, SystemMode
 from crypto_momentum_lab.next_gen.persistence import (
     TradingRepositoryProtocol,
     compute_advisory_lock_key,
@@ -474,7 +474,13 @@ class NextGenDaemon:
                         raise RuntimeError(
                             "Private state became unavailable during startup"
                         )
-                    self.state.set_system_mode(SystemMode.RUNNING)
+                    if any(
+                        order.status == OrderStatus.RECONCILING
+                        for order in self.state.orders.values()
+                    ):
+                        self.state.set_system_mode(SystemMode.DEGRADED)
+                    else:
+                        self.state.set_system_mode(SystemMode.RUNNING)
                     tg.create_task(
                         self.ws_client.run_with_keepalive(
                             keepalive_interval_sec=keepalive_interval_sec,

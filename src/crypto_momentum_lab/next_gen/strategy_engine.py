@@ -110,12 +110,24 @@ class MomentumStrategyEngine:
             )
         for symbol in self.symbols:
             self.symbol_rules.get_filter(symbol)
+        required_data = self.runtime.required_data()
         history = await db.async_get_historical_market_states(
             self.market_environment,
             self.symbols,
-            self.runtime.required_data().warmup_buckets,
+            required_data.warmup_buckets,
         )
         for market_state in history:
+            previous = self._last_state_at.get(market_state.symbol)
+            if not market_state.data_complete:
+                self.runtime.reset_symbol(market_state.symbol)
+                self._last_state_at[market_state.symbol] = market_state.bucket_end
+                continue
+            if (
+                previous is not None
+                and (market_state.bucket_end - previous).total_seconds()
+                > required_data.max_gap_seconds
+            ):
+                self.runtime.reset_symbol(market_state.symbol)
             self.runtime.warm_market_state(market_state)
             self._last_state_at[market_state.symbol] = market_state.bucket_end
             if market_state.effective_price is not None:
@@ -131,13 +143,6 @@ class MomentumStrategyEngine:
         if previous is not None and market_state.bucket_end <= previous:
             return []
         received_at = datetime.now(UTC)
-        self.market_data_observation = {
-            "bucket_end": market_state.bucket_end.isoformat(),
-            "received_at": received_at.isoformat(),
-            "delay_ms": max(
-                0.0, (received_at - market_state.bucket_end).total_seconds() * 1000
-            ),
-        }
         if not market_state.data_complete:
             self.runtime.reset_symbol(symbol)
             self._last_state_at[symbol] = market_state.bucket_end
@@ -154,7 +159,16 @@ class MomentumStrategyEngine:
         decision = self.runtime.on_market_state(market_state)
         now = datetime.now(UTC)
         age = (now - market_state.bucket_end).total_seconds()
-        if not self.market_connected or age < -5 or age > 45:
+        if age < -5 or age > 45:
+            return []
+        self.market_data_observation = {
+            "bucket_end": market_state.bucket_end.isoformat(),
+            "received_at": received_at.isoformat(),
+            "delay_ms": max(
+                0.0, (received_at - market_state.bucket_end).total_seconds() * 1000
+            ),
+        }
+        if not self.market_connected:
             return []
         filter_context: dict[str, Any] = {
             "entry_enabled": self.state.can_submit_entry_order(),

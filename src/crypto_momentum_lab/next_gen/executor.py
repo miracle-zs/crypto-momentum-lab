@@ -9,6 +9,7 @@ from typing import Any
 import structlog
 
 from crypto_momentum_lab.next_gen.client import (
+    BinanceOrderNotFoundError,
     BinanceOrderRejectedError,
     BinanceRestClient,
 )
@@ -168,12 +169,24 @@ class OrderExecutor:
             "EXPIRED_IN_MATCH": OrderStatus.CANCELED,
             "REJECTED": OrderStatus.REJECTED,
         }
+        not_found_order_ids: set[str] = set()
         for order in list(self._state.orders.values()):
             if order.is_terminal:
                 continue
-            row = await self._read.fetch_startup_order(
-                order.symbol, order.client_order_id
-            )
+            try:
+                row = await self._read.fetch_startup_order(
+                    order.symbol, order.client_order_id
+                )
+            except BinanceOrderNotFoundError as error:
+                order.status = OrderStatus.RECONCILING
+                not_found_order_ids.add(order.client_order_id)
+                log.warning(
+                    "startup_order_not_found_unresolved",
+                    order_id=order.client_order_id,
+                    symbol=order.symbol,
+                    reason=error.message,
+                )
+                continue
             if (
                 row["clientOrderId"] != order.client_order_id
                 or row["symbol"] != order.symbol
@@ -233,17 +246,23 @@ class OrderExecutor:
             for order in self._state.orders.values()
             if not order.is_terminal
         }
-        if actual != expected or exchange_ids != local_ids:
+        unresolved_missing_ids = not_found_order_ids - exchange_ids
+        expected_exchange_ids = local_ids - unresolved_missing_ids
+        if actual != expected or exchange_ids != expected_exchange_ids:
             raise RuntimeError("启动基线不一致：检测到交易所存在未结挂单或持仓差异")
         self._state.update_balances(
             snapshot.wallet_balances, snapshot.available_balance
         )
         self._state.replace_exchange_positions(snapshot.positions)
         self._state.hedge_mode = snapshot.hedge_mode
-        self._state.startup_baseline_status = "MATCHED"
+        self._state.startup_baseline_status = (
+            "UNRESOLVED_ORDER" if not_found_order_ids else "MATCHED"
+        )
         self._state.startup_baseline_observed_at = datetime.now(UTC)
         self._state.startup_baseline_position_count = len(actual)
         self._state.startup_baseline_open_order_count = len(exchange_ids)
+        if not_found_order_ids:
+            self._state.set_system_mode(SystemMode.DEGRADED)
         if self._state.has_unrecoverable_fault or self._state.private_stream_gap:
             raise RuntimeError("Startup private state is not trustworthy")
 
@@ -350,7 +369,12 @@ class OrderExecutor:
         # 绝不向交易所发送不可审计订单
         order.apply_update(OrderStatus.SUBMITTED)
         try:
-            await self._db.async_save_order(order)
+            if order.client_order_id.startswith("e_"):
+                await self._db.async_save_order(order)
+            else:
+                await self._db.async_save_order_and_batch(
+                    order, self._state.batches[order.batch_id]
+                )
         except Exception as e:
             log.critical(
                 "db_prewrite_failed_rolling_back_order",

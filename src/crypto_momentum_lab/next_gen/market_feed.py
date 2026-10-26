@@ -162,14 +162,14 @@ class MarketDataFeed:
         dispatch_started = time.monotonic()
         state_count = 0
         minute_boundary = False
-        first_bucket_end: datetime | None = None
+        first_state_bucket_end: datetime | None = None
         try:
             for payload in data["states"]:
                 state_count += 1
                 try:
                     market_state = market_state_from_payload(payload)
-                    if first_bucket_end is None:
-                        first_bucket_end = market_state.bucket_end
+                    if first_state_bucket_end is None:
+                        first_state_bucket_end = market_state.bucket_end
                     minute_boundary |= (
                         market_state.bucket_end.second == 0
                         and market_state.bucket_end.microsecond == 0
@@ -205,11 +205,13 @@ class MarketDataFeed:
                 except ValueError:
                     pass
 
-            publish_delay_ms = None
+            first_state_age_at_publish_ms = None
             publish_to_frame_ms = None
-            if published_at is not None and first_bucket_end is not None:
-                publish_delay_ms = (
-                    published_at - first_bucket_end
+            if published_at is not None and first_state_bucket_end is not None:
+                # A frame can contain cached rows for quiet symbols. This is the
+                # first row's age at publish time, not the transport delay.
+                first_state_age_at_publish_ms = (
+                    published_at - first_state_bucket_end
                 ).total_seconds() * 1000
             if published_at is not None:
                 publish_to_frame_ms = (
@@ -226,12 +228,14 @@ class MarketDataFeed:
                     consumer_id=self.consumer_id,
                     environment=self.environment,
                     published_at=published_at_raw,
-                    bucket_end=first_bucket_end.isoformat()
-                    if first_bucket_end is not None
+                    first_state_bucket_end=first_state_bucket_end.isoformat()
+                    if first_state_bucket_end is not None
                     else None,
                     frame_received_at=received_at.isoformat(),
-                    publish_delay_ms=round(publish_delay_ms, 1)
-                    if publish_delay_ms is not None
+                    first_state_age_at_publish_ms=round(
+                        first_state_age_at_publish_ms, 1
+                    )
+                    if first_state_age_at_publish_ms is not None
                     else None,
                     publish_to_frame_ms=round(publish_to_frame_ms, 1)
                     if publish_to_frame_ms is not None

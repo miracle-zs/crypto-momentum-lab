@@ -33,6 +33,15 @@ class BinanceOrderRejectedError(Exception):
         self.message = message
 
 
+class BinanceOrderNotFoundError(Exception):
+    """The startup lookup found no exchange order; submission remains unknown."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.code = -2013
+        self.message = message
+
+
 class BinanceNetworkError(Exception):
     """网络超时或 5xx 异常，订单状态属于【存疑 (in-doubt)】，严禁判定为 REJECTED"""
 
@@ -337,14 +346,18 @@ class BinanceRestClient:
         self, symbol: str, client_order_id: str
     ) -> dict[str, Any]:
         """Read a stored order once during process startup, never during RUNNING."""
-        return dict(
-            await self._request(
+        try:
+            result = await self._request(
                 "GET",
                 "/fapi/v1/order",
                 signed=True,
                 params={"symbol": symbol, "origClientOrderId": client_order_id},
             )
-        )
+        except BinanceOrderRejectedError as error:
+            if error.code != -2013:
+                raise
+            raise BinanceOrderNotFoundError(error.message) from error
+        return dict(result)
 
     async def fetch_startup_realized_pnl(self, cutoff: datetime) -> Decimal:
         """Read the UTC day's exchange realized PNL at a fixed startup cutoff."""
