@@ -183,12 +183,11 @@ class AggTradeGapRecoverer:
                         current=envelope,
                     )
                 )
-            else:
-                self._last_seen[key] = _SeenTrade(
-                    current_id,
-                    event_at,
-                    envelope.connection_session_id,
-                )
+            self._last_seen[key] = _SeenTrade(
+                current_id,
+                event_at,
+                envelope.connection_session_id,
+            )
             accepted_indices.add(index)
 
         async def _timed_recover(request: _GapRequest) -> _RecoveryResult:
@@ -255,14 +254,6 @@ class AggTradeGapRecoverer:
                     or request.current.exchange_event_at is None
                 ):
                     continue
-                request_current = _SeenTrade(
-                    request.current_id,
-                    request.current.exchange_event_at,
-                    request.current.connection_session_id,
-                )
-                self._last_seen[
-                    (request.current.environment, request.current.symbol)
-                ] = request_current
                 recovered = tuple(
                     _recovered_envelope(trade, current=request.current)
                     for trade in result.trades
@@ -278,19 +269,6 @@ class AggTradeGapRecoverer:
                 or request.current.exchange_event_at is None
             ):
                 continue
-            # The current trade was observed even when the missing range could
-            # not be recovered.  Advance continuity to it before reporting
-            # the gap: otherwise every following trade is compared with the
-            # same stale predecessor, repeatedly rediscovers an ever-growing
-            # range, and turns one outage into an unbounded quality-event
-            # flood.
-            self._last_seen[
-                (request.current.environment, request.current.symbol)
-            ] = _SeenTrade(
-                request.current_id,
-                request.current.exchange_event_at,
-                request.current.connection_session_id,
-            )
             failure_reason = result.failure_reason
             if (
                 request.previous.connection_session_id

@@ -9,6 +9,7 @@ from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
 from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
     ScheduledRiskWindowConfig,
 )
+from crypto_momentum_lab.next_gen.client import BinanceOrderRejectedError
 from crypto_momentum_lab.next_gen.engine import AccountState
 from crypto_momentum_lab.next_gen.executor import OrderExecutor
 from crypto_momentum_lab.next_gen.exit_manager import ExitManager
@@ -167,6 +168,44 @@ async def test_exit_manager_grace_timeout_cancels_limit_and_sweeps_market(exit_s
     second_call = mock_rest.post_order.call_args_list[1].kwargs
     assert second_call["order_type"] == "MARKET"
     assert second_call["client_order_id"] == f"fm_{batch_id}_02"
+
+
+@pytest.mark.asyncio
+async def test_price_filter_retry_is_cancelled_before_market_sweep(exit_setup):
+    state, _, rest, manager = exit_setup
+    batch_id = generate_batch_id("BTCUSDT", "LONG", "a1", counter=21)
+    state.batches[batch_id] = PositionBatch(
+        "live", "a1", batch_id, "BTCUSDT", "LONG", Decimal("1"),
+        Decimal("65000"), datetime.now(UTC),
+    )
+    rest.post_order.side_effect = [
+        BinanceOrderRejectedError(-4014, "tick size changed"),
+        {"orderId": 111},
+        {"orderId": 112},
+    ]
+    rest.fetch_exchange_info.return_value = {"symbols": [{
+        "symbol": "BTCUSDT", "filters": [
+            {"filterType": "PRICE_FILTER", "tickSize": "1"},
+            {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.001"},
+            {"filterType": "MIN_NOTIONAL", "notional": "5"},
+        ],
+    }]}
+
+    async def observe_cancel(**params):
+        order = state.orders[params["client_order_id"]]
+        await state.on_order_trade_update(
+            order.client_order_id, order.symbol, order.position_side, order.side,
+            OrderStatus.CANCELED, Decimal("0"), Decimal("0"), Decimal("0"), Decimal("0"),
+        )
+
+    rest.cancel_order.side_effect = observe_cancel
+    await manager.execute_batch_exit(batch_id, Decimal("66000.4"), grace_period_sec=0.01)
+
+    assert [call.kwargs["order_type"] for call in rest.post_order.call_args_list] == [
+        "LIMIT", "LIMIT", "MARKET"
+    ]
+    retry_id = rest.post_order.call_args_list[1].kwargs["client_order_id"]
+    rest.cancel_order.assert_awaited_once_with(symbol="BTCUSDT", client_order_id=retry_id)
 
 
 @pytest.mark.asyncio

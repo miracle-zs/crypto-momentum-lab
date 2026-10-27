@@ -8,8 +8,10 @@ from crypto_momentum_lab.operator_dashboard.overview_queries import (
 from crypto_momentum_lab.operator_dashboard.queries import DashboardQueries
 from crypto_momentum_lab.operator_dashboard.status import OperationalStatus
 from crypto_momentum_lab.operator_dashboard.telemetry_queries import (
+    DecisionSLOQueries,
     _decision_slo_response,
 )
+
 
 async def test_universe_dashboard_hides_loser_ranking() -> None:
     observed_at = datetime(2026, 9, 14, 0, 0, tzinfo=UTC)
@@ -231,10 +233,9 @@ async def test_decision_slo_query_uses_bounded_historical_window() -> None:
             return SessionContext(self.session)
 
     session = Session()
-    queries = DashboardQueries(
+    queries = DecisionSLOQueries(
         SessionFactory(session),
         clock=lambda: window_end,
-        nextgen_accounts=(),
     )
 
     response = await queries.decision_slo("6h")

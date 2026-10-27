@@ -16,6 +16,9 @@ from crypto_momentum_lab.persistence.postgres.models import (
     RuntimeMarketState15sRow,
     RuntimeMarketStateGapRow,
 )
+from crypto_momentum_lab.persistence.postgres.runtime_state_partitions import (
+    ensure_runtime_state_partitions,
+)
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     PostgresRuntimeMarketStateRepository,
 )
@@ -33,6 +36,8 @@ async def runtime_state_repository(
 ) -> AsyncIterator[PostgresRuntimeMarketStateRepository]:
     engine = create_async_database_engine(async_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
+    day = datetime(2026, 7, 3, tzinfo=UTC)
+    await ensure_runtime_state_partitions(factory, from_at=day, through=day + timedelta(days=1))
     async with factory() as session:
         async with session.begin():
             await session.execute(delete(RuntimeMarketStateGapRow))

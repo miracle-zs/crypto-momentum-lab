@@ -8,12 +8,19 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from crypto_momentum_lab.next_gen.models import Order, OrderStatus, PositionBatch
 from crypto_momentum_lab.next_gen.persistence import PostgresTradingRepository
+from crypto_momentum_lab.persistence.postgres.runtime_state_partitions import (
+    ensure_runtime_state_partitions,
+)
 from crypto_momentum_lab.persistence.postgres.session import (
     create_async_database_engine,
     create_execution_database_engine,
+)
+from crypto_momentum_lab.persistence.postgres.strategy_runtime_event_partitions import (
+    ensure_event_partitions,
 )
 
 ENVIRONMENT = "test-nextgen-postgres"
@@ -25,6 +32,11 @@ async def postgres_repo(
     async_database_url: str,
 ) -> AsyncIterator[PostgresTradingRepository]:
     engine = create_async_database_engine(async_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    day = datetime(2026, 7, 3, tzinfo=UTC)
+    await ensure_runtime_state_partitions(factory, from_at=day, through=day + timedelta(days=1))
+    now = datetime.now(UTC)
+    await ensure_event_partitions(factory, from_at=now - timedelta(days=1), through=now + timedelta(days=1))
     repo = PostgresTradingRepository(engine)
 
     # 清理测试数据

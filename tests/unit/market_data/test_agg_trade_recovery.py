@@ -84,6 +84,21 @@ async def test_recoverer_inserts_missing_trades_before_live_event() -> None:
     assert history.calls == [("BTCUSDT", 11, 2)]
 
 
+async def test_gap_followed_by_contiguous_trades_in_one_batch() -> None:
+    history = FakeAggTradeHistory((_trade(11), _trade(12)))
+    recoverer = AggTradeGapRecoverer(history)
+    await recoverer.expand((_envelope(10),))
+
+    result = await recoverer.expand((_envelope(13), _envelope(14), _envelope(15)))
+
+    assert [item.exchange_sequence for item in result.envelopes] == [
+        "11", "12", "13", "14", "15"
+    ]
+    assert history.calls == [("BTCUSDT", 11, 2)]
+    assert recoverer.metrics.detected_gap_count == 1
+    assert [item.exchange_sequence for item in (await recoverer.expand((_envelope(16),))).envelopes] == ["16"]
+
+
 async def test_failed_recovery_advances_cursor_to_avoid_repeating_one_gap_forever(
 ) -> None:
     history = FlakyAggTradeHistory()
