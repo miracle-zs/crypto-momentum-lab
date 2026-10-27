@@ -538,8 +538,8 @@ class BinanceUserDataStream:
         event_type = event.get("e")
 
         if event_type == "ORDER_TRADE_UPDATE":
-            o = event.get("o", {})
-            status_str = o.get("X", "NEW")
+            o = event["o"]
+            status_str = o["X"]
             status_mapping = {
                 "NEW": OrderStatus.OPEN,
                 "PARTIALLY_FILLED": OrderStatus.PARTIALLY_FILLED,
@@ -550,8 +550,7 @@ class BinanceUserDataStream:
                 "REJECTED": OrderStatus.REJECTED,
             }
             if status_str not in status_mapping:
-                log.warning("unknown_order_status_from_ws", raw_status=status_str)
-                return
+                raise ValueError(f"Unknown order status from WS: {status_str}")
             mapped_status = status_mapping[status_str]
 
             tx_time_ms = o.get("T") or event.get("T")
@@ -562,15 +561,15 @@ class BinanceUserDataStream:
             )
 
             res = on_order_trade_update(
-                client_order_id=o.get("c", ""),
-                symbol=o.get("s", ""),
-                position_side=o.get("ps", "LONG"),
-                side=o.get("S", "BUY"),
+                client_order_id=o["c"],
+                symbol=o["s"],
+                position_side=o["ps"],
+                side=o["S"],
                 order_status=mapped_status,
-                cum_filled_qty=Decimal(str(o.get("z", "0"))),
-                avg_price=Decimal(str(o.get("ap", "0"))),
-                last_filled_qty=Decimal(str(o.get("l", "0"))),
-                last_filled_price=Decimal(str(o.get("L", "0"))),
+                cum_filled_qty=Decimal(str(o["z"])),
+                avg_price=Decimal(str(o["ap"])),
+                last_filled_qty=Decimal(str(o["l"])),
+                last_filled_price=Decimal(str(o["L"])),
                 exchange_order_id=int(o.get("i", 0)) if o.get("i") else None,
                 trade_time=trade_time,
                 exchange_realized_pnl=Decimal(str(o["rp"])) if "rp" in o else None,
@@ -580,14 +579,14 @@ class BinanceUserDataStream:
                 await res
 
         elif event_type == "ACCOUNT_UPDATE":
-            a = event.get("a", {})
+            a = event["a"]
             balances: dict[str, Decimal] = {}
-            for b in a.get("B", []):
-                asset = b.get("a", "")
-                wb = Decimal(str(b.get("wb", "0")))
+            for b in a["B"]:
+                asset = b["a"]
+                wb = Decimal(str(b["wb"]))
                 balances[asset] = wb
 
-            positions = a.get("P", [])
+            positions = a["P"]
             res = on_account_update(balances=balances, positions=positions)
             if asyncio.iscoroutine(res):
                 await res

@@ -319,6 +319,37 @@ async def test_user_data_stream_parse_account_update():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["X", "c", "s", "ps", "S", "z", "ap", "l", "L"])
+async def test_user_data_stream_rejects_order_event_missing_required_field(missing):
+    stream = BinanceUserDataStream(rest_client=AsyncMock())
+    handler = AsyncMock()
+    order = {"X": "FILLED", "c": "id", "s": "BTCUSDT", "ps": "LONG", "S": "BUY", "z": "1", "ap": "100", "l": "1", "L": "100"}
+    del order[missing]
+    with pytest.raises(KeyError):
+        await stream.dispatch_raw_event({"e": "ORDER_TRADE_UPDATE", "o": order}, handler, AsyncMock())
+    handler.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_user_data_stream_rejects_unknown_order_status():
+    stream = BinanceUserDataStream(rest_client=AsyncMock())
+    with pytest.raises(ValueError, match="Unknown order status"):
+        await stream.dispatch_raw_event({"e": "ORDER_TRADE_UPDATE", "o": {"X": "OTHER"}}, AsyncMock(), AsyncMock())
+
+
+@pytest.mark.asyncio
+async def test_user_data_stream_rejects_account_update_without_wallet_balance():
+    stream = BinanceUserDataStream(rest_client=AsyncMock())
+    handler = AsyncMock()
+    with pytest.raises(KeyError):
+        await stream.dispatch_raw_event(
+            {"e": "ACCOUNT_UPDATE", "a": {"B": [{"a": "USDT"}], "P": []}},
+            AsyncMock(), handler,
+        )
+    handler.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_user_data_stream_physical_connect_and_stream_messages():
     mock_rest = AsyncMock()
     mock_rest.create_listen_key.return_value = "fake_listen_key"
