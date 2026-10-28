@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:12316debbfb86890f6b2d825820612741ba527ad5a44e3902759141d572bfe8f
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
@@ -9,13 +9,13 @@ WORKDIR /app
 
 RUN addgroup --system cml && adduser --system --ingroup cml cml
 
-COPY pyproject.toml ./
+COPY pyproject.toml requirements-runtime.lock ./
 
-# Keep third-party dependencies in a layer keyed only by pyproject.toml. A
+# Keep third-party dependencies in a layer keyed by the dependency lock. A
 # source-only change can then rebuild the small local wheel without resolving
 # or downloading pyarrow, asyncpg, and the other runtime packages again.
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python -c "import subprocess,sys,tomllib; deps=tomllib.load(open('pyproject.toml','rb'))['project']['dependencies']; subprocess.check_call([sys.executable,'-m','pip','install','hatchling>=1.27,<2',*deps])"
+    python -m pip install -r requirements-runtime.lock && python -m pip check
 
 COPY SYSTEM.md ./
 COPY src ./src
@@ -27,7 +27,8 @@ COPY docker/local-healthcheck /usr/local/bin/cml-local-healthcheck
 
 RUN chmod 0755 /usr/local/bin/cml-local-healthcheck
 
-RUN python -m pip install --no-cache-dir --no-deps --no-build-isolation .
+RUN python -m pip install --no-cache-dir --no-deps --no-build-isolation . \
+    && python -m pip check
 
 # Keep the release identity below the dependency layer. Changing only the
 # commit must not invalidate dependency resolution or download layers.
