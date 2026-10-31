@@ -16,6 +16,57 @@ from crypto_momentum_lab.market_data.binance.websocket import (
 from crypto_momentum_lab.market_data.capture.queue import CaptureQueueFull
 
 
+async def test_lifetime_rotation_reconnects_immediately_and_resets_backoff(
+    monkeypatch,
+):
+    connection = BinanceWebSocketConnection(
+        base_url="wss://example.test/ws",
+        route=route_for(CaptureStream.AGG_TRADE),
+        environment="test",
+        desired_names=("btcusdt@aggTrade",),
+        generation=1,
+        on_envelope=AsyncMock(),
+        on_lifecycle=AsyncMock(),
+        reconnect_delays=(0.0, 1.0, 5.0),
+        connection_lifetime_seconds=60,
+        open_timeout_seconds=1,
+        ping_interval_seconds=20,
+        ping_timeout_seconds=20,
+        silence_timeout_seconds=60,
+    )
+    outcomes = iter(
+        [
+            OSError(),
+            OSError(),
+            "lifetime_expired",
+            "lifetime_expired",
+            OSError(),
+            OSError(),
+            "stop",
+        ]
+    )
+
+    async def run_once(_session_id):
+        outcome = next(outcomes)
+        if isinstance(outcome, Exception):
+            raise outcome
+        if outcome == "stop":
+            connection._stopping = True
+        return outcome
+
+    delays = []
+
+    async def record_delay(delay):
+        delays.append(delay)
+
+    monkeypatch.setattr(connection, "_run_once", run_once)
+    monkeypatch.setattr(asyncio, "sleep", record_delay)
+    await connection.run()
+
+    assert delays == [1.0, 1.0]
+    assert connection._connection_attempts == 7
+
+
 @pytest.mark.parametrize("prefix", ["symbol", "币" * 12])
 async def test_large_subscription_set_converges_with_bounded_acknowledged_controls(
     prefix,

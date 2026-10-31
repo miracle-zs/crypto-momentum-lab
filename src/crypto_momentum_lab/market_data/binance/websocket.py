@@ -310,6 +310,9 @@ class BinanceWebSocketConnection:
 
             if self._stopping:
                 return
+            if reason == "lifetime_expired":
+                reconnect_attempt = 0
+                continue
             delay = self._reconnect_delays[
                 min(reconnect_attempt, len(self._reconnect_delays) - 1)
             ]
