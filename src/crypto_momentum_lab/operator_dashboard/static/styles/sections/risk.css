@@ -18,7 +18,7 @@
   color: var(--muted);
   font-size: 11px;
 }
-.risk-empty-note strong { color: var(--up); font-family: var(--mono); }
+.risk-empty-note strong { color: var(--success); font-family: var(--mono); }
 .risk-empty-note small { color: var(--faint); }
 
 @media (max-width: 1023px) {

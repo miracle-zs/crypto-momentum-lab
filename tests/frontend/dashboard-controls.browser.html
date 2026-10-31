@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>Dashboard controls regression</title>
+  <link rel="stylesheet" href="../../src/crypto_momentum_lab/operator_dashboard/static/dashboard.css">
+  <script src="../../src/crypto_momentum_lab/operator_dashboard/static/vendor/echarts.min.js"></script>
+</head>
+<body>
+  <div id="result">Running…</div>
+  <span id="ready" class="status-READY">READY</span>
+  <span id="halted" class="status-HALTED">HALTED</span>
+  <div id="chart-root"></div>
+  <div id="metrics"></div>
+  <script type="module">
+    import { patchChildrenFromHtml, replaceChildrenFromHtml } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-dom.js";
+    import { refreshChartColors, registerChartPayload, wireEcharts } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-chart-engine.js";
+    import { wireMetricFilters } from "../../src/crypto_momentum_lab/operator_dashboard/static/app/wire-widgets.js";
+    import { renderLiveAccountMetrics } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/account/render-metrics.js";
+
+    const assert = (condition, message) => { if (!condition) throw new Error(message); };
+    try {
+      const root = document.querySelector("#metrics");
+      const html = renderLiveAccountMetrics({ accounts: [] });
+      replaceChildrenFromHtml(root, html);
+      wireMetricFilters(root);
+      root.querySelector('[data-metric-filter="margin"]').click();
+      patchChildrenFromHtml(root, html);
+      wireMetricFilters(root);
+      assert(root.querySelector('[data-metric-filter="margin"]').getAttribute("aria-selected") === "true", "filter reset");
+      assert(root.querySelectorAll('.live-metric-card:not([hidden])').length === 2, "wrong chart count");
+      const chartRoot = document.getElementById("chart-root");
+      chartRoot.innerHTML = '<div data-echart-chart data-echart-id="test"><div class="echart-surface" style="width:400px;height:200px"></div></div>';
+      registerChartPayload("test", { kind: "equity", title: "权益", lastUp: true, baseline: 1, domainStart: 1, domainEnd: 2, points: [{ atMs: 1, equity: 1 }, { atMs: 2, equity: 2 }] });
+      wireEcharts(chartRoot);
+      const chart = window.echarts.getInstanceByDom(chartRoot.querySelector(".echart-surface"));
+      const lineBefore = chart.getOption().series[0].lineStyle.color;
+      const colorsBefore = ["ready", "halted"].map((id) => getComputedStyle(document.getElementById(id)).getPropertyValue("--s"));
+      document.documentElement.dataset.colorPalette = "cn";
+      refreshChartColors();
+      const colorsAfter = ["ready", "halted"].map((id) => getComputedStyle(document.getElementById(id)).getPropertyValue("--s"));
+      assert(colorsBefore.every((color, i) => color === colorsAfter[i]), "status colors changed");
+      assert(chart.getOption().series[0].lineStyle.color !== lineBefore, "chart color did not change");
+      document.getElementById("result").textContent = "PASS: metric filter, status colors and chart palette";
+    } catch (error) {
+      document.getElementById("result").textContent = `FAIL: ${error.message}`;
+    }
+  </script>
+</body>
+</html>

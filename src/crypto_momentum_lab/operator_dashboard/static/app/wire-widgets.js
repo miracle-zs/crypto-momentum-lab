@@ -185,23 +185,27 @@ export function wireTableSorting(root) {
 export function wireMetricFilters(root) {
   if (!root) return;
   root.querySelectorAll(".metric-filter-tabs").forEach((tabsContainer) => {
-    if (tabsContainer.dataset.wired === "true") return;
-    tabsContainer.dataset.wired = "true";
     const buttons = tabsContainer.querySelectorAll("button[data-metric-filter]");
     const block = tabsContainer.closest(".live-account-metrics-block");
     if (!block) return;
+    const apply = (filter) => {
+      buttons.forEach((button) => {
+        const active = button.dataset.metricFilter === filter;
+        button.classList.toggle("is-active", active);
+        button.setAttribute("aria-selected", String(active));
+      });
+      block.querySelectorAll(".live-metric-card").forEach((card) => {
+        card.hidden = filter !== "all" && card.dataset.metricCategory !== filter;
+      });
+    };
+    apply(root.dataset.metricFilter || "all");
+    if (tabsContainer.dataset.wired === "true") return;
+    tabsContainer.dataset.wired = "true";
     buttons.forEach((btn) => {
       btn.addEventListener("click", () => {
-        buttons.forEach((b) => {
-          const active = b === btn;
-          b.classList.toggle("is-active", active);
-          b.setAttribute("aria-selected", String(active));
-        });
         const filter = btn.dataset.metricFilter;
-        block.querySelectorAll(".live-metric-card").forEach((card) => {
-          const category = card.dataset.metricCategory;
-          card.hidden = filter !== "all" && category !== filter;
-        });
+        root.dataset.metricFilter = filter;
+        apply(filter);
         window.dispatchEvent(new Event("resize"));
       });
     });

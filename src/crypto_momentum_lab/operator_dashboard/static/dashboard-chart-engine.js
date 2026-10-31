@@ -437,3 +437,10 @@ export function refreshEcharts(root = document) {
     }
   });
 }
+
+export function refreshChartColors() {
+  CHART_INSTANCES.forEach((chart, shell) => {
+    const payload = getChartPayload(shell.dataset.echartId);
+    if (payload) chart.setOption(buildChartOption(payload), { notMerge: true });
+  });
+}

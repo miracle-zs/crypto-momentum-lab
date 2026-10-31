@@ -264,14 +264,14 @@
   to { transform: rotate(360deg); }
 }
 
-.poll-state.status-STALE { color: var(--down); }
+.poll-state.status-STALE { color: var(--danger); }
 .poll-state.status-UNKNOWN { color: var(--faint); }
 
 .pulse {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--up);
+  background: var(--success);
   box-shadow: 0 0 0 0 rgba(52, 211, 153, .5);
   animation: pulse 2.4s ease-out infinite;
 }
@@ -418,9 +418,9 @@
   width: 100%;
   padding: 10px 14px;
   margin-top: 6px;
-  border: 1px solid color-mix(in srgb, var(--down) 40%, var(--line));
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--line));
   border-radius: 9px;
-  background: linear-gradient(90deg, color-mix(in srgb, var(--down) 12%, var(--surface-2)), var(--surface-2));
+  background: linear-gradient(90deg, color-mix(in srgb, var(--danger) 12%, var(--surface-2)), var(--surface-2));
   color: var(--text);
   font-size: 11.5px;
 }
@@ -442,7 +442,7 @@
 }
 
 .emergency-triage-lead strong {
-  color: var(--down);
+  color: var(--danger);
   font-family: var(--mono);
   font-size: 12px;
   letter-spacing: .08em;
@@ -482,13 +482,13 @@
 }
 
 .emergency-triage-btn.danger {
-  border-color: color-mix(in srgb, var(--down) 50%, var(--line));
-  color: var(--down);
+  border-color: color-mix(in srgb, var(--danger) 50%, var(--line));
+  color: var(--danger);
 }
 
 .emergency-triage-btn.danger:hover {
-  border-color: var(--down);
-  background: color-mix(in srgb, var(--down) 15%, var(--surface-3));
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 15%, var(--surface-3));
 }
 
 /* ============ footer ============ */

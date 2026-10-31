@@ -13,6 +13,8 @@
   --faint: #8293a2;
   --brand: #71d6d0;
   --accent: var(--brand);
+  --success: #65d39a;
+  --danger: #f4777f;
   --up: #65d39a;
   --down: #f4777f;
   --warn: #e9b45b;
@@ -27,11 +29,11 @@
 }
 
 /* status → accent color (--s) */
-.status-READY, .status-FRESH, .status-ACTIVE, .status-COMPLETED { --s: var(--up); }
+.status-READY, .status-FRESH, .status-ACTIVE, .status-COMPLETED { --s: var(--success); }
 .status-SHADOW, .status-NEW, .status-SHADOW-RUNNING { --s: var(--info); }
 .status-STALE, .status-PENDING-CANCEL, .status-PARTIALLY-FILLED { --s: var(--warn); }
 .status-DEGRADED, .status-ATTENTION, .status-REVIEW { --s: var(--warn); }
-.status-HALTED, .status-BLOCKED, .status-DOWN, .status-ABORTED, .status-REJECTED { --s: var(--down); }
+.status-HALTED, .status-BLOCKED, .status-DOWN, .status-ABORTED, .status-REJECTED { --s: var(--danger); }
 .status-LIVE, .status-LIVE-ENABLED { --s: var(--live); }
 .status-UNKNOWN, .status-NO-DATA, .is-locked { --s: var(--faint); }
 
@@ -67,7 +69,7 @@ body {
 .warn { color: var(--warn); }
 .hero { color: var(--brand); }
 
-.poll-state.status-STALE strong { color: var(--down); }
+.poll-state.status-STALE strong { color: var(--danger); }
 .poll-state.status-UNKNOWN strong { color: var(--faint); }
 
 [data-color-palette="cn"] {

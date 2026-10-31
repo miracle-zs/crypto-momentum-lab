@@ -1,6 +1,6 @@
 import { POLL_MS } from "./dashboard-config.js";
 import { timeOnly } from "./dashboard-formatters.js";
-import { wireEcharts } from "./dashboard-chart-engine.js";
+import { refreshChartColors, wireEcharts } from "./dashboard-chart-engine.js";
 import { renderOverview, updateOverviewDynamic } from "./sections/overview.js";
 import { renderUniverse } from "./sections/universe.js";
 import { renderRisk } from "./sections/risk.js";
@@ -86,12 +86,14 @@ function initPalette() {
   const btn = document.getElementById("palette-toggle-btn");
   const label = document.getElementById("palette-label");
   if (!btn) return;
-  const stored = window.localStorage?.getItem("cml-palette") || "intl";
+  let stored = "intl";
+  try { stored = window.localStorage?.getItem("cml-palette") || "intl"; } catch {}
   const apply = (palette) => {
     document.documentElement.dataset.colorPalette = palette;
     if (label) {
       label.textContent = palette === "cn" ? "国内配色 (红涨绿跌)" : "国际配色 (绿涨红跌)";
     }
+    refreshChartColors();
   };
   apply(stored);
   btn.addEventListener("click", () => {

@@ -31,6 +31,8 @@
   --faint: #8293a2;
   --brand: #71d6d0;
   --accent: var(--brand);
+  --success: #65d39a;
+  --danger: #f4777f;
   --up: #65d39a;
   --down: #f4777f;
   --warn: #e9b45b;
@@ -45,11 +47,11 @@
 }
 
 /* status → accent color (--s) */
-.status-READY, .status-FRESH, .status-ACTIVE, .status-COMPLETED { --s: var(--up); }
+.status-READY, .status-FRESH, .status-ACTIVE, .status-COMPLETED { --s: var(--success); }
 .status-SHADOW, .status-NEW, .status-SHADOW-RUNNING { --s: var(--info); }
 .status-STALE, .status-PENDING-CANCEL, .status-PARTIALLY-FILLED { --s: var(--warn); }
 .status-DEGRADED, .status-ATTENTION, .status-REVIEW { --s: var(--warn); }
-.status-HALTED, .status-BLOCKED, .status-DOWN, .status-ABORTED, .status-REJECTED { --s: var(--down); }
+.status-HALTED, .status-BLOCKED, .status-DOWN, .status-ABORTED, .status-REJECTED { --s: var(--danger); }
 .status-LIVE, .status-LIVE-ENABLED { --s: var(--live); }
 .status-UNKNOWN, .status-NO-DATA, .is-locked { --s: var(--faint); }
 
@@ -85,7 +87,7 @@ body {
 .warn { color: var(--warn); }
 .hero { color: var(--brand); }
 
-.poll-state.status-STALE strong { color: var(--down); }
+.poll-state.status-STALE strong { color: var(--danger); }
 .poll-state.status-UNKNOWN strong { color: var(--faint); }
 
 [data-color-palette="cn"] {
@@ -427,14 +429,14 @@ body[data-active-workspace="data"] .topbar-workspace-kicker { color: var(--info)
   to { transform: rotate(360deg); }
 }
 
-.poll-state.status-STALE { color: var(--down); }
+.poll-state.status-STALE { color: var(--danger); }
 .poll-state.status-UNKNOWN { color: var(--faint); }
 
 .pulse {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--up);
+  background: var(--success);
   box-shadow: 0 0 0 0 rgba(52, 211, 153, .5);
   animation: pulse 2.4s ease-out infinite;
 }
@@ -581,9 +583,9 @@ body[data-active-workspace="data"] .topbar-workspace-kicker { color: var(--info)
   width: 100%;
   padding: 10px 14px;
   margin-top: 6px;
-  border: 1px solid color-mix(in srgb, var(--down) 40%, var(--line));
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--line));
   border-radius: 9px;
-  background: linear-gradient(90deg, color-mix(in srgb, var(--down) 12%, var(--surface-2)), var(--surface-2));
+  background: linear-gradient(90deg, color-mix(in srgb, var(--danger) 12%, var(--surface-2)), var(--surface-2));
   color: var(--text);
   font-size: 11.5px;
 }
@@ -605,7 +607,7 @@ body[data-active-workspace="data"] .topbar-workspace-kicker { color: var(--info)
 }
 
 .emergency-triage-lead strong {
-  color: var(--down);
+  color: var(--danger);
   font-family: var(--mono);
   font-size: 12px;
   letter-spacing: .08em;
@@ -645,13 +647,13 @@ body[data-active-workspace="data"] .topbar-workspace-kicker { color: var(--info)
 }
 
 .emergency-triage-btn.danger {
-  border-color: color-mix(in srgb, var(--down) 50%, var(--line));
-  color: var(--down);
+  border-color: color-mix(in srgb, var(--danger) 50%, var(--line));
+  color: var(--danger);
 }
 
 .emergency-triage-btn.danger:hover {
-  border-color: var(--down);
-  background: color-mix(in srgb, var(--down) 15%, var(--surface-3));
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 15%, var(--surface-3));
 }
 
 /* ============ footer ============ */
@@ -1532,7 +1534,7 @@ details.secondary[open] summary { margin-bottom: 10px; }
 }
 
 .live-signal-kind.signal { color: var(--info); background: rgba(138, 180, 255, .1); }
-.live-signal-kind.candidate { color: var(--up); background: rgba(52, 211, 153, .1); }
+.live-signal-kind.candidate { color: var(--success); background: rgba(52, 211, 153, .1); }
 .live-signal-kind.reduce { color: var(--warn); background: rgba(245, 183, 85, .1); }
 .live-signal-kind.unknown { color: var(--faint); background: rgba(115, 128, 153, .1); }
 
@@ -1590,8 +1592,8 @@ details.secondary[open] summary { margin-bottom: 10px; }
 .event-tag.close { color: var(--warn); background: rgba(245, 183, 85, .12); }
 
 .decision { font-weight: 600; font-size: 11.5px; }
-.decision.ok { color: var(--up); }
-.decision.no { color: var(--down); }
+.decision.ok { color: var(--success); }
+.decision.no { color: var(--danger); }
 
 /* ============ empty / alerts ============ */
 
@@ -1616,12 +1618,12 @@ details.secondary[open] summary { margin-bottom: 10px; }
   align-items: flex-start;
   padding: 13px 16px;
   margin-bottom: 8px;
-  border: 1px solid color-mix(in srgb, var(--down) 35%, var(--line));
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--line));
   border-radius: 10px;
-  background: color-mix(in srgb, var(--down) 8%, var(--surface-2));
+  background: color-mix(in srgb, var(--danger) 8%, var(--surface-2));
 }
 
-.alert-box strong { color: var(--down); font: 700 11px var(--mono); letter-spacing: .12em; margin-top: 2px; }
+.alert-box strong { color: var(--danger); font: 700 11px var(--mono); letter-spacing: .12em; margin-top: 2px; }
 .alert-box small { display: block; margin-top: 4px; color: var(--muted); font-size: 10.5px; }
 
 .ok-box {
@@ -1636,7 +1638,7 @@ details.secondary[open] summary { margin-bottom: 10px; }
   font-size: 12px;
 }
 
-.ok-box i { width: 7px; height: 7px; border-radius: 50%; background: var(--up); }
+.ok-box i { width: 7px; height: 7px; border-radius: 50%; background: var(--success); }
 
 
 
@@ -1758,7 +1760,7 @@ details.secondary[open] summary { margin-bottom: 10px; }
   to { opacity: 1; transform: translateY(0); }
 }
 
-.card[data-workspace="ops"] { border-top-color: color-mix(in srgb, var(--up) 38%, var(--line)); }
+.card[data-workspace="ops"] { border-top-color: color-mix(in srgb, var(--success) 38%, var(--line)); }
 
 .card[data-workspace="data"] { border-top-color: color-mix(in srgb, var(--info) 44%, var(--line)); }
 
@@ -1806,8 +1808,8 @@ details.secondary[open] summary { margin-bottom: 10px; }
 }
 
 .copied-pulse {
-  background: color-mix(in srgb, var(--up) 18%, transparent) !important;
-  color: var(--up) !important;
+  background: color-mix(in srgb, var(--success) 18%, transparent) !important;
+  color: var(--success) !important;
   transition: background .2s ease, color .2s ease;
 }
 
@@ -2056,7 +2058,7 @@ details.secondary[open] summary { margin-bottom: 10px; }
   color: var(--muted);
   font-size: 11px;
 }
-.risk-empty-note strong { color: var(--up); font-family: var(--mono); }
+.risk-empty-note strong { color: var(--success); font-family: var(--mono); }
 .risk-empty-note small { color: var(--faint); }
 
 @media (max-width: 1023px) {
@@ -2171,7 +2173,7 @@ details.secondary[open] summary { margin-bottom: 10px; }
 
 .account-facts span { color: var(--faint); font-size: 10px; }
 .account-facts b { color: var(--muted); font: 500 10.5px var(--mono); text-align: right; }
-.account-facts b.status-READY { color: var(--up); }
+.account-facts b.status-READY { color: var(--success); }
 .account-facts b.status-ATTENTION { color: var(--warn); }
 .account-facts b.status-UNKNOWN { color: var(--faint); }
 .account-strategy { color: var(--brand); font: 10px var(--mono); }
@@ -2616,9 +2618,9 @@ details.secondary[open] summary { margin-bottom: 10px; }
 
 .collector-progress { height: 7px; margin: 11px 0 8px; overflow: hidden; border-radius: 999px; background: var(--surface-3); }
 .collector-progress i { display: block; height: 100%; border-radius: inherit; background: var(--brand); }
-.collector-progress.good i { background: var(--up); }
+.collector-progress.good i { background: var(--success); }
 .collector-progress.warning i { background: var(--warn); }
-.collector-progress.danger i { background: var(--down); }
+.collector-progress.danger i { background: var(--danger); }
 .collector-meter-card small { color: var(--faint); font-size: 10px; }
 
 .collector-alert { margin-bottom: 0; }
@@ -2718,9 +2720,9 @@ details.secondary[open] summary { margin-bottom: 10px; }
   background: var(--brand);
 }
 
-.performance-progress.good i { background: var(--up); }
+.performance-progress.good i { background: var(--success); }
 .performance-progress.warning i { background: var(--warn); }
-.performance-progress.danger i { background: var(--down); }
+.performance-progress.danger i { background: var(--danger); }
 
 .performance-meter-card small {
   color: var(--faint);

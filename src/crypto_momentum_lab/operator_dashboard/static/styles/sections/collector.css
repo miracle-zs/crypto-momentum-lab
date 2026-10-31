@@ -68,9 +68,9 @@
 
 .collector-progress { height: 7px; margin: 11px 0 8px; overflow: hidden; border-radius: 999px; background: var(--surface-3); }
 .collector-progress i { display: block; height: 100%; border-radius: inherit; background: var(--brand); }
-.collector-progress.good i { background: var(--up); }
+.collector-progress.good i { background: var(--success); }
 .collector-progress.warning i { background: var(--warn); }
-.collector-progress.danger i { background: var(--down); }
+.collector-progress.danger i { background: var(--danger); }
 .collector-meter-card small { color: var(--faint); font-size: 10px; }
 
 .collector-alert { margin-bottom: 0; }

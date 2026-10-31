@@ -66,7 +66,7 @@
 
 .account-facts span { color: var(--faint); font-size: 10px; }
 .account-facts b { color: var(--muted); font: 500 10.5px var(--mono); text-align: right; }
-.account-facts b.status-READY { color: var(--up); }
+.account-facts b.status-READY { color: var(--success); }
 .account-facts b.status-ATTENTION { color: var(--warn); }
 .account-facts b.status-UNKNOWN { color: var(--faint); }
 .account-strategy { color: var(--brand); font: 10px var(--mono); }
