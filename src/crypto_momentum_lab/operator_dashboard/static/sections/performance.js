@@ -63,7 +63,7 @@ export function renderPerformance(data) {
     ? `${Number(hostResources.cpu_load_1m).toFixed(2)} (1m) · ${hostResources.cpu_load_5m == null ? "—" : Number(hostResources.cpu_load_5m).toFixed(2)} (5m)`
     : "—";
   const cpuTone = hostResources.cpu_load_1m != null && hostResources.cpu_load_1m > 1.8 ? "warning" : "good";
-  const cpuMeter = meterCard("CPU 负载 (LoadAvg)", loadText, (hostResources.cpu_load_1m || 0) * 50, "双核系统负载指标", cpuTone);
+  const cpuMeter = meterCard("CPU 负载 (LoadAvg)", loadText, (hostResources.cpu_load_1m || 0) * 50, "系统 1m / 5m 平均负载指标 (LoadAvg)", cpuTone);
 
   const memText = hostResources.mem_total_bytes
     ? `${bytes(hostResources.mem_used_bytes)} / ${bytes(hostResources.mem_total_bytes)} (${hostResources.mem_usage_percent || 0}%)`
@@ -80,7 +80,7 @@ export function renderPerformance(data) {
   const pgActive = hostResources.postgres_active_connections != null ? hostResources.postgres_active_connections : "—";
   const pgIdle = hostResources.postgres_idle_connections != null ? hostResources.postgres_idle_connections : "—";
   const pgSize = bytes(hostResources.postgres_database_size_bytes);
-  const pgNote = `活跃 ${pgActive} · 空闲 ${pgIdle} · 库大小 ${pgSize}`;
+  const pgNote = `活跃连接 ${pgActive} · 空闲连接 ${pgIdle} · 数据库体积 ${pgSize}`;
   const pgMeter = meterCard("PostgreSQL 连接与体积", `${pgActive} 活跃 / ${pgIdle} 空闲`, Math.min(100, (Number(pgActive) || 0) * 10), pgNote, "good");
 
   const body = `

@@ -9,6 +9,7 @@ import { K, sel } from "../../ui/css-keys.js";
 import { DISPLAY_TIME_ZONE_LABEL } from "./constants.js";
 import { renderAccount } from "./render-detail.js";
 import { renderLiveAccountMetrics } from "./render-metrics.js";
+import { wireMetricFilters } from "../../app/wire-widgets.js";
 
 export async function defaultAccountRequestJson(url, { timeoutMs = 15000 } = {}) {
   const signal = typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
@@ -167,7 +168,7 @@ export async function loadLiveAccountMetrics(state, root, requestJson) {
   if (!hasLastGood && !slot.children.length) {
     replaceChildrenFromHtml(
       slot,
-      `<div class="live-account-metrics-loading">${emptyBox("加载四账户时序", "正在读取权益、保证金和回撤历史")}</div>`,
+      `<div class="live-account-metrics-loading">${emptyBox("加载集群时序数据", "正在读取权益、保证金和回撤历史")}</div>`,
     );
   }
   slot.setAttribute("aria-busy", "true");
@@ -188,6 +189,7 @@ export async function loadLiveAccountMetrics(state, root, requestJson) {
     else replaceChildrenFromHtml(slot, html);
     rememberRenderedPayload(slot, data);
     refreshEcharts(slot);
+    wireMetricFilters(slot);
   } catch (error) {
     if (requestId !== state.liveAccountMetricsRequest || !slot.isConnected) return;
     if (hasLastGood) {

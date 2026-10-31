@@ -9,12 +9,12 @@ import { liveAccountMetricWindow } from "../../dashboard-charts.js";
 export { DEFAULT_EQUITY_BUCKET_SECONDS, DISPLAY_TIME_ZONE_LABEL };
 
 export const LIVE_ACCOUNT_METRIC_DEFINITIONS = [
-  { key: "equity", title: "资金权益金额变化", subtitle: "USDT · 交易所账户权益 · 各账户首个权益点归零" },
-  { key: "equity_change_ratio", title: "资金权益比例变化", subtitle: "首个可用权益点 = 0%" },
-  { key: "margin_used", title: "保证金占用金额对比", subtitle: "USDT · 交易所初始保证金（含挂单）" },
-  { key: "margin_occupancy_ratio", title: "保证金占用比例对比", subtitle: "保证金占用 / 账户权益" },
-  { key: "drawdown", title: "回撤金额对比", subtitle: "USDT · 窗口内峰值到当前，负值表示回撤" },
-  { key: "drawdown_ratio", title: "回撤比例对比", subtitle: "窗口内峰值到当前，负值表示回撤" },
+  { key: "equity", category: "equity", title: "资金权益金额变化", subtitle: "USDT · 交易所账户权益 · 各账户首个权益点归零" },
+  { key: "equity_change_ratio", category: "equity", title: "资金权益比例变化", subtitle: "首个可用权益点 = 0%" },
+  { key: "margin_used", category: "margin", title: "保证金占用金额对比", subtitle: "USDT · 交易所初始保证金（含挂单）" },
+  { key: "margin_occupancy_ratio", category: "margin", title: "保证金占用比例对比", subtitle: "保证金占用 / 账户权益" },
+  { key: "drawdown", category: "drawdown", title: "回撤金额对比", subtitle: "USDT · 窗口内峰值到当前，负值表示回撤" },
+  { key: "drawdown_ratio", category: "drawdown", title: "回撤比例对比", subtitle: "窗口内峰值到当前，负值表示回撤" },
 ];
 
 export function equitySampleLabel(seconds) {

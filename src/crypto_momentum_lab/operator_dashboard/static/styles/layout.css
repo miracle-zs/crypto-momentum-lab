@@ -560,7 +560,6 @@
   .service-meter { display: none; }
   .service-age { display: none; }
   .crumb { display: none; }
-  .topbar-primary { display: none; }
   .topbar { justify-content: stretch; gap: 8px; padding: 10px 16px; }
   .topbar-meta {
     display: grid;
@@ -634,11 +633,11 @@
 
 .brand-name b { font-size: 14px; letter-spacing: .025em; }
 
-.brand-name small { margin-top: 5px; color: var(--faint); font-size: 9px; letter-spacing: .09em; }
+.brand-name small { margin-top: 5px; color: var(--faint); font-size: 10px; letter-spacing: .09em; }
 
 .nav { gap: 14px; }
 
-.nav-group-label { margin: 0 10px 6px; color: var(--faint); font-size: 9px; letter-spacing: .17em; }
+.nav-group-label { margin: 0 10px 6px; color: var(--faint); font-size: 10px; letter-spacing: .17em; }
 
 .nav a {
   min-height: 44px;
@@ -670,9 +669,9 @@
 
 .legend-row { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 11px; }
 
-.legend-row > small { min-width: 38px; color: var(--faint); font: 9px var(--mono); letter-spacing: .08em; }
+.legend-row > small { min-width: 38px; color: var(--faint); font: 10px var(--mono); letter-spacing: .08em; }
 
-.legend span { gap: 5px; font-size: 9px; letter-spacing: .06em; }
+.legend span { gap: 5px; font-size: 10px; letter-spacing: .06em; }
 
 .sidebar-foot p { font-size: 10px; line-height: 1.65; }
 
@@ -713,11 +712,11 @@
   text-indent: 0;
 }
 
-.mode-badge small { grid-column: 1 / -1; color: color-mix(in srgb, currentColor 72%, var(--faint)); font: 8px var(--mono); letter-spacing: .14em; }
+.mode-badge small { grid-column: 1 / -1; color: color-mix(in srgb, currentColor 72%, var(--faint)); font: 10px var(--mono); letter-spacing: .14em; }
 
 .mode-badge strong { font: 700 12px var(--mono); letter-spacing: .12em; }
 
-.mode-badge span { align-self: end; color: var(--muted); font: 10px var(--sans); white-space: nowrap; }
+.mode-badge span { align-self: end; color: var(--muted); font: 10.5px var(--sans); white-space: nowrap; }
 
 .runtime-line { max-width: none; overflow: visible; }
 
@@ -733,9 +732,9 @@
 
 .poll-state .pulse { grid-row: 1 / -1; align-self: center; }
 
-.poll-kicker { color: var(--faint); font-size: 8px; letter-spacing: .13em; }
+.poll-kicker { color: var(--faint); font-size: 10px; letter-spacing: .13em; }
 
-.poll-state strong { color: var(--muted); font: 10px var(--mono); white-space: nowrap; }
+.poll-state strong { color: var(--muted); font: 10.5px var(--mono); white-space: nowrap; }
 
 .clock { padding-left: 12px; border-left: 1px solid var(--line); }
 
@@ -751,19 +750,19 @@
 
 .readiness-lead { gap: 10px; }
 
-.readiness-kicker { font-size: 8px; letter-spacing: .16em; }
+.readiness-kicker { font-size: 10px; letter-spacing: .16em; }
 
 .readiness-lead strong { font-size: 14px; letter-spacing: .1em; }
 
-.readiness-lead > span:last-child { font-size: 11px; }
+.readiness-lead > span:last-child { font-size: 11.5px; }
 
 .readiness-metrics { gap: 20px; }
 
 .readiness-metric { gap: 2px; }
 
-.readiness-metric b { font-size: 12px; }
+.readiness-metric b { font-size: 12.5px; }
 
-.readiness-metric small { font-size: 8px; }
+.readiness-metric small { font-size: 10px; }
 
 .runtime-announcer { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
 
@@ -823,55 +822,55 @@
     padding: 9px 12px;
   }
   .topbar-primary { display: flex; min-height: 25px; }
-  .topbar-heading .crumb { margin-bottom: 2px; font-size: 8px; }
+  .topbar-heading .crumb { margin-bottom: 2px; font-size: 10px; }
   .topbar-heading > strong { font-size: 14px; }
   .topbar-scope { display: none; }
   .topbar-meta { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "mode clock" "heartbeat clock"; gap: 4px 8px; }
   .mode-badge { grid-area: mode; min-width: 0; min-height: 29px; padding: 4px 8px; grid-template-columns: auto auto; }
-  .mode-badge small { font-size: 7px; }
+  .mode-badge small { font-size: 9.5px; }
   .mode-badge strong { font-size: 11px; }
-  .mode-badge span { font-size: 9px; }
+  .mode-badge span { font-size: 10px; }
   .poll-state { grid-area: heartbeat; min-height: 19px; grid-template-rows: auto; }
   .poll-state .pulse { width: 6px; height: 6px; }
-  .poll-kicker { font-size: 7px; }
-  .poll-state strong { font-size: 9px; }
+  .poll-kicker { font-size: 9.5px; }
+  .poll-state strong { font-size: 10.5px; }
   .clock { grid-area: clock; align-self: center; padding-left: 9px; }
-  .clock small { font-size: 8px; }
+  .clock small { font-size: 9.5px; }
   .clock strong { font-size: 14px; }
   .readiness-strip { display: grid; grid-template-columns: minmax(0, 1fr) minmax(142px, .9fr); align-items: center; min-height: 62px; padding: 8px 10px; }
   .readiness-lead { display: grid; grid-template-columns: auto auto; gap: 5px 8px; }
-  .readiness-kicker { font-size: 7px; }
+  .readiness-kicker { font-size: 9.5px; }
   .readiness-lead strong { font-size: 12px; }
-  .readiness-lead > span:last-child { grid-column: 1 / -1; font-size: 10px; }
+  .readiness-lead > span:last-child { grid-column: 1 / -1; font-size: 10.5px; }
   .readiness-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; }
-  .readiness-metric b { font-size: 11px; }
-  .readiness-metric small { font-size: 7px; }
+  .readiness-metric b { font-size: 11.5px; }
+  .readiness-metric small { font-size: 9.5px; }
   .content { padding: 16px 12px 94px; gap: 14px; }
   .card { padding: 18px 14px 22px; border-radius: 14px; scroll-margin-top: 156px; }
   .card-head { margin-bottom: 18px; }
   .card-title { gap: 10px; }
-  .card-title i { padding: 3px 6px; font-size: 9px; }
+  .card-title i { padding: 3px 6px; font-size: 10px; }
   .card-title h2 { font-size: 20px; }
-  .card-title small { font-size: 8px; letter-spacing: .12em; }
+  .card-title small { font-size: 10px; letter-spacing: .12em; }
   .card-title p { margin-top: 6px; font-size: 11.5px; }
   .section-state { min-height: 24px; padding-inline: 8px; }
   .tile { padding: 13px 13px; }
-  .tile label { margin-bottom: 7px; font-size: 10px; }
+  .tile label { margin-bottom: 7px; font-size: 10.5px; }
   .tile strong { font-size: 19px; }
   .tile strong.hero { font-size: 22px; }
-  .tile small { font-size: 10px; }
+  .tile small { font-size: 10.5px; }
   .block { margin-top: 20px; }
   .block-title b { font-size: 13.5px; }
-  .block-title small { font-size: 8px; }
+  .block-title small { font-size: 10px; }
   .block-title strong { font-size: 14px; }
   .block-split { grid-template-columns: 1fr; }
   .disclosure summary { min-height: 52px; padding: 0 11px; }
   .disclosure-body { padding: 0 10px 14px; }
-  .disclosure-hint { font-size: 8px; }
+  .disclosure-hint { font-size: 10px; }
   .detail-toolbar { padding-top: 11px; }
   .data-table th { padding: 8px 10px; }
   .data-table td { padding: 8px 10px; }
-  .page-foot { flex-direction: column; gap: 5px; padding: 15px 12px calc(15px + env(safe-area-inset-bottom)); font-size: 8px; }
+  .page-foot { flex-direction: column; gap: 5px; padding: 15px 12px calc(15px + env(safe-area-inset-bottom)); font-size: 10px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -921,7 +920,7 @@
   border: 1px solid var(--line-strong);
   border-radius: 7px;
   color: var(--faint);
-  font: 9px var(--mono);
+  font: 10px var(--mono);
 }
 
 .workspace-tab.is-active .workspace-tab-index { border-color: color-mix(in srgb, var(--brand) 64%, var(--line)); color: var(--brand); }
@@ -930,7 +929,7 @@
 
 .workspace-tab-copy b { font-size: 12px; font-weight: 700; }
 
-.workspace-tab-copy small { color: var(--faint); font: 8px var(--mono); letter-spacing: .13em; }
+.workspace-tab-copy small { color: var(--faint); font: 9.5px var(--mono); letter-spacing: .13em; }
 
 .workspace-tab-copy em { color: var(--muted); font-size: 10px; font-style: normal; }
 
@@ -951,7 +950,7 @@
 .readiness-scope {
   flex: none;
   color: var(--faint);
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0;
   white-space: nowrap;
 }
@@ -969,7 +968,7 @@
 
 .topbar-workspace-kicker {
   color: var(--brand);
-  font: 700 9.5px var(--mono);
+  font: 700 10.5px var(--mono);
   letter-spacing: .08em;
   padding: 1px 6px;
   background: color-mix(in srgb, var(--brand) 12%, transparent);
@@ -992,6 +991,6 @@
   }
   .topbar-heading { grid-area: heading; }
   .mobile-workspace-switcher { grid-area: workspace; min-width: 0; }
-  .topbar-workspace-kicker { font-size: 8px; }
-  .topbar-view-purpose { font-size: 9px; }
+  .topbar-workspace-kicker { font-size: 9.5px; }
+  .topbar-view-purpose { font-size: 10.5px; }
 }

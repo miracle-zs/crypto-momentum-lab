@@ -69,3 +69,28 @@ body {
 
 .poll-state.status-STALE strong { color: var(--down); }
 .poll-state.status-UNKNOWN strong { color: var(--faint); }
+
+[data-color-palette="cn"] {
+  --up: #f4777f;
+  --down: #65d39a;
+}
+
+.palette-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 3px 8px;
+  color: var(--muted);
+  font: 10px var(--mono);
+  cursor: pointer;
+  transition: all .15s ease;
+}
+
+.palette-toggle-btn:hover {
+  background: var(--surface-2);
+  color: var(--text);
+  border-color: var(--brand);
+}

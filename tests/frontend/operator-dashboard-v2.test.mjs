@@ -148,12 +148,13 @@ test("live account fleet renders six comparable metric charts", () => {
     accounts,
   });
 
-  assert.match(html, /四账户资金与风险时序/);
+  assert.match(html, /集群资金与风险时序/);
   assert.equal((html.match(/class="live-metric-card"/g) || []).length, 6);
   assert.equal((html.match(/data-echart-kind="metric-comparison"/g) || []).length, 6);
   assert.match(html, /资金权益比例变化/);
   assert.match(html, /保证金占用比例对比/);
   assert.match(html, /回撤比例对比/);
+  assert.match(html, /metric-filter-tabs/);
 });
 
 test("overview surfaces the four live account statuses", () => {
@@ -171,7 +172,7 @@ test("overview surfaces the four live account statuses", () => {
     })),
   });
 
-  assert.match(html, /四账户实盘状态/);
+  assert.match(html, /实盘集群状态/);
   assert.equal((html.match(/class="overview-account-status-card"/g) || []).length, 4);
   assert.match(html, /href="#account\?account=account-4"/);
 });

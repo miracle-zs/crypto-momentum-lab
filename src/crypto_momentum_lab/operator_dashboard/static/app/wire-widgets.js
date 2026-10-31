@@ -61,13 +61,39 @@ export function wireTableFilters(root) {
         ? box.closest(targetSelector) || root.querySelector(targetSelector)
         : box.closest(".block, .card, .market-panel");
       if (!container) return;
-      const rows = container.querySelectorAll("tbody tr");
+      const tbody = container.querySelector("tbody");
+      if (!tbody) return;
+      const rows = tbody.querySelectorAll("tr:not(.search-empty-row)");
+      let visibleCount = 0;
       rows.forEach((row) => {
         const text = row.textContent.toLowerCase();
-        row.hidden = query.length > 0 && !text.includes(query);
+        const match = query.length === 0 || text.includes(query);
+        row.hidden = !match;
+        if (match) visibleCount++;
       });
+      let emptyRow = tbody.querySelector(".search-empty-row");
+      if (query.length > 0 && visibleCount === 0 && rows.length > 0) {
+        if (!emptyRow) {
+          emptyRow = document.createElement("tr");
+          emptyRow.className = "search-empty-row";
+          const colCount = container.querySelectorAll("thead th").length || 1;
+          emptyRow.innerHTML = `<td colspan="${colCount}" class="search-empty-cell"><small class="muted">未匹配到标的或数据（按 ESC 可清空筛选）</small></td>`;
+          tbody.appendChild(emptyRow);
+        } else {
+          emptyRow.hidden = false;
+        }
+      } else if (emptyRow) {
+        emptyRow.hidden = true;
+      }
     };
     input.addEventListener("input", update);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        input.value = "";
+        update();
+        input.blur();
+      }
+    });
     clearBtn?.addEventListener("click", () => {
       input.value = "";
       update();
@@ -151,6 +177,32 @@ export function wireTableSorting(root) {
         if (event.key !== "Enter" && event.key !== " ") return;
         event.preventDefault();
         th.click();
+      });
+    });
+  });
+}
+
+export function wireMetricFilters(root) {
+  if (!root) return;
+  root.querySelectorAll(".metric-filter-tabs").forEach((tabsContainer) => {
+    if (tabsContainer.dataset.wired === "true") return;
+    tabsContainer.dataset.wired = "true";
+    const buttons = tabsContainer.querySelectorAll("button[data-metric-filter]");
+    const block = tabsContainer.closest(".live-account-metrics-block");
+    if (!block) return;
+    buttons.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        buttons.forEach((b) => {
+          const active = b === btn;
+          b.classList.toggle("is-active", active);
+          b.setAttribute("aria-selected", String(active));
+        });
+        const filter = btn.dataset.metricFilter;
+        block.querySelectorAll(".live-metric-card").forEach((card) => {
+          const category = card.dataset.metricCategory;
+          card.hidden = filter !== "all" && category !== filter;
+        });
+        window.dispatchEvent(new Event("resize"));
       });
     });
   });

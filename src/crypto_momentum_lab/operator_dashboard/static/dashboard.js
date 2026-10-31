@@ -82,6 +82,27 @@ if (refreshBtn) {
   });
 }
 
+function initPalette() {
+  const btn = document.getElementById("palette-toggle-btn");
+  const label = document.getElementById("palette-label");
+  if (!btn) return;
+  const stored = window.localStorage?.getItem("cml-palette") || "intl";
+  const apply = (palette) => {
+    document.documentElement.dataset.colorPalette = palette;
+    if (label) {
+      label.textContent = palette === "cn" ? "国内配色 (红涨绿跌)" : "国际配色 (绿涨红跌)";
+    }
+  };
+  apply(stored);
+  btn.addEventListener("click", () => {
+    const current = document.documentElement.dataset.colorPalette === "cn" ? "cn" : "intl";
+    const next = current === "cn" ? "intl" : "cn";
+    try { window.localStorage?.setItem("cml-palette", next); } catch {}
+    apply(next);
+  });
+}
+
+initPalette();
 shell.selectView(shell.initialView(), { updateHistory: false });
 installJumpProbe();
 wireEcharts(document);

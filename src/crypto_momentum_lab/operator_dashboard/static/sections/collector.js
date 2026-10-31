@@ -177,7 +177,7 @@ export function renderCollector(data) {
     <div><small>选择范围</small><b>涨幅 Top${escNumber(data?.top_count)}</b></div>
     <div><small>封存窗口</small><b>${num((Number(data?.parquet_window_seconds) || 0) / 60, 0)} 分钟</b></div>
     <div><small>迟到容忍</small><b>${num(data?.late_tolerance_seconds, 0)} 秒</b></div>
-    <div><small>Hub sequence</small><b class="num">${lastSequence}</b></div>
+    <div><small>Hub 序列号</small><b class="num">${lastSequence}</b></div>
     <div><small>stream</small><b class="num" title="${esc(data?.stream_id || "暂无 stream")}">${esc(streamId)}</b></div>
     <div><small>窗口覆盖</small><b title="${esc(parquetRange)}">${esc(parquetRange)}</b></div>
     <div><small>容量状态</small><b>${esc(capacityStateLabels[capacityState] || data?.capacity_state || "待确认")}</b></div>
@@ -188,7 +188,7 @@ export function renderCollector(data) {
     <div class="block">${blockTitle("容量保护", "CAPACITY GUARD", `<span class="num muted">${capacitySummary}</span>`)}${storage}</div>
     <div class="block-split">
       <div class="block">${blockTitle("最近封存窗口", "LATEST PARQUET WINDOWS", `<span class="num muted">${latestWrittenAge}</span>`)}${recentWindowTable}</div>
-      <div class="block">${blockTitle("采集契约", "COLLECTOR CONTRACT", "READ ONLY")}${facts}</div>
+      <div class="block">${blockTitle("采集规格配置", "COLLECTOR SPEC", "READ ONLY")}${facts}</div>
     </div>`;
   return [status, body];
 }

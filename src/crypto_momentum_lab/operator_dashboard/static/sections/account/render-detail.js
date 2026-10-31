@@ -62,7 +62,7 @@ function renderAccountKpiGrid(summary) {
     ${tile("USDT 钱包余额", money(summary.usdt_wallet_balance), "账户钱包余额", "hero")}
     ${tile("USDT 可用余额", money(summary.usdt_available_balance), `更新于 ${summary.available_balance_observed_at ? esc(dayTime(summary.available_balance_observed_at)) : "时间未知"}`)}
     ${tile("持仓浮动盈亏（估算）", signedMoney(summary.total_unrealized_pnl), `${summary.position_count || 0} 个策略持仓批次`, pnlClass(summary.total_unrealized_pnl))}
-    ${tile("持仓名义价值", money(summary.gross_position_notional), "按近期行情估算的策略持仓暴露")}
+    ${tile("持仓名义价值", money(summary.gross_position_notional), "按最新标记价折算的策略持仓总敞口")}
   </div>`;
 }
 
@@ -93,7 +93,7 @@ function renderAccountFacts(config, startupBaseline, modeLabel) {
   const fraction = asNumber(sizing?.equity_fraction);
   const fractionLabel = sizing?.mode === "fixed"
     ? "固定名义金额"
-    : fraction == null ? "—" : `${num(fraction * 100, 4)}% · 每笔名义金额占比`;
+    : fraction == null ? "—" : `单笔名义占比 ${num(fraction * 100, 4)}%`;
   const baselineMatched = String(startupBaseline.status || "").toLowerCase() === "matched";
   const baselineTime = startupBaseline.observed_at
     ? fullDateTime(startupBaseline.observed_at)
@@ -103,9 +103,9 @@ function renderAccountFacts(config, startupBaseline, modeLabel) {
     <div><span>同步服务模式</span><b class="muted">账户私有 WebSocket</b></div>
     <div><span>资金模式</span><b>${esc(SIZING_LABELS[sizing?.mode] || "—")}</b></div>
     <div><span>开仓金额规则</span><b>${esc(fractionLabel)}</b></div>
-    <div><span>最近计算的单笔名义金额</span><b class="num">${esc(money(sizing?.target_notional))}</b></div>
-    <div><span>定额基准权益</span><b class="num">${esc(money(sizing?.basis_equity))}</b></div>
-    <div><span>定额基准时间</span><b class="num">${esc(sizing?.sampled_at ? fullDateTime(sizing.sampled_at) : "—")}</b></div>
+    <div><span>单笔目标名义金额</span><b class="num">${esc(money(sizing?.target_notional))}</b></div>
+    <div><span>开仓基准权益</span><b class="num">${esc(money(sizing?.basis_equity))}</b></div>
+    <div><span>基准权益快照时间</span><b class="num">${esc(sizing?.sampled_at ? fullDateTime(sizing.sampled_at) : "—")}</b></div>
     <div><span>持仓模式</span><b>${esc(modeLabel(config.hedge_mode, "Hedge · 双向", "One-way · 单向"))}</b></div>
     <div><span>保证金模式</span><b>${esc(modeLabel(config.multi_assets_mode, "Multi-Assets · 多资产", "Single-Asset · 单资产"))}</b></div>
     <div><span>手续费等级</span><b>${esc(config.fee_tier == null ? "—" : `VIP ${config.fee_tier}`)}</b></div>
@@ -289,7 +289,7 @@ export function renderAccount(data) {
     ${equityChartBlock}
     ${disclosure("最近成交订单", "RECENT TRADES · ONE ORDER PER ROW", fillsTable, `<strong class="num">${fills.length}</strong>`, { stateKey: "account-fills" })}
     ${disclosure("实盘策略信号", "LIVE SIGNALS · LATEST 30", liveSignalContent, `<strong class="num">${liveSignals.length}</strong>`, { stateKey: "live-strategy-signals" })}
-    ${disclosure("策略归因持仓", "LOCAL STRATEGY POSITION BATCHES", positionsTable, `<strong class="num">${positions.length}</strong>`, { stateKey: "account-positions" })}
+    ${disclosure("策略归因持仓", "LOCAL STRATEGY POSITION BATCHES", positionsTable, `<strong class="num">${positions.length}</strong>`, { open: positions.length > 0, stateKey: "account-positions" })}
     ${disclosure("账户配置与启动基线", "ACCOUNT CONFIGURATION / STARTUP BASELINE", accountFacts, "", { open: accountNeedsReview, stateKey: "account-settings" })}
     ${disclosure("USDT 资产余额", "USDT BALANCE · ACCOUNT COLLATERAL", balancesTable, `<strong class="num">${usdtBalances.length}</strong>`, { stateKey: "account-balances" })}`;
   return [data.status, body];

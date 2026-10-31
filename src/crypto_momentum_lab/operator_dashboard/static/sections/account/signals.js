@@ -25,18 +25,18 @@ function liveSignalKindCell(row) {
 }
 
 const GATE_LABELS = {
-  scheduled_risk_window: "定时停开仓",
-  entry_gate_closed: "开仓门关闭",
-  long_only: "仅允许做多",
-  outside_positive_gainer_top: "不在正涨幅入场榜范围",
+  scheduled_risk_window: "定时禁开仓窗口",
+  entry_gate_closed: "开仓风控闸门关闭",
+  long_only: "仅允许做多 (Long Only)",
+  outside_positive_gainer_top: "未进入正涨幅目标池",
   active_entry_order: "已有同方向开仓挂单",
-  notional_limit: "超过风险额度",
+  notional_limit: "超过风险额度上限",
   batch_limit: "达到持仓批次上限",
-  submission_failed: "提交未完成",
-  max_concurrency_per_symbol_exceeded: "该币种已达到开仓并发上限",
-  entry_concurrency_unproven: "该币种的开仓记录尚未确认完整",
-  exchange_reject_cooldown: "交易所拒单后的冷却期",
-  entry_sizing_persistence_failed: "开仓金额记录保存失败",
+  submission_failed: "订单提交未完成",
+  max_concurrency_per_symbol_exceeded: "该标的已达开仓并发上限",
+  entry_concurrency_unproven: "该标的开仓记录待完整确认",
+  exchange_reject_cooldown: "交易所拒单冷却保护中",
+  entry_sizing_persistence_failed: "开仓金额记录持久化失败",
 };
 
 function gateLabel(reason) {
@@ -61,7 +61,7 @@ function liveSignalFilterSummary(row) {
   if (context.require_price_above_ema5 === true) parts.push("价格 > EMA5");
   if (context.require_price_above_ema10 === true) parts.push("价格 > EMA10");
   if (context.candidate_execution_path === "reduce_only_exit") {
-    parts.push("只减仓退出");
+    parts.push("仅减仓平仓退出 (Reduce-Only)");
   }
   if (Array.isArray(context.gate_reasons)) {
     parts.push(...context.gate_reasons.filter(Boolean).map((value) => `门控：${gateLabel(value)}`));

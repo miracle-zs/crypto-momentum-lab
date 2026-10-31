@@ -33,7 +33,7 @@ export function renderOverview(data) {
     <small>同步 ${esc(relToNow(account.observed_at))}</small>
   </a>`).join("");
   const accountBlock = accountStatuses.length
-    ? `${blockTitle("四账户实盘状态", "LIVE FLEET", `<span class="num muted">${accountStatuses.length} 个账户</span>`)}<div class="overview-account-status-grid">${accountRows}</div>`
+    ? `${blockTitle("实盘集群状态", "LIVE FLEET", `<span class="num muted">${accountStatuses.length} 个账户</span>`)}<div class="overview-account-status-grid">${accountRows}</div>`
     : "";
   const body = `${tiles}
     ${accountBlock}

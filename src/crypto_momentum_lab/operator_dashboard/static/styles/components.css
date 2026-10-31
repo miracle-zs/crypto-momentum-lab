@@ -52,7 +52,7 @@
 .card-title small {
   display: inline-block;
   color: var(--faint);
-  font-size: 9px;
+  font-size: 10px;
   font-family: var(--mono);
   letter-spacing: .12em;
 }
@@ -67,7 +67,7 @@
   border-color: color-mix(in srgb, var(--s, var(--faint)) 45%, transparent);
   background: color-mix(in srgb, var(--s, var(--faint)) 11%, transparent);
   color: var(--s, var(--faint));
-  font: 600 9.5px var(--mono);
+  font: 600 10px var(--mono);
   letter-spacing: .1em;
   white-space: nowrap;
 }
@@ -178,7 +178,7 @@
   display: block;
   margin-top: 2px;
   color: var(--faint);
-  font-size: 8.5px;
+  font-size: 10px;
   font-family: var(--mono);
   letter-spacing: .13em;
 }
@@ -505,11 +505,11 @@ details.secondary[open] summary { margin-bottom: 10px; }
 
 .card-title h2 { font-size: 22px; letter-spacing: .01em; }
 
-.card-title small { margin-top: 5px; font-size: 9px; letter-spacing: .16em; }
+.card-title small { margin-top: 5px; font-size: 10px; letter-spacing: .16em; }
 
 .card-title p { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
 
-.section-state, .pill { min-height: 26px; padding: 5px 10px; font-size: 9px; }
+.section-state, .pill { min-height: 26px; padding: 5px 10px; font-size: 10px; }
 
 .tile-grid { gap: 12px; }
 
@@ -521,7 +521,7 @@ details.secondary[open] summary { margin-bottom: 10px; }
 
 .tile strong.hero { font-size: 26px; }
 
-.tile small { margin-top: 7px; font-size: 10.5px; }
+.tile small { margin-top: 7px; font-size: 11px; }
 
 .kpi-grid { gap: 12px; }
 
@@ -531,19 +531,19 @@ details.secondary[open] summary { margin-bottom: 10px; }
 
 .block-title b { font-size: 14.5px; }
 
-.block-title small { font-size: 9px; letter-spacing: .14em; }
+.block-title small { font-size: 10px; letter-spacing: .14em; }
 
 .block-title strong { font-size: 15px; }
 
 .empty { min-height: 78px; padding: 17px; border-color: var(--line-strong); font-size: 12px; }
 
-.empty small { font-size: 10.5px; }
+.empty small { font-size: 11px; }
 
 .table-scroll { border-radius: 11px; border-color: var(--line); }
 
 .data-table { font-size: 12px; }
 
-.data-table th { padding: 9px 12px; background: var(--surface-3); font-size: 10px; }
+.data-table th { padding: 9px 12px; background: var(--surface-3); font-size: 10.5px; }
 
 .data-table td { padding: 8px 12px; }
 
@@ -566,7 +566,7 @@ details.secondary[open] summary { margin-bottom: 10px; }
 
 .disclosure summary .block-title > span { color: var(--muted); }
 
-.disclosure-hint { flex: none; margin-left: 12px; color: var(--faint); font: 9px var(--mono); letter-spacing: .08em; }
+.disclosure-hint { flex: none; margin-left: 12px; color: var(--faint); font: 10px var(--mono); letter-spacing: .08em; }
 
 .disclosure[open] .disclosure-hint { color: var(--brand); }
 
@@ -628,7 +628,7 @@ details.secondary[open] summary { margin-bottom: 10px; }
   transition: color .15s ease, background .15s ease, border-color .15s ease;
 }
 
-.view-tab small { color: inherit; font: 8px var(--mono); letter-spacing: .09em; }
+.view-tab small { color: inherit; font: 9.5px var(--mono); letter-spacing: .09em; }
 
 .view-tab:hover { color: var(--text); }
 

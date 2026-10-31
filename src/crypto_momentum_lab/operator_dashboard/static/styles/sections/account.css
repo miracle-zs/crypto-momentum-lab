@@ -278,10 +278,14 @@
 
 .live-metrics-note {
   max-width: 900px;
-  margin: 0 0 14px;
+  margin: 0 0 10px;
   color: var(--muted);
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   line-height: 1.55;
+}
+
+.metric-filter-tabs {
+  margin: 0 0 14px;
 }
 
 .live-metrics-grid {
