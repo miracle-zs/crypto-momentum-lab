@@ -450,6 +450,48 @@ class AccountState:
         self._notify_active_symbols_changed()
         log.warning("order_gateway_rejected_cleaned", id=client_order_id, reason=reason)
 
+    async def mark_submission_not_sent(self, client_order_id: str) -> None:
+        """Release an order only when connection setup failed before sending it."""
+        async with self._update_lock:
+            order = self.orders.get(client_order_id)
+            if (
+                order is None
+                or order.status not in (OrderStatus.SUBMITTED, OrderStatus.RECONCILING)
+                or order.exchange_order_id is not None
+                or order.filled_qty != 0
+            ):
+                return
+            await self._apply_order_trade_update(
+                order.client_order_id,
+                order.symbol,
+                order.position_side,
+                order.side,
+                OrderStatus.REJECTED,
+                order.filled_qty,
+                order.avg_price,
+                Decimal("0"),
+                Decimal("0"),
+            )
+            log.warning("order_submission_not_sent", id=client_order_id)
+
+    async def mark_submission_in_doubt(self, client_order_id: str) -> None:
+        """Persist an ambiguous submission without releasing its reservation."""
+        async with self._update_lock:
+            order = self.orders.get(client_order_id)
+            if order is None or order.status not in (
+                OrderStatus.SUBMITTED,
+                OrderStatus.RECONCILING,
+            ):
+                return
+            order.status = OrderStatus.RECONCILING
+            self.set_system_mode(SystemMode.DEGRADED)
+            if self._db is not None:
+                try:
+                    await self._db.async_save_order(order)
+                except Exception:
+                    self.has_unrecoverable_fault = True
+                    raise
+
     async def watch_submission_timeout(
         self, client_order_id: str, timeout_sec: float = 3.0
     ) -> None:

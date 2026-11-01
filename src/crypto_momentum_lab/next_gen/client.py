@@ -51,6 +51,10 @@ class BinanceNetworkError(Exception):
         self.message = message
 
 
+class BinanceConnectionError(BinanceNetworkError):
+    """Connection establishment failed before the HTTP request was sent."""
+
+
 def get_binance_urls(environment: str = "live") -> tuple[str, str, str]:
     """返回 (rest_base_url, ws_private_base_url, ws_public_base_url)"""
     environment = environment.strip().lower()
@@ -157,6 +161,11 @@ class BinanceRestClient:
                 data=req_params if method.upper() in ("POST", "PUT") else None,
                 headers=headers,
             )
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            raise BinanceConnectionError(
+                status_code=None,
+                message=f"HTTP connection failed before request: {e}",
+            ) from e
         except (httpx.TimeoutException, httpx.NetworkError) as e:
             raise BinanceNetworkError(
                 status_code=None,

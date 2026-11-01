@@ -9,7 +9,11 @@ from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
 from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
     ScheduledRiskWindowConfig,
 )
-from crypto_momentum_lab.next_gen.client import BinanceOrderRejectedError
+from crypto_momentum_lab.next_gen.client import (
+    BinanceConnectionError,
+    BinanceNetworkError,
+    BinanceOrderRejectedError,
+)
 from crypto_momentum_lab.next_gen.engine import AccountState
 from crypto_momentum_lab.next_gen.executor import OrderExecutor
 from crypto_momentum_lab.next_gen.exit_manager import ExitManager
@@ -55,6 +59,128 @@ async def exit_setup():
         yield state, repo, mock_rest, exit_mgr
     finally:
         await executor.close()
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_exit_does_not_freeze_other_symbols(exit_setup):
+    state, repo, rest, manager = exit_setup
+    batch = PositionBatch(
+        "live", "a1", "doubt_batch", "BTCUSDT", "LONG", Decimal("1"),
+        Decimal("65000"), datetime.now(UTC),
+    )
+    state.batches[batch.batch_id] = batch
+    manager._pending_exits[batch.batch_id] = (Decimal("66000"), 7200, False)
+    rest.post_order.side_effect = [BinanceNetworkError(502, "unknown"), {"orderId": 2}]
+
+    assert manager.evaluate_active_batches() == [batch.batch_id]
+    await asyncio.gather(*manager._active_exit_tasks.values())
+    await asyncio.sleep(0)
+
+    order = next(iter(state.orders.values()))
+    assert order.status == OrderStatus.RECONCILING
+    assert repo.orders[("live", "a1", order.client_order_id)].status == (
+        OrderStatus.RECONCILING
+    )
+    assert not state.has_unrecoverable_fault
+    assert not state.can_submit_entry_order()
+    assert not state.can_submit_exit_order("BTCUSDT", "LONG")
+    assert state.can_submit_exit_order("ETHUSDT", "LONG")
+    assert batch.exiting_quantity == Decimal("1")
+    assert rest.post_order.await_count == 1
+    other = PositionBatch(
+        "live", "a1", "other_batch", "ETHUSDT", "LONG", Decimal("1"),
+        Decimal("3000"), datetime.now(UTC),
+    )
+    state.batches[other.batch_id] = other
+    manager._pending_exits[other.batch_id] = (None, 0, True)
+    assert manager.evaluate_active_batches() == [other.batch_id]
+    await asyncio.gather(*manager._active_exit_tasks.values())
+    assert rest.post_order.await_count == 2
+    assert rest.post_order.await_args.kwargs["symbol"] == "ETHUSDT"
+
+
+@pytest.mark.asyncio
+async def test_exit_connection_failure_releases_reservation_and_retries_later(
+    exit_setup,
+):
+    state, repo, rest, manager = exit_setup
+    batch = PositionBatch(
+        "live", "a1", "connect_batch", "BTCUSDT", "LONG", Decimal("1"),
+        Decimal("65000"), datetime.now(UTC),
+    )
+    state.batches[batch.batch_id] = batch
+    rest.post_order.side_effect = BinanceConnectionError(None, "TLS handshake failed")
+    await manager.execute_batch_exit(batch.batch_id, Decimal("66000"))
+
+    order = next(iter(state.orders.values()))
+    assert order.status == OrderStatus.REJECTED
+    assert batch.exiting_quantity == 0
+    assert repo.batches[("live", "a1", batch.batch_id)].exiting_quantity == 0
+    assert ("a1", batch.batch_id) not in state.active_exit_orders
+    assert state.can_submit_exit_order("BTCUSDT", "LONG")
+    assert batch.batch_id in manager._rejected_exit_until
+    assert not state.has_unrecoverable_fault
+    rest.post_order.side_effect = None
+    rest.post_order.return_value = {"orderId": 2}
+    manager._complete_limit_exit = AsyncMock()
+    manager._rejected_exit_until[batch.batch_id] = datetime.now(UTC) - timedelta(
+        seconds=1
+    )
+    assert manager.evaluate_active_batches() == [batch.batch_id]
+    await asyncio.gather(*manager._active_exit_tasks.values())
+    assert rest.post_order.await_count == 2
+    assert rest.post_order.await_args.kwargs["client_order_id"] != order.client_order_id
+
+
+@pytest.mark.asyncio
+async def test_connect_failure_after_watchdog_restores_account(exit_setup):
+    state, repo, rest, manager = exit_setup
+    batch = PositionBatch(
+        "live", "a1", "delayed_connect", "BTCUSDT", "LONG", Decimal("1"),
+        Decimal("65000"), datetime.now(UTC),
+    )
+    state.batches[batch.batch_id] = batch
+
+    async def fail_after_watchdog(**kwargs):
+        await state.watch_submission_timeout(kwargs["client_order_id"], timeout_sec=0)
+        raise BinanceConnectionError(None, "TLS handshake failed")
+
+    rest.post_order.side_effect = fail_after_watchdog
+    await manager.execute_batch_exit(batch.batch_id, Decimal("66000"))
+    order = next(iter(state.orders.values()))
+    assert order.status == OrderStatus.REJECTED
+    assert repo.orders[("live", "a1", order.client_order_id)].status == (
+        OrderStatus.REJECTED
+    )
+    assert batch.exiting_quantity == 0
+    assert state.system_mode == SystemMode.RUNNING
+    assert state.can_submit_entry_order()
+
+
+@pytest.mark.asyncio
+async def test_connect_failure_cannot_resume_when_db_write_fails(exit_setup):
+    state, repo, rest, manager = exit_setup
+    batch = PositionBatch(
+        "live", "a1", "failed_persist", "BTCUSDT", "LONG", Decimal("1"),
+        Decimal("65000"), datetime.now(UTC),
+    )
+    state.batches[batch.batch_id] = batch
+    original_save = repo.async_save_order_and_batch
+    calls = 0
+
+    async def fail_after_prewrite(order, saved_batch):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise OSError("database unavailable")
+        await original_save(order, saved_batch)
+
+    repo.async_save_order_and_batch = fail_after_prewrite
+    rest.post_order.side_effect = BinanceConnectionError(None, "connect failed")
+    with pytest.raises(RuntimeError, match="persist local submission failure"):
+        await manager.execute_batch_exit(batch.batch_id, Decimal("66000"))
+    assert state.has_unrecoverable_fault
+    assert not state.can_submit_exit_order("BTCUSDT", "LONG")
 
 
 @pytest.mark.asyncio
@@ -195,17 +321,22 @@ async def test_price_filter_retry_is_cancelled_before_market_sweep(exit_setup):
         order = state.orders[params["client_order_id"]]
         await state.on_order_trade_update(
             order.client_order_id, order.symbol, order.position_side, order.side,
-            OrderStatus.CANCELED, Decimal("0"), Decimal("0"), Decimal("0"), Decimal("0"),
+            OrderStatus.CANCELED, Decimal("0"), Decimal("0"), Decimal("0"),
+            Decimal("0"),
         )
 
     rest.cancel_order.side_effect = observe_cancel
-    await manager.execute_batch_exit(batch_id, Decimal("66000.4"), grace_period_sec=0.01)
+    await manager.execute_batch_exit(
+        batch_id, Decimal("66000.4"), grace_period_sec=0.01
+    )
 
     assert [call.kwargs["order_type"] for call in rest.post_order.call_args_list] == [
         "LIMIT", "LIMIT", "MARKET"
     ]
     retry_id = rest.post_order.call_args_list[1].kwargs["client_order_id"]
-    rest.cancel_order.assert_awaited_once_with(symbol="BTCUSDT", client_order_id=retry_id)
+    rest.cancel_order.assert_awaited_once_with(
+        symbol="BTCUSDT", client_order_id=retry_id
+    )
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,8 @@ from typing import Any
 import structlog
 
 from crypto_momentum_lab.next_gen.client import (
+    BinanceConnectionError,
+    BinanceNetworkError,
     BinanceOrderNotFoundError,
     BinanceOrderRejectedError,
     BinanceRestClient,
@@ -406,6 +408,13 @@ class OrderExecutor:
                 client_order_id=order.client_order_id,
             )
             return res
+        except BinanceConnectionError as error:
+            await self._state.mark_submission_not_sent(order.client_order_id)
+            if self._state.has_unrecoverable_fault:
+                raise RuntimeError(
+                    "Failed to persist local submission failure"
+                ) from error
+            raise
         except BinanceOrderRejectedError as e:
             # 业务明确拒单（如 -2010/-2019 等）：交易所未建单，原子清理活跃锁与预留
             self._state.mark_order_rejected(order.client_order_id, e.message)
@@ -423,8 +432,9 @@ class OrderExecutor:
                     "Rejected order state could not be persisted; account degraded"
                 ) from persist_error
             raise
-        except Exception as e:
+        except BinanceNetworkError as e:
             # 网络超时/5xx：订单处于存疑状态，绝不清理活跃锁，由看门狗转入 RECONCILING
+            await self._state.mark_submission_in_doubt(order.client_order_id)
             log.warning(
                 "order_submission_in_doubt_due_to_network_failure",
                 order_id=order.client_order_id,

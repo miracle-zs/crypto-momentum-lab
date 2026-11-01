@@ -75,7 +75,7 @@ async def test_order_executor_network_error_keeps_order_in_doubt_and_locks_held(
         await executor.close()
 
     # 关键防重开验证：订单状态绝对不能是 REJECTED，开仓锁必须继续持有以防策略重复发单！
-    assert order.status == OrderStatus.SUBMITTED
+    assert order.status == OrderStatus.RECONCILING
     assert ("a1", "BTCUSDT", "LONG") in state.active_entry_orders
 
 

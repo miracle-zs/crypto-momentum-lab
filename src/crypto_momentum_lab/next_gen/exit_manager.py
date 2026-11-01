@@ -19,6 +19,8 @@ from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
     ScheduledRiskWindowPhase,
 )
 from crypto_momentum_lab.next_gen.client import (
+    BinanceConnectionError,
+    BinanceNetworkError,
     BinanceOrderRejectedError,
     BinanceRestClient,
 )
@@ -166,6 +168,28 @@ class ExitManager:
     ) -> Order | None:
         try:
             await self._executor.submit_order(order)
+        except BinanceConnectionError as error:
+            if order.status == OrderStatus.REJECTED:
+                self._rejected_exit_until[order.batch_id] = datetime.now(
+                    UTC
+                ) + timedelta(seconds=30)
+            log.warning(
+                "exit_order_connection_failed",
+                batch_id=order.batch_id,
+                symbol=order.symbol,
+                reason=str(error),
+            )
+            return None if order.status == OrderStatus.REJECTED else order
+        except BinanceNetworkError as error:
+            log.warning(
+                "exit_order_in_doubt",
+                batch_id=order.batch_id,
+                symbol=order.symbol,
+                reason=str(error),
+            )
+            if order.status == OrderStatus.RECONCILING:
+                return None
+            return order
         except BinanceOrderRejectedError as error:
             self._rejected_exit_until[order.batch_id] = datetime.now(UTC) + timedelta(
                 seconds=30
@@ -197,7 +221,9 @@ class ExitManager:
             return None
         except RuntimeError as error:
             # A closed gate is temporary. Other RuntimeErrors are real faults.
-            if self._state.can_submit_exit_order(order.symbol, order.position_side):
+            if self._state.has_unrecoverable_fault or self._state.can_submit_exit_order(
+                order.symbol, order.position_side
+            ):
                 raise
             log.warning(
                 "exit_order_blocked_by_gate",

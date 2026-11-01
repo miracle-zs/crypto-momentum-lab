@@ -33,7 +33,7 @@ export const ORDER_STATUS_LABELS = Object.freeze({
   FILLED: "已成交",
   CANCELED: "已取消/过期",
   EXPIRED: "已过期",
-  REJECTED: "已拒绝",
+  REJECTED: "未受理／提交失败",
 });
 
 export const MARGIN_TYPE_LABELS = Object.freeze({

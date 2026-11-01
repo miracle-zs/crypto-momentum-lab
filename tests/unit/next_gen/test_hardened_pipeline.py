@@ -10,6 +10,7 @@ import pytest
 import respx
 
 from crypto_momentum_lab.next_gen.client import (
+    BinanceConnectionError,
     BinanceNetworkError,
     BinanceRestClient,
     BinanceUserDataStream,
@@ -54,6 +55,33 @@ async def test_binance_in_doubt_error_code_raises_network_error() -> None:
 
 
 @pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (httpx.ConnectError("TLS handshake failed"), BinanceConnectionError),
+        (httpx.ConnectTimeout("connection timeout"), BinanceConnectionError),
+        (httpx.ReadTimeout("response timeout"), BinanceNetworkError),
+        (httpx.WriteError("write failed"), BinanceNetworkError),
+    ],
+)
+async def test_order_connection_failure_is_distinguished_from_ambiguous_io(
+    error, expected
+) -> None:
+    respx.post("https://fapi.binance.com/fapi/v1/order").mock(side_effect=error)
+    client = BinanceRestClient(api_key="k", api_secret="s")
+    try:
+        with pytest.raises(expected) as caught:
+            await client.post_order(
+                symbol="BTCUSDT", side="BUY", position_side="LONG",
+                order_type="MARKET", quantity=Decimal("1"), client_order_id="test",
+            )
+        assert type(caught.value) is expected
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_order_executor_in_doubt_error_keeps_lock_and_submitted_status() -> None:
     repo = InMemoryTradingRepository()
     mock_rest = AsyncMock()
@@ -82,8 +110,11 @@ async def test_order_executor_in_doubt_error_keeps_lock_and_submitted_status() -
     finally:
         await executor.close()
 
-    # 验证订单保持 SUBMITTED，绝不可标为 REJECTED
-    assert order.status == OrderStatus.SUBMITTED
+    # 网络结果未知必须立即持久化为待确认，绝不可标为 REJECTED。
+    assert order.status == OrderStatus.RECONCILING
+    assert repo.orders[("live", "primary", order.client_order_id)].status == (
+        OrderStatus.RECONCILING
+    )
     # 验证开仓锁依然被持有，防止策略重发造成超开
     assert ("primary", "BTCUSDT", "LONG") in state.active_entry_orders
 
