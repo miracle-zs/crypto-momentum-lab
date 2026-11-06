@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from crypto_momentum_lab.domain.operational.retention_authority import (
+    DependencyVersionConflictError,
     InMemoryRetentionRepository,
     RetentionAuthority,
 )
@@ -98,6 +99,84 @@ def test_plan_prune_unconstrained_when_no_dependencies() -> None:
     assert plan.effective_cutoff == requested
     assert plan.binding_consumer_id is None
     assert plan.status == PrunePlanStatus.CREATED
+
+
+@pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+async def test_plan_version_matches_dependencies_used_for_cutoff(
+    monkeypatch: pytest.MonkeyPatch, async_mode: bool
+) -> None:
+    repo = InMemoryRetentionRepository()
+    authority = RetentionAuthority(repo)
+    cutoff = datetime(2026, 10, 1, tzinfo=UTC)
+    spec = RecoverySpec(
+        source_dataset="test_dataset",
+        earliest_needed_watermark=datetime(2026, 9, 1, tzinfo=UTC),
+    )
+    original = authority._gather_dependencies
+    original_async = authority._gather_dependencies_async
+
+    def gather_then_register(dataset_name: str):
+        dependencies = original(dataset_name)
+        repo.save_dependency(
+            authority._create_consumer_dependency(
+                consumer_id="new_consumer", generation=1, recovery_spec=spec
+            )
+        )
+        return dependencies
+
+    async def gather_then_register_async(dataset_name: str):
+        dependencies = await original_async(dataset_name)
+        repo.save_dependency(
+            authority._create_consumer_dependency(
+                consumer_id="new_consumer", generation=1, recovery_spec=spec
+            )
+        )
+        return dependencies
+
+    if async_mode:
+        monkeypatch.setattr(
+            authority, "_gather_dependencies_async", gather_then_register_async
+        )
+        plan = await authority.plan_prune_async(
+            dataset_name="test_dataset", requested_cutoff=cutoff
+        )
+        monkeypatch.setattr(authority, "_gather_dependencies_async", original_async)
+    else:
+        monkeypatch.setattr(authority, "_gather_dependencies", gather_then_register)
+        plan = authority.plan_prune(
+            dataset_name="test_dataset", requested_cutoff=cutoff
+        )
+        monkeypatch.setattr(authority, "_gather_dependencies", original)
+
+    assert plan.effective_cutoff == cutoff
+    assert plan.expected_dependency_version == "dep_v0_empty"
+    with pytest.raises(DependencyVersionConflictError, match="epoch fence violation"):
+        authority.verify_fence(plan)
+
+    executed = False
+
+    def execute(plan):
+        nonlocal executed
+        executed = True
+        return PruneOutcome()
+
+    async def execute_async(plan):
+        return execute(plan)
+
+    if async_mode:
+        receipt = await authority.execute_prune_async(
+            plan=plan,
+            expected_dependency_version=plan.expected_dependency_version,
+            executor_fn=execute_async,
+        )
+    else:
+        receipt = authority.execute_prune(
+            plan=plan,
+            expected_dependency_version=plan.expected_dependency_version,
+            executor_fn=execute,
+        )
+    assert receipt.status == PruneReceiptStatus.REJECTED_VERSION_MISMATCH
+    assert executed is False
 
 
 def test_plan_prune_constrained_by_active_consumer_watermark() -> None:

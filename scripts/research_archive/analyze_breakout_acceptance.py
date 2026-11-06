@@ -540,7 +540,7 @@ def simulate_same_exit(
 
         mark = mark_at_or_near(series, timeout)
         if mark is not None:
-            mark_time, mark_price = mark
+            _, mark_price = mark
             return make_same_exit_trade(
                 event,
                 exit_epoch=timeout,

@@ -322,7 +322,7 @@ class RetentionAuthority:
             raise ValueError("requested_cutoff must be timezone-aware")
 
         deps = self._gather_dependencies(dataset_name)
-        current_dep_version = self.compute_dependency_version(dataset_name)
+        current_dep_version = self._compute_version_hash_pure(deps)
 
         plan = _build_prune_plan(
             dataset_name=dataset_name,
@@ -377,7 +377,7 @@ class RetentionAuthority:
             raise ValueError("requested_cutoff must be timezone-aware")
 
         deps = await self._gather_dependencies_async(dataset_name)
-        current_dep_version = await self.compute_dependency_version_async(dataset_name)
+        current_dep_version = self._compute_version_hash_pure(deps)
 
         plan = _build_prune_plan(
             dataset_name=dataset_name,
