@@ -1,11 +1,9 @@
-"""Domain models for immutable exchange facts and their derived position view.
+"""Position identity and batch models used by execution-head migrations.
 
 Provides strict identity types:
 - ``PositionKey``: Fully qualified identity across environment,
   account, symbol, and side;
 - ``PositionLedgerBatch``: An entry lot within a specific position episode;
-- ``PositionEpisode``: A continuous non-zero holding lifecycle
-  bounded by zero-crossings;
 """
 
 from __future__ import annotations
@@ -16,7 +14,6 @@ from decimal import Decimal
 from enum import StrEnum
 
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
-from crypto_momentum_lab.domain.trading import TradeSide as StrategySide
 
 
 class PositionHealthStatus(StrEnum):
@@ -98,53 +95,4 @@ class PositionLedgerBatch:
             and self.exit_order_submitted_at.tzinfo is None
         ):
             raise ValueError("exit_order_submitted_at must be timezone-aware")
-
-
-@dataclass(frozen=True, slots=True)
-class PositionEpisode:
-    """A continuous holding lifecycle bounded by zero-crossings or side reversals."""
-
-    episode_id: str
-    position_key: PositionKey
-    side: StrategySide
-    opened_at: datetime
-    closed_at: datetime | None = None
-    is_active: bool = True
-    cumulative_bought: Decimal = Decimal("0")
-    cumulative_sold: Decimal = Decimal("0")
-    peak_quantity: Decimal = Decimal("0")
-
-    def __post_init__(self) -> None:
-        if not self.episode_id.strip():
-            raise ValueError("episode_id must not be empty")
-        if self.opened_at.tzinfo is None:
-            raise ValueError("opened_at must be timezone-aware")
-        if self.closed_at is not None and self.closed_at.tzinfo is None:
-            raise ValueError("closed_at must be timezone-aware")
-
-
-@dataclass(frozen=True, slots=True)
-class PositionView:
-    """Compact position context for deterministic decision evaluation and replay.
-
-    The live NextGen runtime maintains its own position batches. This view keeps
-    the position inputs needed by the decision trace and its replay.
-    """
-
-    key: PositionKey
-    projection_version: str
-    input_revision: int
-    event_cut: datetime | None
-    policy_version: str
-    schema_version: str
-    active_episode: PositionEpisode | None
-    batches: tuple[PositionLedgerBatch, ...]
-    unallocated_quantity: Decimal
-    reconciliation_gap: Decimal | None = None
-    health_status: PositionHealthStatus = PositionHealthStatus.READY
-    is_comparable: bool = True
-
-    @property
-    def total_quantity(self) -> Decimal:
-        return sum((b.quantity for b in self.batches), start=Decimal("0"))
 

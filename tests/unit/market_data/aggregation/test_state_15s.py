@@ -14,7 +14,6 @@ from crypto_momentum_lab.domain.market.models import (
 )
 from crypto_momentum_lab.market_data.aggregation.state_15s import (
     MarketState15sAccumulator,
-    aggregate_market_states_15s,
     bucket_start_15s,
 )
 
@@ -35,7 +34,7 @@ def test_bucket_start_15s_aligns_utc_boundaries() -> None:
 
 
 def test_aggregate_trades_calculates_ohlc_and_aggressive_notional() -> None:
-    states = aggregate_market_states_15s(
+    state = _aggregate_bucket(
         (
             _trade(
                 sequence=1,
@@ -52,8 +51,6 @@ def test_aggregate_trades_calculates_ohlc_and_aggressive_notional() -> None:
         )
     )
 
-    assert len(states) == 1
-    state = states[0]
     assert state.bucket_start == datetime(2026, 6, 15, 2, 0, tzinfo=UTC)
     assert state.bucket_end == datetime(2026, 6, 15, 2, 0, 15, tzinfo=UTC)
     assert state.open_price == Decimal("100")
@@ -68,7 +65,7 @@ def test_aggregate_trades_calculates_ohlc_and_aggressive_notional() -> None:
 
 
 def test_book_ticker_sets_last_spread_and_midpoint() -> None:
-    states = aggregate_market_states_15s(
+    state = _aggregate_bucket(
         (
             NormalizedBookTicker(
                 **_source(CaptureStream.BOOK_TICKER),
@@ -81,7 +78,6 @@ def test_book_ticker_sets_last_spread_and_midpoint() -> None:
         )
     )
 
-    state = states[0]
     assert state.last_bid_price == Decimal("100")
     assert state.last_ask_price == Decimal("101")
     assert state.spread == Decimal("1")
@@ -91,7 +87,7 @@ def test_book_ticker_sets_last_spread_and_midpoint() -> None:
 
 
 def test_liquidation_mark_price_and_closed_kline_update_bucket() -> None:
-    states = aggregate_market_states_15s(
+    state = _aggregate_bucket(
         (
             NormalizedLiquidation(
                 **_source(CaptureStream.FORCE_ORDER, sequence=1),
@@ -126,7 +122,6 @@ def test_liquidation_mark_price_and_closed_kline_update_bucket() -> None:
         )
     )
 
-    state = states[0]
     assert state.liquidation_count == 1
     assert state.liquidation_notional == Decimal("40.20")
     assert state.mark_price == Decimal("100.1")
@@ -141,11 +136,9 @@ def test_liquidation_mark_price_and_closed_kline_update_bucket() -> None:
 
 
 def test_different_symbols_produce_separate_states() -> None:
-    states = aggregate_market_states_15s(
-        (
-            _trade(sequence=1, symbol="BTCUSDT"),
-            _trade(sequence=2, symbol="ETHUSDT"),
-        )
+    states = (
+        _aggregate_bucket((_trade(sequence=1, symbol="BTCUSDT"),)),
+        _aggregate_bucket((_trade(sequence=2, symbol="ETHUSDT"),)),
     )
 
     assert [(state.symbol, state.trade_count) for state in states] == [
@@ -172,6 +165,13 @@ def test_incremental_accumulator_snapshots_without_consuming_the_bucket() -> Non
     assert durable.state.close_price == Decimal("99")
     assert durable.input_sequence_min == 1
     assert durable.input_sequence_max == 3
+
+
+def _aggregate_bucket(events):
+    accumulator = MarketState15sAccumulator.for_bucket(events[0])
+    for event in events:
+        accumulator.observe(event)
+    return accumulator.snapshot().state
 
 
 def _trade(

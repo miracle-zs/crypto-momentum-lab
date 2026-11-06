@@ -99,7 +99,7 @@ class ProcessResourceSampler:
 def _read_text(path: Path) -> str:
     try:
         return path.read_text(encoding="ascii")
-    except (FileNotFoundError, OSError):
+    except OSError:
         return ""
 
 

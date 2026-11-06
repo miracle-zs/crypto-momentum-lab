@@ -230,7 +230,8 @@ export function restoreViewState(root, state) {
   }
 
   // 4. Restore focus ONLY if the active element was an editable text input.
-  if (state.focusIdentity && state.focusIdentity.isEditable) {
+  if (state.focusIdentity && state.focusIdentity.isEditable
+      && state.interactionVersion === getUserInteractionVersion()) {
     let focusTarget = null;
     if (state.focusIdentity.stateKey) {
       focusTarget = root.querySelector?.(`[data-state-key="${state.focusIdentity.stateKey}"]`);

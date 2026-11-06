@@ -10,12 +10,6 @@ from crypto_momentum_lab.live_rollout.profile import LiveOrderFlowImpulseProfile
 from crypto_momentum_lab.strategies.order_flow_impulse import OrderFlowImpulseConfig
 from crypto_momentum_lab.strategies.registry import build_runtime_config
 
-_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT = 30
-_LIVE_ENTRY_PRICE_ABOVE_EMA5 = False
-_LIVE_ENTRY_PRICE_ABOVE_EMA10 = False
-_LIVE_ENTRY_ORDER_TYPE = EntryType.LIMIT
-_LIVE_ENTRY_LIMIT_TTL_SECONDS = 900
-
 
 def _live_strategy_config(
     profile: LiveOrderFlowImpulseProfile,
@@ -43,11 +37,11 @@ def _live_strategy_config_hash(
     strategy_name: str,
     *,
     profile: LiveOrderFlowImpulseProfile,
-    entry_positive_gainer_top_count: int | None = _LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT,
-    require_price_above_ema5: bool = _LIVE_ENTRY_PRICE_ABOVE_EMA5,
-    require_price_above_ema10: bool = _LIVE_ENTRY_PRICE_ABOVE_EMA10,
-    entry_order_type: EntryType = _LIVE_ENTRY_ORDER_TYPE,
-    entry_limit_ttl_seconds: int = _LIVE_ENTRY_LIMIT_TTL_SECONDS,
+    entry_positive_gainer_top_count: int | None,
+    require_price_above_ema5: bool,
+    require_price_above_ema10: bool,
+    entry_order_type: EntryType,
+    entry_limit_ttl_seconds: int,
 ) -> str:
     if (
         entry_positive_gainer_top_count is not None

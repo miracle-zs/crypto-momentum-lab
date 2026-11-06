@@ -6,14 +6,9 @@ import base64
 import hashlib
 import json
 import zlib
-from datetime import datetime
 from typing import Any
 
 from crypto_momentum_lab.domain.market.market_book import UnreproducibleError
-from crypto_momentum_lab.domain.market.revision_models import (
-    MarketRevisionRef,
-    MarketVisibilityMode,
-)
 
 
 def share_policy_states(
@@ -40,34 +35,6 @@ def share_policy_states(
         "next": next_digest,
     }
     return decoded, states
-
-def policy_state_reference_ids(payload: dict[str, Any]) -> set[str]:
-    refs = payload.get("policy_state_refs")
-    if refs is None:
-        return set()
-    if not isinstance(refs, dict) or set(refs) != {"prior", "next"}:
-        raise UnreproducibleError("Invalid shared policy state references")
-    if any(not isinstance(value, str) or len(value) != 64 for value in refs.values()):
-        raise UnreproducibleError("Invalid shared policy state digest")
-    return set(refs.values())
-
-def resolve_policy_states(
-    payload: dict[str, Any], states: dict[str, dict[str, Any]]
-) -> dict[str, Any]:
-    """Resolve exact state evidence and reject missing, corrupt or ambiguous inputs."""
-    result = expand_trace_payload(payload)
-    ids = policy_state_reference_ids(result)
-    if not ids:
-        return result
-    if "prior_policy_state" in result or "next_policy_state" in result:
-        raise UnreproducibleError("Ambiguous shared policy evidence")
-    for digest in ids:
-        if digest not in states or _payload_digest(states[digest]) != digest:
-            raise UnreproducibleError("Shared policy evidence is missing or corrupt")
-    refs = result.pop("policy_state_refs")
-    result["prior_policy_state"] = states[refs["prior"]]
-    result["next_policy_state"] = states[refs["next"]]
-    return result
 
 def expand_trace_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Decode exact policy evidence; malformed or altered evidence fails closed."""
@@ -103,46 +70,6 @@ def expand_trace_payload(payload: dict[str, Any]) -> dict[str, Any]:
         ) from exc
     return result
 
-def load_summary_market_refs(
-    payload: dict[str, Any], *, decision_id: str
-) -> list[MarketRevisionRef]:
-    """Decode the reference identities attached to a compacted trace."""
-    raw_refs = payload.get("market_refs")
-    if not isinstance(raw_refs, list) or not raw_refs:
-        raise UnreproducibleError(
-            f"Summary decision trace {decision_id} has no market references"
-        )
-    refs: list[MarketRevisionRef] = []
-    try:
-        for raw in raw_refs:
-            if not isinstance(raw, dict):
-                raise TypeError("market reference is not an object")
-            observed_at = raw.get("observed_at")
-            refs.append(
-                MarketRevisionRef(
-                    scope=str(raw["scope"]),
-                    symbol=str(raw["symbol"]),
-                    interval=str(raw["interval"]),
-                    bucket_start=datetime.fromisoformat(str(raw["bucket_start"])),
-                    bucket_end=datetime.fromisoformat(str(raw["bucket_end"])),
-                    revision_id=str(raw["revision_id"]),
-                    content_hash=str(raw["content_hash"]),
-                    published_at=datetime.fromisoformat(str(raw["published_at"])),
-                    source_epoch=str(raw["source_epoch"]),
-                    visibility_mode=MarketVisibilityMode(str(raw["visibility_mode"])),
-                    observed_at=(
-                        datetime.fromisoformat(str(observed_at))
-                        if observed_at
-                        else None
-                    ),
-                )
-            )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise UnreproducibleError(
-            f"Summary decision trace {decision_id} has invalid market references"
-        ) from exc
-    return refs
-
 def _payload_digest(payload: dict[str, Any]) -> str:
     canonical = json.dumps(
         payload,
@@ -155,6 +82,5 @@ def _payload_digest(payload: dict[str, Any]) -> str:
 
 __all__ = [
     "expand_trace_payload",
-    "load_summary_market_refs",
     "share_policy_states",
 ]

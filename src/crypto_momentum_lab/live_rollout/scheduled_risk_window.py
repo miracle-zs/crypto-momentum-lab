@@ -44,9 +44,6 @@ class ScheduledRiskWindowConfig:
     flatten_deadline_at: time = time(7, 55)
     verify_at: time = time(7, 58)
     reopen_at: time = time(9, 0)
-    poll_interval_seconds: float = 1.0
-    retry_interval_seconds: float = 2.0
-    verify_retry_interval_seconds: float = 5.0
 
     @classmethod
     def from_environment(
@@ -105,13 +102,6 @@ class ScheduledRiskWindowConfig:
             raise ValueError("flatten_deadline_at must be before verify_at")
         if self.verify_at >= self.reopen_at:
             raise ValueError("verify_at must be before reopen_at")
-        for value, field_name in (
-            (self.poll_interval_seconds, "poll_interval_seconds"),
-            (self.retry_interval_seconds, "retry_interval_seconds"),
-            (self.verify_retry_interval_seconds, "verify_retry_interval_seconds"),
-        ):
-            if value <= 0:
-                raise ValueError(f"{field_name} must be positive")
 
     @property
     def zone(self) -> ZoneInfo:
@@ -141,9 +131,7 @@ class ScheduledRiskWindowConfig:
         """Check whether new order entries are allowed at the given timestamp."""
         local_value = self.localize(value)
         current_time = local_value.time().replace(tzinfo=None)
-        if self.entry_stop_at < self.reopen_at:
-            return not (self.entry_stop_at <= current_time < self.reopen_at)
-        return not (current_time >= self.entry_stop_at or current_time < self.reopen_at)
+        return not (self.entry_stop_at <= current_time < self.reopen_at)
 
 
 __all__ = [

@@ -57,22 +57,6 @@ class WebSocketQuoteVolumeProvider:
         self._task: asyncio.Task[None] | None = None
         self._failure_count = 0
 
-    @property
-    def cached_symbol_count(self) -> int:
-        return len(self._snapshots)
-
-    @property
-    def total_snapshot_count(self) -> int:
-        return len(self._snapshots)
-
-    @property
-    def lookup_hit_count(self) -> int:
-        return self._lookup_hit_count
-
-    @property
-    def lookup_miss_count(self) -> int:
-        return self._lookup_miss_count
-
     def oldest_snapshot_age_seconds(
         self,
         *,
@@ -93,11 +77,11 @@ class WebSocketQuoteVolumeProvider:
         now: datetime | None = None,
     ) -> dict[str, object]:
         return {
-            "cached_symbol_count": self.cached_symbol_count,
-            "total_snapshot_count": self.total_snapshot_count,
+            "cached_symbol_count": len(self._snapshots),
+            "total_snapshot_count": len(self._snapshots),
             "oldest_snapshot_age_seconds": self.oldest_snapshot_age_seconds(now=now),
-            "lookup_hit_count": self.lookup_hit_count,
-            "lookup_miss_count": self.lookup_miss_count,
+            "lookup_hit_count": self._lookup_hit_count,
+            "lookup_miss_count": self._lookup_miss_count,
         }
 
     async def start(self) -> None:
@@ -133,12 +117,12 @@ class WebSocketQuoteVolumeProvider:
         self._lookup_miss_count += 1
         return None
 
-    def _observe(self, snapshot: QuoteVolume24hSnapshot) -> bool:
+    def _observe(self, snapshot: QuoteVolume24hSnapshot) -> None:
         # The live strategy trades USDT-margined perpetuals.  The global
         # endpoint also returns COIN-M/USDC-style symbols, for which a value
         # labelled as USDT would be misleading.
         if not snapshot.symbol.upper().endswith("USDT"):
-            return False
+            return
         normalized = QuoteVolume24hSnapshot(
             symbol=snapshot.symbol.upper(),
             quote_volume=snapshot.quote_volume,
@@ -150,7 +134,6 @@ class WebSocketQuoteVolumeProvider:
             environment=snapshot.environment,
         )
         self._snapshots[normalized.symbol] = normalized
-        return True
 
     async def _run(self) -> None:
         while True:

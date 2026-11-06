@@ -4,7 +4,6 @@ Obeys Astra Architecture Blueprint 2026-09-25:
 - RevisionRef separates business bucket time from immutable content revision;
 - Distinct visibility modes: decision_visible vs canonical;
 - DatasetManifest with explicit interval coverage and holes proof;
-- DecisionTrace pinning input revision references.
 """
 
 from __future__ import annotations
@@ -162,33 +161,3 @@ class DatasetManifest:
         }
         dumped = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(dumped.encode("utf-8")).hexdigest()
-
-
-@dataclass(frozen=True, slots=True)
-class DecisionTrace:
-    """Record pinning exact market revision inputs and policy outputs."""
-
-    decision_id: str
-    strategy_name: str
-    account_label: str
-    decision_time: datetime
-    evaluated_market_refs: tuple[MarketRevisionRef, ...]
-    intent_produced: bool
-    intent_id: str | None = None
-    rejection_reason: str | None = None
-    input_hash: str = ""
-    frame_digest: str = ""
-    trace_payload: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not self.decision_id.strip():
-            raise ValueError("decision_id must not be empty")
-        if not self.strategy_name.strip():
-            raise ValueError("strategy_name must not be empty")
-        if not self.account_label.strip():
-            raise ValueError("account_label must not be empty")
-        object.__setattr__(
-            self, "decision_time", _require_aware(self.decision_time, "decision_time")
-        )
-        if not self.evaluated_market_refs:
-            raise ValueError("evaluated_market_refs must not be empty")

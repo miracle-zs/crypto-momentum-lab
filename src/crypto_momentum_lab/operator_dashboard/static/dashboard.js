@@ -19,11 +19,9 @@ import { createShell } from "./app/shell.js";
 import {
   wireClickToCopy,
   wireGlobalShortcuts,
-  wireMarketViews,
   wireTableFilters,
   wireTableSorting,
 } from "./app/wire-widgets.js";
-import { installJumpProbe } from "./app/jump-probe.js";
 
 const renderers = {
   overview: renderOverview,
@@ -51,7 +49,6 @@ function tick() {
 const poller = createPoller({
   renderers,
   onAfterRender: {
-    wireMarketViews,
     wireTableFilters,
     wireClickToCopy,
     wireTableSorting,
@@ -106,7 +103,6 @@ function initPalette() {
 
 initPalette();
 shell.selectView(shell.initialView(), { updateHistory: false });
-installJumpProbe();
 wireEcharts(document);
 wireGlobalShortcuts(shell, poller);
 tick();

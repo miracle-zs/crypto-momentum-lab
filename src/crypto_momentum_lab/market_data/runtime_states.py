@@ -494,10 +494,10 @@ class ClosedMarketStatePublisher:
 
     async def _observe(self, envelope: RawEnvelope) -> None:
         self._received_envelope_count += 1
-        counters = self._lateness_by_stream.setdefault(
-            envelope.stream,
-            _EventLatenessCounters(),
-        )
+        counters = self._lateness_by_stream.get(envelope.stream)
+        if counters is None:
+            counters = _EventLatenessCounters()
+            self._lateness_by_stream[envelope.stream] = counters
         counters.observe_raw(envelope)
         try:
             event = normalize_binance_envelope(envelope)

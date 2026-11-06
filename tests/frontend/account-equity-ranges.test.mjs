@@ -9,7 +9,7 @@ import { createPoller } from "../../src/crypto_momentum_lab/operator_dashboard/s
 import { sectionRenderKey } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-rendering.js";
 import {
   latestSectionData,
-  latestSectionError,
+  failedSections,
   latestSectionUpdatedAt,
   sectionInFlight,
   sectionRenderKeys,
@@ -334,7 +334,7 @@ test("poller waits for account dynamic refresh before ending the poll transactio
   sectionInFlight.clear();
   sectionRenderKeys.clear();
   latestSectionData.clear();
-  latestSectionError.clear();
+  failedSections.clear();
   latestSectionUpdatedAt.clear();
   sectionRenderKeys.set("account", sectionRenderKey("account", data));
   const previousFetch = globalThis.fetch;
@@ -379,7 +379,7 @@ test("poller waits for account dynamic refresh before ending the poll transactio
     sectionInFlight.clear();
     sectionRenderKeys.clear();
     latestSectionData.clear();
-    latestSectionError.clear();
+    failedSections.clear();
     latestSectionUpdatedAt.clear();
   }
 });

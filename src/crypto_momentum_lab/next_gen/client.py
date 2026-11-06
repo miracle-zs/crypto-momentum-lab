@@ -220,7 +220,7 @@ class BinanceRestClient:
                 pass
 
             # 3. 币安系统未知处理/超时错误码 (-1000, -1006, -1007)
-            # 这类错误发生时订单可能已被撮合引擎接收并成交，状态存疑，必须走看门狗查证
+            # 订单可能已被撮合引擎接收，保留存疑状态并等待私有流确认。
             if code in (-1000, -1006, -1007):
                 raise BinanceNetworkError(
                     status_code=response.status_code,
@@ -430,9 +430,6 @@ class BinanceRestClient:
 
         if client_order_id:
             params["newClientOrderId"] = client_order_id
-
-        # 严格遵守设计原则：双向持仓模式下禁止传 reduceOnly
-        params.pop("reduceOnly", None)
 
         res = await self._request("POST", "/fapi/v1/order", signed=True, params=params)
         return dict(res)

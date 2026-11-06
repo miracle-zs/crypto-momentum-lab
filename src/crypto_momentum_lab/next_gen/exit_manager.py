@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from functools import partial
@@ -12,7 +11,6 @@ import structlog
 from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
 from crypto_momentum_lab.domain.strategy.models import StrategySide
 from crypto_momentum_lab.domain.strategy.position_exit import (
-    PositionExitPolicy,
     position_exit_reason,
 )
 from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
@@ -414,7 +412,6 @@ class ExitManager:
                     opened_at=batch.entry_bar_time,
                     symbol=batch.symbol,
                     side=StrategySide(batch.position_side.lower()),
-                    policy=PositionExitPolicy(max_holding_seconds=None),
                     closed_candle=closed_candle,
                 )
                 if reason is not None:
@@ -582,7 +579,6 @@ class ExitManager:
     async def run(
         self,
         stop_event: asyncio.Event | None = None,
-        price_provider: Callable[[str], Decimal | None] | None = None,
     ) -> None:
         """持续盯盘协程 (由 TaskGroup 结构化调度)"""
         self.resume_active_exits()
@@ -603,15 +599,7 @@ class ExitManager:
                     await asyncio.sleep(self.eval_interval_sec)
 
                 await self._process_scheduled_window(datetime.now(UTC))
-                prices: dict[str, Decimal] = {}
-                if price_provider is not None:
-                    for batch in self._state.batches.values():
-                        if batch.status == "ACTIVE" and batch.symbol not in prices:
-                            p = price_provider(batch.symbol)
-                            if p is not None:
-                                prices[batch.symbol] = p
-
-                self.evaluate_active_batches(current_prices=prices)
+                self.evaluate_active_batches()
             except asyncio.CancelledError:
                 break
             except Exception as e:

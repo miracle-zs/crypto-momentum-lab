@@ -1,29 +1,8 @@
 /**
- * Shared DOM keys for render templates and querySelector wiring.
- * Sections must not invent private class-name selectors; extend this table.
+ * Shared account DOM keys for render templates and querySelector wiring.
  */
 
 export const K = {
-  // structural
-  sectionState: "section-state",
-  panelBody: "panel-body",
-  searchBox: "search-box",
-  searchClear: "search-clear",
-  filterTable: "data-filter-table",
-  tableScroll: "table-scroll",
-  echartChart: "data-echart-chart",
-  echartSurface: "echart-surface",
-  modeValue: "data-mode-value",
-  modeDetail: "data-mode-detail",
-  navDot: "data-nav-dot",
-  marketBoard: "data-market-board",
-  marketView: "data-market-view",
-  marketPanel: "data-market-panel",
-  marketViewActive: "is-active",
-  workspaceTab: "data-workspace-tab",
-  workspaceNav: "data-workspace-nav",
-  skipLink: "skip-link",
-  // account
   liveAccountMetrics: "data-live-account-metrics",
   liveAccountLabel: "data-live-account-label",
   liveAccountDetail: "data-live-account-detail",
@@ -36,9 +15,6 @@ export const K = {
   liveAccountCardState: "live-account-card-state",
   liveAccountCardStateDetail: "live-account-card-state-detail",
   liveAccountFleetStatus: "live-account-fleet-status",
-  // overview
-  serviceAge: "data-service-age",
-  serviceMeter: "data-service-meter",
 };
 
 /** CSS.escape is not always present in test runtimes. */
@@ -47,11 +23,6 @@ function cssEscape(value) {
 }
 
 export const sel = {
-  sectionState: () => `.${K.sectionState}`,
-  panelBody: () => `.${K.panelBody}`,
-  tableScroll: () => `.${K.tableScroll}`,
-  echartSurface: () => `.${K.echartSurface}`,
-  echartCharts: () => `[${K.echartChart}]`,
   accountCard: (label) => `[${K.liveAccountLabel}="${cssEscape(label)}"]`,
   accountCards: () => `[${K.liveAccountLabel}]`,
   liveAccountMetrics: () => `[${K.liveAccountMetrics}]`,

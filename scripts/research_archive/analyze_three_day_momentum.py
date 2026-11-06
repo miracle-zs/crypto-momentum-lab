@@ -488,7 +488,7 @@ def passes_up(metrics: RawMetrics, config: GateConfig) -> bool:
     return True
 
 
-def candidate_index(series: StateSeries, config: GateConfig) -> int:
+def candidate_index(config: GateConfig) -> int:
     return max(
         config.baseline_buckets + config.impulse_buckets - 1,
         config.breakout_buckets,
@@ -544,7 +544,7 @@ def scan_events(
     for symbol, series in states.items():
         for segment_start, segment_end in good_segments(series):
             next_allowed = {
-                config.name: candidate_index(series, config)
+                config.name: candidate_index(config)
                 for config in configs
             }
             for index in range(segment_start, segment_end):
@@ -932,7 +932,7 @@ def write_markdown_report(output_dir: Path, summary: dict[str, object]) -> None:
             "",
             "## 基线与候选参数",
             "",
-            f"- 基线：45 秒涨幅 ≥ 1%、aggressive imbalance ≥ 0.50、成交额强度 ≥ 2。",
+            "- 基线：45 秒涨幅 ≥ 1%、aggressive imbalance ≥ 0.50、成交额强度 ≥ 2。",
             f"- 基线 order-flow 事件：`{baseline['orderflow_events']}`；通过 Top100 正收益 entry pool：`{baseline['pool_pass_events']}`；EMA 近似下完整通过：`{baseline['approx_full_entry_events']}`。",
             f"- 基线 EMA 近似完整事件前瞻收益：1 分钟均值 `{ratio_percent(baseline['approx_full_entry_forward_return_stats']['mean_1m'])}`，5 分钟均值 `{ratio_percent(baseline['approx_full_entry_forward_return_stats']['mean_5m'])}`。",
             f"- 候选参数：`{selection['selected']}`，即涨幅 ≥ `{selection['min_return_pct']:.1f}%`、imbalance ≥ `{selection['min_imbalance']:.2f}`、强度 ≥ `{selection['min_intensity']:.1f}`。",

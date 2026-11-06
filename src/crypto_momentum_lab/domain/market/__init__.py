@@ -27,7 +27,6 @@ from crypto_momentum_lab.domain.market.ports import (
 )
 from crypto_momentum_lab.domain.market.revision_models import (
     DatasetManifest,
-    DecisionTrace,
     MarketEnvelope,
     MarketRevisionRef,
     MarketVisibilityMode,
@@ -40,7 +39,6 @@ __all__ = [
     "ConnectionLifecycleEvent",
     "DatasetCatalog",
     "DatasetManifest",
-    "DecisionTrace",
     "DurableArchiveAcknowledgement",
     "InMemoryMarketBookRepository",
     "JsonScalar",

@@ -30,7 +30,7 @@ def current_rss_bytes() -> int | None:
         with open("/proc/self/statm", encoding="ascii") as statm:
             resident_pages = int(statm.read().split()[1])
         return resident_pages * page_size
-    except (FileNotFoundError, IndexError, OSError, ValueError):
+    except (IndexError, OSError, ValueError):
         usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         if usage <= 0:
             return None
@@ -101,7 +101,7 @@ def _read_cgroup_bytes(paths: tuple[Path, ...]) -> int | None:
     for path in paths:
         try:
             value = path.read_text(encoding="ascii").strip()
-        except (FileNotFoundError, OSError):
+        except OSError:
             continue
         if value == "max":
             return None

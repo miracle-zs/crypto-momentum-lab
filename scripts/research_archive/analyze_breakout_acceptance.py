@@ -1328,7 +1328,6 @@ def number(value: float | None, digits: int = 2) -> str:
 def write_report(
     path: Path,
     report: dict[str, Any],
-    rows: list[dict[str, Any]],
 ) -> None:
     funnel = report["funnel"]
     outcomes = report["sequential_outcomes"]
@@ -1536,7 +1535,7 @@ def write_report(
             f"- 回踩：信号后 {report['definition']['retest_start_minutes']}–{report['definition']['retest_end_minutes']} 分钟内触及 VAH，允许触及误差 {report['definition']['touch_tolerance_pct']:.2%}，有效跌破容忍 {report['definition']['breach_tolerance_pct']:.2%}。",
             f"- Sell Absorption proxy：卖成交额占回踩窗口主动成交额至少 {report['definition']['absorption_sell_share']:.0%}，同时价格不有效跌破 VAH。",
             "",
-            "详细逐信号字段见同目录的 `breakout_acceptance_signals.csv`；脚本为 `scripts/analyze_breakout_acceptance.py`。",
+            "详细逐信号字段见同目录的 `breakout_acceptance_signals.csv`；脚本为 `scripts/research_archive/analyze_breakout_acceptance.py`。",
         ]
     )
     path.write_text("\n".join(lines) + "\n")
@@ -1855,7 +1854,7 @@ def main() -> None:
     (output_dir / "breakout_acceptance_report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
     )
-    write_report(output_dir / "breakout_acceptance_report.md", report, analyzed)
+    write_report(output_dir / "breakout_acceptance_report.md", report)
     print(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False))
 
 

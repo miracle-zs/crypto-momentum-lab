@@ -57,11 +57,10 @@ class PerformanceQueries:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
-        decision_slo_queries: DecisionSLOQueries | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._clock = clock
-        self._decision_slo_queries = decision_slo_queries or DecisionSLOQueries(
+        self._decision_slo_queries = DecisionSLOQueries(
             session_factory,
             clock=clock,
         )

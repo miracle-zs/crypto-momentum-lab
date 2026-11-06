@@ -140,7 +140,6 @@ def test_lock_held_across_fence_and_delete() -> None:
         from_dt="2026-07-25",
         to_dt="2026-08-01",
         batch_rows=10,
-        db={},
         expected_fingerprint=_DIGEST,
     )
     assert result == (3, 3)
@@ -174,7 +173,6 @@ def test_frozen_count_mismatch_aborts_without_delete() -> None:
             from_dt="2026-07-25",
             to_dt="2026-08-01",
             batch_rows=10,
-            db={},
             expected_fingerprint=_DIGEST,
         )
     assert authority.fence_calls >= 1
@@ -208,7 +206,6 @@ def test_deleted_count_mismatch_raises() -> None:
             from_dt="2026-07-25",
             to_dt="2026-08-01",
             batch_rows=10,
-            db={},
             expected_fingerprint=_DIGEST,
         )
 
@@ -263,7 +260,6 @@ def test_frozen_content_fingerprint_mismatch_aborts_without_delete() -> None:
             from_dt="2026-07-25",
             to_dt="2026-08-01",
             batch_rows=10,
-            db={},
             expected_fingerprint=_DIGEST,
         )
     assert authority.fence_calls >= 1
@@ -297,7 +293,6 @@ def test_frozen_content_fingerprint_match_proceeds() -> None:
         from_dt="2026-07-25",
         to_dt="2026-08-01",
         batch_rows=10,
-        db={},
         expected_fingerprint=_DIGEST,
     )
     assert result == (3, 3)

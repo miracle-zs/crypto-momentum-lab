@@ -84,7 +84,6 @@ def test_decode_closed_candle_requires_official_final_flag() -> None:
     assert event.candle.candle_end - event.candle.candle_start == timedelta(minutes=15)
     assert event.candle.open_price == Decimal("100")
     assert event.candle.close_price == Decimal("101.5")
-    assert event.recovered is False
 
 
 @pytest.mark.asyncio
@@ -101,78 +100,6 @@ async def test_feed_deduplicates_same_symbol_and_candle_start() -> None:
     event = await feed._events.get()
     assert event.candle.symbol == "BTCUSDT"
     assert feed._events.empty()
-
-
-@pytest.mark.asyncio
-async def test_feed_recovery_publishes_only_missing_candles() -> None:
-    class Backfill:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, datetime, datetime]] = []
-
-        def load_closed_candles(
-            self,
-            *,
-            symbol: str,
-            start: datetime,
-            end: datetime,
-        ) -> tuple[ClosedCandle15m, ...]:
-            self.calls.append((symbol, start, end))
-            return (
-                ClosedCandle15m(
-                    symbol=symbol,
-                    candle_start=start,
-                    candle_end=start + timedelta(minutes=15),
-                    open_price=Decimal("100"),
-                    close_price=Decimal("99"),
-                ),
-            )
-
-    backfill = Backfill()
-    feed = BinanceClosedCandle15mFeed(
-        config=ClosedCandle15mFeedConfig(
-            websocket_url="wss://example.test/market/ws",
-        ),
-        backfill_source=backfill,
-        clock=lambda: RECEIVED_AT,
-    )
-    through = datetime(2026, 8, 24, 15, 1, tzinfo=UTC)
-
-    count = await feed.recover_missing(symbol="BTCUSDT", through=through)
-
-    assert count == 1
-    assert backfill.calls[0][0] == "BTCUSDT"
-    event = await feed._events.get()
-    assert event.recovered is True
-
-
-@pytest.mark.asyncio
-async def test_feed_coalesces_reconnect_recovery_within_cooldown() -> None:
-    now = RECEIVED_AT
-    recovery_calls: list[frozenset[str]] = []
-    feed = BinanceClosedCandle15mFeed(
-        config=ClosedCandle15mFeedConfig(
-            websocket_url="wss://example.test/market/ws",
-            connection_recovery_cooldown_seconds=30,
-        ),
-        clock=lambda: now,
-    )
-    feed._symbols = frozenset({"BTCUSDT"})
-    feed._schedule_recovery = recovery_calls.append  # type: ignore[method-assign]
-
-    class LifecycleEvent:
-        opened = True
-        reason = None
-
-    await feed._observe_lifecycle(LifecycleEvent())
-    await feed._observe_lifecycle(LifecycleEvent())
-    assert recovery_calls == [frozenset({"BTCUSDT"})]
-
-    now += timedelta(seconds=31)
-    await feed._observe_lifecycle(LifecycleEvent())
-    assert recovery_calls == [
-        frozenset({"BTCUSDT"}),
-        frozenset({"BTCUSDT"}),
-    ]
 
 
 @pytest.mark.asyncio
@@ -209,16 +136,12 @@ async def test_feed_overflow_does_not_ack_a_dropped_candle() -> None:
     assert await feed._publish(first) is True
     with pytest.raises(ClosedCandleFeedOverflow):
         await feed._publish(second)
-    assert feed.last_seen_start["BTCUSDT"] == first.candle.candle_start
-
     await feed._events.get()
     assert await feed._publish(second) is True
 
 
 @pytest.mark.asyncio
 async def test_symbol_targets_replace_synchronously_while_control_ack_is_pending():
-    from unittest.mock import Mock
-
     from crypto_momentum_lab.market_data.binance.websocket import (
         BinanceWebSocketConnection,
     )
@@ -235,21 +158,18 @@ async def test_symbol_targets_replace_synchronously_while_control_ack_is_pending
     pending_ack = object()
     connection._pending_control = pending_ack
     feed._connection = connection
-    recover = Mock()
-    feed._schedule_recovery = recover
 
     assert feed.set_symbols(frozenset({" btcusdt ", "ETHUSDT"})) is None
     assert feed.set_symbols(frozenset({"SOLUSDT"})) is None
     assert feed.symbols == frozenset({"SOLUSDT"})
-    assert await connection._desired_snapshot() == (("solusdt@kline_15m",), 2)
+    assert connection._desired_snapshot() == (("solusdt@kline_15m",), 2)
     assert connection._desired_event.is_set()
     assert connection._pending_control is pending_ack
     assert connection._control_commands_sent == 0
-    assert recover.call_count == 2
     feed.set_symbols(frozenset({" solusdt "}))
-    assert recover.call_count == 2
+    assert connection._desired_snapshot() == (("solusdt@kline_15m",), 2)
     feed.set_symbols(frozenset())
-    assert await connection._desired_snapshot() == ((), 3)
+    assert connection._desired_snapshot() == ((), 3)
 
 
 def test_symbol_target_can_be_set_before_connection_start():

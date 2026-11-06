@@ -5,6 +5,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.live_rollout.runtime_manifest import LiveRuntimeAccount
 from crypto_momentum_lab.next_gen.dashboard import NextGenDashboardQueries
 from crypto_momentum_lab.operator_dashboard.collector_status import (
@@ -30,9 +31,6 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
 )
 from crypto_momentum_lab.operator_dashboard.status import (
     OperationalStatus,
-)
-from crypto_momentum_lab.operator_dashboard.telemetry_queries import (
-    DecisionSLOQueries as DecisionSLOQueries,
 )
 
 
@@ -128,19 +126,40 @@ class DashboardQueries:
         fleet = await self._nextgen_queries.live_accounts()
         overview.account_statuses = fleet.accounts
         overview.active_halt_count = await self._nextgen_queries.active_halt_count()
-        observed = [a.runtime_observed_at for a in fleet.accounts]
+        observed = [
+            a.runtime_observed_at
+            for a in fleet.accounts
+            if a.runtime_observed_at is not None
+        ]
+        started = [
+            a.runtime_started_at
+            for a in fleet.accounts
+            if a.runtime_started_at is not None
+        ]
+        entry_gate_reasons: list[JsonValue] = [
+            *sorted(
+                {
+                    a.runtime_tradeability.entry_gate_reason
+                    for a in fleet.accounts
+                    if a.runtime_tradeability
+                    and not a.runtime_tradeability.entry_gate_open
+                }
+            )
+        ]
         runner = service(
             "strategy-runner",
             self._clock(),
-            min(observed) if observed and all(observed) else None,
+            min(observed)
+            if observed and len(observed) == len(fleet.accounts)
+            else None,
             180,
         )
         runner.details = {
             "engine": "nextgen",
             "status": fleet.status.value,
             "started_at": (
-                max(a.runtime_started_at for a in fleet.accounts).isoformat()
-                if fleet.accounts and all(a.runtime_started_at for a in fleet.accounts)
+                max(started).isoformat()
+                if started and len(started) == len(fleet.accounts)
                 else None
             ),
             "accounts": {a.account_label: a.readiness for a in fleet.accounts},
@@ -148,14 +167,7 @@ class DashboardQueries:
                 a.runtime_tradeability and a.runtime_tradeability.entry_gate_open
                 for a in fleet.accounts
             ),
-            "entry_gate_reasons": sorted(
-                {
-                    a.runtime_tradeability.entry_gate_reason
-                    for a in fleet.accounts
-                    if a.runtime_tradeability
-                    and not a.runtime_tradeability.entry_gate_open
-                }
-            ),
+            "entry_gate_reasons": entry_gate_reasons,
         }
         overview.services.insert(1, runner)
         return overview

@@ -111,16 +111,16 @@ def _decision_slo_response(
                 "last_observed_at": None,
             },
         )
-        stats["observed_event_count"] = int(stats["observed_event_count"]) + 1
+        stats["observed_event_count"] += 1
         if details.get("lag") is True:
-            stats["lag_event_count"] = int(stats["lag_event_count"]) + 1
+            stats["lag_event_count"] += 1
         if details.get("recovery") is True:
-            stats["recovery_count"] = int(stats["recovery_count"]) + 1
+            stats["recovery_count"] += 1
             recovery_reason = _slo_text(details.get("reason"))
             if recovery_reason is not None:
                 stats["last_recovery_reason"] = recovery_reason
         if details.get("available") is False:
-            stats["unavailable_event_count"] = int(stats["unavailable_event_count"]) + 1
+            stats["unavailable_event_count"] += 1
         observed_at = row.occurred_at
         last_observed_at = stats["last_observed_at"]
         if last_observed_at is None or observed_at > last_observed_at:
@@ -148,10 +148,10 @@ def _decision_slo_response(
         consumers=[
             DecisionSLOConsumerResponse(
                 consumer=consumer,
-                observed_event_count=int(stats["observed_event_count"]),
-                recovery_count=int(stats["recovery_count"]),
-                unavailable_event_count=int(stats["unavailable_event_count"]),
-                lag_event_count=int(stats["lag_event_count"]),
+                observed_event_count=stats["observed_event_count"],
+                recovery_count=stats["recovery_count"],
+                unavailable_event_count=stats["unavailable_event_count"],
+                lag_event_count=stats["lag_event_count"],
                 last_available=stats["last_available"],
                 last_recovery_reason=stats["last_recovery_reason"],
                 last_observed_at=stats["last_observed_at"],

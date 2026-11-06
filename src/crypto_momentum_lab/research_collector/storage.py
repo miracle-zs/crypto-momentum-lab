@@ -191,10 +191,6 @@ class ParquetWindowSink:
         self._buffers: dict[Path, dict[_STATE_KEY, dict[str, object]]] = {}
         self._root.mkdir(parents=True, exist_ok=True)
 
-    @property
-    def root(self) -> Path:
-        return self._root
-
     def append(
         self,
         collection_batch: CollectionBatch,

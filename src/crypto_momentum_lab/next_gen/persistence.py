@@ -12,6 +12,7 @@ from uuid import uuid4
 import structlog
 from sqlalchemy import Integer, String, column, insert, select, text, true, values
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.orm import aliased
 
@@ -33,6 +34,24 @@ from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
 )
 
 log = structlog.get_logger("next_gen_persistence")
+
+
+def _batch_from_row(row: RowMapping) -> PositionBatch:
+    return PositionBatch(
+        environment=row["environment"],
+        account_label=row["account_label"],
+        batch_id=row["batch_id"],
+        symbol=row["symbol"],
+        position_side=row["position_side"],
+        quantity=Decimal(str(row["quantity"])),
+        entry_price=Decimal(str(row["entry_price"])),
+        entry_bar_time=row["entry_bar_time"],
+        exit_order_submitted_at=row["exit_order_submitted_at"],
+        status=row["status"],
+        realized_pnl=Decimal(str(row["realized_pnl"])),
+        exiting_quantity=Decimal(str(row["exiting_quantity"])),
+        updated_at=row["updated_at"],
+    )
 
 
 def compute_advisory_lock_key(environment: str, account_label: str) -> str:
@@ -597,21 +616,7 @@ class PostgresTradingRepository:
             row = res.mappings().first()
             if not row:
                 return None
-            return PositionBatch(
-                environment=row["environment"],
-                account_label=row["account_label"],
-                batch_id=row["batch_id"],
-                symbol=row["symbol"],
-                position_side=row["position_side"],
-                quantity=Decimal(str(row["quantity"])),
-                entry_price=Decimal(str(row["entry_price"])),
-                entry_bar_time=row["entry_bar_time"],
-                exit_order_submitted_at=row["exit_order_submitted_at"],
-                status=row["status"],
-                realized_pnl=Decimal(str(row["realized_pnl"])),
-                exiting_quantity=Decimal(str(row["exiting_quantity"])),
-                updated_at=row["updated_at"],
-            )
+            return _batch_from_row(row)
 
     async def async_get_active_batches(
         self, environment: str, account_label: str
@@ -630,24 +635,7 @@ class PostgresTradingRepository:
                 text(sql), {"env": environment, "acc": account_label}
             )
             rows = res.mappings().all()
-            return [
-                PositionBatch(
-                    environment=r["environment"],
-                    account_label=r["account_label"],
-                    batch_id=r["batch_id"],
-                    symbol=r["symbol"],
-                    position_side=r["position_side"],
-                    quantity=Decimal(str(r["quantity"])),
-                    entry_price=Decimal(str(r["entry_price"])),
-                    entry_bar_time=r["entry_bar_time"],
-                    exit_order_submitted_at=r["exit_order_submitted_at"],
-                    status=r["status"],
-                    realized_pnl=Decimal(str(r["realized_pnl"])),
-                    exiting_quantity=Decimal(str(r["exiting_quantity"])),
-                    updated_at=r["updated_at"],
-                )
-                for r in rows
-            ]
+            return [_batch_from_row(row) for row in rows]
 
     async def async_get_active_position_symbols(
         self, environment: str

@@ -4,18 +4,17 @@ The normal market-state capture path is optimized for all-symbol aggregation
 and durable storage.  It is intentionally not used for candle exits.  This
 module owns the smaller execution seam: subscribe to the symbols that may
 have positions, discard open-kline updates, deduplicate final candles, and
-offer an explicit REST backfill adapter for transport gaps.
+and deliver final candles to the exit policy.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections import deque
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Protocol
 
 import structlog
 
@@ -43,22 +42,11 @@ class ClosedCandleFeedOverflow(ClosedCandleFeedError):
     """The consumer did not drain the bounded final-candle queue."""
 
 
-class ClosedCandleBackfillSource(Protocol):
-    def load_closed_candles(
-        self,
-        *,
-        symbol: str,
-        start: datetime,
-        end: datetime,
-    ) -> tuple[ClosedCandle15m, ...]: ...
-
-
 @dataclass(frozen=True, slots=True)
 class ClosedCandle15mEvent:
     candle: ClosedCandle15m
     exchange_event_at: datetime
     received_at: datetime
-    recovered: bool = False
 
     def __post_init__(self) -> None:
         for value, field_name in (
@@ -67,8 +55,6 @@ class ClosedCandle15mEvent:
         ):
             if value.tzinfo is None or value.utcoffset() is None:
                 raise ValueError(f"{field_name} must be timezone-aware")
-        if not isinstance(self.recovered, bool):
-            raise TypeError("recovered must be a bool")
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,7 +70,6 @@ class ClosedCandle15mFeedConfig:
     control_ack_timeout_seconds: float = 10.0
     ingress_queue_max_events: int = 4096
     final_event_queue_size: int = 2048
-    connection_recovery_cooldown_seconds: float = 30.0
 
     def __post_init__(self) -> None:
         for value, field_name in (
@@ -104,10 +89,6 @@ class ClosedCandle15mFeedConfig:
             (self.ping_interval_seconds, "ping_interval_seconds"),
             (self.ping_timeout_seconds, "ping_timeout_seconds"),
             (self.control_ack_timeout_seconds, "control_ack_timeout_seconds"),
-            (
-                self.connection_recovery_cooldown_seconds,
-                "connection_recovery_cooldown_seconds",
-            ),
         ):
             if numeric_value <= 0:
                 raise ValueError(f"{field_name} must be positive")
@@ -169,7 +150,7 @@ class BinanceClosedCandle15mFeed:
     """Low-volume, dynamically subscribed final-candle feed.
 
     The public interface intentionally exposes only symbol reconciliation,
-    event iteration, and explicit recovery.  WebSocket reconnects, control
+    and event iteration. WebSocket reconnects, control
     ACKs, duplicate suppression, and bounded buffering stay behind this seam.
     """
 
@@ -177,25 +158,17 @@ class BinanceClosedCandle15mFeed:
         self,
         *,
         config: ClosedCandle15mFeedConfig,
-        backfill_source: ClosedCandleBackfillSource | None = None,
-        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._config = config
-        self._backfill_source = backfill_source
-        self._clock = clock
         self._symbols: frozenset[str] = frozenset()
         self._generation = 0
         self._connection: BinanceWebSocketConnection | None = None
         self._events: asyncio.Queue[ClosedCandle15mEvent] = asyncio.Queue(
             maxsize=config.final_event_queue_size
         )
-        self._recovery_lock = asyncio.Lock()
         self._stopping = False
         self._seen_keys: set[tuple[str, datetime]] = set()
         self._seen_order: deque[tuple[str, datetime]] = deque()
-        self._last_seen_start: dict[str, datetime] = {}
-        self._last_connection_recovery_at: datetime | None = None
-        self._recovery_tasks: set[asyncio.Task[None]] = set()
         self._started = False
 
     @property
@@ -208,10 +181,6 @@ class BinanceClosedCandle15mFeed:
         return not self._symbols or (
             self._connection is not None and self._connection.metrics_snapshot().ready
         )
-
-    @property
-    def last_seen_start(self) -> dict[str, datetime]:
-        return dict(self._last_seen_start)
 
     async def start(self) -> None:
         if self._started:
@@ -248,12 +217,6 @@ class BinanceClosedCandle15mFeed:
         self._connection = None
         if connection is not None:
             await connection.stop()
-        recovery_tasks = tuple(self._recovery_tasks)
-        for task in recovery_tasks:
-            task.cancel()
-        if recovery_tasks:
-            await asyncio.gather(*recovery_tasks, return_exceptions=True)
-        self._recovery_tasks.clear()
         self._started = False
 
     def set_symbols(self, symbols: frozenset[str]) -> None:
@@ -272,7 +235,6 @@ class BinanceClosedCandle15mFeed:
         connection.set_desired_subscriptions(
             self._stream_names(normalized), generation=max(1, self._generation)
         )
-        self._schedule_recovery(normalized - previous)
 
     def __aiter__(self) -> AsyncIterator[ClosedCandle15mEvent]:
         return self._iterate()
@@ -281,52 +243,6 @@ class BinanceClosedCandle15mFeed:
         await self.start()
         while not self._stopping:
             yield await self._events.get()
-
-    async def recover_missing(
-        self,
-        *,
-        symbol: str,
-        through: datetime,
-    ) -> int:
-        """Backfill final candles through the latest completed boundary.
-
-        This method is intentionally explicit: the WebSocket is the normal
-        path, while callers decide when a missing-event deadline justifies a
-        market-data REST request.
-        """
-
-        if self._backfill_source is None:
-            raise ClosedCandleFeedError("closed-candle backfill is not configured")
-        normalized_symbol = symbol.strip().upper()
-        if not normalized_symbol:
-            raise ValueError("symbol must not be empty")
-        latest_start = _candle_start_15m(through) - _CANDLE_INTERVAL
-        async with self._recovery_lock:
-            previous = self._last_seen_start.get(normalized_symbol)
-            start = latest_start if previous is None else previous + _CANDLE_INTERVAL
-            if start > latest_start:
-                return 0
-            candles = await asyncio.to_thread(
-                self._backfill_source.load_closed_candles,
-                symbol=normalized_symbol,
-                start=start,
-                end=latest_start + _CANDLE_INTERVAL,
-            )
-            published = 0
-            for candle in candles:
-                if candle.symbol.strip().upper() != normalized_symbol:
-                    raise ClosedCandleFeedError(
-                        "backfill returned a different candle symbol"
-                    )
-                event = ClosedCandle15mEvent(
-                    candle=candle,
-                    exchange_event_at=candle.candle_end,
-                    received_at=self._clock(),
-                    recovered=True,
-                )
-                if await self._publish(event):
-                    published += 1
-            return published
 
     async def _receive_envelope(self, envelope: RawEnvelope) -> None:
         try:
@@ -360,9 +276,6 @@ class BinanceClosedCandle15mFeed:
             raise ClosedCandleFeedOverflow(
                 "closed candle final-event queue is full"
             ) from error
-        previous = self._last_seen_start.get(event.candle.symbol)
-        if previous is None or event.candle.candle_start > previous:
-            self._last_seen_start[event.candle.symbol] = event.candle.candle_start
         return True
 
     async def _discard_envelope(self, envelope: RawEnvelope) -> None:
@@ -375,56 +288,6 @@ class BinanceClosedCandle15mFeed:
             opened=event.opened,
             reason=event.reason,
         )
-        if event.opened:
-            now = self._clock()
-            last_recovery_at = self._last_connection_recovery_at
-            if last_recovery_at is not None and now - last_recovery_at < timedelta(
-                seconds=self._config.connection_recovery_cooldown_seconds
-            ):
-                log.debug(
-                    "live_closed_candle_recovery_coalesced",
-                    consumer_id=self._config.consumer_id,
-                    cooldown_seconds=(
-                        self._config.connection_recovery_cooldown_seconds
-                    ),
-                )
-                return
-            self._last_connection_recovery_at = now
-            self._schedule_recovery(self._symbols)
-
-    def _schedule_recovery(self, symbols: frozenset[str]) -> None:
-        if self._backfill_source is None or not symbols or self._stopping:
-            return
-        task = asyncio.create_task(
-            self._recover_symbols(symbols),
-            name=f"{self._config.consumer_id}:candle-recovery",
-        )
-        self._recovery_tasks.add(task)
-        task.add_done_callback(self._recovery_tasks.discard)
-
-    async def _recover_symbols(self, symbols: frozenset[str]) -> None:
-        through = self._clock()
-        for symbol in sorted(symbols):
-            try:
-                recovered = await self.recover_missing(
-                    symbol=symbol,
-                    through=through,
-                )
-            except Exception as error:
-                log.warning(
-                    "live_closed_candle_backfill_failed",
-                    consumer_id=self._config.consumer_id,
-                    symbol=symbol,
-                    error_type=type(error).__name__,
-                )
-                continue
-            if recovered:
-                log.info(
-                    "live_closed_candle_backfilled",
-                    consumer_id=self._config.consumer_id,
-                    symbol=symbol,
-                    event_count=recovered,
-                )
 
     def _symbol_filter(self, stream: CaptureStream, symbol: str) -> bool:
         return stream is CaptureStream.KLINE_15M and symbol.upper() in self._symbols
@@ -453,14 +316,3 @@ def _required_decimal(payload: Mapping[str, object], name: str) -> Decimal:
 
 def _from_milliseconds(value: int) -> datetime:
     return datetime.fromtimestamp(value / 1000, tz=UTC)
-
-
-def _candle_start_15m(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("candle boundary must be timezone-aware")
-    utc_value = value.astimezone(UTC)
-    return utc_value.replace(
-        minute=utc_value.minute - utc_value.minute % 15,
-        second=0,
-        microsecond=0,
-    )

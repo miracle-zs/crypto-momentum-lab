@@ -1,4 +1,3 @@
-from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -23,39 +22,6 @@ def bucket_start_15s(value: datetime) -> datetime:
     utc_value = value.astimezone(UTC)
     second = (utc_value.second // _BUCKET_SECONDS) * _BUCKET_SECONDS
     return utc_value.replace(second=second, microsecond=0)
-
-
-def aggregate_market_states_15s(
-    events: Iterable[NormalizedMarketEvent],
-    *,
-    initial_quotes: Mapping[str, tuple[Decimal, Decimal]] | None = None,
-) -> tuple[MarketState15s, ...]:
-    buckets: dict[tuple[str, datetime], MarketState15sAccumulator] = {}
-    for event in events:
-        start = bucket_start_15s(event.event_at)
-        key = (event.symbol, start)
-        accumulator = buckets.get(key)
-        if accumulator is None:
-            accumulator = MarketState15sAccumulator.for_bucket(event)
-            buckets[key] = accumulator
-        accumulator.observe(event)
-    previous_quotes = dict(initial_quotes or {})
-    states: list[MarketState15s] = []
-    for _, accumulator in sorted(
-        buckets.items(),
-        key=lambda item: (item[0][1], item[0][0]),
-    ):
-        snapshot = accumulator.snapshot(
-            initial_quote=previous_quotes.get(accumulator.symbol)
-        )
-        state = snapshot.state
-        if state.last_bid_price is not None and state.last_ask_price is not None:
-            previous_quotes[state.symbol] = (
-                state.last_bid_price,
-                state.last_ask_price,
-            )
-        states.append(state)
-    return tuple(states)
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,6 +331,12 @@ class MarketState15sAccumulator:
             self.high_price = event.price
             self.low_price = event.price
         else:
-            self.high_price = max(self.high_price if self.high_price is not None else event.price, event.price)
-            self.low_price = min(self.low_price if self.low_price is not None else event.price, event.price)
+            self.high_price = max(
+                self.high_price if self.high_price is not None else event.price,
+                event.price,
+            )
+            self.low_price = min(
+                self.low_price if self.low_price is not None else event.price,
+                event.price,
+            )
         self.close_price = event.price

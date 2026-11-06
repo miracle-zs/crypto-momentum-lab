@@ -91,7 +91,7 @@ def pressure_average(path: Path) -> float:
     raise RuntimeError(f"missing full pressure metric: {path}")
 
 
-def snapshot(project: Path, containers: list[str]) -> dict[str, object]:
+def snapshot(containers: list[str]) -> dict[str, object]:
     statuses = command(
         [
             "docker",
@@ -261,7 +261,7 @@ def run(args: argparse.Namespace) -> int:
                 continue
             try:
                 try:
-                    state = snapshot(project, containers)
+                    state = snapshot(containers)
                 except (
                     RuntimeError,
                     OSError,

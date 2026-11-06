@@ -92,7 +92,6 @@ class PostgresOperationalRetentionRepository:
         self,
         *,
         before: datetime,
-        batch_size: int = 1_000,
         consumer_requirements: tuple[RetentionConsumerRequirement, ...] = (),
     ) -> int:
         effective_before = before

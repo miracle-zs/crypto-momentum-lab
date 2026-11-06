@@ -144,7 +144,6 @@ _CONTRACT_METADATA_RETENTION_HOURS = 6.0
 # datasets are separate, longer-lived copies).
 _RUNTIME_STATE_RETENTION_HOURS = 12.0
 _CONTRACT_METADATA_RETENTION_BATCH_SIZE = 250
-_RUNTIME_STATE_RETENTION_BATCH_SIZE = 250
 _MARKET_STATE_HUB_HOST_ENV = "CML_MARKET_STATE_HUB_HOST"
 _MARKET_STATE_HUB_PORT_ENV = "CML_MARKET_STATE_HUB_PORT"
 _MARKET_STATE_HUB_DEFAULT_HOST = "0.0.0.0"
@@ -443,9 +442,8 @@ class CaptureUniverseObserver:
         if self._universe_symbols is None:
             return None
         prewarm = frozenset(self._prewarm_until_by_symbol)
-        forced = self._universe_forced_symbols
         applied = self._applied_symbols or frozenset()
-        return self._universe_symbols | prewarm | forced | applied
+        return self._universe_symbols | prewarm | applied
 
     def _active_trade_tier_symbols(
         self,
@@ -656,7 +654,6 @@ async def prune_operational_database_once(
     contract_metadata_retention_hours: float = _CONTRACT_METADATA_RETENTION_HOURS,
     runtime_state_retention_hours: float = _RUNTIME_STATE_RETENTION_HOURS,
     contract_metadata_batch_size: int = (_CONTRACT_METADATA_RETENTION_BATCH_SIZE),
-    runtime_state_batch_size: int = _RUNTIME_STATE_RETENTION_BATCH_SIZE,
     consumer_requirements: tuple[RetentionConsumerRequirement, ...] = (),
     now: datetime | None = None,
     authority: RetentionAuthority,
@@ -667,8 +664,6 @@ async def prune_operational_database_once(
         raise ValueError("runtime_state_retention_hours must be positive")
     if contract_metadata_batch_size <= 0:
         raise ValueError("contract_metadata_batch_size must be positive")
-    if runtime_state_batch_size <= 0:
-        raise ValueError("runtime_state_batch_size must be positive")
     observed_at = datetime.now(UTC) if now is None else now
     contract_cutoff = observed_at - timedelta(hours=contract_metadata_retention_hours)
     runtime_cutoff = observed_at - timedelta(hours=runtime_state_retention_hours)
@@ -719,7 +714,6 @@ async def prune_operational_database_once(
         )
         deleted_states = await repository.prune_runtime_market_states(
             before=p.effective_cutoff,
-            batch_size=runtime_state_batch_size,
         )
         return PruneOutcome(
             rows_archived=0,
@@ -764,7 +758,6 @@ async def run_operational_database_retention_loop(
     contract_metadata_retention_hours: float = _CONTRACT_METADATA_RETENTION_HOURS,
     runtime_state_retention_hours: float = _RUNTIME_STATE_RETENTION_HOURS,
     contract_metadata_batch_size: int = (_CONTRACT_METADATA_RETENTION_BATCH_SIZE),
-    runtime_state_batch_size: int = _RUNTIME_STATE_RETENTION_BATCH_SIZE,
     consumer_requirements_provider: (
         Callable[[], Awaitable[tuple[RetentionConsumerRequirement, ...]]] | None
     ) = None,
@@ -794,7 +787,6 @@ async def run_operational_database_retention_loop(
                     ),
                     runtime_state_retention_hours=runtime_state_retention_hours,
                     contract_metadata_batch_size=contract_metadata_batch_size,
-                    runtime_state_batch_size=runtime_state_batch_size,
                     consumer_requirements=reqs,
                 )
         except Exception as error:
@@ -1346,25 +1338,12 @@ async def run_market_data(
                 watermark=watermark.isoformat(),
             )
             first_durable_state_logged = True
-            if health is not None:
-                # Publish the business-level startup contract before the
-                # health marker. The deployment gate can therefore treat a
-                # healthy container as proof that capture, universe selection,
-                # and at least one state persistence all completed.
-                health.write_readiness(
-                    {
-                        "service": "market-data",
-                        "startup_ready": True,
-                        "durable_state_watermark": watermark.isoformat(),
-                    }
-                )
         if health is not None:
             health.heartbeat(database_ok=True)
 
-    health_callback = on_durable_state_persisted
     async with build_market_data_runtime(
         config_path,
-        on_durable_state_persisted=health_callback,
+        on_durable_state_persisted=on_durable_state_persisted,
         startup_timer=startup_timer,
     ) as runtime:
         capture_task: asyncio.Task[None] | None = None
@@ -1551,16 +1530,6 @@ async def run_market_data(
         health.stopped()
 
 
-async def run_market_data_until_stopped(
-    config_path: Path,
-    stop_requested: asyncio.Event,
-) -> None:
-    await run_market_data(
-        config_path,
-        stop_requested=stop_requested,
-    )
-
-
 async def run_market_data_with_signal_handlers(config_path: Path) -> None:
     stop_requested = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -1582,7 +1551,7 @@ async def run_market_data_with_signal_handlers(config_path: Path) -> None:
             continue
         registered_signals.append(shutdown_signal)
     try:
-        await run_market_data_until_stopped(config_path, stop_requested)
+        await run_market_data(config_path, stop_requested=stop_requested)
     finally:
         for shutdown_signal in registered_signals:
             loop.remove_signal_handler(shutdown_signal)

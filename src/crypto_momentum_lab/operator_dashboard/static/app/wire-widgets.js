@@ -1,49 +1,4 @@
-/** Marketplace tabs and table quick-filter wiring. */
-
-function wireMarketTab(tab) {
-  if (!tab || tab.dataset.marketWired === "true") return;
-  tab.dataset.marketWired = "true";
-  tab.addEventListener("click", () => {
-    const board = tab.closest("[data-market-board]");
-    if (!board) return;
-    applyMarketView(board, tab.dataset.marketView);
-  });
-  tab.addEventListener("keydown", (event) => {
-    if (!["ArrowRight", "ArrowLeft", "Home", "End"].includes(event.key)) return;
-    const board = tab.closest("[data-market-board]");
-    const tabs = Array.from(board?.querySelectorAll("[data-market-view]") || []);
-    const current = tabs.indexOf(tab);
-    if (current < 0 || tabs.length === 0) return;
-    const next = event.key === "Home"
-      ? 0
-      : event.key === "End"
-        ? tabs.length - 1
-        : (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
-    tabs[next].focus();
-    applyMarketView(board, tabs[next].dataset.marketView);
-    event.preventDefault();
-  });
-}
-
-function applyMarketView(board, view = "rankings") {
-  if (!board) return;
-  board.querySelectorAll("[data-market-view]").forEach((candidate) => {
-    const active = candidate.dataset.marketView === view;
-    candidate.classList.toggle("is-active", active);
-    candidate.setAttribute("aria-selected", String(active));
-    candidate.tabIndex = active ? 0 : -1;
-  });
-  board.querySelectorAll("[data-market-panel]").forEach((panel) => {
-    panel.hidden = panel.dataset.marketPanel !== view;
-  });
-}
-
-export function wireMarketViews(root, selectedView = null) {
-  const board = root?.querySelector("[data-market-board]");
-  if (!board) return;
-  board.querySelectorAll("[data-market-view]").forEach(wireMarketTab);
-  if (selectedView) applyMarketView(board, selectedView);
-}
+/** Table filters and dashboard interaction wiring. */
 
 export function wireTableFilters(root) {
   if (!root) return;
@@ -67,7 +22,7 @@ export function wireTableFilters(root) {
       const targetSelector = input.dataset.filterTable;
       const container = targetSelector
         ? box.closest(targetSelector) || root.querySelector(targetSelector)
-        : box.closest(".block, .card, .market-panel");
+        : box.closest(".block, .card");
       if (!container) return;
       const tbody = container.querySelector("tbody");
       if (!tbody) return;

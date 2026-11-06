@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from crypto_momentum_lab.next_gen.models import Order, OrderStatus, PositionBatch
 from crypto_momentum_lab.next_gen.persistence import PostgresTradingRepository
+from crypto_momentum_lab.next_gen.sizing import EntrySizingSnapshot
 from crypto_momentum_lab.persistence.postgres.runtime_state_partitions import (
     ensure_runtime_state_partitions,
 )
@@ -25,6 +26,50 @@ from crypto_momentum_lab.persistence.postgres.strategy_runtime_event_partitions 
 
 ENVIRONMENT = "test-nextgen-postgres"
 ACCOUNT_LABEL = "a1"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_entry_sizing_persists_and_isolates_accounts(
+    async_database_url: str,
+) -> None:
+    environment = f"sizing-test-{uuid4().hex[:12]}"
+    first = EntrySizingSnapshot(
+        "daily", Decimal("0.4"), Decimal("1000"), datetime(2026, 10, 24, tzinfo=UTC)
+    )
+    second = EntrySizingSnapshot(
+        "flat_reset", Decimal("0.25"), Decimal("2000"), first.sampled_at
+    )
+    engine = create_async_database_engine(async_database_url)
+    try:
+        repo = PostgresTradingRepository(engine)
+        assert await repo.async_get_entry_sizing(environment, "a1") is None
+        await repo.async_save_entry_sizing(environment, "a1", first)
+        await repo.async_save_entry_sizing(environment, "a2", second)
+        await engine.dispose()
+
+        restarted = PostgresTradingRepository(engine)
+        assert await restarted.async_get_entry_sizing(environment, "a1") == first
+        assert await restarted.async_get_entry_sizing(environment, "a2") == second
+        updated = EntrySizingSnapshot(
+            "daily",
+            Decimal("0.4"),
+            Decimal("1500"),
+            first.sampled_at + timedelta(days=1),
+        )
+        await restarted.async_save_entry_sizing(environment, "a1", updated)
+        assert await restarted.async_get_entry_sizing(environment, "a1") == updated
+        assert await restarted.async_get_entry_sizing(environment, "a2") == second
+        assert (
+            await restarted.async_get_entry_sizing(environment + "-other", "a1") is None
+        )
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM entry_sizing_states WHERE environment = :env"),
+                {"env": environment},
+            )
+        await engine.dispose()
 
 
 @pytest.fixture
@@ -317,6 +362,10 @@ async def test_postgres_get_active_batches_and_recent_orders(
     )
     assert len(active_batches) == 2
     assert [b.batch_id for b in active_batches] == ["b_active", "b_exiting"]
+    assert (
+        await postgres_repo.async_get_batch(ENVIRONMENT, ACCOUNT_LABEL, "b_exiting")
+        == active_batches[1]
+    )
 
     # 保存 2 个订单并验证 async_get_recent_orders
     o1 = Order(

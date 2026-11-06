@@ -1,6 +1,5 @@
 import importlib.util
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
@@ -8,20 +7,16 @@ import pytest
 from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from crypto_momentum_lab.domain.market.revision_models import DecisionTrace
-from crypto_momentum_lab.persistence.postgres.decision_trace_repository import (
-    _load_policy_evidence,
-)
 from crypto_momentum_lab.persistence.postgres.models import (
     DecisionPolicyEvidenceRow,
     DecisionTraceRow,
     MarketRevisionRefRow,
 )
 from crypto_momentum_lab.tools.share_decision_policy_evidence import (
+    _load_policy_evidence,
     backfill_batch,
     collect_batch,
 )
-from tests.unit.decision.test_decision_engine import _make_market_envelope
 from tests.unit.decision.test_decision_state_storage import large_payload
 
 pytestmark = pytest.mark.integration
@@ -77,41 +72,25 @@ async def evidence_sessions(async_database_url):
             await connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
         await admin.dispose()
 
-def trace():
-    t0 = datetime.now(UTC)
-    ref, _ = _make_market_envelope("BTCUSDT", t0, Decimal("100"))
-    payload = large_payload()
-    payload["market_state"] = {"symbol": "BTCUSDT"}
-    return DecisionTrace(
-        decision_id="first",
-        strategy_name="test",
-        account_label="primary",
-        decision_time=t0,
-        evaluated_market_refs=(ref,),
-        intent_produced=False,
-        rejection_reason="no_candidate",
-        input_hash="input",
-        frame_digest="frame",
-        trace_payload=payload,
-    )
-
 async def test_backfill_is_lossless_and_gc_respects_reader_locks_and_live_refs(
     evidence_sessions,
 ):
-    decision = trace()
+    decision_time = datetime.now(UTC)
+    payload = large_payload()
+    payload["market_state"] = {"symbol": "BTCUSDT"}
     async with evidence_sessions() as session, session.begin():
         session.add(
             DecisionTraceRow(
                 decision_id="legacy",
                 strategy_name="test",
                 account_label="primary",
-                decision_time=decision.decision_time,
+                decision_time=decision_time,
                 intent_produced=False,
                 intent_id=None,
                 rejection_reason="no_candidate",
                 evaluated_revision_ids=[],
-                trace_payload=decision.trace_payload,
-                created_at=decision.decision_time,
+                trace_payload=payload,
+                created_at=decision_time,
             )
         )
     async with evidence_sessions() as session, session.begin():

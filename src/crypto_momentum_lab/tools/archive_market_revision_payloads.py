@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -520,7 +521,7 @@ def main() -> None:
     if args.retention_days < 1:
         parser.error("--retention-days must be at least 1")
     archive_root = args.archive_dir or Path(
-        __import__("os").environ.get(
+        os.environ.get(
             "CML_MARKET_REVISION_ARCHIVE_DIR", str(_DEFAULT_ARCHIVE_ROOT)
         )
     )

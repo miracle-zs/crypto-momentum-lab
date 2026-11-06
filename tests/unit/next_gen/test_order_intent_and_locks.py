@@ -17,12 +17,10 @@ from tests.unit.next_gen.factories import risk_config
 @pytest.fixture
 def account_state():
     mock_db = AsyncMock()
-    mock_rest = AsyncMock()
     state = AccountState(
         environment="live",
         account_label="a1",
         db=mock_db,
-        rest_client=mock_rest,
     )
     state.risk_config = risk_config(state.environment, state.account_label)
     state.set_system_mode(SystemMode.RUNNING)

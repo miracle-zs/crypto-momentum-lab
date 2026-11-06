@@ -62,10 +62,6 @@ class OrderExecutor:
             {"batch_id": batch_id, "symbol": symbol, "reason": reason},
         )
 
-    @property
-    def rest_client(self) -> BinanceRestClient:
-        return self._rest
-
     async def close(self) -> None:
         """取消所有正在运行的延时看门狗任务"""
         for task in list(self._watchdog_tasks):
@@ -252,9 +248,7 @@ class OrderExecutor:
         expected_exchange_ids = local_ids - unresolved_missing_ids
         if actual != expected or exchange_ids != expected_exchange_ids:
             raise RuntimeError("启动基线不一致：检测到交易所存在未结挂单或持仓差异")
-        self._state.update_balances(
-            snapshot.wallet_balances, snapshot.available_balance
-        )
+        self._state.update_balances(snapshot.wallet_balances)
         self._state.replace_exchange_positions(snapshot.positions)
         self._state.hedge_mode = snapshot.hedge_mode
         self._state.startup_baseline_status = (
@@ -324,7 +318,7 @@ class OrderExecutor:
         3. 预写库落库为 SUBMITTED (失败则回滚并进入 DEGRADED，绝不外呼)；
         4. 启动 3.0s 超时探针看门狗；
         5. 发送 REST 请求。明确业务拒单 (4xx) 原子更新为 REJECTED 并释放活跃锁；
-        6. 网络超时/5xx 服务端错误保持 SUBMITTED 与锁定，交由看门狗触发存疑查证。
+        6. 网络超时/5xx 保留订单锁并标记 RECONCILING，等待私有流确认。
         """
         # 1. 状态幂等检查
         if order.status != OrderStatus.PENDING:

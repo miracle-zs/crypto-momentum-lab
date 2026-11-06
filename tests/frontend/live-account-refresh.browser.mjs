@@ -172,10 +172,8 @@ async function requestJson(path) {
   throw new Error(`Unexpected synthetic request: ${path}`);
 }
 
-function countRequests(pathPrefix, range) {
-  return requests.filter((path) => (
-    path.startsWith(pathPrefix) && path.includes(`equity_range=${range}`)
-  )).length;
+function countRequests(pathPrefix) {
+  return requests.filter((path) => path.startsWith(pathPrefix)).length;
 }
 
 function run(label, action) {
@@ -203,7 +201,7 @@ async function exerciseAccountRefresh() {
   wireLiveAccounts(root, directoryData, { requestJson });
   await waitFor(() => (
     root.querySelector('[data-live-account-detail][data-rendered-account="primary"]')
-      && root.querySelector('[data-live-account-metrics][data-rendered-range="24h"]')
+      && root.querySelector('[data-live-account-metrics] [data-echart-id="live-account-metric-margin_used"]')
       && window.echarts.getInstanceByDom(root.querySelector(".echart-surface"))
   ), "initial account detail, metrics, and ECharts instance did not load");
 
@@ -212,19 +210,17 @@ async function exerciseAccountRefresh() {
   const btcRow = detailSlot.querySelector('[data-row-key="BTCUSDT:BOTH"]');
   const orderRow = detailSlot.querySelector('[data-row-key="order-1"]');
   const fillRow = detailSlot.querySelector('[data-row-key="fill-1"]');
-  const accountRangeButton = detailSlot.querySelector('[data-account-equity-range="7d"]');
-  const metricRangeButton = metricsSlot.querySelector('[data-live-account-metrics-range="7d"]');
   const positionsDetails = detailSlot.querySelector('[data-state-key="account-positions"]');
   const chartShell = metricsSlot.querySelector('[data-echart-id="live-account-metric-margin_used"]');
   const chartSurface = chartShell.querySelector(".echart-surface");
   const chartInstance = window.echarts.getInstanceByDom(chartSurface);
   const oldChartData = JSON.stringify(chartInstance.getOption().series[0].data);
-  assert(btcRow && orderRow && fillRow && accountRangeButton && metricRangeButton && positionsDetails && chartInstance,
-    "initial render omitted a keyed table row, range button, disclosure, or chart");
+  assert(btcRow && orderRow && fillRow && positionsDetails && chartInstance,
+    "initial render omitted a keyed table row, disclosure, or chart");
 
   positionsDetails.open = false;
   version = 2;
-  const beforeTop = accountRangeButton.getBoundingClientRect().top;
+  const beforeTop = positionsDetails.getBoundingClientRect().top;
   await updateLiveAccountsDynamic(root, directoryData);
   await waitFor(() => (
     detailSlot.querySelector('[data-row-key="BTCUSDT:BOTH"]')?.textContent.includes("60,102.00")
@@ -243,55 +239,31 @@ async function exerciseAccountRefresh() {
   assert(detailSlot.querySelector('[data-row-key="ETHUSDT:BOTH"]'), "new ETH row was not inserted");
   assert(detailSlot.querySelector('[data-row-key="fill-2"]'), "new fill row was not inserted");
   assert(!positionsDetails.open, "same-root content morph reset a user-collapsed disclosure");
-  assert(accountRangeButton.isConnected && metricsSlot.querySelector('[data-live-account-metrics-range="7d"]') === metricRangeButton,
-    "range controls were replaced during refresh");
   assert(metricsSlot.querySelector('[data-echart-id="live-account-metric-margin_used"]') === chartShell,
     "chart shell was replaced during metrics refresh");
   assert(window.echarts.getInstanceByDom(chartSurface) === chartInstance,
     "existing ECharts instance was discarded during metrics refresh");
   const newChartData = JSON.stringify(chartInstance.getOption().series[0].data);
   assert(newChartData !== oldChartData, "existing chart instance retained stale series data");
-  assert(Math.abs(accountRangeButton.getBoundingClientRect().top - beforeTop) <= 3,
+  assert(Math.abs(positionsDetails.getBoundingClientRect().top - beforeTop) <= 3,
     "same-root patch moved the focused reading position");
 }
 
-async function exerciseRangeListeners() {
+async function exerciseFixedWindow() {
   const root = document.querySelector("#scenario");
-  const detailSlot = root.querySelector("[data-live-account-detail-content]");
-  const metricsSlot = root.querySelector("[data-live-account-metrics]");
-  const accountButton = detailSlot.querySelector('[data-account-equity-range="7d"]');
-  const metricsButton = metricsSlot.querySelector('[data-live-account-metrics-range="7d"]');
-  const accountBefore = countRequests("api/account?", "7d");
-  accountButton.click();
-  await waitFor(() => (
-    countRequests("api/account?", "7d") === accountBefore + 1
-      && !accountButton.disabled
-      && root.querySelector('[data-live-account-detail][data-rendered-range="7d"]')
-  ), "account 7d click did not complete exactly one selected-range request");
-  assert(countRequests("api/account?", "7d") === accountBefore + 1,
-    "one account range click issued duplicate HTTP requests");
-
-  const metricsBefore = countRequests("api/live-account-metrics?", "7d");
-  metricsButton.click();
-  await waitFor(() => (
-    countRequests("api/live-account-metrics?", "7d") === metricsBefore + 1
-      && !metricsButton.disabled
-      && root.querySelector('[data-live-account-metrics][data-rendered-range="7d"]')
-  ), "metrics 7d click did not complete exactly one selected-range request");
-  assert(countRequests("api/live-account-metrics?", "7d") === metricsBefore + 1,
-    "one metrics range click issued duplicate HTTP requests");
-
+  assert(!root.querySelector('[data-account-equity-range], [data-live-account-metrics-range]'),
+    "obsolete range controls appeared in the fixed 24-hour view");
   version = 3;
-  const nextAccountBefore = countRequests("api/account?", "7d");
-  const nextMetricsBefore = countRequests("api/live-account-metrics?", "7d");
+  const nextAccountBefore = countRequests("api/account?");
+  const nextMetricsBefore = countRequests("api/live-account-metrics");
   await updateLiveAccountsDynamic(root, {
     status: "READY",
     accounts: [{ account_label: "primary", status: "READY", observed_at: observedAt(5) }],
   });
-  assert(countRequests("api/account?", "7d") === nextAccountBefore + 1,
-    "same-structure poll did not preserve selected account equity range");
-  assert(countRequests("api/live-account-metrics?", "7d") === nextMetricsBefore + 1,
-    "same-structure poll did not preserve selected fleet-metrics range");
+  assert(countRequests("api/account?") === nextAccountBefore + 1,
+    "same-structure poll did not refresh account detail once");
+  assert(countRequests("api/live-account-metrics") === nextMetricsBefore + 1,
+    "same-structure poll did not refresh fleet metrics once");
 }
 
 async function exerciseLastGoodRefresh() {
@@ -300,12 +272,12 @@ async function exerciseLastGoodRefresh() {
   const metricsSlot = root.querySelector("[data-live-account-metrics]");
   const btcRow = detailSlot.querySelector('[data-row-key="BTCUSDT:BOTH"]');
   const chartShell = metricsSlot.querySelector('[data-echart-id="live-account-metric-margin_used"]');
-  assert(chartShell, "margin-used chart shell is missing after range refresh");
+  assert(chartShell, "margin-used chart shell is missing after account refresh");
   const chartSurface = chartShell.querySelector(".echart-surface");
-  assert(chartSurface, "margin-used chart surface is missing after range refresh");
+  assert(chartSurface, "margin-used chart surface is missing after account refresh");
   const chartInstance = window.echarts.getInstanceByDom(chartSurface);
   assert(chartInstance,
-    `margin-used ECharts instance is missing after range refresh (mounted=${chartShell.dataset.echartMounted}, connected=${chartShell.isConnected})`);
+    `margin-used ECharts instance is missing after account refresh (mounted=${chartShell.dataset.echartMounted}, connected=${chartShell.isConnected})`);
   const walletText = detailSlot.querySelector(".account-kpi-grid")?.textContent;
   const chartData = JSON.stringify(chartInstance.getOption().series[0].data);
   offline = true;
@@ -421,8 +393,8 @@ async function exerciseMultiRootAnchor() {
 
 async function exerciseFocusRace() {
   const root = document.querySelector("#race-a");
-  const oldMarkup = `<div style="height:100px"><button id="race-old-focus" type="button">Old focus target</button></div>`;
-  const newMarkup = `<div style="height:120px"><button id="race-old-focus" type="button">Updated focus target</button></div>`;
+  const oldMarkup = `<div style="height:100px"><input id="race-old-focus" value="Old focus target"></div>`;
+  const newMarkup = `<div style="height:120px"><input id="race-old-focus" value="Updated focus target"></div>`;
   replaceChildrenFromHtml(root, oldMarkup);
   const oldFocus = root.querySelector("#race-old-focus");
   oldFocus.focus({ preventScroll: true });
@@ -450,7 +422,7 @@ await run("real DOM: keyed rows, disclosure state, chart shell, and ECharts inst
   assert(root.querySelector('[data-row-key="ETHUSDT:BOTH"]'), "ETH row missing after refresh");
   assert(root.querySelector('[data-row-key="fill-2"]'), "new fill missing after refresh");
 });
-await run("real DOM: account and metrics range listeners issue one request and preserve 7d", exerciseRangeListeners);
+await run("real DOM: fixed 24-hour account and metrics refresh once", exerciseFixedWindow);
 await run("real DOM: offline refresh retains last-good balances, rows, charts, and recovers stale state", exerciseLastGoodRefresh);
 await run("real DOM: same-root rapid render keeps the last version and releases min-height", exerciseSameRootRender);
 await run("real DOM: same-frame height changes in two roots keep the reading anchor stable", exerciseMultiRootAnchor);

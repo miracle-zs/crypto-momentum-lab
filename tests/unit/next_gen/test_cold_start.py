@@ -25,7 +25,7 @@ async def startup():
         Decimal("900"),
         [],
     )
-    state = AccountState("live", "a1", repo, rest)
+    state = AccountState("live", "a1", repo)
     state.risk_config = risk_config()
     state.on_ws_status_change(True)
     executor = OrderExecutor(rest, state, repo)
@@ -40,8 +40,7 @@ async def test_flat_startup_initializes_balances_without_orders(startup):
     state, _, rest, executor = startup
     await executor.load_active_state()
     await executor.restore_startup_state()
-    assert state.wallet_balance == Decimal("1000")
-    assert state.available_balance_snapshot == Decimal("900")
+    assert state.wallet_balances["USDT"] == Decimal("1000")
     rest.fetch_startup_order.assert_not_awaited()
     rest.post_order.assert_not_awaited()
 

@@ -212,7 +212,7 @@ class NextGenDashboardQueries:
         window, interval = account_equity_range(equity_range)
         end = self._clock()
         start = end - window
-        # At most 241 indexed probes; do not scan every heartbeat in a year.
+        # Sample the 24-hour window with at most 241 indexed probes.
         statement = text("""
             SELECT point.occurred_at, point.details
             FROM generate_series(

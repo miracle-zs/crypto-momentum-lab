@@ -40,7 +40,6 @@ async def exit_setup():
         environment="live",
         account_label="a1",
         db=repo,
-        rest_client=mock_rest,
     )
     state.risk_config = risk_config(state.environment, state.account_label)
     state.set_system_mode(SystemMode.RUNNING)

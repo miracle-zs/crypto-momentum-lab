@@ -198,29 +198,31 @@ class PostgresRuntimeMarketStateRepository:
                     for state in adjusted_states
                 ]
                 await _insert_many_idempotent(session, values)
-                revision_values = [
-                    {
-                        "revision_id": (
-                            f"{state.environment}:{state.symbol}:15s:"
-                            f"{int(state.bucket_start.timestamp())}:{compute_market_state_hash(state)[:10]}"
-                        ),
-                        "scope": state.environment,
-                        "symbol": state.symbol,
-                        "interval": "15s",
-                        "bucket_start": state.bucket_start,
-                        "bucket_end": state.bucket_end,
-                        "content_hash": compute_market_state_hash(state),
-                        "published_at": state.last_received_at or state.bucket_end,
-                        "source_epoch": f"seq_{sequence_range.minimum or 0}",
-                        "visibility_mode": "decision_visible",
-                        "is_canonical": state.data_complete,
-                        "payload": market_state_to_payload(state),
-                        "lineage": {
-                            "source_watermark_at": source_watermark_at.isoformat()
-                        },
-                    }
-                    for state in adjusted_states
-                ]
+                revision_values = []
+                for state in adjusted_states:
+                    content_hash = compute_market_state_hash(state)
+                    revision_values.append(
+                        {
+                            "revision_id": (
+                                f"{state.environment}:{state.symbol}:15s:"
+                                f"{int(state.bucket_start.timestamp())}:{content_hash[:10]}"
+                            ),
+                            "scope": state.environment,
+                            "symbol": state.symbol,
+                            "interval": "15s",
+                            "bucket_start": state.bucket_start,
+                            "bucket_end": state.bucket_end,
+                            "content_hash": content_hash,
+                            "published_at": state.last_received_at or state.bucket_end,
+                            "source_epoch": f"seq_{sequence_range.minimum or 0}",
+                            "visibility_mode": "decision_visible",
+                            "is_canonical": state.data_complete,
+                            "payload": market_state_to_payload(state),
+                            "lineage": {
+                                "source_watermark_at": source_watermark_at.isoformat()
+                            },
+                        }
+                    )
                 await _insert_revision_refs_idempotent(session, revision_values)
                 for environment in sorted({state.environment for state in states}):
                     await session.execute(
@@ -291,33 +293,38 @@ class PostgresRuntimeMarketStateRepository:
                         )
                     )
                 ).all()
-                revision_values = [
-                    {
-                        "revision_id": (
-                            f"{gap.environment}:{gap.symbol}:15s:"
-                            f"{int(row.bucket_start.timestamp())}:{compute_market_state_hash(market_state_from_row(row))[:10]}"
-                        ),
-                        "scope": gap.environment,
-                        "symbol": gap.symbol,
-                        "interval": "15s",
-                        "bucket_start": row.bucket_start,
-                        "bucket_end": row.bucket_end,
-                        "content_hash": compute_market_state_hash(
-                            market_state_from_row(row)
-                        ),
-                        "published_at": gap.current_event_at,
-                        "source_epoch": f"gap_{inserted}",
-                        "visibility_mode": "decision_visible",
-                        "is_canonical": False,
-                        "payload": market_state_to_payload(market_state_from_row(row)),
-                        "lineage": {
-                            "gap_id": str(inserted),
-                            "gap_previous_event_at": gap.previous_event_at.isoformat(),
-                            "gap_current_event_at": gap.current_event_at.isoformat(),
-                        },
-                    }
-                    for row in updated_rows
-                ]
+                revision_values = []
+                for row in updated_rows:
+                    state = market_state_from_row(row)
+                    content_hash = compute_market_state_hash(state)
+                    revision_values.append(
+                        {
+                            "revision_id": (
+                                f"{gap.environment}:{gap.symbol}:15s:"
+                                f"{int(row.bucket_start.timestamp())}:{content_hash[:10]}"
+                            ),
+                            "scope": gap.environment,
+                            "symbol": gap.symbol,
+                            "interval": "15s",
+                            "bucket_start": row.bucket_start,
+                            "bucket_end": row.bucket_end,
+                            "content_hash": content_hash,
+                            "published_at": gap.current_event_at,
+                            "source_epoch": f"gap_{inserted}",
+                            "visibility_mode": "decision_visible",
+                            "is_canonical": False,
+                            "payload": market_state_to_payload(state),
+                            "lineage": {
+                                "gap_id": str(inserted),
+                                "gap_previous_event_at": (
+                                    gap.previous_event_at.isoformat()
+                                ),
+                                "gap_current_event_at": (
+                                    gap.current_event_at.isoformat()
+                                ),
+                            },
+                        }
+                    )
                 if revision_values:
                     await _insert_revision_refs_idempotent(session, revision_values)
 

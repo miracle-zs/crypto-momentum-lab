@@ -234,7 +234,7 @@ async def _run_collector(
     window_seconds: int,
     late_tolerance_seconds: int,
     max_spool_gib: float,
-    hub_receive_queue_size: int = 128,
+    hub_receive_queue_size: int,
 ) -> None:
     startup_timer = StartupPhaseTimer(
         log,

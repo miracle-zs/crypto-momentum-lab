@@ -240,7 +240,7 @@ async def test_live_position_symbols_propagate_database_timeout() -> None:
         )
 
 
-async def test_operational_retention_uses_bounded_batches() -> None:
+async def test_operational_retention_batches_contract_metadata() -> None:
     class RecordingRetention:
         def __init__(self) -> None:
             self.calls: list[tuple[str, int]] = []
@@ -259,10 +259,9 @@ async def test_operational_retention_uses_bounded_batches() -> None:
             self,
             *,
             before: datetime,
-            batch_size: int,
         ) -> int:
             del before
-            self.calls.append(("runtime", batch_size))
+            self.calls.append(("runtime", 0))
             return 0
 
         async def ensure_strategy_runtime_event_partitions(self) -> int:
@@ -279,7 +278,7 @@ async def test_operational_retention_uses_bounded_batches() -> None:
 
     assert repository.calls == [
         ("contract", 250),
-        ("runtime", 250),
+        ("runtime", 0),
         ("event_partitions", 0),
     ]
 
@@ -307,9 +306,8 @@ async def test_retention_emits_prune_outcome_with_partitions() -> None:
             self,
             *,
             before: datetime,
-            batch_size: int,
         ) -> int:
-            del before, batch_size
+            del before
             return 2
 
         async def ensure_strategy_runtime_event_partitions(self) -> int:
@@ -379,7 +377,6 @@ async def test_operational_retention_records_consumer_cutoff_before_execution(
     assert receipt.effective_cutoff == effective
     assert repository.prune_runtime_market_states.await_args.kwargs == {
         "before": effective,
-        "batch_size": 250,
     }
     assert repository.prune_contract_metadata.await_args.kwargs == {
         "before": effective,
@@ -465,51 +462,16 @@ def test_run_market_data_uses_combined_service(
     assert called == [Path("configs/environments/research.yaml")]
 
 
-async def test_run_market_data_until_stopped_cancels_and_awaits_cleanup(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    started = asyncio.Event()
-    cleaned_up = asyncio.Event()
-
-    async def fake_run(
-        config_path: Path,
-        *,
-        stop_requested: asyncio.Event | None = None,
-    ) -> None:
-        del config_path
-        assert stop_requested is not None
-        started.set()
-        try:
-            await stop_requested.wait()
-        finally:
-            cleaned_up.set()
-
-    monkeypatch.setattr(main, "run_market_data", fake_run)
-    stop_requested = asyncio.Event()
-    task = asyncio.create_task(
-        main.run_market_data_until_stopped(Path("server.yaml"), stop_requested)
-    )
-    await started.wait()
-
-    stop_requested.set()
-    await asyncio.wait_for(task, timeout=1)
-
-    assert cleaned_up.is_set()
-
 async def test_run_market_data_keeps_consumer_alive_while_capture_stops(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeHealth:
         def __init__(self) -> None:
             self.heartbeats: list[bool] = []
-            self.readiness: list[dict[str, object]] = []
             self.stopped_called = False
 
         def heartbeat(self, *, database_ok: bool = False) -> None:
             self.heartbeats.append(database_ok)
-
-        def write_readiness(self, payload: dict[str, object]) -> None:
-            self.readiness.append(payload)
 
         def stopped(self) -> None:
             self.stopped_called = True
@@ -648,16 +610,8 @@ async def test_run_market_data_keeps_consumer_alive_while_capture_stops(
     # Building the runtime and scheduling capture must not make Docker see a
     # ready market-data process. Only a completed durable state can do that.
     assert health.heartbeats == []
-    assert health.readiness == []
     durable_state_callbacks[0](datetime(2026, 10, 6, 1, 2, tzinfo=UTC))
     assert health.heartbeats == [True]
-    assert health.readiness == [
-        {
-            "service": "market-data",
-            "startup_ready": True,
-            "durable_state_watermark": "2026-10-06T01:02:00+00:00",
-        }
-    ]
 
     stop_requested.set()
     await asyncio.wait_for(task, timeout=1)

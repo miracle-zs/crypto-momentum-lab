@@ -126,10 +126,7 @@ async def test_account_update_event_dispatches_safely_to_engine() -> None:
     state.risk_config = risk_config(state.environment, state.account_label)
 
     # 预设 USDT 与 BNB
-    state.update_balances(
-        {"USDT": Decimal("5000.00"), "BNB": Decimal("10.0")},
-        available_balance_snapshot=Decimal("4500.00"),
-    )
+    state.update_balances({"USDT": Decimal("5000.00"), "BNB": Decimal("10.0")})
 
     # 模拟推流只包含 BTC 资产变化
     event = {

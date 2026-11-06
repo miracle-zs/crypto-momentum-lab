@@ -148,7 +148,19 @@ class OverviewQueries:
                 stale_after_seconds=3600,
             ),
             observed_at=snapshot.observed_at,
-            gainers=[universe_entry(row, "gainer") for row in gainers],
+            gainers=[
+                {
+                    "symbol": row.symbol,
+                    "rank": row.gainer_rank,
+                    "utc_day_return": (
+                        None if row.utc_day_return is None else str(row.utc_day_return)
+                    ),
+                    "current_price": (
+                        None if row.current_price is None else str(row.current_price)
+                    ),
+                }
+                for row in gainers
+            ],
             # Loser ranks remain in the database for historical/research
             # compatibility, but the operational dashboard is gainer-only.
             losers=[],
@@ -191,18 +203,6 @@ def age(now: datetime, observed_at: datetime) -> float:
     return max(0.0, (now - observed_at).total_seconds())
 
 
-def universe_entry(row: UniverseEntryRow, side: str) -> dict[str, JsonValue]:
-    rank = row.gainer_rank if side == "gainer" else row.loser_rank
-    return {
-        "symbol": row.symbol,
-        "rank": rank,
-        "utc_day_return": None
-        if row.utc_day_return is None
-        else str(row.utc_day_return),
-        "current_price": None if row.current_price is None else str(row.current_price),
-    }
-
-
 def universe_membership(
     row: MonitoringMembershipRow,
     entry: UniverseEntryRow | None,
@@ -239,6 +239,5 @@ __all__ = [
     "age",
     "live_account_fleet_status",
     "service",
-    "universe_entry",
     "universe_membership",
 ]

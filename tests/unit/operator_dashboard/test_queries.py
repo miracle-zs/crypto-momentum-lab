@@ -1,16 +1,75 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from crypto_momentum_lab.operator_dashboard.overview_queries import (
     universe_membership as _universe_membership,
 )
 from crypto_momentum_lab.operator_dashboard.queries import DashboardQueries
+from crypto_momentum_lab.operator_dashboard.schemas import (
+    LiveAccountsResponse,
+    LiveAccountSummaryResponse,
+    SystemOverviewResponse,
+)
 from crypto_momentum_lab.operator_dashboard.status import OperationalStatus
 from crypto_momentum_lab.operator_dashboard.telemetry_queries import (
     DecisionSLOQueries,
     _decision_slo_response,
 )
+
+
+async def test_overview_requires_all_account_timestamps_for_runner() -> None:
+    now = datetime(2026, 9, 14, 0, 0, tzinfo=UTC)
+    older = now - timedelta(seconds=20)
+    newer = now - timedelta(seconds=10)
+    queries = DashboardQueries(None, clock=lambda: now, nextgen_accounts=())
+    queries._overview_queries.overview = AsyncMock(
+        side_effect=lambda: SystemOverviewResponse(
+            generated_at=now,
+            database_status=OperationalStatus.READY,
+            services=[],
+            active_halt_count=0,
+        )
+    )
+    queries._nextgen_queries.active_halt_count = AsyncMock(return_value=0)
+    first = LiveAccountSummaryResponse(
+        account_label="first",
+        environment="live",
+        status=OperationalStatus.READY,
+        readiness="READY",
+        runtime_observed_at=older,
+        runtime_started_at=older,
+    )
+    second = first.model_copy(
+        update={
+            "account_label": "second",
+            "runtime_observed_at": newer,
+            "runtime_started_at": newer,
+        }
+    )
+    for accounts, expected_observed, expected_started in (
+        ([], None, None),
+        ([first, second], older, newer.isoformat()),
+        (
+            [first, second.model_copy(update={"runtime_observed_at": None})],
+            None,
+            newer.isoformat(),
+        ),
+        (
+            [first, second.model_copy(update={"runtime_started_at": None})],
+            older,
+            None,
+        ),
+    ):
+        queries._nextgen_queries.live_accounts = AsyncMock(
+            return_value=LiveAccountsResponse(
+                status=OperationalStatus.READY, accounts=accounts
+            )
+        )
+        runner = (await queries.overview()).services[0]
+        assert runner.observed_at == expected_observed
+        assert runner.details["started_at"] == expected_started
 
 
 async def test_universe_dashboard_hides_loser_ranking() -> None:

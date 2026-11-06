@@ -111,7 +111,11 @@ class PostgresTop30Selector:
             raise RuntimeError(
                 f"no activated universe snapshot available at {timestamp.isoformat()}"
             )
-        position_symbols = await self._load_position_symbols()
+        position_symbols = (
+            await self._position_repository.async_get_active_position_symbols(
+                self._position_environment
+            )
+        )
         selection = _build_selection(
             universe,
             top_count=self._top_count,
@@ -121,11 +125,6 @@ class PostgresTop30Selector:
         self._cached_selection = selection
         self._next_refresh_at = timestamp + self._refresh_interval
         return selection
-
-    async def _load_position_symbols(self) -> frozenset[str]:
-        return await self._position_repository.async_get_active_position_symbols(
-            self._position_environment
-        )
 
 
 def _build_selection(

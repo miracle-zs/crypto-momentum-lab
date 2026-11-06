@@ -68,13 +68,13 @@ def read_research_collector_status(
             pending_spool_overdue_files,
             pending_spool_oldest_age_seconds,
         ) = _spool_stats(
-            root / "spool" / "pending",
+            root / "journal" / "pending",
             now=now_utc,
             overdue_after_seconds=(
                 config.window_seconds + config.late_tolerance_seconds
             ),
         )
-    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+    except (OSError, TypeError, ValueError):
         return _unavailable_response(
             now=now_utc,
             environment=environment,
@@ -85,8 +85,7 @@ def read_research_collector_status(
     checkpoint_at = None if checkpoint is None else checkpoint.updated_at
     checkpoint_age_seconds = _age_seconds(now_utc, checkpoint_at)
     stale = (
-        checkpoint_at is None
-        or checkpoint_age_seconds is None
+        checkpoint_age_seconds is None
         or checkpoint_age_seconds > stale_after_seconds
     )
     gap_count = _window_gap_count(
@@ -117,13 +116,12 @@ def read_research_collector_status(
         gap_count=gap_count,
         pending_spool_overdue_files=pending_spool_overdue_files,
     )
-    latest_window_start = max(window_starts) if window_starts else None
-    first_window_start = min(window_starts) if window_starts else None
+    latest_window_start = window_starts[-1] if window_starts else None
+    first_window_start = window_starts[0] if window_starts else None
     return ResearchCollectorResponse(
         status=status,
         status_detail=_status_detail(
             status=status,
-            checkpoint=checkpoint,
             capacity_state=capacity.state,
             gap_count=gap_count,
             pending_spool_files=pending_spool_files,
@@ -162,7 +160,7 @@ def read_research_collector_status(
         late_tolerance_seconds=config.late_tolerance_seconds,
         max_spool_bytes=config.max_spool_bytes,
         alerts=alerts,
-        recent_windows=window_rows[:_RECENT_WINDOW_LIMIT],
+        recent_windows=window_rows,
     )
 
 
@@ -211,7 +209,7 @@ def _window_rows(
     starts = tuple(sorted({row[0] for row in rows}))
     latest_written_at = max((row[1] for row in rows), default=None)
     payload: list[dict[str, JsonValue]] = []
-    for window_start, written_at, size_bytes in rows:
+    for window_start, written_at, size_bytes in rows[:_RECENT_WINDOW_LIMIT]:
         payload.append(
             {
                 "window_start": window_start.isoformat(),
@@ -267,12 +265,9 @@ def _spool_stats(
         stat = path.stat()
         pending_spool_files += 1
         pending_spool_bytes += stat.st_size
-        age_seconds = _age_seconds(
-            now,
-            datetime.fromtimestamp(stat.st_mtime, tz=UTC),
+        age_seconds = max(
+            0.0, (now - datetime.fromtimestamp(stat.st_mtime, tz=UTC)).total_seconds()
         )
-        if age_seconds is None:
-            continue
         if (
             pending_spool_oldest_age_seconds is None
             or age_seconds > pending_spool_oldest_age_seconds
@@ -314,13 +309,12 @@ def _status_for_snapshot(
 def _status_detail(
     *,
     status: OperationalStatus,
-    checkpoint: CollectorCheckpoint | None,
     capacity_state: CapacityState,
     gap_count: int,
     pending_spool_files: int,
     pending_spool_overdue_files: int,
 ) -> str:
-    if status is OperationalStatus.NO_DATA or checkpoint is None:
+    if status is OperationalStatus.NO_DATA:
         return "等待 checkpoint"
     if status is OperationalStatus.HALTED:
         return "容量保护已暂停写入"

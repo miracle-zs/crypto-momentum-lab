@@ -73,7 +73,7 @@ def _write_spool_file(
     name: str,
     modified_at: datetime,
 ) -> None:
-    spool_path = root / "spool" / "pending" / "hub" / name
+    spool_path = root / "journal" / "pending" / "hub" / name
     spool_path.parent.mkdir(parents=True, exist_ok=True)
     spool_path.write_bytes(b"spool payload placeholder")
     timestamp = modified_at.timestamp()

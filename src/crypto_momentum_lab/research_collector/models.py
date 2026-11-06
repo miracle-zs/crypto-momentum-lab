@@ -34,7 +34,7 @@ class CollectorSequenceGap(CollectorError):
 
 
 class CollectorStateConflict(CollectorError):
-    """Raised when one natural state key has two different payloads."""
+    """Raised when stored collector state is invalid or inconsistent."""
 
 
 class SourceKind(StrEnum):
@@ -76,8 +76,6 @@ class CollectorCheckpoint:
 
         if self.last_sequence is not None and self.last_sequence < 0:
             raise ValueError("last_sequence must not be negative")
-        if self.materialized_sequence is not None and self.materialized_sequence < 0:
-            raise ValueError("materialized_sequence must not be negative")
         if self.accepted_sequence is not None and self.accepted_sequence < 0:
             raise ValueError("accepted_sequence must not be negative")
 

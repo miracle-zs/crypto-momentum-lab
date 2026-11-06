@@ -5,7 +5,7 @@ ArchiveJournal provides a strict, two-stage write-ahead log:
    Empty-selection batches write a lightweight durable receipt so continuous
    sequences are verifiable upon crash recovery.
    Incrementally tracks pending bytes and updates ``accepted_sequence``.
-2. ``pending()``: Returns uncommitted journal records sorted by sequence/time.
+2. ``pending_records()``: Returns uncommitted journal records in publish order.
 3. ``commit_materialization()``: Materializer commits Parquet windows
    and safely removes covered journal files, decrements pending bytes,
    and advances ``materialized_sequence``.
@@ -279,12 +279,10 @@ class ArchiveJournal:
 
     def get_record(self, receipt: DurableReceipt) -> JournalRecord | None:
         """Find the JournalRecord corresponding to a DurableReceipt."""
-        if receipt.record_id:
-            for record in self._pending_records.values():
-                if record.receipt.record_id == receipt.record_id:
-                    return record
         for record in self._pending_records.values():
-            if record.receipt == receipt:
+            if (
+                receipt.record_id and record.receipt.record_id == receipt.record_id
+            ) or record.receipt == receipt:
                 return record
         return None
 
@@ -449,12 +447,7 @@ class ArchiveJournal:
         # 3. ONLY AFTER audit trail and manifest are safely fsynced, remove committed
         # journal files
         for path in paths_to_remove:
-            dropped: Any = (
-                self._pending_records.pop(path)
-                if path in self._pending_records
-                else None
-            )
-            record = dropped
+            record = self._pending_records.pop(path, None)
             if record is not None:
                 try:
                     size = path.stat().st_size

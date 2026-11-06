@@ -71,10 +71,8 @@ TABLES: tuple[tuple[str, str], ...] = (
     ("account_position_snapshots", "observed_at"),
     ("exchange_order_events", "occurred_at"),
     ("paper_equity_snapshots", "observed_at"),
-    # The dashboard only reads the newest row per account, and nothing else
-    # queries this table's history -- yet it had no retention, so it had grown
-    # to 17 days / 144 MB (89 MB of that is TOAST holding six jsonb columns,
-    # so archiving it stays on the JSONL path).
+    # Research scripts query this historical signal table. Archive its jsonb
+    # payloads before trimming so older observations remain available.
     ("live_strategy_signals", "recorded_at"),
     # Market-data quality diagnostics (jsonb -> JSONL archive).  Volume
     # spikes with connection churn; without a window this table grows
@@ -619,7 +617,6 @@ def run_locked_prune(
     from_dt: str,
     to_dt: str,
     batch_rows: int,
-    db: dict[str, str],
     is_partitioned_table: bool = False,
     expected_fingerprint: str | None = None,
 ) -> tuple[int, int]:
@@ -990,7 +987,6 @@ def main(argv: list[str] | None = None) -> int:
                     from_dt=from_dt,
                     to_dt=to_dt,
                     batch_rows=args.batch_rows,
-                    db=db,
                     is_partitioned_table=is_part,
                     expected_fingerprint=fp,
                 )

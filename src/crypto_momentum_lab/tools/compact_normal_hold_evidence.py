@@ -388,8 +388,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--lock-timeout-seconds must be at least 1")
     if not args.dry_run and not args.apply:
         parser.error("destructive mode requires --apply; use --dry-run to inspect only")
-    if args.purge_unreferenced_revisions and not args.apply and not args.dry_run:
-        parser.error("--purge-unreferenced-revisions requires --apply")
     if args.purge_only and not args.purge_unreferenced_revisions:
         parser.error("--purge-only requires --purge-unreferenced-revisions")
     return asyncio.run(_run(args))

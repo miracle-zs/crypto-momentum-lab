@@ -10,7 +10,6 @@ from crypto_momentum_lab.strategies.order_flow_impulse import (
     OrderFlowImpulseConfig,
     event_study,
     find_order_flow_impulses,
-    summarize_order_flow_impulses,
 )
 
 
@@ -161,29 +160,6 @@ def test_requires_confirmation_and_applies_cooldown() -> None:
 
     assert len(events) == 1
     assert events[0].detected_at == states[7].bucket_start
-
-
-def test_summarizes_events_by_direction() -> None:
-    states = (
-        _state(0, Decimal("100.00"), notional=Decimal("100")),
-        _state(1, Decimal("100.00"), notional=Decimal("100")),
-        _state(2, Decimal("100.00"), notional=Decimal("100")),
-        _state(3, Decimal("100.00"), notional=Decimal("100")),
-        _state(4, Decimal("100.00"), notional=Decimal("300"), buy=Decimal("250")),
-        _state(5, Decimal("101.00"), notional=Decimal("300"), buy=Decimal("250")),
-        _state(6, Decimal("102.00"), notional=Decimal("300"), buy=Decimal("250")),
-        _state(7, Decimal("103.00"), notional=Decimal("200"), buy=Decimal("150")),
-    )
-    events = find_order_flow_impulses(states, _config())
-
-    summary = summarize_order_flow_impulses(events, horizons=(1, 2))
-
-    assert summary.total_count == 1
-    assert summary.by_direction[OrderFlowDirection.UP].count == 1
-    assert summary.by_direction[OrderFlowDirection.UP].mean_forward_returns[1] == (
-        Decimal("0.009803921568627450980392156863")
-    )
-    assert summary.by_direction[OrderFlowDirection.DOWN].count == 0
 
 
 def test_applies_causal_five_minute_volume_ratio_filter() -> None:

@@ -33,17 +33,6 @@
 .membership-status.forced { color: var(--live); background: rgba(103, 232, 249, .1); }
 .membership-status.unknown { color: var(--faint); background: rgba(115, 128, 153, .1); }
 
-.monitor-note {
-  margin: 0 0 12px;
-  padding: 9px 11px;
-  border: 1px solid color-mix(in srgb, var(--info) 22%, var(--line));
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--info) 6%, var(--surface-2));
-  color: var(--muted);
-  font-size: 10.5px;
-  line-height: 1.5;
-}
-
 .monitor-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin: 0 0 12px; color: var(--muted); font-size: 11px; }
 .monitor-summary b { color: var(--text); font: 600 10px var(--mono); }
 
@@ -55,11 +44,3 @@
   .market-board > .block-title { align-items: flex-start; flex-direction: column; gap: 10px; }
   .market-controls { gap: 8px; }
 }
-
-.market-panel[hidden] { display: none !important; }
-
-.market-panel > .block-split { margin-top: 0; }
-
-.market-panel > .block-split .block { margin-top: 18px; }
-
-.market-panel > .block { margin-top: 18px; }

@@ -10,7 +10,7 @@ export const SAFETY_SECTIONS = new Set(["overview", "risk", "account", "universe
 export const sectionInFlight = new Set();
 export const lastSectionPollAt = new Map();
 export const latestSectionData = new Map();
-export const latestSectionError = new Map();
+export const failedSections = new Set();
 export const latestSectionUpdatedAt = new Map();
 export const forcedSectionRefreshes = new Set();
 export const sectionRenderKeys = new Map();
@@ -42,13 +42,13 @@ export function readingReliable(id, now = Date.now()) {
 
 export function markSectionStored(id, data) {
   latestSectionData.set(id, data);
-  latestSectionError.delete(id);
+  failedSections.delete(id);
   latestSectionUpdatedAt.set(id, Date.now());
   forcedSectionRefreshes.delete(id);
 }
 
-export function markSectionFailed(id, reason) {
-  latestSectionError.set(id, { reason, at: Date.now() });
+export function markSectionFailed(id) {
+  failedSections.add(id);
 }
 
 export function expireSectionReading(id) {

@@ -405,7 +405,7 @@ class BinanceWebSocketConnection:
             self._dispatch_task = dispatch_task
             self._realtime_dispatch_task = realtime_dispatch_task
             try:
-                initial_names, initial_generation = await self._desired_snapshot()
+                initial_names, initial_generation = self._desired_snapshot()
                 await self._start_control(
                     connection,
                     "SUBSCRIBE",
@@ -757,7 +757,7 @@ class BinanceWebSocketConnection:
     ) -> None:
         if self._pending_control is not None:
             return
-        desired_names, generation = await self._desired_snapshot()
+        desired_names, generation = self._desired_snapshot()
         applied_names = set(self._applied_names)
         desired_set = set(desired_names)
         additions = tuple(sorted(desired_set - applied_names))
@@ -781,7 +781,7 @@ class BinanceWebSocketConnection:
         self._phase = _ConnectionPhase.READY
         self._active_generation = generation
 
-    async def _desired_snapshot(self) -> tuple[tuple[str, ...], int]:
+    def _desired_snapshot(self) -> tuple[tuple[str, ...], int]:
         return self._desired_names, self._generation
 
     def _resolve_control_ack(self, decoded: object) -> bool:

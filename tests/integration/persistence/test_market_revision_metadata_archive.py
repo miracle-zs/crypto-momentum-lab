@@ -5,7 +5,17 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import text
 
-from crypto_momentum_lab.domain.market.market_book import DatasetCatalog, MarketBook
+from crypto_momentum_lab.domain.market.market_book import (
+    DatasetCatalog,
+    MarketBook,
+    compute_market_state_hash,
+)
+from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.domain.market.revision_models import (
+    MarketEnvelope,
+    MarketRevisionRef,
+    MarketVisibilityMode,
+)
 from crypto_momentum_lab.persistence.postgres.market_book_repository import (
     PostgresMarketBookRepository,
 )
@@ -27,9 +37,55 @@ from crypto_momentum_lab.tools.archive_market_revision_payloads import (
 from tests.integration.persistence.test_market_revision_archiver import (
     archive_sessions,  # noqa: F401
 )
-from tests.unit.decision.test_decision_engine import _make_market_envelope
 
 pytestmark = pytest.mark.integration
+
+
+def _make_market_envelope(symbol, bucket_start, close_price):
+    bucket_end = bucket_start + timedelta(seconds=15)
+    state = MarketState15s(
+        schema_version=1,
+        environment="live",
+        exchange="binance",
+        symbol=symbol,
+        bucket_start=bucket_start,
+        bucket_end=bucket_end,
+        open_price=Decimal("64990.00"),
+        high_price=Decimal("65010.00"),
+        low_price=Decimal("64980.00"),
+        close_price=close_price,
+        trade_count=100,
+        trade_notional=Decimal("1000000.00"),
+        aggressive_buy_notional=Decimal("500000.00"),
+        aggressive_sell_notional=Decimal("500000.00"),
+        last_bid_price=Decimal("64999.00"),
+        last_ask_price=Decimal("65001.00"),
+        spread=Decimal("2.00"),
+        midpoint=Decimal("65000.00"),
+        liquidation_count=0,
+        liquidation_notional=Decimal("0.00"),
+        mark_price=Decimal("65000.00"),
+        closed_kline_count=0,
+        source_event_count=100,
+        first_received_at=bucket_start + timedelta(milliseconds=100),
+        last_received_at=bucket_end - timedelta(milliseconds=50),
+        data_complete=True,
+        missing_agg_trade_count=0,
+        is_backfill=False,
+    )
+    ref = MarketRevisionRef(
+        scope="live",
+        symbol=symbol,
+        interval="15s",
+        bucket_start=bucket_start,
+        bucket_end=bucket_end,
+        revision_id=f"rev_{symbol}_{int(bucket_start.timestamp())}",
+        content_hash=compute_market_state_hash(state),
+        published_at=bucket_end,
+        source_epoch="ep1",
+        visibility_mode=MarketVisibilityMode.DECISION_VISIBLE,
+    )
+    return ref, MarketEnvelope(ref=ref, state=state)
 
 
 @pytest.fixture
@@ -332,8 +388,10 @@ def test_cold_metadata_migration_creates_valid_concurrent_indexes(async_database
                 migration.upgrade()
             valid = connection.execute(
                 text(
-                    "SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid "
-                    "JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=:schema "
+                    "SELECT count(*) FROM pg_index i "
+                    "JOIN pg_class c ON c.oid=i.indexrelid "
+                    "JOIN pg_namespace n ON n.oid=c.relnamespace "
+                    "WHERE n.nspname=:schema "
                     "AND c.relname IN ('ix_market_revision_refs_cold_metadata',"
                     "'ix_decision_traces_full_revision_ids') AND i.indisvalid"
                 ),

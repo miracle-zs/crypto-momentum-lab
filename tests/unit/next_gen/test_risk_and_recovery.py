@@ -17,7 +17,7 @@ from tests.unit.next_gen.factories import risk_config, symbol_rules
 def state_with_risk():
     repository = InMemoryTradingRepository()
     rest = AsyncMock()
-    state = AccountState("live", "a1", repository, rest)
+    state = AccountState("live", "a1", repository)
     state.risk_config = risk_config()
     state.set_system_mode(SystemMode.RUNNING)
     state.on_ws_status_change(True)

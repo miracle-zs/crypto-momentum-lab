@@ -317,9 +317,7 @@ def drain_command(
     )
 
     async def _drainer() -> None:
-        state = AccountState(
-            environment, account_label, db=repo, rest_client=read_client
-        )
+        state = AccountState(environment, account_label, db=repo)
         state.is_draining = True
         executor = OrderExecutor(trade_client, state, repo, read_client=read_client)
         ws_client = BinanceUserDataStream(read_client, environment=environment)

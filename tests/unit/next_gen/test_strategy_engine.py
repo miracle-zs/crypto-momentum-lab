@@ -60,7 +60,7 @@ async def strategy_setup(account_config):
     repository.entry_symbols = frozenset({"BTCUSDT"})
     rest = AsyncMock()
     rest.fetch_exchange_info.return_value = exchange_info()
-    state = AccountState("live", "a1", repository, rest)
+    state = AccountState("live", "a1", repository)
     state.risk_config = risk_config(state.environment, state.account_label)
     state.set_system_mode(SystemMode.RUNNING)
     state.on_ws_status_change(True)

@@ -59,7 +59,6 @@ class NextGenDaemon:
         symbols: list[str] | None = None,
         stop_event: asyncio.Event | None = None,
         hub_url: str | None = None,
-        market_feed_connector: Any = None,
         market_environment: str = "research",
     ) -> None:
         self.account_config = account_config
@@ -88,7 +87,6 @@ class NextGenDaemon:
             environment=environment,
             account_label=account_label,
             db=db,
-            rest_client=self.read_client,
             on_active_symbols_change=self._candle_feed.set_symbols,
         )
         self.state.scheduled_risk_window = ScheduledRiskWindowConfig.from_environment()
@@ -153,7 +151,6 @@ class NextGenDaemon:
                 symbols=self.strategy_engine.symbols,
                 on_market_state=self.strategy_engine.on_market_state,
                 hub_url=resolved_hub,
-                ws_connector=market_feed_connector,
                 environment=self.strategy_engine.market_environment,
                 consumer_id=f"nextgen-{environment}-{account_label}",
                 on_connection_change=self._on_market_connection_change,
@@ -212,8 +209,6 @@ class NextGenDaemon:
                 unrealized = None
                 break
             direction = Decimal("1") if batch.position_side == "LONG" else Decimal("-1")
-            if unrealized is None:
-                break
             unrealized += direction * (price - batch.entry_price) * batch.quantity
 
         margin_used: Decimal | None = None
@@ -488,7 +483,6 @@ class NextGenDaemon:
                     tg.create_task(
                         self.exit_manager.run(
                             stop_event=self.stop_event,
-                            price_provider=self.strategy_engine.latest_prices.get,
                         )
                     )
                     tg.create_task(
@@ -532,7 +526,6 @@ async def run_nextgen_daemon(
     stop_event: asyncio.Event | None = None,
     keepalive_interval_sec: float = 1800.0,
     hub_url: str | None = None,
-    market_feed_connector: Any = None,
     market_environment: str = "research",
 ) -> NextGenDaemon:
     """下一代交易守护进程便捷启动函数"""
@@ -550,7 +543,6 @@ async def run_nextgen_daemon(
         symbols=symbols,
         stop_event=stop_event,
         hub_url=hub_url,
-        market_feed_connector=market_feed_connector,
         market_environment=market_environment,
     )
     await daemon.run(keepalive_interval_sec=keepalive_interval_sec)

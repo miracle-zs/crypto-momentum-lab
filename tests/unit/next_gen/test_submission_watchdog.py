@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from crypto_momentum_lab.next_gen.client import BinanceRestClient
 from crypto_momentum_lab.next_gen.engine import AccountState
 from crypto_momentum_lab.next_gen.models import (
     OrderStatus,
@@ -14,14 +15,13 @@ from tests.unit.next_gen.factories import risk_config
 
 
 @pytest.fixture
-def account_state():
+def account_state(monkeypatch):
     mock_db = AsyncMock()
-    mock_rest = AsyncMock()
+    monkeypatch.setattr(BinanceRestClient, "_request", AsyncMock())
     state = AccountState(
         environment="live",
         account_label="a1",
         db=mock_db,
-        rest_client=mock_rest,
     )
     state.risk_config = risk_config(state.environment, state.account_label)
     state.set_system_mode(SystemMode.RUNNING)
@@ -59,7 +59,7 @@ async def test_watchdog_triggers_reconciling_and_freezes_ordering_on_timeout(
 
     # Order must be in doubt (RECONCILING)
     assert order.status == OrderStatus.RECONCILING
-    account_state._rest_client.query_order.assert_not_awaited()
+    BinanceRestClient._request.assert_not_awaited()
     # System must be frozen into DEGRADED
     assert account_state.system_mode == SystemMode.DEGRADED
     assert not account_state.can_submit_entry_order()
@@ -129,7 +129,7 @@ async def test_system_mode_recovery_when_in_doubt_order_resolves(
         order.client_order_id, timeout_sec=0.01
     )
     assert order.status == OrderStatus.RECONCILING
-    account_state._rest_client.query_order.assert_not_awaited()
+    BinanceRestClient._request.assert_not_awaited()
     assert account_state.system_mode == SystemMode.DEGRADED
     assert not account_state.can_submit_entry_order()
 

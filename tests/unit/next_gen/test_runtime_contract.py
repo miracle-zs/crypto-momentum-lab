@@ -29,7 +29,7 @@ from tests.unit.persistence.postgres.test_runtime_state_repository import fixtur
 async def execution():
     repository = InMemoryTradingRepository()
     rest = AsyncMock()
-    state = AccountState("live", "review", repository, rest)
+    state = AccountState("live", "review", repository)
     state.risk_config = risk_config(state.environment, state.account_label)
     state.set_system_mode(SystemMode.RUNNING)
     state.on_ws_status_change(True)

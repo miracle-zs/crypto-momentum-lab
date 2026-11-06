@@ -53,14 +53,12 @@ class AccountState:
         environment: str,
         account_label: str,
         db: TradingRepositoryProtocol | None = None,
-        rest_client: Any = None,
         *,
         on_active_symbols_change: Callable[[frozenset[str]], None] | None = None,
     ) -> None:
         self.environment = environment
         self.account_label = account_label
         self._db: TradingRepositoryProtocol | None = db
-        self._rest_client = rest_client
         self._on_active_symbols_change = on_active_symbols_change
         self._ws_client: Any = None
 
@@ -72,8 +70,6 @@ class AccountState:
         self.batches: dict[str, PositionBatch] = {}
 
         self.wallet_balances: dict[str, Decimal] = {}
-        self.wallet_balance: Decimal = Decimal("0")
-        self.available_balance_snapshot: Decimal = Decimal("0")
         self.exchange_positions: dict[tuple[str, str], PositionSnapshot] = {}
         self.exchange_positions_observed_at: datetime | None = None
         self.hedge_mode: bool | None = None
@@ -166,15 +162,8 @@ class AccountState:
             if self.system_mode == SystemMode.RUNNING:
                 self.set_system_mode(SystemMode.DEGRADED)
 
-    def update_balances(
-        self,
-        balances: dict[str, Decimal],
-        available_balance_snapshot: Decimal | None = None,
-    ) -> None:
+    def update_balances(self, balances: dict[str, Decimal]) -> None:
         self.wallet_balances.update(balances)
-        self.wallet_balance = self.wallet_balances.get("USDT", Decimal("0"))
-        if available_balance_snapshot is not None:
-            self.available_balance_snapshot = available_balance_snapshot
 
     def replace_exchange_positions(self, positions: list[PositionSnapshot]) -> None:
         self.exchange_positions.clear()
@@ -465,11 +454,9 @@ class AccountState:
                 order.client_order_id,
                 order.symbol,
                 order.position_side,
-                order.side,
                 OrderStatus.REJECTED,
                 order.filled_qty,
                 order.avg_price,
-                Decimal("0"),
                 Decimal("0"),
             )
             log.warning("order_submission_not_sent", id=client_order_id)
@@ -528,10 +515,9 @@ class AccountState:
     async def on_account_update(
         self,
         balances: dict[str, Decimal],
-        available_balance: Decimal | None = None,
         positions: list[dict[str, Any]] | None = None,
     ) -> None:
-        self.update_balances(balances, available_balance)
+        self.update_balances(balances)
         if positions:
             self.update_exchange_positions(
                 [
@@ -595,11 +581,9 @@ class AccountState:
                 client_order_id,
                 symbol,
                 position_side,
-                side,
                 order_status,
                 cum_filled_qty,
                 avg_price,
-                last_filled_qty,
                 last_filled_price,
                 exchange_order_id,
                 trade_time,
@@ -611,11 +595,9 @@ class AccountState:
         client_order_id: str,
         symbol: str,
         position_side: str,
-        side: str,
         order_status: OrderStatus,
         cum_filled_qty: Decimal,
         avg_price: Decimal,
-        last_filled_qty: Decimal,
         last_filled_price: Decimal,
         exchange_order_id: int | None = None,
         trade_time: datetime | None = None,

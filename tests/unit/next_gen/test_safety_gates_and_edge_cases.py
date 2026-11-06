@@ -154,7 +154,7 @@ def test_account_update_merges_balances_without_wiping_other_assets() -> None:
             "BTC": Decimal("0.5"),
         }
     )
-    assert state.wallet_balance == Decimal("10000.00")
+    assert state.wallet_balances["USDT"] == Decimal("10000.00")
 
     # 收到仅包含 BNB 变化的增量推流
     state.update_balances(
@@ -167,7 +167,6 @@ def test_account_update_merges_balances_without_wiping_other_assets() -> None:
     assert state.wallet_balances["USDT"] == Decimal("10000.00")
     assert state.wallet_balances["BTC"] == Decimal("0.5")
     assert state.wallet_balances["BNB"] == Decimal("2.5")
-    assert state.wallet_balance == Decimal("10000.00")
 
 
 def test_generate_batch_id_uniqueness_and_salt_preservation() -> None:

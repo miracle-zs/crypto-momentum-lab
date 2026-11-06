@@ -9,7 +9,6 @@ WindowMaterializer is the sole writer to Parquet window datasets:
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -128,14 +127,6 @@ class WindowMaterializer:
         self._covered_keys.setdefault(record.path, set())
         return append_result
 
-    def stage_records(
-        self,
-        records: Iterable[JournalRecord],
-    ) -> None:
-        """Stage multiple recovered records into the materializer buffer."""
-        for record in records:
-            self.stage_record(record)
-
     def flush_ready(self, latest_bucket_start: datetime) -> SinkFlushResult:
         """Flush windows older than the late tolerance and commit covered receipts."""
         sink_result = self._sink.flush_ready(latest_bucket_start)
@@ -160,7 +151,7 @@ class WindowMaterializer:
         # Check non-empty staged records
         completed_paths: list[Path] = []
         for path, (receipt, record_keys) in self._staged_records.items():
-            covered = self._covered_keys.setdefault(path, set())
+            covered = self._covered_keys[path]
             covered.update(committed_keys.intersection(record_keys))
             covered.update(self._superseded_keys.intersection(record_keys))
             if record_keys.issubset(covered):

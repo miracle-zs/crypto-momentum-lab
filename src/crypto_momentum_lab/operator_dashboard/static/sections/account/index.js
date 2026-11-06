@@ -1,6 +1,5 @@
 import { pill } from "../../dashboard-ui.js";
 import { K, sel } from "../../ui/css-keys.js";
-import { createAccountSectionState } from "./state.js";
 import {
   defaultAccountRequestJson,
   loadLiveAccountDetail,
@@ -15,7 +14,11 @@ import {
 } from "./render-fleet.js";
 
 /** Account section state shared by rendering and event handlers. */
-const state = createAccountSectionState();
+const state = {
+  selectedLiveAccount: "primary",
+  liveAccountDetailRequest: 0,
+  liveAccountMetricsRequest: 0,
+};
 
 export function renderLiveAccounts(data) {
   return renderLiveAccountsInternal(state, data);

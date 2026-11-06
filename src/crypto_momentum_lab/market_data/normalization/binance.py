@@ -105,19 +105,18 @@ def _normalize_kline_1m(
     kline = payload.get("k")
     if not isinstance(kline, dict):
         raise BinanceNormalizationError("k must be an object")
-    kline_payload = kline
     return NormalizedKline1m(
         **_source_kwargs(envelope),
-        open_time=_required_ms(kline_payload, "t"),
-        close_time=_required_ms(kline_payload, "T"),
-        open_price=_required_decimal(kline_payload, "o"),
-        high_price=_required_decimal(kline_payload, "h"),
-        low_price=_required_decimal(kline_payload, "l"),
-        close_price=_required_decimal(kline_payload, "c"),
-        volume=_required_decimal(kline_payload, "v"),
-        quote_volume=_required_decimal(kline_payload, "q"),
-        trade_count=_required_int(kline_payload, "n"),
-        closed=_required_bool(kline_payload, "x"),
+        open_time=_required_ms(kline, "t"),
+        close_time=_required_ms(kline, "T"),
+        open_price=_required_decimal(kline, "o"),
+        high_price=_required_decimal(kline, "h"),
+        low_price=_required_decimal(kline, "l"),
+        close_price=_required_decimal(kline, "c"),
+        volume=_required_decimal(kline, "v"),
+        quote_volume=_required_decimal(kline, "q"),
+        trade_count=_required_int(kline, "n"),
+        closed=_required_bool(kline, "x"),
     )
 
 
@@ -128,21 +127,20 @@ def _normalize_force_order(
     order = payload.get("o")
     if not isinstance(order, dict):
         raise BinanceNormalizationError("o must be an object")
-    order_payload = order
-    price = _required_decimal(order_payload, "p")
-    average_price = _required_decimal(order_payload, "ap")
-    original_quantity = _required_decimal(order_payload, "q")
-    filled_quantity = _optional_decimal(order_payload, "z")
+    price = _required_decimal(order, "p")
+    average_price = _required_decimal(order, "ap")
+    original_quantity = _required_decimal(order, "q")
+    filled_quantity = _optional_decimal(order, "z")
     quantity = filled_quantity if filled_quantity is not None else original_quantity
     notional_price = average_price if average_price > 0 else price
     return NormalizedLiquidation(
         **_source_kwargs(envelope),
-        order_side=_order_side(_required_str(order_payload, "S")),
+        order_side=_order_side(_required_str(order, "S")),
         price=price,
         average_price=average_price,
         quantity=quantity,
         notional=notional_price * quantity,
-        trade_time=_optional_ms(order_payload, "T"),
+        trade_time=_optional_ms(order, "T"),
     )
 
 

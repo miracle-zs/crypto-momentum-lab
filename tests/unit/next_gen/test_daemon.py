@@ -400,7 +400,7 @@ async def test_nextgen_daemon_orchestrates_strategy_and_exit_manager(
     mock_exit_mgr = AsyncMock()
     exit_mgr_started = asyncio.Event()
 
-    async def mock_exit_run(stop_event: asyncio.Event, price_provider=None) -> None:
+    async def mock_exit_run(stop_event: asyncio.Event) -> None:
         exit_mgr_started.set()
         await stop_event.wait()
 

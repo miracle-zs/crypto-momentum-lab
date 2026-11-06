@@ -10,9 +10,6 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from crypto_momentum_lab.config import resolve_database_url
-from crypto_momentum_lab.persistence.postgres.decision_trace_repository import (
-    _load_policy_evidence,
-)
 from crypto_momentum_lab.persistence.postgres.decision_trace_storage import (
     share_policy_states,
 )
@@ -23,6 +20,23 @@ from crypto_momentum_lab.persistence.postgres.models import (
 from crypto_momentum_lab.persistence.postgres.session import (
     create_async_database_engine,
 )
+
+
+async def _load_policy_evidence(session, digests: set[str]) -> dict[str, dict]:
+    if not digests:
+        return {}
+    rows = (
+        (
+            await session.execute(
+                select(DecisionPolicyEvidenceRow)
+                .where(DecisionPolicyEvidenceRow.state_digest.in_(sorted(digests)))
+                .with_for_update(read=True, key_share=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {row.state_digest: dict(row.state_payload) for row in rows}
 
 
 async def backfill_batch(session, batch_size: int, after=None) -> tuple[int, int]:

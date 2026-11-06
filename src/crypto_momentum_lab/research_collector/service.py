@@ -69,10 +69,6 @@ class ResearchStateCollector:
         config: CollectorConfig,
         source: CollectionSource,
         selector: SymbolSelector,
-        sink: ParquetWindowSink | None = None,
-        journal: ArchiveJournal | None = None,
-        materializer: WindowMaterializer | None = None,
-        checkpoint_store: CheckpointStore | None = None,
         backfill_source: RuntimeMarketStateBackfillSource | None = None,
         startup_timer: StartupPhaseTimer | None = None,
     ) -> None:
@@ -82,21 +78,20 @@ class ResearchStateCollector:
         self._config = config
         self._source = source
         self._selector = selector
-        self._journal = journal or ArchiveJournal(
+        self._journal = ArchiveJournal(
             config.root / "journal",
             environment=config.environment,
             max_bytes=config.max_spool_bytes,
         )
-        self._sink = sink or ParquetWindowSink(
-            config.root / "parquet",
-            window_seconds=config.window_seconds,
-            late_tolerance_seconds=config.late_tolerance_seconds,
-        )
-        self._materializer = materializer or WindowMaterializer(
-            sink=self._sink,
+        self._materializer = WindowMaterializer(
+            sink=ParquetWindowSink(
+                config.root / "parquet",
+                window_seconds=config.window_seconds,
+                late_tolerance_seconds=config.late_tolerance_seconds,
+            ),
             journal=self._journal,
         )
-        self._checkpoint_store = checkpoint_store or CheckpointStore(
+        self._checkpoint_store = CheckpointStore(
             config.root / "checkpoints" / f"{config.environment}.json"
         )
         self._capacity = CapacityGuard(
@@ -116,7 +111,6 @@ class ResearchStateCollector:
         self._startup_health_ready_logged = False
         self._checkpoint: CollectorCheckpoint | None = None
         self._active_stream_id: str | None = None
-        self._sequence_baseline: int | None = None
         self._last_seen_sequence: int | None = None
         self._last_received_bucket: datetime | None = None
         self._last_persisted_bucket: datetime | None = None
@@ -141,10 +135,6 @@ class ResearchStateCollector:
         )
         self._materializer_error: BaseException | None = None
         self._materializer_failed = asyncio.Event()
-
-    @property
-    def config(self) -> CollectorConfig:
-        return self._config
 
     async def refresh_capacity(self) -> CapacitySnapshot:
         """
@@ -260,20 +250,12 @@ class ResearchStateCollector:
     ) -> None:
         latest_bucket: datetime | None = None
         for record in records:
-            if record.receipt.is_empty or not record.collection_batch.states:
-                await asyncio.to_thread(self._materializer.stage_record, record)
-                if record.collection_batch.states:
-                    bucket = max(
-                        state.bucket_start for state in record.collection_batch.states
-                    )
-                    if latest_bucket is None or bucket > latest_bucket:
-                        latest_bucket = bucket
-            else:
-                append_result = await asyncio.to_thread(
-                    self._materializer.stage_record,
-                    record,
-                )
-                if append_result is not None:
+            append_result = await asyncio.to_thread(
+                self._materializer.stage_record,
+                record,
+            )
+            if record.collection_batch.states:
+                if not record.receipt.is_empty and append_result is not None:
                     self._duplicate_rows += append_result.duplicate_rows
                 bucket = max(
                     state.bucket_start for state in record.collection_batch.states
@@ -340,7 +322,8 @@ class ResearchStateCollector:
         )
 
         recovered = await asyncio.to_thread(self._journal.recover)
-        self._materializer.stage_records(recovered)
+        for record in recovered:
+            self._materializer.stage_record(record)
 
         hub_records = [
             record
@@ -369,7 +352,6 @@ class ResearchStateCollector:
                         f"{pending_sequences[i]} -> {pending_sequences[i + 1]}"
                     )
             if self._last_seen_sequence is None:
-                self._sequence_baseline = pending_sequences[0] - 1
                 self._last_seen_sequence = pending_sequences[-1]
             else:
                 self._last_seen_sequence = max(
@@ -448,10 +430,11 @@ class ResearchStateCollector:
             selection,
             collection_batch.states,
         )
+        selected_by_symbol = selection.by_symbol
         selected_states = tuple(
             state
             for state in collection_batch.states
-            if state.symbol in selection.by_symbol and not state.is_backfill
+            if state.symbol in selected_by_symbol and not state.is_backfill
         )
 
         # Check queue backpressure before accepting batch into journal
@@ -712,16 +695,15 @@ class ResearchStateCollector:
                 return
             await asyncio.sleep(min(30.0, self._config.capacity_check_interval_seconds))
 
-    async def _flush_ready(self, latest_bucket: datetime) -> SinkFlushResult:
+    async def _flush_ready(self, latest_bucket: datetime) -> None:
         self._ensure_capacity()
         result = await asyncio.to_thread(
             self._materializer.flush_ready,
             latest_bucket,
         )
         await self._apply_flush_result(result)
-        return result
 
-    async def _flush_all_buffers(self) -> SinkFlushResult:
+    async def _flush_all_buffers(self) -> None:
         self._ensure_capacity()
         if self._materializer_error is not None:
             raise RuntimeError(
@@ -734,7 +716,6 @@ class ResearchStateCollector:
         result = await asyncio.to_thread(self._materializer.flush_all)
         await self._apply_flush_result(result)
         await self._save_checkpoint()
-        return result
 
     async def _apply_flush_result(self, result: SinkFlushResult) -> None:
         if result.bytes_written > 0:
@@ -820,16 +801,8 @@ class ResearchStateCollector:
                 "last_sequence": None
                 if checkpoint is None
                 else checkpoint.last_sequence,
-                "accepted_sequence": (
-                    self._journal.accepted_sequence
-                    if self._journal is not None
-                    else None
-                ),
-                "materialized_sequence": (
-                    self._journal.materialized_sequence
-                    if self._journal is not None
-                    else None
-                ),
+                "accepted_sequence": self._journal.accepted_sequence,
+                "materialized_sequence": self._journal.materialized_sequence,
                 "queued_batches": self._queue.qsize(),
                 "updated_at": (
                     None
@@ -885,7 +858,6 @@ class ResearchStateCollector:
         await self._flush_all_buffers()
         self._active_stream_id = stream_id
         self._journal.set_active_stream_id(stream_id)
-        self._sequence_baseline = None
         self._last_seen_sequence = None
         self._checkpoint = replace(
             self._require_checkpoint(),
@@ -912,8 +884,6 @@ class ResearchStateCollector:
             self._active_stream_id = collection_batch.stream_id
             self._journal.set_active_stream_id(collection_batch.stream_id)
         if self._last_seen_sequence is None:
-            if self._sequence_baseline is None:
-                self._sequence_baseline = collection_batch.sequence - 1
             return True
         if collection_batch.sequence <= self._last_seen_sequence:
             log.warning(
@@ -997,7 +967,7 @@ class ResearchStateCollector:
         if previous is not None:
             self._last_received_bucket = previous
 
-    def _ensure_capacity(self) -> CapacitySnapshot:
+    def _ensure_capacity(self) -> None:
         try:
             snapshot = self._capacity.ensure_writable()
         except CollectorPaused:
@@ -1011,7 +981,6 @@ class ResearchStateCollector:
                 collector_bytes=snapshot.collector_bytes,
                 disk_free_bytes=snapshot.disk_free_bytes,
             )
-        return snapshot
 
     def _set_source_cursor_from_checkpoint(self) -> None:
         checkpoint = self._require_checkpoint()

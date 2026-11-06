@@ -90,18 +90,6 @@ class OrderFlowImpulseEvent:
     max_adverse_return: Decimal | None
 
 
-@dataclass(frozen=True, slots=True)
-class OrderFlowImpulseDirectionSummary:
-    count: int
-    mean_forward_returns: dict[int, Decimal | None]
-
-
-@dataclass(frozen=True, slots=True)
-class OrderFlowImpulseSummary:
-    total_count: int
-    by_direction: dict[OrderFlowDirection, OrderFlowImpulseDirectionSummary]
-
-
 def find_order_flow_impulses(
     states: Iterable[MarketState15s],
     config: OrderFlowImpulseConfig,
@@ -110,26 +98,6 @@ def find_order_flow_impulses(
     for symbol_states in _states_by_symbol(states).values():
         events.extend(_find_symbol_events(symbol_states, config))
     return tuple(sorted(events, key=lambda event: (event.symbol, event.detected_at)))
-
-
-def summarize_order_flow_impulses(
-    events: Iterable[OrderFlowImpulseEvent],
-    *,
-    horizons: Iterable[int],
-) -> OrderFlowImpulseSummary:
-    event_tuple = tuple(events)
-    horizon_tuple = tuple(sorted(set(horizons)))
-    by_direction = {
-        direction: _summarize_direction(
-            tuple(event for event in event_tuple if event.direction is direction),
-            horizon_tuple,
-        )
-        for direction in OrderFlowDirection
-    }
-    return OrderFlowImpulseSummary(
-        total_count=len(event_tuple),
-        by_direction=by_direction,
-    )
 
 
 def _find_symbol_events(
@@ -555,29 +523,3 @@ def _state_high(state: MarketState15s) -> Decimal | None:
 
 def _state_low(state: MarketState15s) -> Decimal | None:
     return state.low_price if state.low_price is not None else _state_price(state)
-
-
-def _summarize_direction(
-    events: tuple[OrderFlowImpulseEvent, ...],
-    horizons: tuple[int, ...],
-) -> OrderFlowImpulseDirectionSummary:
-    return OrderFlowImpulseDirectionSummary(
-        count=len(events),
-        mean_forward_returns={
-            horizon: _mean(
-                tuple(
-                    event.forward_returns[horizon]
-                    for event in events
-                    if event.forward_returns.get(horizon) is not None
-                )
-            )
-            for horizon in horizons
-        },
-    )
-
-
-def _mean(values: tuple[Decimal | None, ...]) -> Decimal | None:
-    decimals = tuple(value for value in values if value is not None)
-    if not decimals:
-        return None
-    return sum(decimals, Decimal("0")) / Decimal(len(decimals))

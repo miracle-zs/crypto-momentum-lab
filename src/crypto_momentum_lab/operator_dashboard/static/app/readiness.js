@@ -9,7 +9,7 @@ import {
   SAFETY_SECTIONS,
   getLiveMode,
   latestSectionData,
-  latestSectionError,
+  failedSections,
   markSectionFailed,
   markSectionStored,
   readingReliable,
@@ -51,7 +51,7 @@ export function globalReadinessModel(now = Date.now()) {
   const expiredSafetySections = [...latestSectionData.keys()].filter(
     (id) => SAFETY_SECTIONS.has(id) && !readingReliable(id, now),
   ).length;
-  const staleSafetySections = [...latestSectionError.keys()]
+  const staleSafetySections = [...failedSections]
     .filter((id) => SAFETY_SECTIONS.has(id))
     .length;
   const staleNote = staleSafetySections > 0 ? " · 读数可能过期" : "";
@@ -204,7 +204,7 @@ export function updateGlobalState(id, data) {
   renderGlobalReadiness();
 }
 
-export function markSectionError(id, reason) {
-  markSectionFailed(id, reason);
+export function markSectionError(id) {
+  markSectionFailed(id);
   renderGlobalReadiness();
 }

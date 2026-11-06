@@ -152,7 +152,6 @@ def bucket_imbalance(series: StateSeries, index: int) -> float:
 def prepare_event(
     symbol: str,
     series: StateSeries,
-    segment_end: int,
     metrics: RawMetrics,
     config: GateConfig,
 ) -> PreparedEvent:
@@ -213,7 +212,7 @@ def collect_events(
     raw_count = 0
     for symbol, series in states.items():
         for segment_start, segment_end in good_segments(series):
-            next_allowed = candidate_index(series, config)
+            next_allowed = candidate_index(config)
             for index in range(segment_start, segment_end):
                 if index < next_allowed:
                     continue
@@ -221,7 +220,7 @@ def collect_events(
                 if metrics is None or not passes_up(metrics, config):
                     continue
                 raw_count += 1
-                event = prepare_event(symbol, series, segment_end, metrics, config)
+                event = prepare_event(symbol, series, metrics, config)
                 pool = universe.pool_at(event.detected_ts) if universe is not None else None
                 if pool is not None and symbol in pool:
                     events.append(event)
@@ -246,12 +245,12 @@ def run_key_for_timestamp(
 def attach_runs(
     events: list[PreparedEvent],
     states: dict[str, StateSeries],
-) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+) -> list[dict[str, object]]:
     all_run_rows: list[dict[str, object]] = []
     runs_by_symbol: dict[str, list[tuple[int, int, str]]] = defaultdict(list)
     for symbol, series in states.items():
         candles = aggregate_candles(series, good_segments(series))
-        for index, run in enumerate(build_rising_runs(symbol, candles, "close")):
+        for run in build_rising_runs(symbol, candles, "close"):
             if run.length < 2 or run.cumulative_return < 0.01:
                 continue
             key = f"{symbol}:{run.start}"
@@ -271,7 +270,7 @@ def attach_runs(
     for event in events:
         event.run_key = run_key_for_timestamp(event, runs_by_symbol)
     all_run_rows.sort(key=lambda item: (str(item["start"]), str(item["symbol"])))
-    return all_run_rows, all_run_rows
+    return all_run_rows
 
 
 def fit_thresholds(events: list[PreparedEvent], cutoff: int) -> dict[str, float | None]:
@@ -646,7 +645,7 @@ def main() -> None:
         cooldown_buckets=args.cooldown_buckets,
     )
     events, raw_count = collect_events(states, universe, config)
-    run_rows, _ = attach_runs(events, states)
+    run_rows = attach_runs(events, states)
     candles, marks = load_market_data(args.states, start_ms=start_ms, end_ms=end_ms)
     unresolved = attach_exits(events, candles, marks, end_ms)
     thresholds = fit_thresholds(events, midpoint // 1_000)

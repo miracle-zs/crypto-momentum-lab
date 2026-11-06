@@ -8,10 +8,8 @@ remain outside this module.
 
 from __future__ import annotations
 
-import os
-from collections.abc import Mapping
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,74 +47,5 @@ class LiveOrderFlowImpulseProfile:
             raise ValueError("min_notional_intensity must be positive")
         if self.min_notional_5m_vs_30m < 0:
             raise ValueError("min_notional_5m_vs_30m must be non-negative")
-
-    @classmethod
-    def from_environment(
-        cls,
-        environment: Mapping[str, str] | None = None,
-    ) -> LiveOrderFlowImpulseProfile:
-        """Resolve one profile from ``CML_LIVE_*`` environment variables.
-
-        All variables are strictly required. Missing or empty variables fail closed.
-        """
-
-        values = os.environ if environment is None else environment
-        return cls(
-            impulse_window_buckets=_read_required_int(
-                values,
-                "CML_LIVE_IMPULSE_WINDOW_BUCKETS",
-            ),
-            confirmation_buckets=_read_required_int(
-                values,
-                "CML_LIVE_CONFIRMATION_BUCKETS",
-            ),
-            min_return_pct=_read_required_decimal(
-                values,
-                "CML_LIVE_MIN_RETURN_PCT",
-            ),
-            min_aggressive_imbalance=_read_required_decimal(
-                values,
-                "CML_LIVE_MIN_IMBALANCE",
-            ),
-            min_notional_intensity=_read_required_decimal(
-                values,
-                "CML_LIVE_MIN_INTENSITY",
-            ),
-            min_notional_5m_vs_30m=_read_required_decimal(
-                values,
-                "CML_LIVE_MIN_NOTIONAL_5M_VS_30M",
-            ),
-            cooldown_buckets=_read_required_int(
-                values,
-                "CML_LIVE_COOLDOWN_BUCKETS",
-            ),
-        )
-
-
-def _read_required_int(
-    environment: Mapping[str, str],
-    name: str,
-) -> int:
-    raw = environment.get(name)
-    if raw is None or not raw.strip():
-        raise ValueError(f"Missing required environment variable: {name}")
-    try:
-        return int(raw.strip())
-    except ValueError as error:
-        raise ValueError(f"{name} must be an integer") from error
-
-
-def _read_required_decimal(
-    environment: Mapping[str, str],
-    name: str,
-) -> Decimal:
-    raw = environment.get(name)
-    if raw is None or not raw.strip():
-        raise ValueError(f"Missing required environment variable: {name}")
-    try:
-        return Decimal(raw.strip())
-    except (InvalidOperation, ValueError) as error:
-        raise ValueError(f"{name} must be a decimal") from error
-
 
 __all__ = ["LiveOrderFlowImpulseProfile"]
