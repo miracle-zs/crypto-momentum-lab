@@ -48,13 +48,21 @@ export function wireMarketViews(root, selectedView = null) {
 export function wireTableFilters(root) {
   if (!root) return;
   root.querySelectorAll(".search-box").forEach((box) => {
-    if (box.dataset.wired === "true") return;
+    if (box.dataset.wired === "true") {
+      box.querySelector("input[data-filter-table]")?.dispatchEvent(new Event("input"));
+      return;
+    }
     box.dataset.wired = "true";
     const input = box.querySelector("input[data-filter-table]");
     const clearBtn = box.querySelector(".search-clear");
     if (!input) return;
+    const statusFilter = root.querySelector("[data-market-status]");
+    if (statusFilter && root.dataset.marketStatus) {
+      statusFilter.value = root.dataset.marketStatus;
+    }
     const update = () => {
       const query = input.value.trim().toLowerCase();
+      const status = statusFilter?.value || "all";
       if (clearBtn) clearBtn.hidden = !query;
       const targetSelector = input.dataset.filterTable;
       const container = targetSelector
@@ -67,17 +75,19 @@ export function wireTableFilters(root) {
       let visibleCount = 0;
       rows.forEach((row) => {
         const text = row.textContent.toLowerCase();
-        const match = query.length === 0 || text.includes(query);
+        const rowStatus = row.querySelector("[data-membership-status]")?.dataset.membershipStatus;
+        const match = (query.length === 0 || text.includes(query))
+          && (status === "all" || rowStatus === status);
         row.hidden = !match;
         if (match) visibleCount++;
       });
       let emptyRow = tbody.querySelector(".search-empty-row");
-      if (query.length > 0 && visibleCount === 0 && rows.length > 0) {
+      if ((query.length > 0 || status !== "all") && visibleCount === 0 && rows.length > 0) {
         if (!emptyRow) {
           emptyRow = document.createElement("tr");
           emptyRow.className = "search-empty-row";
           const colCount = container.querySelectorAll("thead th").length || 1;
-          emptyRow.innerHTML = `<td colspan="${colCount}" class="search-empty-cell"><small class="muted">未匹配到标的或数据（按 ESC 可清空筛选）</small></td>`;
+          emptyRow.innerHTML = `<td colspan="${colCount}" class="search-empty-cell"><small class="muted">没有匹配结果</small></td>`;
           tbody.appendChild(emptyRow);
         } else {
           emptyRow.hidden = false;
@@ -87,6 +97,10 @@ export function wireTableFilters(root) {
       }
     };
     input.addEventListener("input", update);
+    statusFilter?.addEventListener("change", () => {
+      root.dataset.marketStatus = statusFilter.value;
+      update();
+    });
     input.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
         input.value = "";
@@ -99,6 +113,7 @@ export function wireTableFilters(root) {
       update();
       input.focus();
     });
+    update();
   });
 }
 

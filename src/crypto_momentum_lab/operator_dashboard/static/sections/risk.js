@@ -38,10 +38,10 @@ export function renderRisk(data) {
       </div>`
     : `<div class="risk-empty-note" data-state-key="risk-ambiguous-note"><span>未决订单</span><strong class="num">0</strong><small>无状态待确认的订单</small></div>`;
   const body = `${metaStrip}
-    <div class="block risk-halts" data-state-key="risk-halts-block">${blockTitle("活跃停机", "", `<strong class="num">${activeHalts.length}</strong>`)}${halts}</div>
+    <div class="block risk-halts" data-state-key="risk-halts-block">${blockTitle("活跃停机", "", activeHalts.length ? `<strong class="num">${activeHalts.length}</strong>` : "")}${halts}</div>
     ${ambiguousBlock}
     <div class="block risk-pending" data-state-key="risk-pending-block">
-      ${blockTitle("待完成订单", "已提交、挂单或部分成交", `<strong class="num">${pendingOrders.length}</strong>`)}
+      ${blockTitle("待完成订单", "已提交、挂单或部分成交", pendingOrders.length ? `<strong class="num">${pendingOrders.length}</strong>` : "")}
       ${pendingTable}
     </div>`;
   return [activeHalts.length ? "HALTED" : data.status, body];

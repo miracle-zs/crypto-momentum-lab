@@ -306,7 +306,7 @@ test("universe renderer includes relative snapshot age", () => {
   assert.match(html, /快照时间/);
 });
 
-test("universe renderer keeps ranking and monitoring views distinct", () => {
+test("universe renderer shows all monitored members in one table", () => {
   const [status, html] = renderUniverse({
     status: "FRESH",
     observed_at: "2026-08-18T04:51:00Z",
@@ -339,18 +339,30 @@ test("universe renderer keeps ranking and monitoring views distinct", () => {
         current_price: "2",
         utc_day_return: "-0.02",
       },
+      {
+        symbol: "EXTUSDT",
+        status: "extended",
+        side: "gainer",
+        rank: 31,
+        current_price: "1",
+        utc_day_return: "0.01",
+      },
+      { symbol: "HELDUSDT", status: "forced", rank: null },
     ],
   });
   assert.equal(status, "FRESH");
-  assert.match(html, /监控池 2/);
-  assert.match(html, /补充监控 1/);
-  assert.match(html, /MONITORING ADDITIONS/);
-  assert.match(html, /涨幅榜中的目标标的已计入监控池/);
+  assert.match(html, /监控池 4/);
+  assert.match(html, /全部状态/);
+  assert.match(html, /扩展监控/);
+  assert.doesNotMatch(html, /data-market-view/);
   assert.match(html, /监控状态/);
   assert.match(html, /保留/);
   assert.doesNotMatch(html, /跌幅榜 Top 20/);
-  assert.equal(html.match(/AAAUSDT/g)?.length, 1);
-  assert.equal(html.match(/CCCUSDT/g)?.length, 1);
+  assert.equal(html.match(/data-row-key="AAAUSDT"/g)?.length, 1);
+  assert.equal(html.match(/data-row-key="CCCUSDT"/g)?.length, 1);
+  assert.match(html, /data-membership-status="extended">扩展监控/);
+  assert.match(html, /data-membership-status="forced">持仓保护/);
+  assert.match(html, /data-row-key="HELDUSDT"/);
   assert.doesNotMatch(html, /目标池 · 涨幅 Top 20/);
   assert.doesNotMatch(html, /目标池 · 跌幅 Top 20/);
   assert.doesNotMatch(html, /class="chip/);

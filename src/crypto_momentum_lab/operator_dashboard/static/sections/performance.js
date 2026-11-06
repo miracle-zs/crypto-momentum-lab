@@ -86,7 +86,7 @@ export function renderPerformance(data) {
   const body = `
     ${kpis}
     <div class="block" style="margin-top: 14px;">
-      ${blockTitle("系统基础设施稳态", "HOST & DATABASE RESOURCES")}
+      ${blockTitle("主机与数据库", "")}
       <div class="performance-meter-grid">
         ${cpuMeter}
         ${memMeter}

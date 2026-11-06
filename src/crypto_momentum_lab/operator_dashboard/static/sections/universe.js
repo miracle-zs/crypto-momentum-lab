@@ -6,74 +6,49 @@ import {
   price,
   relToNow,
 } from "../dashboard-formatters.js";
-import { blockTitle, dataTable, emptyBox, searchBox } from "../dashboard-ui.js";
+import { blockTitle, dataTable, searchBox } from "../dashboard-ui.js";
 import { returnBar } from "../dashboard-charts.js";
 
 export function renderUniverse(data) {
-  const statusOrder = { target: 0, retained: 1, forced: 2 };
-  const sideOrder = { gainer: 0, loser: 1 };
+  const labels = { target: "目标", extended: "扩展监控", retained: "保留", forced: "持仓保护" };
   const monitored = [...(data.monitored_symbols || [])].sort((left, right) => (
-    (statusOrder[left.status] ?? 99) - (statusOrder[right.status] ?? 99)
-    || (sideOrder[left.side] ?? 99) - (sideOrder[right.side] ?? 99)
-    || (left.rank ?? 999) - (right.rank ?? 999)
+    (left.rank ?? Infinity) - (right.rank ?? Infinity)
     || String(left.symbol || "").localeCompare(String(right.symbol || ""))
   ));
-  const statusBySymbol = new Map(monitored.map((row) => [row.symbol, row]));
-  const membershipLabels = {
-    target: "目标",
-    retained: "保留",
-    forced: "持仓保护",
-  };
-  const membershipBadge = (status) => {
-    const className = Object.prototype.hasOwnProperty.call(membershipLabels, status)
-      ? status
-      : "unknown";
-    return `<span class="membership-status ${className}">${esc(membershipLabels[status] || "未监控")}</span>`;
-  };
-  const sideLabel = (side) => side === "gainer" ? "涨幅" : side === "loser" ? "跌幅" : "—";
   const maxAbs = Math.max(
-    [...(data.gainers || []), ...monitored]
-      .map((row) => Math.abs(asNumber(row.utc_day_return) ?? 0)),
+    ...monitored.map((row) => Math.abs(asNumber(row.utc_day_return) ?? 0)),
     0.0001,
   );
-  const universeTable = (rows) => dataTable([
-    { label: "#", key: "rank", align: "right", cls: "muted" },
+  const table = dataTable([
+    { label: "排名", value: (row) => row.rank ?? "—", align: "right", cls: "muted" },
     { label: "币种", key: "symbol", cls: "sym" },
     { label: "现价", value: (row) => price(row.current_price), align: "right" },
     { label: "UTC 日内涨跌", value: (row) => returnBar(row.utc_day_return, maxAbs), html: true },
     {
       label: "监控状态",
-      value: (row) => membershipBadge(statusBySymbol.get(row.symbol)?.status),
+      value: (row) => {
+        const status = Object.hasOwn(labels, row.status) ? row.status : "unknown";
+        return `<span class="membership-status ${status}" data-membership-status="${status}">${esc(labels[status] || "未知")}</span>`;
+      },
       html: true,
     },
-  ], rows, { emptyText: "暂无数据" });
-  const targetCount = monitored.filter((row) => row.status === "target").length;
-  const retainedRows = monitored.filter((row) => row.status === "retained");
-  const forcedRows = monitored.filter((row) => row.status === "forced");
-  const monitoringAdditions = monitored.filter((row) => row.status !== "target");
-  const summary = `<span class="monitor-summary"><b>${targetCount}</b> 目标 · <b>${retainedRows.length}</b> 保留 · <b>${forcedRows.length}</b> 保护 · <b>${monitored.length}</b> 总计</span>`;
-  const monitoringTable = dataTable([
-    { label: "#", value: (row) => row.rank ?? "—", align: "right", cls: "muted" },
-    { label: "币种", key: "symbol", cls: "sym" },
-    { label: "方向", value: (row) => sideLabel(row.side) },
-    { label: "现价", value: (row) => price(row.current_price), align: "right" },
-    { label: "UTC 日内涨跌", value: (row) => returnBar(row.utc_day_return, maxAbs), html: true },
-    { label: "监控状态", value: (row) => membershipBadge(row.status), html: true },
-  ], monitoringAdditions, { emptyText: "无补充监控成员", tall: monitoringAdditions.length > 24 });
-  const monitoringNote = `<div class="monitor-note">涨幅榜中的目标标的已计入监控池；此处只展示未出现在涨幅榜中的保留和持仓保护成员。</div>`;
-  const viewTabs = `<div class="view-tabs market-view-tabs" role="tablist" aria-label="市场子视图">
-    <button type="button" class="view-tab is-active" id="universe-tab-rankings" data-market-view="rankings" role="tab" aria-selected="true" aria-controls="universe-panel-rankings" tabindex="0">UTC 排名<small>TOP 20</small></button>
-    <button type="button" class="view-tab" id="universe-tab-monitoring" data-market-view="monitoring" role="tab" aria-selected="false" aria-controls="universe-panel-monitoring" tabindex="-1">监控池<small>PROTECTED UNIVERSE</small></button>
+  ], monitored, { emptyText: "暂无监控币种", tall: monitored.length > 24, rowKey: (row) => row.symbol });
+  const counts = Object.entries(labels).map(([status, label]) => {
+    const count = monitored.filter((row) => row.status === status).length;
+    return `<span><b>${count}</b> ${label}</span>`;
+  }).join("");
+  const controls = `<div class="market-controls">
+    <label>状态 <select data-market-status aria-label="筛选监控状态">
+      <option value="all">全部状态</option>
+      ${Object.entries(labels).map(([status, label]) => `<option value="${status}">${label}</option>`).join("")}
+    </select></label>
+    ${searchBox("搜索币种", "[data-market-table]")}
   </div>`;
   const body = `<div class="detail-meta"><span>快照时间 <b class="num">${esc(dayTime(data.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</b></span><span>${esc(relToNow(data.observed_at))}</span></div>
-    <div class="market-board" data-market-board>
-      ${viewTabs}
-      <div class="market-panel" id="universe-panel-rankings" data-market-panel="rankings" role="tabpanel" aria-labelledby="universe-tab-rankings" tabindex="0">
-        <div class="block">${blockTitle("涨幅榜 Top 20", "TOP GAINERS · UTC DAY", searchBox("过滤币种...", "[data-market-panel='rankings']"))}${universeTable(data.gainers)}</div>
-      </div>
-      <div class="market-panel" id="universe-panel-monitoring" data-market-panel="monitoring" role="tabpanel" aria-labelledby="universe-tab-monitoring" tabindex="0" hidden>
-        <div class="block">${blockTitle(`监控池 ${monitored.length}`, "MONITORED UNIVERSE", summary)}${monitoringNote}${blockTitle(`补充监控 ${monitoringAdditions.length}`, "MONITORING ADDITIONS", searchBox("过滤补充监控...", "[data-market-panel='monitoring']"))}${monitoringTable}</div>
-      </div>
+    <div class="market-board" data-market-table>
+      ${blockTitle(`监控池 ${monitored.length}`, "", controls)}
+      <div class="monitor-summary">${counts}</div>
+      ${table}
     </div>`;
   return [data.status, body];
 }

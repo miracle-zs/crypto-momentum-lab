@@ -150,7 +150,7 @@ function renderPositionsTable(positions, strategy) {
 
 function renderExchangePositionsTable(positions, observedAt) {
   const snapshotLabel = observedAt
-    ? `交易所持仓状态更新 ${fullDateTime(observedAt)} · 启动 REST 基线，运行期间由私有 WebSocket 更新`
+    ? `交易所持仓更新于 ${fullDateTime(observedAt)}`
     : "暂无交易所持仓快照；当前进程状态尚未提供此字段";
   const table = dataTable([
     { label: "币种", key: "symbol", cls: "sym" },
@@ -284,8 +284,8 @@ export function renderAccount(data) {
 
   const body = `<small class="account-refresh-note muted" data-refresh-state hidden></small>
     ${renderAccountSizing(config)}${executionLine}${kpis}
-    ${disclosure("交易所实际持仓", "EXCHANGE POSITIONS · PRIVATE USER DATA STREAM", exchangePositionsTable, `<strong class="num">${exchangePositions.length}</strong>`, { open: exchangePositions.length > 0, stateKey: "exchange-positions" })}
-    ${disclosure("当前挂单", "OPEN ORDERS · PRIVATE USER DATA STREAM", ordersTable, `<strong class="num">${openOrders.length}</strong>`, { open: openOrders.length > 0, stateKey: "account-open-orders" })}
+    ${disclosure("交易所实际持仓", "", exchangePositionsTable, `<strong class="num">${exchangePositions.length}</strong>`, { open: exchangePositions.length > 0, stateKey: "exchange-positions" })}
+    ${disclosure("当前挂单", "", ordersTable, `<strong class="num">${openOrders.length}</strong>`, { open: openOrders.length > 0, stateKey: "account-open-orders" })}
     ${equityChartBlock}
     ${disclosure("最近成交订单", "RECENT TRADES · ONE ORDER PER ROW", fillsTable, `<strong class="num">${fills.length}</strong>`, { stateKey: "account-fills" })}
     ${disclosure("实盘策略信号", "LIVE SIGNALS · LATEST 30", liveSignalContent, `<strong class="num">${liveSignals.length}</strong>`, { stateKey: "live-strategy-signals" })}

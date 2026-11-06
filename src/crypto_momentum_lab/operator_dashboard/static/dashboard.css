@@ -2011,6 +2011,7 @@ details.secondary[open] summary { margin-bottom: 10px; }
 }
 
 .membership-status.target { color: var(--info); background: rgba(138, 180, 255, .1); }
+.membership-status.extended { color: var(--muted); background: var(--surface-3); }
 .membership-status.retained { color: var(--warn); background: rgba(245, 183, 85, .1); }
 .membership-status.forced { color: var(--live); background: rgba(103, 232, 249, .1); }
 .membership-status.unknown { color: var(--faint); background: rgba(115, 128, 153, .1); }
@@ -2026,8 +2027,17 @@ details.secondary[open] summary { margin-bottom: 10px; }
   line-height: 1.5;
 }
 
-.monitor-summary { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 10px; white-space: nowrap; }
+.monitor-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin: 0 0 12px; color: var(--muted); font-size: 11px; }
 .monitor-summary b { color: var(--text); font: 600 10px var(--mono); }
+
+.market-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.market-controls label { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+.market-controls select { color: var(--text); background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px; }
+
+@media (max-width: 600px) {
+  .market-board > .block-title { align-items: flex-start; flex-direction: column; gap: 10px; }
+  .market-controls { gap: 8px; }
+}
 
 .market-panel[hidden] { display: none !important; }
 

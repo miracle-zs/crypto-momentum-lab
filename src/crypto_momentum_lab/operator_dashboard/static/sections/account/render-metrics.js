@@ -19,7 +19,7 @@ export function renderLiveAccountMetrics(data) {
   const charts = LIVE_ACCOUNT_METRIC_DEFINITIONS.map((definition) => `
     <article class="live-metric-card" data-metric-category="${esc(definition.category || "equity")}">
       <div class="live-metric-card-head">
-        <div><span class="section-kicker">LIVE ACCOUNT FLEET</span><h4>${esc(definition.title)}</h4><p>${esc(definition.subtitle)}</p></div>
+        <div><h4>${esc(definition.title)}</h4><p>${esc(definition.subtitle)}</p></div>
       </div>
       ${liveAccountMetricChart(
         accounts,
