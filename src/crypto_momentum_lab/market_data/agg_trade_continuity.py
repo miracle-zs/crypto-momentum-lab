@@ -12,7 +12,7 @@ from crypto_momentum_lab.domain.market.models import (
 
 
 @dataclass(frozen=True, slots=True)
-class _SeenTrade:
+class SeenAggTrade:
     aggregate_trade_id: int
     event_at: datetime
     connection_session_id: UUID
@@ -22,7 +22,7 @@ class AggTradeContinuityTracker:
     """Detect a live aggTrade discontinuity without recovery or archive I/O."""
 
     def __init__(self) -> None:
-        self._last_seen: dict[tuple[str, str], _SeenTrade] = {}
+        self._last_seen: dict[tuple[str, str], SeenAggTrade] = {}
         self._monitored_symbols: frozenset[str] | None = None
 
     def set_monitored_symbols(self, symbols: frozenset[str]) -> None:
@@ -36,7 +36,7 @@ class AggTradeContinuityTracker:
 
     def observe(self, envelope: RawEnvelope) -> tuple[bool, AggTradeGap | None]:
         """Return whether to publish *envelope* and its preceding gap, if any."""
-        parsed = _agg_trade_identity(envelope)
+        parsed = agg_trade_identity(envelope)
         if parsed is None:
             return True, None
         key, current_id, event_at = parsed
@@ -49,7 +49,7 @@ class AggTradeContinuityTracker:
             # state for a symbol that the universe intentionally removed.
             return True, None
         previous = self._last_seen.get(key)
-        current = _SeenTrade(current_id, event_at, envelope.connection_session_id)
+        current = SeenAggTrade(current_id, event_at, envelope.connection_session_id)
         if previous is None:
             self._last_seen[key] = current
             return True, None
@@ -76,7 +76,7 @@ class AggTradeContinuityTracker:
         )
 
 
-def _agg_trade_identity(
+def agg_trade_identity(
     envelope: RawEnvelope,
 ) -> tuple[tuple[str, str], int, datetime] | None:
     if (

@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import NAMESPACE_URL, uuid5
 
 import httpx
 import structlog
@@ -17,6 +17,10 @@ from crypto_momentum_lab.domain.market.models import (
     QualityCategory,
     QualityEvent,
     RawEnvelope,
+)
+from crypto_momentum_lab.market_data.agg_trade_continuity import (
+    SeenAggTrade,
+    agg_trade_identity,
 )
 from crypto_momentum_lab.market_data.binance.rest import BinanceAggTrade
 
@@ -54,16 +58,9 @@ class AggTradeRecoveryMetrics:
 
 
 @dataclass(frozen=True, slots=True)
-class _SeenTrade:
-    aggregate_trade_id: int
-    event_at: datetime
-    connection_session_id: UUID
-
-
-@dataclass(frozen=True, slots=True)
 class _GapRequest:
     index: int
-    previous: _SeenTrade
+    previous: SeenAggTrade
     current_id: int
     current: RawEnvelope
 
@@ -110,7 +107,7 @@ class AggTradeGapRecoverer:
         self._max_batch_recovery_seconds = max_batch_recovery_seconds
         self._request_timestamps: deque[float] = deque()
         self._request_budget_lock = asyncio.Lock()
-        self._last_seen: dict[tuple[str, str], _SeenTrade] = {}
+        self._last_seen: dict[tuple[str, str], SeenAggTrade] = {}
         self._monitored_symbols: frozenset[str] | None = None
         self._detected_gap_count = 0
         self._recovered_gap_count = 0
@@ -150,7 +147,7 @@ class AggTradeGapRecoverer:
         accepted_indices: set[int] = set()
         requests: list[_GapRequest] = []
         for index, envelope in enumerate(batch):
-            parsed = _agg_trade_identity(envelope)
+            parsed = agg_trade_identity(envelope)
             if parsed is None:
                 accepted_indices.add(index)
                 continue
@@ -162,28 +159,21 @@ class AggTradeGapRecoverer:
                 accepted_indices.add(index)
                 continue
             previous = self._last_seen.get(key)
-            if previous is None:
-                self._last_seen[key] = _SeenTrade(
-                    current_id,
-                    event_at,
-                    envelope.connection_session_id,
-                )
-                accepted_indices.add(index)
-                continue
-            if current_id <= previous.aggregate_trade_id:
-                self._duplicate_trade_count += 1
-                continue
-            if current_id > previous.aggregate_trade_id + 1:
-                self._detected_gap_count += 1
-                requests.append(
-                    _GapRequest(
-                        index=index,
-                        previous=previous,
-                        current_id=current_id,
-                        current=envelope,
+            if previous is not None:
+                if current_id <= previous.aggregate_trade_id:
+                    self._duplicate_trade_count += 1
+                    continue
+                if current_id > previous.aggregate_trade_id + 1:
+                    self._detected_gap_count += 1
+                    requests.append(
+                        _GapRequest(
+                            index=index,
+                            previous=previous,
+                            current_id=current_id,
+                            current=envelope,
+                        )
                     )
-                )
-            self._last_seen[key] = _SeenTrade(
+            self._last_seen[key] = SeenAggTrade(
                 current_id,
                 event_at,
                 envelope.connection_session_id,
@@ -368,27 +358,6 @@ class AggTradeGapRecoverer:
                 return False
             self._request_timestamps.append(now)
             return True
-
-
-def _agg_trade_identity(
-    envelope: RawEnvelope,
-) -> tuple[tuple[str, str], int, datetime] | None:
-    if (
-        envelope.stream is not CaptureStream.AGG_TRADE
-        or envelope.symbol is None
-        or envelope.exchange_sequence is None
-        or envelope.exchange_event_at is None
-    ):
-        return None
-    try:
-        aggregate_trade_id = int(envelope.exchange_sequence)
-    except ValueError:
-        return None
-    return (
-        (envelope.environment, envelope.symbol),
-        aggregate_trade_id,
-        envelope.exchange_event_at,
-    )
 
 
 def _recovered_envelope(

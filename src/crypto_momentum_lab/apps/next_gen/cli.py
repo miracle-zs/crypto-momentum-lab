@@ -11,6 +11,7 @@ from typing import Annotated, Any
 
 import structlog
 import typer
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from crypto_momentum_lab.config import (
     BinanceCredentialRole,
@@ -42,15 +43,6 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 log = structlog.get_logger("next_gen_cli")
-
-
-def _resolve_db_url(database_url: str | None) -> str | None:
-    """Resolve database URL from explicit flag or environment fallbacks."""
-    return resolve_database_url(
-        database_url,
-        "CML_EXECUTION_DATABASE_URL",
-        "CML_DATABASE_URL",
-    )
 
 
 def _resolve_account_credentials(
@@ -89,9 +81,11 @@ def _resolve_read_credentials(account_label: str = "a1") -> tuple[str, str]:
 def _resolve_repository(
     database_url: str | None = None,
     environment: str = "live",
-) -> tuple[TradingRepositoryProtocol, Any]:
+) -> tuple[TradingRepositoryProtocol, AsyncEngine]:
     """Both exchange environments require persistent execution storage."""
-    resolved_url = _resolve_db_url(database_url)
+    resolved_url = resolve_database_url(
+        database_url, "CML_EXECUTION_DATABASE_URL", "CML_DATABASE_URL"
+    )
     if not resolved_url:
         raise ValueError(
             f"{environment} 必须配置 CML_DATABASE_URL / "
@@ -237,7 +231,6 @@ def run_command(
         rest_client=read_client,
         environment=environment,
     )
-    hub_url = os.environ.get("CML_MARKET_STATE_HUB_URL")
     market_environment = os.environ.get("CML_MARKET_STATE_ENVIRONMENT", "research")
 
     async def _runner(stop_event: asyncio.Event) -> None:
@@ -253,14 +246,12 @@ def run_command(
                 ws_client=ws_client,
                 stop_event=stop_event,
                 keepalive_interval_sec=keepalive_interval,
-                hub_url=hub_url,
                 market_environment=market_environment,
             )
         finally:
             await read_client.close()
             await trade_client.close()
-            if engine:
-                await engine.dispose()
+            await engine.dispose()
 
     asyncio.run(_run_with_signal_handlers(_runner))
 
@@ -373,8 +364,7 @@ def drain_command(
             await executor.close()
             await read_client.close()
             await trade_client.close()
-            if engine:
-                await engine.dispose()
+            await engine.dispose()
 
     asyncio.run(_drainer())
 
@@ -452,8 +442,7 @@ def status_command(
                 ],
             }
         finally:
-            if engine:
-                await engine.dispose()
+            await engine.dispose()
 
     status_data = asyncio.run(_fetcher())
 

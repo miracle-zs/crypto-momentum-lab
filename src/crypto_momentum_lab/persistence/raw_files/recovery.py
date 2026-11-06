@@ -16,6 +16,7 @@ from crypto_momentum_lab.domain.market.models import (
     CaptureStream,
     RawEnvelope,
 )
+from crypto_momentum_lab.persistence._file_io import fsync_directory
 from crypto_momentum_lab.persistence.raw_files.archive import ZstdJsonlArchive
 
 _RECOVERY_BATCH_SIZE = 250
@@ -248,8 +249,8 @@ def _quarantine_temporary(temporary: Path, archive_root: Path) -> Path:
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
     os.replace(temporary, destination)
-    _fsync_directory(destination.parent)
-    _fsync_directory(temporary.parent)
+    fsync_directory(destination.parent)
+    fsync_directory(temporary.parent)
     return destination
 
 
@@ -263,7 +264,7 @@ def _promote_recovered_files(
         destination = archive_root / manifest.relative_path
         destination.parent.mkdir(parents=True, exist_ok=True)
         os.replace(source, destination)
-        _fsync_directory(destination.parent)
+        fsync_directory(destination.parent)
 
 
 def _temporary_archive_paths(root: Path) -> tuple[Path, ...]:
@@ -325,11 +326,3 @@ def _optional_datetime_value(value: object) -> datetime | None:
     if value is None:
         return None
     return _datetime_value(value)
-
-
-def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)

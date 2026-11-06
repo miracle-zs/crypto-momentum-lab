@@ -2,7 +2,7 @@
 
 This module aggregates performance telemetry across three domains:
 1. Decision path SLO (latencies, transition phases, terminal reasons)
-2. Market data ingestion freshness & quality events (market_delay_ms, drops)
+2. Market data ingestion freshness & quality events
 3. Host & PostgreSQL resources (load average, memory, swap, connections, size)
 """
 
@@ -30,12 +30,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
     RuntimeMarketState15sRow,
     StrategyRuntimeEventRow,
 )
-
-
-def _as_float(value: object) -> float | None:
-    if value is None:
-        return None
-    return float(str(value))
 
 
 def _read_meminfo() -> dict[str, int]:
@@ -155,43 +149,11 @@ class PerformanceQueries:
                 )
             )
         )
-        market_delay_ms = None
-        if (
-            latest_market_progress is not None
-            and latest_market_progress.details.get("market_delay_ms") is not None
-        ):
-            market_delay_ms = round(
-                _as_float(latest_market_progress.details.get("market_delay_ms")) or 0.0,
-                1,
-            )
-        elif (
-            latest_market_state is not None
-            and latest_market_state.created_at is not None
-        ):
-            market_delay_ms = round(
-                max(
-                    0.0,
-                    (
-                        latest_market_state.created_at - latest_market_state.bucket_end
-                    ).total_seconds()
-                    * 1000,
-                ),
-                1,
-            )
-        elif observed_at is not None:
-            market_delay_ms = round(
-                max(0.0, (now - observed_at).total_seconds() * 1000), 1
-            )
-
         market_status = OperationalStatus.READY
         if not observed_at:
             market_status = OperationalStatus.NO_DATA
         elif (now - observed_at).total_seconds() > 120:
             market_status = OperationalStatus.STALE
-
-        realtime_closure_delay_seconds = 0.4
-        if market_delay_ms is not None:
-            realtime_closure_delay_seconds = round(market_delay_ms / 1000.0, 3)
 
         missing_agg_trade_count = (
             latest_market_state.missing_agg_trade_count
@@ -203,8 +165,6 @@ class PerformanceQueries:
         market_resp = MarketDataPerformanceResponse(
             status=market_status,
             observed_at=observed_at,
-            market_delay_ms=market_delay_ms,
-            realtime_closure_delay_seconds=realtime_closure_delay_seconds,
             missing_agg_trade_count=missing_agg_trade_count,
             quality_events_count_1h=quality_events_count,
         )

@@ -92,7 +92,7 @@ class NextGenDaemon:
             on_active_symbols_change=self._candle_feed.set_symbols,
         )
         self.state.scheduled_risk_window = ScheduledRiskWindowConfig.from_environment()
-        self.ws_client.on_status_change = self._on_ws_status_change
+        self.ws_client.on_status_change = self.state.on_ws_status_change
         self.state.attach_ws_client(self.ws_client)
         self.entry_sizer = EntrySizer(self.state, account_config.execution_inputs)
 
@@ -162,9 +162,6 @@ class NextGenDaemon:
 
     def _on_market_connection_change(self, connected: bool) -> None:
         self.strategy_engine.market_connected = connected
-
-    def _on_ws_status_change(self, connected: bool) -> None:
-        self.state.on_ws_status_change(connected)
 
     async def _run_exit_candles(self) -> None:
         """Feed formal exchange 15m closes directly to the existing exit policy."""

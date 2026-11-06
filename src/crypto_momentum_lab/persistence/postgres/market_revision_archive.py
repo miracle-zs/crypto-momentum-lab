@@ -7,7 +7,6 @@ Archive files are immutable, content-addressed JSONL zstd files.
 
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import os
@@ -21,6 +20,8 @@ from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 import zstandard
+
+from crypto_momentum_lab.persistence._file_io import sha256_file
 
 _ARCHIVE_DIRECTORY_MODE = 0o755
 _ARCHIVE_FILE_MODE = 0o644
@@ -138,7 +139,7 @@ def write_market_revision_archive(
             os.fsync(output.fileno())
 
         os.chmod(temp_path, _ARCHIVE_FILE_MODE)
-        digest = _sha256_file(temp_path)
+        digest = sha256_file(temp_path)
         filename = f"payloads-{digest}.jsonl.zst"
         relative_path = (partition_path / filename).as_posix()
         destination = output_directory / filename
@@ -146,7 +147,7 @@ def write_market_revision_archive(
         _verify_archive_file(temp_path, digest, len(normalized_records))
 
         if destination.exists():
-            if _sha256_file(destination) != digest:
+            if sha256_file(destination) != digest:
                 raise MarketRevisionArchiveError(
                     "content-addressed archive path has conflicting bytes: "
                     f"{relative_path}"
@@ -325,7 +326,7 @@ class ZstdMarketRevisionPayloadArchive:
         if verified == signature:
             self._verified.move_to_end(relative_path)
             return
-        actual = _sha256_file(path)
+        actual = sha256_file(path)
         if actual != expected_sha256:
             raise MarketRevisionArchiveError(
                 f"SHA-256 mismatch for market revision archive {relative_path}"
@@ -411,16 +412,8 @@ def _safe_relative_path(value: str) -> PurePosixPath:
     return relative
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _verify_archive_file(path: Path, expected_sha256: str, expected_count: int) -> None:
-    if _sha256_file(path) != expected_sha256:
+    if sha256_file(path) != expected_sha256:
         raise MarketRevisionArchiveError("archive SHA-256 changed during write")
     count = 0
     with path.open("rb") as compressed:

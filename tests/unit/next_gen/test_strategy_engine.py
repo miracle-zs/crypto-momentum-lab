@@ -160,6 +160,12 @@ async def test_signal_keeps_volume_captured_before_order_submission(strategy_set
 @pytest.mark.parametrize("exit_started", [False, True])
 async def test_entry_batch_merges_until_first_exit(strategy_setup, exit_started):
     state, _, _, _, strategy, last = strategy_setup
+    strategy.account_config = replace(
+        strategy.account_config,
+        execution_inputs=replace(
+            strategy.account_config.execution_inputs, max_concurrency_per_symbol=2
+        ),
+    )
     batch = PositionBatch(
         "live",
         "a1",

@@ -23,6 +23,7 @@ from crypto_momentum_lab.domain.market.models import (
     NormalizedMarketEvent,
     NormalizedMarkPrice,
 )
+from crypto_momentum_lab.persistence._file_io import sha256_file
 
 _DERIVED_DATASET_SCHEMA_VERSION = 2
 _DECIMAL_TYPE = pa.decimal128(38, 18)
@@ -507,7 +508,7 @@ def _finalize_partition_writer(
     writer.writer.close()
     if writer.first_event_at is None or writer.last_event_at is None:
         raise RuntimeError("partition writer finalized without rows")
-    output_sha256 = _sha256_file(writer.temporary_path)
+    output_sha256 = sha256_file(writer.temporary_path)
     manifest_id = uuid5(
         NAMESPACE_URL,
         json.dumps(
@@ -584,16 +585,8 @@ def _input_sha256(paths: tuple[Path, ...]) -> str:
     for path in sorted(paths, key=lambda item: item.as_posix()):
         digest.update(path.as_posix().encode())
         digest.update(b"\0")
-        digest.update(_sha256_file(path).encode())
+        digest.update(sha256_file(path).encode())
         digest.update(b"\0")
-    return digest.hexdigest()
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
     return digest.hexdigest()
 
 

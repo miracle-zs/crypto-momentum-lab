@@ -10,7 +10,9 @@ from crypto_momentum_lab.operator_dashboard.api import create_dashboard_app
 from crypto_momentum_lab.operator_dashboard.performance_queries import (
     PerformanceQueries,
 )
+from crypto_momentum_lab.operator_dashboard.queries import DashboardQueries
 from crypto_momentum_lab.operator_dashboard.schemas import (
+    MarketDataPerformanceResponse,
     SystemPerformanceResponse,
 )
 from crypto_momentum_lab.operator_dashboard.status import OperationalStatus
@@ -127,7 +129,7 @@ def test_dashboard_js_uses_fetch_timeout_and_section_inflight() -> None:
 
 
 @pytest.mark.asyncio
-async def test_performance_queries_uses_market_state_progress_delay() -> None:
+async def test_performance_queries_preserves_market_status_and_quality_counts() -> None:
     mock_session = AsyncMock()
     mock_scalars_result = MagicMock()
     mock_scalars_result.all.return_value = []
@@ -136,7 +138,7 @@ async def test_performance_queries_uses_market_state_progress_delay() -> None:
     market_state = MagicMock(spec=RuntimeMarketState15sRow)
     market_state.bucket_end = NOW - timedelta(seconds=12)
     market_state.created_at = NOW - timedelta(seconds=11, milliseconds=450)
-    market_state.missing_agg_trade_count = 0
+    market_state.missing_agg_trade_count = 3
 
     market_progress = MagicMock(spec=StrategyRuntimeEventRow)
     market_progress.occurred_at = NOW - timedelta(seconds=11, milliseconds=450)
@@ -146,7 +148,7 @@ async def test_performance_queries_uses_market_state_progress_delay() -> None:
         market_state,
         None,
         market_progress,
-        0,
+        7,
     ]
     mock_session.execute.return_value = MagicMock(
         first=lambda: (2, 45),
@@ -166,5 +168,23 @@ async def test_performance_queries_uses_market_state_progress_delay() -> None:
     )
     result = await queries.performance()
     assert result.market_data.status == OperationalStatus.READY
-    assert result.market_data.market_delay_ms == 550.0
-    assert result.market_data.realtime_closure_delay_seconds == 0.55
+    assert result.market_data.missing_agg_trade_count == 3
+    assert result.market_data.quality_events_count_1h == 7
+
+    mock_session.scalar.side_effect = [market_state, None, market_progress, 7]
+    dashboard = DashboardQueries(
+        MockSessionFactory(), clock=lambda: NOW, nextgen_accounts=()
+    )
+    dashboard._nextgen_queries.market_performance = AsyncMock(
+        return_value=MarketDataPerformanceResponse(
+            status=OperationalStatus.READY,
+            market_delay_ms=480,
+            latency_source="strategy_receive",
+        )
+    )
+    response = await dashboard.performance()
+    assert response.status == OperationalStatus.READY
+    assert response.market_data.market_delay_ms == 480
+    assert response.market_data.latency_source == "strategy_receive"
+    assert response.market_data.missing_agg_trade_count == 3
+    assert response.market_data.quality_events_count_1h == 7

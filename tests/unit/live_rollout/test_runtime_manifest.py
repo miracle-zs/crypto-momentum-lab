@@ -29,22 +29,24 @@ def test_checked_in_live_runtime_manifest_resolves_account_identity() -> None:
     assert primary.execution_inputs.entry_long_only is True
     assert primary.execution_inputs.entry_leverage == 5
     assert primary.execution_inputs.margin_type == "CROSSED"
-    assert primary.execution_inputs.candle_grace_bars == 8
 
     expected_profile = LiveOrderFlowImpulseProfile(
         impulse_window_buckets=2,
         confirmation_buckets=1,
-        min_return_pct=Decimal("0.0075"),
+        min_return_pct=Decimal("0.0125"),
         min_aggressive_imbalance=Decimal("0.30"),
-        min_notional_intensity=Decimal("3.0"),
-        min_notional_5m_vs_30m=Decimal("1.25"),
+        min_notional_intensity=Decimal("2.0"),
+        min_notional_5m_vs_30m=Decimal("0.0"),
         cooldown_buckets=0,
     )
     for label in ("primary", "account-2", "account-3", "account-4"):
         account = manifest.account(label)
         assert account.strategy_inputs.profile == expected_profile
+        assert account.execution_inputs.candle_grace_bars == 1
+        assert account.execution_inputs.candle_grace_profit_pct == Decimal("0.002")
+        assert account.execution_inputs.max_concurrency_per_symbol == 1
         assert account.strategy_config_hash == (
-            "d0b133c89f80063a0e6c94418bdc463b0546daf136e160bfb2bcc6dd604f21e7"
+            "050d7934a4a375db60edd560352a5090109deb57f37fcf90e60b96f69720bf20"
         )
 
 
@@ -177,7 +179,7 @@ def test_manifest_accepts_trading_configuration_without_compliance_metadata(tmp_
     path = tmp_path / "trading.yaml"
     path.write_text(yaml.safe_dump(document))
     manifest = load_live_runtime_manifest(path, environment={})
-    assert manifest.account("primary").execution_inputs.candle_grace_bars == 8
+    assert manifest.account("primary").execution_inputs.candle_grace_bars == 1
     assert (
         manifest.account("account-4").strategy_inputs.entry_order_type.value == "limit"
     )

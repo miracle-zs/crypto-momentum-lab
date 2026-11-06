@@ -99,7 +99,6 @@ class _ResponseCache:
         self._entries: dict[str, tuple[float, object]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._refresh_tasks: dict[str, asyncio.Task[None]] = {}
-        self._refresh_errors: dict[str, tuple[float, str]] = {}
 
     def _prune(self, now: float) -> None:
         # First remove expired entries
@@ -118,19 +117,6 @@ class _ResponseCache:
         finished_tasks = [k for k, t in self._refresh_tasks.items() if t.done()]
         for k in finished_tasks:
             self._refresh_tasks.pop(k, None)
-
-        # Prune expired or excessive refresh errors
-        expired_errors = [
-            k for k, v in self._refresh_errors.items() if v[0] + 300.0 <= now
-        ]
-        for k in expired_errors:
-            self._refresh_errors.pop(k, None)
-        if len(self._refresh_errors) > self._max_entries:
-            sorted_errs = sorted(
-                self._refresh_errors.keys(), key=lambda k: self._refresh_errors[k][0]
-            )
-            for k in sorted_errs[: len(self._refresh_errors) - self._max_entries]:
-                self._refresh_errors.pop(k, None)
 
         # Prune unheld locks for keys not active in entries or tasks
         active_keys = set(self._entries) | set(self._refresh_tasks)
@@ -234,16 +220,13 @@ class _ResponseCache:
                 if ttl <= 0:
                     return
                 self._entries[key] = (time.monotonic() + ttl, value)
-                self._refresh_errors.pop(key, None)
                 self._prune(time.monotonic())
         except Exception as exc:
-            self._refresh_errors[key] = (time.monotonic(), str(exc))
             logger.warning(
                 "Dashboard cache background refresh failed for %s: %s",
                 key,
                 exc,
             )
-            return
         finally:
             current = asyncio.current_task()
             if self._refresh_tasks.get(key) is current:

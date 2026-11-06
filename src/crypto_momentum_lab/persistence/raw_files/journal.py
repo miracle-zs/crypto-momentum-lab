@@ -15,6 +15,7 @@ from crypto_momentum_lab.domain.market.models import (
     CaptureRoute,
     CaptureStream,
 )
+from crypto_momentum_lab.persistence._file_io import fsync_directory
 
 log = structlog.get_logger()
 
@@ -191,7 +192,7 @@ def _write_json_atomic(
         stream.flush()
         os.fsync(stream.fileno())
     os.replace(temporary, final)
-    _fsync_directory(directory)
+    fsync_directory(directory)
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -210,12 +211,4 @@ def _journal_entries(directory: Path) -> tuple[Path, ...]:
 
 def _delete_journal_entry(path: Path) -> None:
     path.unlink()
-    _fsync_directory(path.parent)
-
-
-def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    fsync_directory(path.parent)

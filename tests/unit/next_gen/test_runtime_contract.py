@@ -144,8 +144,10 @@ async def test_stream_gap_does_not_launch_rest_reconciliation(
     order = daemon.state.create_entry_order(
         "BTCUSDT", "LONG", Decimal("2"), Decimal("100"), "reconnect"
     )
-    daemon._on_ws_status_change(False)
-    daemon._on_ws_status_change(True)
+    status_changed = daemon.ws_client.on_status_change
+    assert status_changed is not None
+    status_changed(False)
+    status_changed(True)
     await asyncio.sleep(0)
     assert order.status == OrderStatus.RECONCILING
     assert not daemon.state.can_submit_entry_order()

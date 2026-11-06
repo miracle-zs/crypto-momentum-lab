@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import json
 import os
 from collections import OrderedDict
@@ -19,6 +18,7 @@ from crypto_momentum_lab.domain.market.models import (
     DurableArchiveAcknowledgement,
     RawEnvelope,
 )
+from crypto_momentum_lab.persistence._file_io import fsync_directory, sha256_file
 
 type ArchiveManifestSink = Callable[[ArchiveManifest], Awaitable[None]]
 type KnownGapCountProvider = Callable[["PartitionKey"], int]
@@ -428,11 +428,11 @@ class _ArchiveWriter:
             finally:
                 self._raw_file = None
 
-        sha256 = _sha256_file(self._temporary_path)
+        sha256 = sha256_file(self._temporary_path)
         compressed_bytes = self._temporary_path.stat().st_size
         self._final_path.parent.mkdir(parents=True, exist_ok=True)
         os.replace(self._temporary_path, self._final_path)
-        _fsync_directory(self._final_path.parent)
+        fsync_directory(self._final_path.parent)
 
         if (
             self._subscription_generation_min is None
@@ -521,19 +521,3 @@ def _safe_path_component(value: str, field_name: str) -> str:
     ):
         raise ValueError(f"{field_name} must be a safe path component")
     return value
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)

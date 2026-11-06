@@ -6,6 +6,7 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncEngine
 from typer.testing import CliRunner
 
 from crypto_momentum_lab.apps.next_gen.cli import (
@@ -36,6 +37,11 @@ def test_manifest_for_cli(monkeypatch, account_config):
 runner = CliRunner()
 
 
+@pytest.fixture
+def db_engine():
+    return AsyncMock(spec=AsyncEngine)
+
+
 def test_cli_help() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
@@ -44,7 +50,7 @@ def test_cli_help() -> None:
     assert "status" in result.output
 
 
-def test_cli_status_json() -> None:
+def test_cli_status_json(db_engine) -> None:
     from datetime import UTC, datetime
 
     repo = InMemoryTradingRepository()
@@ -80,10 +86,11 @@ def test_cli_status_json() -> None:
 
     with patch(
         "crypto_momentum_lab.apps.next_gen.cli._resolve_repository",
-        return_value=(repo, None),
+        return_value=(repo, db_engine),
     ):
         result = runner.invoke(app, ["status", "-e", "live", "-a", "a1", "--json"])
         assert result.exit_code == 0
+        db_engine.dispose.assert_awaited_once()
         data = json.loads(result.output)
         assert data["environment"] == "live"
         assert data["account_label"] == "a1"
@@ -93,10 +100,10 @@ def test_cli_status_json() -> None:
         assert data["recent_orders"][0]["client_order_id"] == "o_test_1"
 
 
-def test_cli_status_human_readable() -> None:
+def test_cli_status_human_readable(db_engine) -> None:
     with patch(
         "crypto_momentum_lab.apps.next_gen.cli._resolve_repository",
-        return_value=(InMemoryTradingRepository(), None),
+        return_value=(InMemoryTradingRepository(), db_engine),
     ):
         result = runner.invoke(app, ["status", "-e", "testnet", "-a", "a1"])
     assert result.exit_code == 0
@@ -115,7 +122,7 @@ def test_cli_drain_dry_run() -> None:
     assert result.exit_code == 0
 
 
-def test_cli_drain_live_flow_cancels_and_sweeps() -> None:
+def test_cli_drain_live_flow_cancels_and_sweeps(db_engine) -> None:
     from datetime import UTC, datetime
 
     from crypto_momentum_lab.next_gen.engine import AccountSnapshot, PositionSnapshot
@@ -224,7 +231,7 @@ def test_cli_drain_live_flow_cancels_and_sweeps() -> None:
         ),
         patch(
             "crypto_momentum_lab.apps.next_gen.cli._resolve_repository",
-            return_value=(repo, None),
+            return_value=(repo, db_engine),
         ),
         patch(
             "crypto_momentum_lab.apps.next_gen.cli.BinanceRestClient",
@@ -237,6 +244,7 @@ def test_cli_drain_live_flow_cancels_and_sweeps() -> None:
     ):
         result = runner.invoke(app, ["drain", "-e", "testnet", "-a", "a1"])
         assert result.exit_code == 0
+        db_engine.dispose.assert_awaited_once()
         assert mock_rest.fetch_open_orders.await_count == 2
         mock_rest.query_order.assert_not_awaited()
         mock_rest.cancel_order.assert_awaited_once()
@@ -255,13 +263,13 @@ def test_cli_run_dry_run_does_not_connect() -> None:
         rest.assert_not_called()
 
 
-def test_cli_testnet_routes_both_clients_to_testnet() -> None:
+def test_cli_testnet_routes_both_clients_to_testnet(db_engine) -> None:
     rest = AsyncMock()
     daemon = AsyncMock()
     with (
         patch(
             "crypto_momentum_lab.apps.next_gen.cli._resolve_repository",
-            return_value=(InMemoryTradingRepository(), None),
+            return_value=(InMemoryTradingRepository(), db_engine),
         ),
         patch(
             "crypto_momentum_lab.apps.next_gen.cli._resolve_credentials",
@@ -278,18 +286,19 @@ def test_cli_testnet_routes_both_clients_to_testnet() -> None:
     ):
         result = runner.invoke(app, ["run", "-e", "testnet", "-a", "a1"])
         assert result.exit_code == 0
+        db_engine.dispose.assert_awaited_once()
         assert factory.call_args.kwargs["environment"] == "testnet"
         assert daemon.await_args.kwargs["ws_client"].environment == "testnet"
 
 
-def test_cli_keeps_read_and_trade_clients_separate() -> None:
+def test_cli_keeps_read_and_trade_clients_separate(db_engine) -> None:
     trade_client = AsyncMock()
     read_client = AsyncMock()
     daemon = AsyncMock()
     with (
         patch(
             "crypto_momentum_lab.apps.next_gen.cli._resolve_repository",
-            return_value=(InMemoryTradingRepository(), None),
+            return_value=(InMemoryTradingRepository(), db_engine),
         ),
         patch(
             "crypto_momentum_lab.apps.next_gen.cli._resolve_credentials",

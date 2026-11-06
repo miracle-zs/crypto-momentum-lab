@@ -7,14 +7,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.live_rollout.runtime_manifest import LiveRuntimeAccount
 from crypto_momentum_lab.next_gen.dashboard import NextGenDashboardQueries
-from crypto_momentum_lab.operator_dashboard import (
-    overview_queries as _overview_queries,
-)
-from crypto_momentum_lab.operator_dashboard import (
-    telemetry_queries as _telemetry_queries,
-)
 from crypto_momentum_lab.operator_dashboard.collector_status import (
     DEFAULT_RESEARCH_COLLECTOR_ROOT,
+)
+from crypto_momentum_lab.operator_dashboard.overview_queries import (
+    OverviewQueries,
+    service,
 )
 from crypto_momentum_lab.operator_dashboard.performance_queries import (
     PerformanceQueries,
@@ -33,8 +31,11 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
 from crypto_momentum_lab.operator_dashboard.status import (
     OperationalStatus,
 )
+from crypto_momentum_lab.operator_dashboard.telemetry_queries import (
+    DecisionSLOQueries as DecisionSLOQueries,
+)
 
-DecisionSLOQueries = _telemetry_queries.DecisionSLOQueries
+
 class DashboardQueries:
     """Stable dashboard read facade over cohesive query families.
 
@@ -52,30 +53,18 @@ class DashboardQueries:
         research_collector_root: Path = DEFAULT_RESEARCH_COLLECTOR_ROOT,
         nextgen_accounts: tuple[LiveRuntimeAccount, ...],
     ) -> None:
-        self._session_factory = session_factory
         self._clock = clock
-        self._stale_after_seconds = stale_after_seconds
-        self._research_collector_root = research_collector_root
-        self._telemetry_queries = DecisionSLOQueries(
+        self._overview_queries = OverviewQueries(
             session_factory,
-            clock=self._clock,
+            clock=clock,
+            stale_after_seconds=stale_after_seconds,
+            research_collector_root=research_collector_root,
         )
-        self._overview_queries = _overview_queries.OverviewQueries(
-            session_factory,
-            clock=self._clock,
-            stale_after_seconds=self._stale_after_seconds,
-            research_collector_root=self._research_collector_root,
-        )
-        self._performance_queries = PerformanceQueries(
-            session_factory,
-            clock=self._clock,
-            decision_slo_queries=self._telemetry_queries,
-        )
-
+        self._performance_queries = PerformanceQueries(session_factory, clock=clock)
         self._nextgen_queries = NextGenDashboardQueries(
             session_factory,
             nextgen_accounts,
-            clock=self._clock,
+            clock=clock,
         )
 
     async def health(self) -> dict[str, str]:
@@ -140,7 +129,7 @@ class DashboardQueries:
         overview.account_statuses = fleet.accounts
         overview.active_halt_count = await self._nextgen_queries.active_halt_count()
         observed = [a.runtime_observed_at for a in fleet.accounts]
-        runner = _overview_queries.service(
+        runner = service(
             "strategy-runner",
             self._clock(),
             min(observed) if observed and all(observed) else None,

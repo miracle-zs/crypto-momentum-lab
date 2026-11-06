@@ -13,6 +13,7 @@ import hashlib
 import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, Protocol
 from uuid import uuid4
@@ -88,6 +89,67 @@ class InMemoryRetentionRepository:
 
 class DependencyVersionConflictError(Exception):
     """Raised when dependency version mismatches registered version."""
+
+
+def _build_prune_plan(
+    *,
+    dataset_name: str,
+    requested_cutoff: datetime,
+    dependencies: tuple[ConsumerDependency, ...],
+    dependency_version: str,
+    manifest_hash: str | None,
+    cascade_target_tables: tuple[str, ...],
+) -> PrunePlan:
+    earliest = min(
+        dependencies,
+        key=lambda dep: dep.recovery_spec.earliest_needed_watermark,
+        default=None,
+    )
+    effective_cutoff = requested_cutoff
+    binding_consumer_id = None
+    if earliest is not None:
+        watermark = earliest.recovery_spec.earliest_needed_watermark
+        if watermark < requested_cutoff:
+            effective_cutoff = watermark
+            binding_consumer_id = earliest.consumer_id
+
+    return PrunePlan(
+        plan_id=f"plan_{dataset_name}_{uuid4().hex[:12]}",
+        dataset_name=dataset_name,
+        requested_cutoff=requested_cutoff,
+        effective_cutoff=effective_cutoff,
+        is_constrained=binding_consumer_id is not None,
+        binding_consumer_id=binding_consumer_id,
+        manifest_hash=manifest_hash,
+        expected_dependency_version=dependency_version,
+        cascade_target_tables=cascade_target_tables,
+    )
+
+
+def _prune_rejection(
+    plan: PrunePlan, expected_version: str, current_version: str
+) -> PruneReceipt | None:
+    if (
+        current_version != plan.expected_dependency_version
+        or current_version != expected_version
+    ):
+        outcome = PruneOutcome(
+            status=PruneReceiptStatus.REJECTED_VERSION_MISMATCH,
+            details=(
+                f"Dependency version mismatch: plan expected "
+                f"{plan.expected_dependency_version}, caller expected "
+                f"{expected_version}, current {current_version}. "
+                "A consumer dependency was added or modified since plan creation."
+            ),
+        )
+    elif plan.status == PrunePlanStatus.ABORTED:
+        outcome = PruneOutcome(
+            status=PruneReceiptStatus.REJECTED_DEPENDENCY_VIOLATION,
+            details="Prune plan was previously aborted.",
+        )
+    else:
+        return None
+    return outcome.to_receipt(plan=plan, dependency_version_verified=current_version)
 
 
 class RetentionAuthority:
@@ -209,8 +271,7 @@ class RetentionAuthority:
             recovery_spec=recovery_spec,
         )
         self._repo.save_dependency(dependency)
-        epoch = self.compute_dependency_version(recovery_spec.source_dataset)
-        return epoch
+        return self.compute_dependency_version(recovery_spec.source_dataset)
 
     async def register_dependency_async(
         self,
@@ -263,48 +324,13 @@ class RetentionAuthority:
         deps = self._gather_dependencies(dataset_name)
         current_dep_version = self.compute_dependency_version(dataset_name)
 
-        if not deps:
-            plan = PrunePlan(
-                plan_id=f"plan_{dataset_name}_{uuid4().hex[:12]}",
-                dataset_name=dataset_name,
-                requested_cutoff=requested_cutoff,
-                effective_cutoff=requested_cutoff,
-                is_constrained=False,
-                binding_consumer_id=None,
-                manifest_hash=manifest_hash,
-                expected_dependency_version=current_dep_version,
-                cascade_target_tables=cascade_target_tables,
-                status=PrunePlanStatus.CREATED,
-                created_at=datetime.now(UTC),
-            )
-            self._repo.save_plan(plan)
-            return plan
-
-        # Find the earliest watermark across all active dependencies
-        binding_dep = min(deps, key=lambda d: d.recovery_spec.earliest_needed_watermark)
-        watermark = binding_dep.recovery_spec.earliest_needed_watermark
-
-        if watermark < requested_cutoff:
-            effective_cutoff = watermark
-            is_constrained = True
-            binding_consumer_id = binding_dep.consumer_id
-        else:
-            effective_cutoff = requested_cutoff
-            is_constrained = False
-            binding_consumer_id = None
-
-        plan = PrunePlan(
-            plan_id=f"plan_{dataset_name}_{uuid4().hex[:12]}",
+        plan = _build_prune_plan(
             dataset_name=dataset_name,
             requested_cutoff=requested_cutoff,
-            effective_cutoff=effective_cutoff,
-            is_constrained=is_constrained,
-            binding_consumer_id=binding_consumer_id,
+            dependencies=deps,
+            dependency_version=current_dep_version,
             manifest_hash=manifest_hash,
-            expected_dependency_version=current_dep_version,
             cascade_target_tables=cascade_target_tables,
-            status=PrunePlanStatus.CREATED,
-            created_at=datetime.now(UTC),
         )
         self._repo.save_plan(plan)
         return plan
@@ -326,19 +352,7 @@ class RetentionAuthority:
             raise RuntimeError(
                 f"Cannot bind manifest to plan in status {plan.status.value}"
             )
-        bound_plan = PrunePlan(
-            plan_id=plan.plan_id,
-            dataset_name=plan.dataset_name,
-            requested_cutoff=plan.requested_cutoff,
-            effective_cutoff=plan.effective_cutoff,
-            is_constrained=plan.is_constrained,
-            binding_consumer_id=plan.binding_consumer_id,
-            manifest_hash=manifest_hash,
-            expected_dependency_version=plan.expected_dependency_version,
-            cascade_target_tables=plan.cascade_target_tables,
-            status=plan.status,
-            created_at=plan.created_at,
-        )
+        bound_plan = replace(plan, manifest_hash=manifest_hash)
         self._repo.update_plan(bound_plan)
         return bound_plan
 
@@ -365,47 +379,13 @@ class RetentionAuthority:
         deps = await self._gather_dependencies_async(dataset_name)
         current_dep_version = await self.compute_dependency_version_async(dataset_name)
 
-        if not deps:
-            plan = PrunePlan(
-                plan_id=f"plan_{dataset_name}_{uuid4().hex[:12]}",
-                dataset_name=dataset_name,
-                requested_cutoff=requested_cutoff,
-                effective_cutoff=requested_cutoff,
-                is_constrained=False,
-                binding_consumer_id=None,
-                manifest_hash=manifest_hash,
-                expected_dependency_version=current_dep_version,
-                cascade_target_tables=cascade_target_tables,
-                status=PrunePlanStatus.CREATED,
-                created_at=datetime.now(UTC),
-            )
-            await _await_void_call(self._repo.save_plan, plan)
-            return plan
-
-        binding_dep = min(deps, key=lambda d: d.recovery_spec.earliest_needed_watermark)
-        watermark = binding_dep.recovery_spec.earliest_needed_watermark
-
-        if watermark < requested_cutoff:
-            effective_cutoff = watermark
-            is_constrained = True
-            binding_consumer_id = binding_dep.consumer_id
-        else:
-            effective_cutoff = requested_cutoff
-            is_constrained = False
-            binding_consumer_id = None
-
-        plan = PrunePlan(
-            plan_id=f"plan_{dataset_name}_{uuid4().hex[:12]}",
+        plan = _build_prune_plan(
             dataset_name=dataset_name,
             requested_cutoff=requested_cutoff,
-            effective_cutoff=effective_cutoff,
-            is_constrained=is_constrained,
-            binding_consumer_id=binding_consumer_id,
+            dependencies=deps,
+            dependency_version=current_dep_version,
             manifest_hash=manifest_hash,
-            expected_dependency_version=current_dep_version,
             cascade_target_tables=cascade_target_tables,
-            status=PrunePlanStatus.CREATED,
-            created_at=datetime.now(UTC),
         )
         await _await_void_call(self._repo.save_plan, plan)
         return plan
@@ -449,104 +429,34 @@ class RetentionAuthority:
         register_dependency_async calls within the same process.
         """
         async with self._lock_scope(plan.dataset_name):
-            return await self._execute_prune_async_inner(
-                plan=plan,
-                expected_dependency_version=expected_dependency_version,
-                executor_fn=executor_fn,
+            current_dep_version = await self.compute_dependency_version_async(
+                plan.dataset_name
             )
 
-    async def _execute_prune_async_inner(
-        self,
-        *,
-        plan: PrunePlan,
-        expected_dependency_version: str,
-        executor_fn: Callable[
-            [PrunePlan],
-            Awaitable[PruneOutcome],
-        ],
-    ) -> PruneReceipt:
-        """Inner execution logic, called under dataset lock."""
-        current_dep_version = await self.compute_dependency_version_async(
-            plan.dataset_name
-        )
+            rejection = _prune_rejection(
+                plan, expected_dependency_version, current_dep_version
+            )
+            if rejection is not None:
+                await _await_void_call(self._repo.save_receipt, rejection)
+                return rejection
 
-        if (
-            current_dep_version != plan.expected_dependency_version
-            or current_dep_version != expected_dependency_version
-        ):
-            receipt = PruneReceipt(
-                plan_id=plan.plan_id,
-                dataset_name=plan.dataset_name,
-                effective_cutoff=plan.effective_cutoff,
-                rows_archived=0,
-                rows_deleted=0,
-                manifest_hash=plan.manifest_hash,
-                dependency_version_verified=current_dep_version,
-                status=PruneReceiptStatus.REJECTED_VERSION_MISMATCH,
-                details=(
-                    f"Dependency version mismatch: plan expected "
-                    f"{plan.expected_dependency_version}, caller expected "
-                    f"{expected_dependency_version}, current {current_dep_version}. "
-                    "A consumer dependency was added or modified since plan creation."
-                ),
-                executed_at=datetime.now(UTC),
-            )
-            await _await_void_call(self._repo.save_receipt, receipt)
-            return receipt
-
-        if plan.status == PrunePlanStatus.ABORTED:
-            receipt = PruneReceipt(
-                plan_id=plan.plan_id,
-                dataset_name=plan.dataset_name,
-                effective_cutoff=plan.effective_cutoff,
-                rows_archived=0,
-                rows_deleted=0,
-                manifest_hash=plan.manifest_hash,
-                dependency_version_verified=current_dep_version,
-                status=PruneReceiptStatus.REJECTED_DEPENDENCY_VIOLATION,
-                details="Prune plan was previously aborted.",
-                executed_at=datetime.now(UTC),
-            )
-            await _await_void_call(self._repo.save_receipt, receipt)
-            return receipt
-
-        try:
-            outcome = await executor_fn(plan)
-            receipt = outcome.to_receipt(
-                plan=plan,
-                dependency_version_verified=current_dep_version,
-            )
-            completed_plan = PrunePlan(
-                plan_id=plan.plan_id,
-                dataset_name=plan.dataset_name,
-                requested_cutoff=plan.requested_cutoff,
-                effective_cutoff=plan.effective_cutoff,
-                is_constrained=plan.is_constrained,
-                binding_consumer_id=plan.binding_consumer_id,
-                manifest_hash=plan.manifest_hash,
-                expected_dependency_version=plan.expected_dependency_version,
-                cascade_target_tables=plan.cascade_target_tables,
-                status=PrunePlanStatus.COMPLETED,
-                created_at=plan.created_at,
-            )
-            await _await_void_call(self._repo.update_plan, completed_plan)
-            await _await_void_call(self._repo.save_receipt, receipt)
-            return receipt
-        except Exception as ex:
-            receipt = PruneReceipt(
-                plan_id=plan.plan_id,
-                dataset_name=plan.dataset_name,
-                effective_cutoff=plan.effective_cutoff,
-                rows_archived=0,
-                rows_deleted=0,
-                manifest_hash=plan.manifest_hash,
-                dependency_version_verified=current_dep_version,
-                status=PruneReceiptStatus.EXECUTION_FAILED,
-                details=f"Prune execution failed with exception: {ex}",
-                executed_at=datetime.now(UTC),
-            )
-            await _await_void_call(self._repo.save_receipt, receipt)
-            return receipt
+            try:
+                outcome = await executor_fn(plan)
+                receipt = outcome.to_receipt(
+                    plan=plan,
+                    dependency_version_verified=current_dep_version,
+                )
+                completed_plan = replace(plan, status=PrunePlanStatus.COMPLETED)
+                await _await_void_call(self._repo.update_plan, completed_plan)
+                await _await_void_call(self._repo.save_receipt, receipt)
+                return receipt
+            except Exception as ex:
+                receipt = PruneOutcome(
+                    status=PruneReceiptStatus.EXECUTION_FAILED,
+                    details=f"Prune execution failed with exception: {ex}",
+                ).to_receipt(plan=plan, dependency_version_verified=current_dep_version)
+                await _await_void_call(self._repo.save_receipt, receipt)
+                return receipt
 
     def execute_prune(
         self,
@@ -564,85 +474,27 @@ class RetentionAuthority:
         """
         current_dep_version = self.compute_dependency_version(plan.dataset_name)
 
-        # 1. Verify dependency version epoch fencing against both plan and caller
-        # expectations
-        if (
-            current_dep_version != plan.expected_dependency_version
-            or current_dep_version != expected_dependency_version
-        ):
-            receipt = PruneReceipt(
-                plan_id=plan.plan_id,
-                dataset_name=plan.dataset_name,
-                effective_cutoff=plan.effective_cutoff,
-                rows_archived=0,
-                rows_deleted=0,
-                manifest_hash=plan.manifest_hash,
-                dependency_version_verified=current_dep_version,
-                status=PruneReceiptStatus.REJECTED_VERSION_MISMATCH,
-                details=(
-                    f"Dependency version mismatch: plan expected "
-                    f"{plan.expected_dependency_version}, caller expected "
-                    f"{expected_dependency_version}, current {current_dep_version}. "
-                    "A consumer dependency was added or modified since plan creation."
-                ),
-                executed_at=datetime.now(UTC),
-            )
-            self._repo.save_receipt(receipt)
-            return receipt
+        rejection = _prune_rejection(
+            plan, expected_dependency_version, current_dep_version
+        )
+        if rejection is not None:
+            self._repo.save_receipt(rejection)
+            return rejection
 
-        # 2. Verify plan has not expired or aborted
-        if plan.status == PrunePlanStatus.ABORTED:
-            receipt = PruneReceipt(
-                plan_id=plan.plan_id,
-                dataset_name=plan.dataset_name,
-                effective_cutoff=plan.effective_cutoff,
-                rows_archived=0,
-                rows_deleted=0,
-                manifest_hash=plan.manifest_hash,
-                dependency_version_verified=current_dep_version,
-                status=PruneReceiptStatus.REJECTED_DEPENDENCY_VIOLATION,
-                details="Prune plan was previously aborted.",
-                executed_at=datetime.now(UTC),
-            )
-            self._repo.save_receipt(receipt)
-            return receipt
-
-        # 3. Execute bounded prune
         try:
             outcome = executor_fn(plan)
             receipt = outcome.to_receipt(
                 plan=plan,
                 dependency_version_verified=current_dep_version,
             )
-            # Update plan status to COMPLETED
-            completed_plan = PrunePlan(
-                plan_id=plan.plan_id,
-                dataset_name=plan.dataset_name,
-                requested_cutoff=plan.requested_cutoff,
-                effective_cutoff=plan.effective_cutoff,
-                is_constrained=plan.is_constrained,
-                binding_consumer_id=plan.binding_consumer_id,
-                manifest_hash=plan.manifest_hash,
-                expected_dependency_version=plan.expected_dependency_version,
-                cascade_target_tables=plan.cascade_target_tables,
-                status=PrunePlanStatus.COMPLETED,
-                created_at=plan.created_at,
-            )
+            completed_plan = replace(plan, status=PrunePlanStatus.COMPLETED)
             self._repo.update_plan(completed_plan)
             self._repo.save_receipt(receipt)
             return receipt
         except Exception as ex:
-            receipt = PruneReceipt(
-                plan_id=plan.plan_id,
-                dataset_name=plan.dataset_name,
-                effective_cutoff=plan.effective_cutoff,
-                rows_archived=0,
-                rows_deleted=0,
-                manifest_hash=plan.manifest_hash,
-                dependency_version_verified=current_dep_version,
+            receipt = PruneOutcome(
                 status=PruneReceiptStatus.EXECUTION_FAILED,
                 details=f"Prune execution failed with exception: {ex}",
-                executed_at=datetime.now(UTC),
-            )
+            ).to_receipt(plan=plan, dependency_version_verified=current_dep_version)
             self._repo.save_receipt(receipt)
             return receipt
