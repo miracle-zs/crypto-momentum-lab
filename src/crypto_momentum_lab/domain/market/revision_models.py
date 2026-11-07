@@ -14,9 +14,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
 
-from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.domain.market.models import JsonValue, MarketState15s
 
 
 def _require_aware(dt: datetime, name: str) -> datetime:
@@ -84,7 +83,7 @@ class MarketEnvelope:
 
     ref: MarketRevisionRef
     state: MarketState15s
-    lineage: dict[str, Any] = field(default_factory=dict)
+    lineage: dict[str, JsonValue] = field(default_factory=dict)
     data_complete: bool = True
     missing_count: int = 0
 

@@ -402,10 +402,7 @@ class ParquetWindowSink:
             os.replace(temporary_path, path)
             _fsync_directory(path.parent)
         finally:
-            try:
-                temporary_path.unlink()
-            except FileNotFoundError:
-                pass
+            temporary_path.unlink(missing_ok=True)
         return path.stat().st_size
 
 
@@ -863,17 +860,11 @@ def _atomic_write_bytes(path: Path, encoded: bytes) -> None:
         os.replace(temporary_path, path)
         _fsync_directory(path.parent)
     finally:
-        try:
-            temporary_path.unlink()
-        except FileNotFoundError:
-            pass
+        temporary_path.unlink(missing_ok=True)
 
 
 def _fsync_directory(path: Path) -> None:
-    try:
-        descriptor = os.open(path, os.O_RDONLY)
-    except OSError:
-        return
+    descriptor = os.open(path, os.O_RDONLY)
     try:
         os.fsync(descriptor)
     finally:

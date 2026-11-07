@@ -53,10 +53,7 @@ def _clean_temporary_files(root: Path) -> None:
     if not root.exists():
         return
     for item in root.rglob(".*.tmp"):
-        try:
-            item.unlink()
-        except OSError:
-            pass
+        item.unlink(missing_ok=True)
 
 
 def _require_sequence(value: object, name: str = "sequence") -> int:

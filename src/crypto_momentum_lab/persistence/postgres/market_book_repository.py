@@ -13,6 +13,7 @@ from sqlalchemy import func, null, select, update
 from sqlalchemy.orm import Session, load_only, sessionmaker
 
 from crypto_momentum_lab.domain.market.market_book import UnreproducibleError
+from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.domain.market.revision_models import (
     DatasetManifest,
     MarketEnvelope,
@@ -36,7 +37,9 @@ from crypto_momentum_lab.persistence.postgres.models import (
 )
 
 
-def _observed_at_from_lineage(lineage: dict[str, object] | None) -> datetime | None:
+def _observed_at_from_lineage(
+    lineage: dict[str, JsonValue] | None,
+) -> datetime | None:
     if lineage and "observed_at" in lineage:
         val = lineage["observed_at"]
         if isinstance(val, str):
@@ -316,16 +319,16 @@ class PostgresMarketBookRepository:
                     revision = revisions.get(identity)
                     if revision is None:
                         raise UnreproducibleError(
-                            f"Manifest {manifest_id} is unreproducible: missing revision {identity}"
+                            f"Manifest {manifest_id} is unreproducible: "
+                            f"missing revision {identity}"
                         )
                     refs.append(_ref_from_row(revision))
-            hole_pairs = [(str(hole[0]), str(hole[1])) for hole in row.holes]
             holes = tuple(
                 (
-                    datetime.fromisoformat(a),
-                    datetime.fromisoformat(b),
+                    datetime.fromisoformat(hole[0]),
+                    datetime.fromisoformat(hole[1]),
                 )
-                for a, b in hole_pairs
+                for hole in row.holes
             )
             return DatasetManifest(
                 manifest_id=row.manifest_id,
@@ -344,7 +347,7 @@ class PostgresMarketBookRepository:
                 holes=holes,
             )
 
-    def verify_manifest(self, manifest_id: str) -> dict[str, Any]:
+    def verify_manifest(self, manifest_id: str) -> dict[str, JsonValue]:
         """Low-memory cryptographic verification directly via database."""
         with self._session_factory() as session:
             bind = session.get_bind()
@@ -413,12 +416,12 @@ class PostgresMarketBookRepository:
                 ).all()
                 chunk_map = {r[0]: r[1] for r in hash_rows}
                 cold = self._cold_revisions(
-                    [rid for rid in chunk if str(rid) not in chunk_map]
+                    [rid for rid in chunk if rid not in chunk_map]
                 )
                 for rid in chunk:
-                    h = chunk_map.get(str(rid))
+                    h = chunk_map.get(rid)
                     if h is None:
-                        revision = cold.get(str(rid))
+                        revision = cold.get(rid)
                         h = revision.content_hash if revision is not None else None
                     if h is None:
                         return {
@@ -551,10 +554,10 @@ class PostgresMarketBookRepository:
                     coverage_ratio=row.coverage_ratio,
                     holes=tuple(
                         (
-                            datetime.fromisoformat(str(h[0])),  # type: ignore[index]
-                            datetime.fromisoformat(str(h[1])),  # type: ignore[index]
+                            datetime.fromisoformat(hole[0]),
+                            datetime.fromisoformat(hole[1]),
                         )
-                        for h in row.holes
+                        for hole in row.holes
                     ),
                     revision_count=len(row.revision_ids),
                 )

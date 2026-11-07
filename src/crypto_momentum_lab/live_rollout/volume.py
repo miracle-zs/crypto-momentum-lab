@@ -67,7 +67,6 @@ class WebSocketQuoteVolumeProvider:
         )
         return {
             "cached_symbol_count": len(self._snapshots),
-            "total_snapshot_count": len(self._snapshots),
             "oldest_snapshot_age_seconds": oldest_age,
             "lookup_hit_count": self._lookup_hit_count,
             "lookup_miss_count": self._lookup_miss_count,

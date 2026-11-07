@@ -164,26 +164,23 @@ class ResearchStateCollector:
 
     async def _capacity_monitor_worker(self) -> None:
         interval = max(0.1, self._config.capacity_check_interval_seconds)
-        try:
-            while not self._stopping:
-                try:
-                    await asyncio.sleep(interval)
-                except asyncio.CancelledError:
-                    break
-                if self._stopping:
-                    break
-                try:
-                    await self.refresh_capacity()
-                except asyncio.CancelledError:
-                    break
-                except Exception as exc:
-                    log.warning(
-                        "research_collector_capacity_scan_failed",
-                        environment=self._config.environment,
-                        error=str(exc),
-                    )
-        except asyncio.CancelledError:
-            pass
+        while not self._stopping:
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                break
+            if self._stopping:
+                break
+            try:
+                await self.refresh_capacity()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.warning(
+                    "research_collector_capacity_scan_failed",
+                    environment=self._config.environment,
+                    error=str(exc),
+                )
 
     def _ensure_materializer_task(self) -> None:
         if (
@@ -199,8 +196,6 @@ class ResearchStateCollector:
                 try:
                     record = self._queue.get_nowait()
                 except asyncio.QueueEmpty:
-                    break
-                except (asyncio.CancelledError, GeneratorExit):
                     break
 
                 if record is None:
@@ -220,7 +215,7 @@ class ResearchStateCollector:
 
                 try:
                     await self._process_materializer_batch(records)
-                except (asyncio.CancelledError, GeneratorExit):
+                except asyncio.CancelledError:
                     break
                 except Exception as exc:
                     self._materializer_error = exc
@@ -523,22 +518,27 @@ class ResearchStateCollector:
             self._capacity_task.cancel()
             try:
                 await self._capacity_task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass
+            except Exception:
+                log.exception(
+                    "research_collector_capacity_monitor_stop_failed",
+                    environment=self._config.environment,
+                )
 
         if self._materializer_task is not None and not self._materializer_task.done():
             try:
                 self._queue.put_nowait(None)
-            except (asyncio.QueueFull, Exception):
+            except asyncio.QueueFull:
                 pass
             try:
                 async with asyncio.timeout(10.0):
                     await self._materializer_task
-            except (TimeoutError, asyncio.CancelledError, Exception):
+            except (TimeoutError, asyncio.CancelledError):
                 self._materializer_task.cancel()
                 try:
                     await self._materializer_task
-                except (asyncio.CancelledError, Exception):
+                except asyncio.CancelledError:
                     pass
 
         if not self._initialized:
@@ -558,7 +558,7 @@ class ResearchStateCollector:
         await self.initialize()
         try:
             await self.drain_queue(timeout_seconds=2.0)
-        except (TimeoutError, RuntimeError):
+        except TimeoutError:
             pass
         snapshot = await self.refresh_capacity()
         pending_bytes = self._journal.pending_bytes

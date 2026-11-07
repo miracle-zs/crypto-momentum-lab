@@ -521,6 +521,22 @@ async def test_exit_manager_run_loop_lifecycle(exit_setup):
 
 
 @pytest.mark.asyncio
+async def test_exit_manager_loop_propagates_window_processing_error(
+    exit_setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, _, exit_mgr = exit_setup
+    exit_mgr.eval_interval_sec = 0.001
+    monkeypatch.setattr(
+        exit_mgr,
+        "_process_scheduled_window",
+        AsyncMock(side_effect=RuntimeError("window processing failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="window processing failed"):
+        await exit_mgr.run(stop_event=asyncio.Event())
+
+
+@pytest.mark.asyncio
 async def test_exit_manager_cancels_unfilled_entry_orders_before_exit(exit_setup):
     state, repo, mock_rest, exit_mgr = exit_setup
     mock_rest.post_order.return_value = {"orderId": 111}

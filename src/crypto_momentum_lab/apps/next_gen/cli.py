@@ -127,7 +127,7 @@ async def _run_with_signal_handlers(
         for sig in registered_signals:
             try:
                 loop.remove_signal_handler(sig)
-            except Exception:
+            except (NotImplementedError, RuntimeError, ValueError):
                 pass
 
 

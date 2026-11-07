@@ -9,6 +9,7 @@ Obeys Astra Architecture Blueprint 2026-09-25:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -162,12 +163,10 @@ class RetentionAuthority:
 
     def __init__(self, repository: RetentionRepository) -> None:
         self._repo = repository
-        self._dataset_locks: dict[str, Any] = {}
+        self._dataset_locks: dict[str, asyncio.Lock] = {}
 
-    def _get_lock(self, dataset_name: str) -> Any:
+    def _get_lock(self, dataset_name: str) -> asyncio.Lock:
         """Returns (or creates) the asyncio.Lock for a dataset or lock key."""
-        import asyncio
-
         if dataset_name not in self._dataset_locks:
             self._dataset_locks[dataset_name] = asyncio.Lock()
         return self._dataset_locks[dataset_name]

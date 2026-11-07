@@ -150,3 +150,58 @@ async def test_market_feed_run_with_mock_connector() -> None:
     assert received_bars[0].close_price == Decimal("65050")
     await feed.close()
     assert feed.is_connected is False
+
+
+@pytest.mark.asyncio
+async def test_unexpected_state_handler_error_reconnects_market_feed() -> None:
+    stop_event = asyncio.Event()
+    state = fixture_state("BTCUSDT", 0)
+    connector_calls = 0
+
+    class MockWSStream:
+        def __init__(self, *, send_state: bool) -> None:
+            self.messages = (
+                [json.dumps({"states": [market_state_to_payload(state)]})]
+                if send_state
+                else []
+            )
+
+        async def send(self, message: str) -> None:
+            assert json.loads(message)["type"] == "subscribe_market_states"
+
+        async def recv(self) -> str:
+            return json.dumps(
+                {"type": "market_state_hub_ready", "environment": "research"}
+            )
+
+        def __aiter__(self) -> MockWSStream:
+            return self
+
+        async def __anext__(self) -> str:
+            if self.messages:
+                return self.messages.pop(0)
+            stop_event.set()
+            raise asyncio.CancelledError
+
+        async def close(self) -> None:
+            pass
+
+    async def mock_connector(url: str) -> MockWSStream:
+        nonlocal connector_calls
+        connector_calls += 1
+        return MockWSStream(send_state=connector_calls == 1)
+
+    async def fail_handler(market_state: MarketState15s) -> None:
+        raise RuntimeError(f"failed {market_state.symbol}")
+
+    feed = MarketDataFeed(
+        symbols=["BTCUSDT"],
+        on_market_state=fail_handler,
+        ws_connector=mock_connector,
+        initial_backoff=0,
+    )
+
+    await feed.run(stop_event=stop_event)
+
+    assert connector_calls == 2
+    assert feed.is_connected is False

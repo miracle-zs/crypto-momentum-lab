@@ -216,7 +216,7 @@ class BinanceRestClient:
                 err_data = response.json()
                 code = int(err_data.get("code", response.status_code))
                 msg = str(err_data.get("msg", response.text))
-            except Exception:
+            except (json.JSONDecodeError, UnicodeDecodeError):
                 pass
 
             # 3. 币安系统未知处理/超时错误码 (-1000, -1006, -1007)
@@ -249,13 +249,7 @@ class BinanceRestClient:
         res = await self._request("GET", "/fapi/v3/account", signed=True)
         hedge_mode: bool | None = None
         try:
-            position_mode = await self._request(
-                "GET", "/fapi/v1/positionSide/dual", signed=True
-            )
-            mode_value = position_mode["dualSidePosition"]
-            if not isinstance(mode_value, bool):
-                raise ValueError("Binance position mode was not a boolean")
-            hedge_mode = mode_value
+            hedge_mode = await self.get_position_mode()
         except Exception as error:
             log.warning("account_position_mode_unavailable", error=str(error))
 

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, time
 from enum import StrEnum
 from typing import TypedDict, cast
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 class _ScheduledRiskWindowOverrides(TypedDict, total=False):
@@ -77,7 +77,7 @@ class ScheduledRiskWindowConfig:
                         kwargs[field_name] = time(parts[0], parts[1], parts[2])
                     else:
                         raise ValueError(f"Invalid time format: {value}")
-                except Exception as exc:
+                except ValueError as exc:
                     raise ValueError(
                         f"Failed to parse {env_key}={value}: expected HH:MM or HH:MM:SS"
                     ) from exc
@@ -92,7 +92,7 @@ class ScheduledRiskWindowConfig:
             raise ValueError("timezone must not be empty")
         try:
             ZoneInfo(self.timezone)
-        except Exception as error:
+        except (ValueError, ZoneInfoNotFoundError) as error:
             raise ValueError(f"unknown timezone: {self.timezone}") from error
         if self.entry_stop_at > self.flatten_start_at:
             raise ValueError("entry_stop_at must not be after flatten_start_at")

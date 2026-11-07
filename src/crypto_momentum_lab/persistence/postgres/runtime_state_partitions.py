@@ -4,14 +4,18 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from re import fullmatch
-from typing import Any, Final, cast
+from typing import Final, cast
 
 import structlog
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from crypto_momentum_lab.domain.operational.retention_authority import (
+    RetentionAuthority,
+)
 from crypto_momentum_lab.domain.operational.retention_models import (
+    PrunePlan,
     resolve_dataset_scope,
 )
 
@@ -63,8 +67,8 @@ async def drop_expired_runtime_state_partitions(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     before: datetime,
-    authority: Any | None = None,
-    plan: Any | None = None,
+    authority: RetentionAuthority | None = None,
+    plan: PrunePlan | None = None,
 ) -> int:
     cutoff = _as_utc(before)
     if authority is not None:

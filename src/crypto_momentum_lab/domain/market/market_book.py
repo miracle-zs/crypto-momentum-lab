@@ -15,9 +15,9 @@ import json
 from dataclasses import fields
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Protocol
+from typing import Protocol
 
-from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.domain.market.models import JsonValue, MarketState15s
 from crypto_momentum_lab.domain.market.revision_models import (
     DatasetManifest,
     MarketEnvelope,
@@ -44,7 +44,7 @@ class UnreproducibleError(Exception):
 
 def compute_market_state_hash(state: MarketState15s) -> str:
     """Calculates a deterministic SHA256 hash of a normalized MarketState15s payload."""
-    payload: dict[str, Any] = {}
+    payload: dict[str, JsonValue] = {}
     for f in fields(MarketState15s):
         val = getattr(state, f.name)
         if isinstance(val, Decimal):
@@ -89,7 +89,7 @@ class MarketBookRepository(Protocol):
     def list_manifests(
         self, scope: str | None = None, limit: int = 100
     ) -> list[DatasetManifest]: ...
-    def verify_manifest(self, manifest_id: str) -> dict[str, Any]: ...
+    def verify_manifest(self, manifest_id: str) -> dict[str, JsonValue]: ...
     def get_distinct_dates_and_symbols(
         self, scope: str, interval: str = "15s"
     ) -> list[tuple[date, tuple[str, ...]]]: ...
@@ -190,7 +190,7 @@ class InMemoryMarketBookRepository:
                 date_to_symbols.setdefault(d, set()).add(sym)
         return [(d, tuple(sorted(syms))) for d, syms in sorted(date_to_symbols.items())]
 
-    def verify_manifest(self, manifest_id: str) -> dict[str, Any]:
+    def verify_manifest(self, manifest_id: str) -> dict[str, JsonValue]:
         """Cryptographically verifies a DatasetManifest and its referenced revisions."""
         manifest = self.load_manifest(manifest_id)
         if manifest is None:
@@ -251,7 +251,7 @@ class MarketBook:
         self,
         state: MarketState15s,
         *,
-        lineage: dict[str, Any] | None = None,
+        lineage: dict[str, JsonValue] | None = None,
         visibility_mode: MarketVisibilityMode = MarketVisibilityMode.DECISION_VISIBLE,
         source_epoch: str = "epoch_1",
         is_canonical: bool = False,
@@ -544,7 +544,7 @@ class DatasetCatalog:
         envelopes.sort(key=lambda e: (e.ref.bucket_start, e.ref.symbol))
         return tuple(envelopes)
 
-    def verify_manifest(self, manifest_id: str) -> dict[str, Any]:
+    def verify_manifest(self, manifest_id: str) -> dict[str, JsonValue]:
         return self._repo.verify_manifest(manifest_id)
 
     def list_manifests(

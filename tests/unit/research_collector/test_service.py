@@ -134,6 +134,8 @@ async def test_materializer_failure_wakes_unbounded_drain_without_retrying_queue
         assert len(calls) == 1
         assert collector._queue.qsize() == 1
         assert len(collector._journal.pending_records()) == 2
+        with pytest.raises(RuntimeError, match="durable storage unavailable"):
+            await collector.health()
     finally:
         release.set()
         with pytest.raises(RuntimeError, match="durable storage unavailable"):

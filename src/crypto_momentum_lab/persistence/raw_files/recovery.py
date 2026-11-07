@@ -14,6 +14,7 @@ from crypto_momentum_lab.domain.market.models import (
     ArchiveManifest,
     CaptureRoute,
     CaptureStream,
+    JsonValue,
     RawEnvelope,
 )
 from crypto_momentum_lab.persistence._file_io import fsync_directory
@@ -220,7 +221,7 @@ def _prepend(
     yield from remaining
 
 
-def _envelope_from_payload(payload: dict[str, object]) -> RawEnvelope:
+def _envelope_from_payload(payload: dict[str, JsonValue]) -> RawEnvelope:
     return RawEnvelope(
         schema_version=_int_value(payload["schema_version"]),
         exchange=_str_value(payload["exchange"]),
@@ -235,7 +236,7 @@ def _envelope_from_payload(payload: dict[str, object]) -> RawEnvelope:
         local_sequence=_int_value(payload["local_sequence"]),
         exchange_sequence=_optional_str_value(payload["exchange_sequence"]),
         subscription_generation=_int_value(payload["subscription_generation"]),
-        raw_payload=payload["raw_payload"],  # type: ignore[arg-type]
+        raw_payload=payload["raw_payload"],
         recovered=_bool_value(payload.get("recovered", False)),
     )
 
@@ -307,7 +308,7 @@ def _optional_str_value(value: object) -> str | None:
 
 
 def _int_value(value: object) -> int:
-    if not isinstance(value, int):
+    if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError("expected integer value")
     return value
 

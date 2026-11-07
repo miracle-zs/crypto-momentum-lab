@@ -39,6 +39,12 @@ def test_registry_fails_closed_when_strategy_config_missing() -> None:
         )
 
 
+@pytest.mark.parametrize("field", ["candidate_notional", "candidate_ttl_buckets"])
+def test_registry_rejects_boolean_numeric_fields(field: str) -> None:
+    with pytest.raises(StrategyRegistryError, match="invalid"):
+        build_runtime_config("orderflow_impulse", config={field: True})
+
+
 def test_registry_builds_orderflow_runtime_strategy() -> None:
     event_config = OrderFlowImpulseConfig(
         impulse_window_buckets=2,

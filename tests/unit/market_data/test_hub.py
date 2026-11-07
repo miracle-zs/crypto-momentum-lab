@@ -8,6 +8,7 @@ import pytest
 
 import crypto_momentum_lab.market_data.hub as hub_module
 from crypto_momentum_lab.market_data.hub import (
+    MarketStateBatch,
     MarketStateHub,
     MarketStateHubConfig,
     MarketStateHubEpochError,
@@ -324,13 +325,13 @@ async def test_market_state_source_reports_consumed_batch_cursor(monkeypatch) ->
         "connect",
         lambda *_args, **_kwargs: FakeConnection(),
     )
-    batches: list[object] = []
+    batches: list[MarketStateBatch] = []
     source = WebSocketMarketStateSource(
         url="ws://unused",
         environment="research",
         consumer_id="test-live",
         config=MarketStateHubConfig(reconnect_delays=(0,)),
-        on_batch=batches.append,  # type: ignore[arg-type]
+        on_batch=batches.append,
         fail_on_replay_unavailable=True,
     )
     iterator = source.batches()

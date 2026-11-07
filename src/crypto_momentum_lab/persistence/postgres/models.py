@@ -21,6 +21,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.next_gen.db_models import (
     EntrySizingStateRow as EntrySizingStateRow,
 )
@@ -1099,7 +1100,7 @@ class MarketRevisionRefRow(Base):
     payload_archive_sha256: Mapped[str | None] = mapped_column(
         String(64), nullable=True
     )
-    lineage: Mapped[dict[str, object]] = mapped_column(
+    lineage: Mapped[dict[str, JsonValue]] = mapped_column(
         JSONB, nullable=False, default=dict
     )
 
@@ -1166,8 +1167,8 @@ class DatasetManifestRow(Base):
     )
     manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     coverage_ratio: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False)
-    revision_ids: Mapped[list[object]] = mapped_column(JSONB, nullable=False)
-    holes: Mapped[list[object]] = mapped_column(JSONB, nullable=False)
+    revision_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    holes: Mapped[list[list[str]]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
@@ -1198,7 +1199,7 @@ class DecisionTraceRow(Base):
     intent_produced: Mapped[bool] = mapped_column(Boolean, nullable=False)
     intent_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     rejection_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    evaluated_revision_ids: Mapped[list[object]] = mapped_column(JSONB, nullable=False)
+    evaluated_revision_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     trace_payload: Mapped[dict[str, object]] = mapped_column(
         JSONB, nullable=False, default=dict
     )

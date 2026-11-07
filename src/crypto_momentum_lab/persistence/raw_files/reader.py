@@ -2,7 +2,6 @@ import json
 from collections.abc import Iterable, Iterator
 from datetime import datetime
 from pathlib import Path
-from typing import cast
 from uuid import UUID
 
 import zstandard
@@ -10,7 +9,6 @@ import zstandard
 from crypto_momentum_lab.domain.market.models import (
     CaptureRoute,
     CaptureStream,
-    JsonValue,
     RawEnvelope,
 )
 
@@ -52,7 +50,7 @@ def deserialize_envelope_row(row: str) -> RawEnvelope:
                 decoded,
                 "subscription_generation",
             ),
-            raw_payload=cast(JsonValue, decoded.get("raw_payload")),
+            raw_payload=decoded["raw_payload"],
             recovered=_optional_bool(decoded, "recovered", default=False),
         )
     except (TypeError, ValueError) as exc:
@@ -114,7 +112,7 @@ def _optional_bool(
 
 def _required_int(row: dict[object, object], key: str) -> int:
     value = row.get(key)
-    if not isinstance(value, int):
+    if isinstance(value, bool) or not isinstance(value, int):
         raise RawArchiveRowError(f"{key} must be an integer")
     return value
 

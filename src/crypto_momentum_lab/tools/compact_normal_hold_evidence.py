@@ -20,11 +20,11 @@ import hashlib
 import json
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 import asyncpg  # type: ignore[import-untyped]
 
 from crypto_momentum_lab.config import resolve_database_url
+from crypto_momentum_lab.domain.market.models import JsonValue
 
 _NORMAL_HOLD_OUTCOME = "holding_position_no_exit"
 _SUMMARY_LEVEL = "summary"
@@ -74,8 +74,9 @@ def build_revision_purge_candidate_sql(
 
 
 def build_summary_payload(
-    original_payload: dict[str, Any], market_refs: list[dict[str, str]]
-) -> dict[str, Any]:
+    original_payload: dict[str, JsonValue],
+    market_refs: list[dict[str, JsonValue]],
+) -> dict[str, JsonValue]:
     """Build the exact compact representation written by the live runtime."""
     canonical = json.dumps(
         original_payload,
@@ -98,7 +99,7 @@ def build_summary_payload(
 
 
 async def compact_normal_hold_evidence(
-    connection: asyncpg.Connection[Any], *, batch_size: int, dry_run: bool
+    connection: asyncpg.Connection[asyncpg.Record], *, batch_size: int, dry_run: bool
 ) -> int:
     """Compact every un-compacted normal hold, in bounded transactions."""
     if dry_run:
@@ -186,7 +187,7 @@ async def compact_normal_hold_evidence(
     return compacted
 
 
-def _summary_ref_from_row(row: asyncpg.Record) -> dict[str, str]:
+def _summary_ref_from_row(row: asyncpg.Record) -> dict[str, JsonValue]:
     lineage = json.loads(str(row["lineage"]))
     observed_at = lineage.get("observed_at")
     return {
@@ -205,7 +206,7 @@ def _summary_ref_from_row(row: asyncpg.Record) -> dict[str, str]:
 
 
 async def purge_unreferenced_revisions(
-    connection: asyncpg.Connection[Any],
+    connection: asyncpg.Connection[asyncpg.Record],
     *,
     batch_size: int,
     dry_run: bool,

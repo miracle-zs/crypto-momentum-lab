@@ -72,7 +72,7 @@ async def test_hub_volume_keeps_only_latest_value():
         )
         assert (
             provider.metrics_snapshot(now=now + timedelta(seconds=2))[
-                "total_snapshot_count"
+                "cached_symbol_count"
             ]
             == 1
         )

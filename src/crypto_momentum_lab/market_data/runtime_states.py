@@ -121,8 +121,6 @@ class ClosedMarketStatePublisherMetrics:
     rejected_envelope_count: int
     late_event_count: int
     latest_watermark_at: datetime | None
-    realtime_batch_count: int
-    realtime_sink_failure_count: int
     durable_queue_size: int
     durable_sink_failure_count: int
     aggregation_processing_count: int
@@ -252,8 +250,6 @@ class ClosedMarketStatePublisher:
         self._synthetic_state_count = 0
         self._rejected_envelope_count = 0
         self._late_event_count = 0
-        self._realtime_batch_count = 0
-        self._realtime_sink_failure_count = 0
         # Websocket real-time dispatch is deliberately independent from the
         # archival queue.  Keep its aggregate-trade cursor here too, so a gap
         # is reflected in the decision state before the current live trade is
@@ -359,8 +355,6 @@ class ClosedMarketStatePublisher:
             rejected_envelope_count=self._rejected_envelope_count,
             late_event_count=self._late_event_count,
             latest_watermark_at=self._latest_watermark_at,
-            realtime_batch_count=self._realtime_batch_count,
-            realtime_sink_failure_count=self._realtime_sink_failure_count,
             durable_queue_size=(
                 0 if self._durable_queue is None else self._durable_queue.qsize()
             ),
@@ -389,9 +383,6 @@ class ClosedMarketStatePublisher:
         """
         metrics = self.metrics
         return {
-            "configured_closure_delay_seconds": (
-                self._config.realtime_closure_delay_seconds
-            ),
             "configured_realtime_closure_delay_seconds": (
                 self._config.realtime_closure_delay_seconds
             ),
@@ -616,9 +607,13 @@ class ClosedMarketStatePublisher:
             if self._realtime_state_sink is not None and realtime_states:
                 try:
                     await self._realtime_state_sink(realtime_states)
-                    self._realtime_batch_count += 1
-                except Exception:
-                    self._realtime_sink_failure_count += 1
+                except Exception as error:
+                    # Realtime fanout is independent from durable persistence.
+                    self._log.exception(
+                        "runtime_state_realtime_sink_failed",
+                        error=str(error),
+                        state_count=len(realtime_states),
+                    )
 
         durable_ready_keys = _pop_ready_keys(
             self._durable_deadlines,

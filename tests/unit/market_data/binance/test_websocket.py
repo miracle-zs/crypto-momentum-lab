@@ -482,6 +482,55 @@ async def test_realtime_sink_does_not_block_socket_reader() -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_realtime_sink_error_surfaces_to_connection_loop(monkeypatch) -> None:
+    from contextlib import asynccontextmanager
+    from uuid import uuid4
+
+    import crypto_momentum_lab.market_data.binance.websocket as websocket_module
+
+    class FakeConnection:
+        async def send(self, message: str) -> None:
+            assert json.loads(message)["method"] == "SUBSCRIBE"
+
+        async def recv(self) -> str:
+            await asyncio.Event().wait()
+            raise AssertionError("fake socket was unexpectedly released")
+
+        async def close(self) -> None:
+            pass
+
+    @asynccontextmanager
+    async def connect(*args, **kwargs):
+        yield FakeConnection()
+
+    async def fail_dispatch(queue: asyncio.Queue) -> None:
+        del queue
+        raise RuntimeError("realtime callback failed")
+
+    connection = BinanceWebSocketConnection(
+        base_url="wss://example.test/ws",
+        route=route_for(CaptureStream.AGG_TRADE),
+        environment="test",
+        desired_names=("btcusdt@aggTrade",),
+        generation=1,
+        on_envelope=AsyncMock(),
+        on_lifecycle=AsyncMock(),
+        reconnect_delays=(0,),
+        connection_lifetime_seconds=60,
+        open_timeout_seconds=1,
+        ping_interval_seconds=20,
+        ping_timeout_seconds=20,
+        silence_timeout_seconds=60,
+        on_realtime_envelope=AsyncMock(),
+    )
+    monkeypatch.setattr(websocket_module, "connect", connect)
+    monkeypatch.setattr(connection, "_dispatch_realtime_messages", fail_dispatch)
+
+    with pytest.raises(RuntimeError, match="realtime callback failed"):
+        await connection._run_once(uuid4())
+
+
 @pytest.mark.parametrize(
     ("stream", "expected_timeout"),
     [

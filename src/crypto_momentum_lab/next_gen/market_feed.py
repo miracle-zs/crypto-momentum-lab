@@ -12,7 +12,10 @@ import structlog
 import websockets
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
-from crypto_momentum_lab.domain.market.state_codec import market_state_from_payload
+from crypto_momentum_lab.domain.market.state_codec import (
+    MarketStateCodecError,
+    market_state_from_payload,
+)
 from crypto_momentum_lab.next_gen.client import BinanceOrderRejectedError
 
 log = structlog.get_logger("market_feed")
@@ -112,15 +115,23 @@ class MarketDataFeed:
                             else str(raw_msg)
                         )
                         payload = json.loads(text_msg)
-                        await self._dispatch_message(
-                            payload, frame_received_at=frame_received_at
-                        )
-                    except Exception as e:
+                    except (UnicodeDecodeError, json.JSONDecodeError) as error:
                         log.warning(
                             "market_feed_dispatch_error",
-                            err=str(e),
+                            err=str(error),
                             payload=str(raw_msg)[:200],
                         )
+                        continue
+                    if not isinstance(payload, dict):
+                        log.warning(
+                            "market_feed_dispatch_error",
+                            err="Hub message must be an object",
+                            payload=str(raw_msg)[:200],
+                        )
+                        continue
+                    await self._dispatch_message(
+                        payload, frame_received_at=frame_received_at
+                    )
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -166,16 +177,31 @@ class MarketDataFeed:
         try:
             for payload in data["states"]:
                 state_count += 1
+                if not isinstance(payload, dict):
+                    log.warning(
+                        "market_state_processing_failed",
+                        error="market state must be an object",
+                    )
+                    continue
                 try:
                     market_state = market_state_from_payload(payload)
-                    if first_state_bucket_end is None:
-                        first_state_bucket_end = market_state.bucket_end
-                    minute_boundary |= (
-                        market_state.bucket_end.second == 0
-                        and market_state.bucket_end.microsecond == 0
+                except MarketStateCodecError as error:
+                    log.warning(
+                        "market_state_processing_failed",
+                        symbol=payload.get("symbol"),
+                        error=str(error),
                     )
-                    if market_state.symbol not in self.symbols:
-                        continue
+                    continue
+
+                if first_state_bucket_end is None:
+                    first_state_bucket_end = market_state.bucket_end
+                minute_boundary |= (
+                    market_state.bucket_end.second == 0
+                    and market_state.bucket_end.microsecond == 0
+                )
+                if market_state.symbol not in self.symbols:
+                    continue
+                try:
                     result = self.on_market_state(market_state)
                     if asyncio.iscoroutine(result):
                         await result
@@ -185,10 +211,6 @@ class MarketDataFeed:
                         symbol=market_state.symbol,
                         code=error.code,
                         reason=error.message,
-                    )
-                except Exception:
-                    log.exception(
-                        "market_state_processing_failed", symbol=payload.get("symbol")
                     )
         finally:
             dispatch_duration_ms = (time.monotonic() - dispatch_started) * 1000

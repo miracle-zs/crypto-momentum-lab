@@ -3,7 +3,7 @@
 from collections.abc import Mapping
 from dataclasses import fields
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
 
@@ -131,7 +131,7 @@ def _require_decimal(payload: Mapping[str, object], name: str) -> Decimal:
         raise MarketStateCodecError(f"{name} must be numeric")
     try:
         return Decimal(str(value))
-    except Exception as cause:
+    except InvalidOperation as cause:
         raise MarketStateCodecError(f"{name} is not numeric") from cause
 
 

@@ -624,8 +624,6 @@ class ExitManager:
                 self.evaluate_active_batches()
             except asyncio.CancelledError:
                 break
-            except Exception as e:
-                log.error("exit_manager_loop_error", err=str(e))
 
         log.info("exit_manager_loop_stopped")
 

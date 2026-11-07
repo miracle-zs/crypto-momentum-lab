@@ -325,8 +325,6 @@ async def test_publisher_fanout_happens_before_durable_runtime_state_write() -> 
     await publisher.observe(fixture_trade(3, price="102", sequence=3))
 
     assert events == ["realtime", "durable"]
-    assert publisher.metrics.realtime_batch_count == 1
-    assert publisher.metrics.realtime_sink_failure_count == 0
 
 
 async def test_snapshot_build_yields_when_closing_many_symbols() -> None:

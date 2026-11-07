@@ -398,9 +398,10 @@ class BinanceWebSocketConnection:
                 )
             )
             dispatch_task = asyncio.create_task(self._dispatch_messages(data_queue))
-            realtime_dispatch_task = asyncio.create_task(
-                self._dispatch_realtime_messages(realtime_queue)
-            )
+            if self._on_realtime_envelope is not None:
+                realtime_dispatch_task = asyncio.create_task(
+                    self._dispatch_realtime_messages(realtime_queue)
+                )
             self._reader_task = reader_task
             self._dispatch_task = dispatch_task
             self._realtime_dispatch_task = realtime_dispatch_task
@@ -448,13 +449,19 @@ class BinanceWebSocketConnection:
                             if timeout is None
                             else min(timeout, control_timeout)
                         )
-                    done, _ = await asyncio.wait(
-                        (
-                            reader_task,
-                            dispatch_task,
-                            ack_task,
-                            desired_task,
+                    wait_tasks = (
+                        reader_task,
+                        dispatch_task,
+                        ack_task,
+                        desired_task,
+                        *(
+                            (realtime_dispatch_task,)
+                            if realtime_dispatch_task is not None
+                            else ()
                         ),
+                    )
+                    done, _ = await asyncio.wait(
+                        wait_tasks,
                         timeout=timeout,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
@@ -484,6 +491,13 @@ class BinanceWebSocketConnection:
 
                     if dispatch_task in done:
                         dispatch_task.result()
+                        return "stopped"
+
+                    if (
+                        realtime_dispatch_task is not None
+                        and realtime_dispatch_task in done
+                    ):
+                        realtime_dispatch_task.result()
                         return "stopped"
 
                     if reader_task in done:
@@ -675,15 +689,6 @@ class BinanceWebSocketConnection:
             self._realtime_queue_events = realtime_queue.qsize()
             try:
                 await self._on_realtime_envelope(envelope)
-            except Exception as error:
-                log.exception(
-                    "binance_websocket_realtime_sink_failed",
-                    group_id=self._group_id,
-                    route=self._route.value,
-                    stream=self._stream.value,
-                    reason=error.__class__.__name__,
-                    error=str(error),
-                )
             finally:
                 realtime_queue.task_done()
             await asyncio.sleep(0)

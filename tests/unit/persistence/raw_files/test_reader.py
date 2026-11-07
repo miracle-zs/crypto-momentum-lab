@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
+import pytest
 import zstandard
 
 from crypto_momentum_lab.domain.market.models import (
@@ -13,6 +14,7 @@ from crypto_momentum_lab.domain.market.models import (
 )
 from crypto_momentum_lab.persistence.raw_files.archive import serialize_envelope
 from crypto_momentum_lab.persistence.raw_files.reader import (
+    RawArchiveRowError,
     deserialize_envelope_row,
     replay_envelopes,
 )
@@ -47,6 +49,36 @@ def test_deserialize_envelope_row_round_trips_archive_json() -> None:
     assert envelope.connection_session_id == UUID(int=1)
     assert envelope.local_sequence == 7
     assert envelope.raw_payload == {"e": "aggTrade", "s": "BTCUSDT", "a": 42}
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "schema_version",
+        "received_monotonic_ns",
+        "local_sequence",
+        "subscription_generation",
+    ),
+)
+def test_deserialize_envelope_row_rejects_boolean_integer_fields(
+    field: str,
+    raw_envelope: RawEnvelope,
+) -> None:
+    row = json.loads(serialize_envelope(raw_envelope))
+    row[field] = True
+
+    with pytest.raises(RawArchiveRowError, match=f"{field} must be an integer"):
+        deserialize_envelope_row(json.dumps(row))
+
+
+def test_deserialize_envelope_row_requires_raw_payload(
+    raw_envelope: RawEnvelope,
+) -> None:
+    row = json.loads(serialize_envelope(raw_envelope))
+    del row["raw_payload"]
+
+    with pytest.raises(KeyError, match="raw_payload"):
+        deserialize_envelope_row(json.dumps(row))
 
 
 def test_replay_envelopes_sorts_by_local_receive_order(

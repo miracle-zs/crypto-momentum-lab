@@ -487,7 +487,7 @@ class NextGenDaemon:
                         account_health_file.write_text(now_ts, encoding="utf-8")  # noqa: ASYNC240
                         status_file.write_text("ready", encoding="utf-8")  # noqa: ASYNC240
                         database_file.write_text(now_ts, encoding="utf-8")  # noqa: ASYNC240
-                    except Exception as e:
+                    except OSError as e:
                         log.warning("failed_to_write_healthcheck_file", err=str(e))
                 try:
                     await asyncio.wait_for(stop_event.wait(), timeout=interval_sec)
@@ -495,11 +495,15 @@ class NextGenDaemon:
                 except TimeoutError:
                     pass
         finally:
-            for f in (account_health_file, status_file):
+            for health_file in (account_health_file, status_file):
                 try:
-                    f.unlink(missing_ok=True)  # noqa: ASYNC240
-                except Exception:
-                    pass
+                    health_file.unlink(missing_ok=True)  # noqa: ASYNC240
+                except OSError as error:
+                    log.warning(
+                        "failed_to_remove_healthcheck_file",
+                        path=str(health_file),
+                        error=str(error),
+                    )
 
     async def run(self, keepalive_interval_sec: float = 1800.0) -> None:
         """端到端生命周期执行入口：

@@ -1,4 +1,5 @@
 import asyncio
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -33,6 +34,29 @@ async def test_recovery_preserves_complete_records_and_quarantines_source(
     assert result.quarantined_path.exists()
     assert result.quarantined_path.suffix == ".quarantined"
     assert not temporary.exists()
+
+
+async def test_recovery_rejects_boolean_integer_fields(
+    tmp_path: Path,
+    raw_envelope: RawEnvelope,
+) -> None:
+    temporary = _temporary_path(tmp_path)
+    temporary.parent.mkdir(parents=True)
+    payload = json.loads(serialize_envelope(raw_envelope))
+    payload["local_sequence"] = True
+    temporary.write_bytes(
+        zstandard.ZstdCompressor(level=1).compress(json.dumps(payload).encode())
+    )
+
+    with pytest.raises(ValueError, match="expected integer value"):
+        await recover_temporary_archive(
+            temporary,
+            archive_root=tmp_path,
+            environment="test",
+            capture_version="test",
+        )
+
+    assert temporary.exists()
 
 
 async def test_recovery_commits_multiple_batches_without_serial_timer_waits(

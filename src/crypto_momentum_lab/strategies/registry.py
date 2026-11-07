@@ -56,6 +56,8 @@ def build_runtime_strategy(
 def _optional_decimal(value: object) -> Decimal | None:
     if value is None:
         return None
+    if isinstance(value, bool):
+        raise StrategyRegistryError("candidate_notional is invalid")
     if isinstance(value, Decimal):
         return value
     if isinstance(value, int | str):
@@ -66,6 +68,6 @@ def _optional_decimal(value: object) -> Decimal | None:
 def _int_value(value: object, *, default: int, field_name: str) -> int:
     if value is None:
         return default
-    if isinstance(value, int):
+    if isinstance(value, int) and not isinstance(value, bool):
         return value
     raise StrategyRegistryError(f"{field_name} is invalid")
