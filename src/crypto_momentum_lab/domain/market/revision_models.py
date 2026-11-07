@@ -122,6 +122,7 @@ class DatasetManifest:
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     coverage_ratio: Decimal = Decimal("1.0")
     holes: tuple[tuple[datetime, datetime], ...] = ()
+    revision_count: int | None = None
 
     def __post_init__(self) -> None:
         if not self.manifest_id.strip():
@@ -141,6 +142,12 @@ class DatasetManifest:
             raise ValueError("end_time must be greater than start_time")
         if self.coverage_ratio < Decimal("0") or self.coverage_ratio > Decimal("1"):
             raise ValueError("coverage_ratio must be between 0 and 1")
+        if self.revision_count is None:
+            object.__setattr__(self, "revision_count", len(self.revision_refs))
+        elif self.revision_count < len(self.revision_refs) or (
+            self.revision_refs and self.revision_count != len(self.revision_refs)
+        ):
+            raise ValueError("revision_count must match revision_refs")
         if not self.manifest_hash:
             object.__setattr__(self, "manifest_hash", self.compute_manifest_hash())
 

@@ -414,8 +414,9 @@ class DatasetCatalog:
         end_time: datetime,
         visibility_mode: MarketVisibilityMode = MarketVisibilityMode.DECISION_VISIBLE,
         feature_algorithm_version: str = "v1",
+        save: bool = True,
     ) -> DatasetManifest:
-        """Builds an immutable DatasetManifest with explicit interval proof."""
+        """Build a manifest with interval proof, optionally persisting it."""
         if interval != "15s":
             raise NotImplementedError(f"Interval {interval} not supported yet")
         step = timedelta(seconds=15)
@@ -499,7 +500,8 @@ class DatasetCatalog:
             holes=tuple(holes),
         )
 
-        self._repo.save_manifest(manifest)
+        if save:
+            self._repo.save_manifest(manifest)
         return manifest
 
     def open_dataset(self, manifest_id: str) -> tuple[MarketEnvelope, ...]:

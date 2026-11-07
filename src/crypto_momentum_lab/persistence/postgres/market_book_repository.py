@@ -556,6 +556,7 @@ class PostgresMarketBookRepository:
                         )
                         for h in row.holes
                     ),
+                    revision_count=len(row.revision_ids),
                 )
                 for row in rows
             ]

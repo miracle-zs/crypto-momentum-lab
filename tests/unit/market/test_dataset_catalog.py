@@ -7,6 +7,7 @@ Tests:
 4. Missing revision fails closed with UnreproducibleError.
 """
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -339,7 +340,18 @@ def test_dataset_catalog_list_and_distinct_dates() -> None:
     assert dates_syms[1][0] == d2.date()
     assert dates_syms[1][1] == ("SOLUSDT",)
 
-    # Test auto_daily tool logic
+    # Auto-catalog can build without persisting, then persist when requested.
+    unsaved_results = catalog_auto_daily(
+        catalog,
+        repo,  # type: ignore[arg-type]
+        scope="live",
+        interval="15s",
+        save=False,
+    )
+    assert len(unsaved_results) == 2
+    assert all(not result["saved"] for result in unsaved_results)
+    assert catalog.list_manifests(scope="live") == []
+
     results = catalog_auto_daily(
         catalog,
         repo,  # type: ignore[arg-type]
@@ -350,6 +362,21 @@ def test_dataset_catalog_list_and_distinct_dates() -> None:
     assert len(results) == 2
     assert results[0]["symbols_count"] == 2
     assert results[1]["symbols_count"] == 1
+
+    first_manifest = repo.manifests["ds_live_20260924_15s"]
+    repo.manifests[first_manifest.manifest_id] = replace(
+        first_manifest,
+        revision_refs=(),
+        revision_count=len(first_manifest.revision_refs),
+    )
+    skipped_results = catalog_auto_daily(
+        catalog,
+        repo,  # type: ignore[arg-type]
+        scope="live",
+        interval="15s",
+        save=False,
+    )
+    assert [result["revisions_count"] for result in skipped_results] == [2, 1]
 
     # Test list_manifests
     listed = catalog.list_manifests(scope="live")

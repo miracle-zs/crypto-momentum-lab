@@ -2,7 +2,7 @@
 
 Obeys Astra Architecture Blueprint Sections 9, 10 & 16:
 - Compiles immutable DatasetManifests with interval coverage and holes proof;
-- Persists reproducible manifests to Postgres `dataset_manifests` table;
+- Optionally persists reproducible manifests to Postgres `dataset_manifests` table;
 - Verifies cryptographic manifest hash and complete revision references;
 - Ensures reproducible market data streams for research and strategy replay.
 """
@@ -112,7 +112,7 @@ def catalog_auto_daily(
                     "scope": existing.scope,
                     "date": d.isoformat(),
                     "symbols_count": len(existing.symbols),
-                    "revisions_count": len(existing.revision_refs),
+                    "revisions_count": existing.revision_count,
                     "coverage_ratio": str(existing.coverage_ratio),
                     "holes_count": len(existing.holes),
                     "manifest_hash": existing.manifest_hash,
@@ -130,6 +130,7 @@ def catalog_auto_daily(
             start_time=day_start,
             end_time=day_end,
             visibility_mode=MarketVisibilityMode.CANONICAL,
+            save=save,
         )
         results.append(
             {
@@ -186,9 +187,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--save",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=True,
-        help="Persist built manifests into postgres dataset_manifests table",
+        help="Persist built manifests (use --no-save to skip)",
     )
     parser.add_argument(
         "--overwrite",
