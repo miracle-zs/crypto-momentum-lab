@@ -7,8 +7,9 @@ indistinguishable from a crash and can produce lifecycle alerts such as
 container_missing, container_unhealthy, live_heartbeat_stale, and
 live_crash_log_archive_failed.
 
-Only the deploy knows the change is planned, so the deploy declares a
-maintenance window and the monitor honours it.
+The monitor honours a maintenance-window file when one is present. The
+repository's deployment script does not create this file, so a deployment
+does not automatically suppress lifecycle alerts.
 
 The window always expires on its own: a deploy that dies mid-flight must not
 silence the monitor forever.
@@ -17,6 +18,7 @@ silence the monitor forever.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -24,7 +26,6 @@ from pathlib import Path
 __all__ = [
     "MaintenanceWindow",
     "clear_maintenance_window",
-    "is_maintenance_active",
     "read_maintenance_window",
     "write_maintenance_window",
 ]
@@ -113,15 +114,8 @@ def read_maintenance_window(path: Path) -> MaintenanceWindow | None:
     )
 
 
-def is_maintenance_active(path: Path, *, now: datetime) -> bool:
-    """Report whether a declared window is still running."""
-
-    window = read_maintenance_window(path)
-    return window is not None and window.is_active(now=now)
-
-
 def clear_maintenance_window(path: Path) -> None:
-    """End the window.  Missing files are fine; the deploy may never have won."""
+    """End the window; a missing marker is already clear."""
 
     try:
         path.unlink()
@@ -130,20 +124,11 @@ def clear_maintenance_window(path: Path) -> None:
 
 
 def default_maintenance_path() -> Path:
-    """The marker location shared by the deploy script and the monitor."""
-
-    override = _environment_path()
-    if override is not None:
-        return override
-    return Path("/var/lib/crypto-momentum-lab/maintenance.json")
-
-
-def _environment_path() -> Path | None:
-    import os
+    """Return the marker location read by the monitor."""
 
     raw = os.environ.get("CML_MAINTENANCE_WINDOW_FILE")
     if raw is None or not raw.strip():
-        return None
+        return Path("/var/lib/crypto-momentum-lab/maintenance.json")
     return Path(raw.strip())
 
 

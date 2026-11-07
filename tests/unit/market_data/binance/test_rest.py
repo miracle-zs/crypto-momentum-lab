@@ -1,5 +1,5 @@
 import asyncio
-from datetime import UTC, date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import httpx
@@ -7,6 +7,25 @@ import pytest
 import respx
 
 from crypto_momentum_lab.market_data.binance.rest import BinanceUsdMRestClient
+
+
+@respx.mock
+async def test_fetches_exact_closed_15m_candle() -> None:
+    start = datetime(2026, 6, 14, tzinfo=UTC)
+    route = respx.get("https://fapi.binance.com/fapi/v1/klines").mock(
+        return_value=httpx.Response(
+            200, json=[[1781395200000, "100", "103", "99", "101", "1", 1781396099999]]
+        )
+    )
+    async with BinanceUsdMRestClient("https://fapi.binance.com") as client:
+        candle = await client.fetch_closed_15m_candle("BTCUSDT", start)
+    assert candle.symbol == "BTCUSDT"
+    assert candle.candle_start == start
+    assert candle.candle_end == datetime(2026, 6, 14, 0, 15, tzinfo=UTC)
+    assert candle.open_price == Decimal("100")
+    assert candle.close_price == Decimal("101")
+    assert route.calls[0].request.url.params["interval"] == "15m"
+    assert route.calls[0].request.url.params["startTime"] == "1781395200000"
 
 
 @respx.mock

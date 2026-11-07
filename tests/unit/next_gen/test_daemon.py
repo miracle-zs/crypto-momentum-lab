@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 
+from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
 from crypto_momentum_lab.next_gen.client import BinanceUserDataStream
 from crypto_momentum_lab.next_gen.daemon import NextGenDaemon, run_nextgen_daemon
 from crypto_momentum_lab.next_gen.engine import AccountSnapshot, PositionSnapshot
@@ -89,6 +91,87 @@ def mock_rest_client(clean_account_snapshot: AccountSnapshot) -> AsyncMock:
     mock_client.create_listen_key.return_value = "fake_listen_key_123"
     mock_client.keepalive_listen_key.return_value = None
     return mock_client
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("forced", [False, True])
+async def test_formal_second_candle_loads_entry_candle(
+    account_config,
+    mock_rest_client: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+    forced: bool,
+) -> None:
+    start = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
+    entry = ClosedCandle15m(
+        "BTCUSDT", start, start + timedelta(minutes=15), Decimal("100"), Decimal("99")
+    )
+    following = ClosedCandle15m(
+        "BTCUSDT",
+        entry.candle_end,
+        entry.candle_end + timedelta(minutes=15),
+        Decimal("99"),
+        Decimal("98"),
+    )
+    fetch = AsyncMock(return_value=entry)
+
+    class HistoricalClient:
+        def __init__(self, base_url):
+            self.fetch_closed_15m_candle = fetch
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+    class Feed:
+        def set_symbols(self, symbols):
+            pass
+
+        async def start(self):
+            pass
+
+        async def stop(self):
+            pass
+
+        async def __aiter__(self):
+            yield SimpleNamespace(candle=following)
+
+    monkeypatch.setattr(
+        "crypto_momentum_lab.next_gen.daemon.BinanceUsdMRestClient", HistoricalClient
+    )
+    daemon = NextGenDaemon(
+        environment="live",
+        account_label="a1",
+        db=InMemoryTradingRepository(),
+        rest_client=mock_rest_client,
+        account_config=account_config,
+    )
+    daemon._candle_feed = Feed()
+    daemon.state.batches["batch"] = PositionBatch(
+        "live",
+        "a1",
+        "batch",
+        "BTCUSDT",
+        "LONG",
+        Decimal("1"),
+        Decimal("100"),
+        start + timedelta(minutes=5),
+    )
+    daemon.state.scheduled_flatten_pending = forced
+    received = []
+    monkeypatch.setattr(
+        daemon.exit_manager,
+        "evaluate_active_batches",
+        lambda **kwargs: received.append(kwargs),
+    )
+    await daemon._run_exit_candles()
+    if forced:
+        fetch.assert_not_awaited()
+        assert received[0]["entry_candles"] == {}
+    else:
+        fetch.assert_awaited_once_with("BTCUSDT", start)
+        assert received[0]["entry_candles"] == {"batch": entry}
 
 
 @pytest.mark.asyncio
@@ -550,6 +633,8 @@ async def test_runtime_status_publish_failure_invalidates_health_and_recovers(
         rest_client=mock_rest_client,
         ws_client=BinanceUserDataStream(mock_rest_client, ws_connector=False),
     )
+    # This test isolates heartbeat recovery from the wall-clock entry window.
+    daemon.state.scheduled_risk_window = None
     daemon.state.set_system_mode(SystemMode.RUNNING)
     daemon.state.ws_connected = True
 
@@ -609,6 +694,8 @@ async def test_transient_risk_config_read_failure_keeps_exits_and_recovers(
         rest_client=mock_rest_client,
         ws_client=BinanceUserDataStream(mock_rest_client, ws_connector=False),
     )
+    # This test isolates risk-config recovery from the wall-clock entry window.
+    daemon.state.scheduled_risk_window = None
     daemon.state.risk_config = config
     daemon.state.set_system_mode(SystemMode.RUNNING)
     daemon.state.ws_connected = True

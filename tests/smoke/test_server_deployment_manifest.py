@@ -23,12 +23,9 @@ def _services():
 
 def _account(service):
     command = service.get("command", [])
-    if "--account-label" in command:
-        value = _option_value(command, "--account-label")
-    else:
-        value = service.get("environment", {}).get("CML_ACCOUNT_LABEL")
-    if value is None:
+    if "--account-label" not in command:
         return None
+    value = _option_value(command, "--account-label")
     if value.startswith("${"):
         value = value.split(":-", 1)[1].removesuffix("}")
     return value

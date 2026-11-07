@@ -7,6 +7,7 @@ from typing import Self
 
 import httpx
 
+from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.domain.universe.models import (
     ContractMetadata,
@@ -242,6 +243,45 @@ class BinanceUsdMRestClient:
                 buyer_is_maker=bool(item["m"]),
             )
             for item in response.json()
+        )
+
+    async def fetch_closed_15m_candle(
+        self, symbol: str, candle_start: datetime
+    ) -> ClosedCandle15m:
+        """Fetch one historical, fully closed exchange candle by its start."""
+        if candle_start.tzinfo is None or candle_start.utcoffset() is None:
+            raise ValueError("candle_start must be timezone-aware")
+        start = candle_start.astimezone(UTC)
+        if start.minute % 15 or start.second or start.microsecond:
+            raise ValueError("candle_start must be aligned to 15 minutes")
+        end = start + timedelta(minutes=15)
+        if end > datetime.now(UTC):
+            raise ValueError("candle has not closed")
+        response = await self._get(
+            "/fapi/v1/klines",
+            params={
+                "symbol": symbol.upper(),
+                "interval": "15m",
+                "startTime": int(start.timestamp() * 1000),
+                "endTime": int(end.timestamp() * 1000) - 1,
+                "limit": 1,
+            },
+        )
+        rows = response.json()
+        if len(rows) != 1:
+            raise ValueError("expected exactly one historical 15m candle")
+        row = rows[0]
+        if (
+            int(row[0]) != int(start.timestamp() * 1000)
+            or int(row[6]) != int(end.timestamp() * 1000) - 1
+        ):
+            raise ValueError("historical candle does not match requested interval")
+        return ClosedCandle15m(
+            symbol=symbol.upper(),
+            candle_start=start,
+            candle_end=end,
+            open_price=Decimal(str(row[1])),
+            close_price=Decimal(str(row[4])),
         )
 
     async def fetch_daily_open(

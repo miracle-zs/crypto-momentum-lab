@@ -171,7 +171,7 @@ def _build_selection(
             membership_status=membership.status.value,
         )
 
-    for symbol in sorted(position_symbols):
+    for symbol in position_symbols:
         if symbol in selected:
             continue
         selected[symbol] = SelectedSymbol(

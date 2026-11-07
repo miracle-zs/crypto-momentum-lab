@@ -198,8 +198,10 @@ def test_overview_timeout_returns_gateway_timeout() -> None:
 
 def test_account_timeout_returns_gateway_timeout() -> None:
     class SlowAccountQueries(FakeQueries):
-        async def account(self, equity_range: str = "24h") -> object:
-            del equity_range
+        async def account(
+            self, equity_range: str = "24h", account_label: str | None = None
+        ) -> object:
+            del equity_range, account_label
             raise TimeoutError("account query timed out")
 
     with TestClient(create_dashboard_app(queries=SlowAccountQueries())) as client:

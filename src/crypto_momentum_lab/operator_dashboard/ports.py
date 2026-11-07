@@ -32,7 +32,6 @@ class DashboardQueryProtocol(Protocol):
         self,
         equity_range: str = "24h",
         account_label: str | None = None,
-        environment: str | None = None,
     ) -> AccountOverviewResponse: ...
 
     async def live_accounts(self) -> LiveAccountsResponse: ...

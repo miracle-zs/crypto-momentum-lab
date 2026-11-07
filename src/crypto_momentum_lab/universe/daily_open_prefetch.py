@@ -128,7 +128,7 @@ class DailyOpenPrefetcher:
             while self._pending and not self._closed:
                 utc_day = min(self._pending)
                 symbols = self._pending[utc_day]
-                batch = frozenset(sorted(symbols, key=str)[: self._batch_size])
+                batch = frozenset(sorted(symbols)[: self._batch_size])
                 symbols.difference_update(batch)
                 if not symbols:
                     del self._pending[utc_day]
@@ -164,7 +164,7 @@ class DailyOpenPrefetcher:
             remaining.difference_update(stored)
             if not remaining:
                 return
-            batch = frozenset(sorted(remaining, key=str)[: self._batch_size])
+            batch = frozenset(sorted(remaining)[: self._batch_size])
             fetched = await self._market_data.fetch_daily_opens(
                 batch,
                 utc_day,

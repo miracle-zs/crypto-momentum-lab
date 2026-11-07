@@ -6,6 +6,7 @@ This module aggregates performance telemetry across three domains:
 3. Host & PostgreSQL resources (load average, memory, swap, connections, size)
 """
 
+import logging
 import os
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -31,6 +32,8 @@ from crypto_momentum_lab.persistence.postgres.models import (
     StrategyRuntimeEventRow,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def _read_meminfo() -> dict[str, int]:
     """Read host /proc/meminfo when running on Linux."""
@@ -45,7 +48,7 @@ def _read_meminfo() -> dict[str, int]:
                     if val_parts and val_parts[0].isdigit():
                         # meminfo reports in kB
                         result[key] = int(val_parts[0]) * 1024
-    except (FileNotFoundError, OSError, ValueError):
+    except (OSError, ValueError):
         pass
     return result
 
@@ -131,8 +134,11 @@ class PerformanceQueries:
                 ).scalar()
                 if db_size_res is not None:
                     pg_db_size = int(db_size_res)
-            except Exception:
-                pass
+            except Exception as error:
+                logger.warning(
+                    "Dashboard PostgreSQL resource query failed: %s",
+                    type(error).__name__,
+                )
 
         # Build MarketDataPerformanceResponse
         observed_at = (

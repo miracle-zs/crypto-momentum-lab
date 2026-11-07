@@ -418,7 +418,12 @@ class ResearchStateCollector:
                     collection_batch.states,
                     source_kind=collection_batch.source_kind,
                 )
-                return _receipt_for_skipped_batch(collection_batch)
+                return CollectionReceipt(
+                    source_kind=collection_batch.source_kind,
+                    sequence=collection_batch.sequence,
+                    selected_rows=0,
+                    skipped_rows=len(collection_batch.states),
+                )
 
         self._observe_received_states(
             collection_batch.states,
@@ -1044,19 +1049,4 @@ def _state_key(state: MarketState15s) -> _STATE_KEY:
         state.environment,
         state.symbol,
         require_utc(state.bucket_start, "bucket_start"),
-    )
-
-
-def _receipt_for_skipped_batch(
-    collection_batch: CollectionBatch,
-) -> CollectionReceipt:
-    return CollectionReceipt(
-        source_kind=collection_batch.source_kind,
-        sequence=(
-            collection_batch.sequence
-            if collection_batch.source_kind is SourceKind.HUB
-            else None
-        ),
-        selected_rows=0,
-        skipped_rows=len(collection_batch.states),
     )

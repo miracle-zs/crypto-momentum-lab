@@ -22,8 +22,9 @@ def rank_utc_day_returns(
 
     valid: list[tuple[MarketCandidate, Decimal]] = []
     exclusions: dict[str, str] = {}
+    ordered_candidates = sorted(candidates, key=lambda item: item.symbol)
 
-    for candidate in sorted(candidates, key=lambda item: item.symbol):
+    for candidate in ordered_candidates:
         if candidate.open_price is None:
             exclusions[candidate.symbol] = "missing_open_price"
             continue
@@ -74,7 +75,7 @@ def rank_utc_day_returns(
         )
     )
     return RankingResult(
-        candidates=tuple(sorted(candidates, key=lambda item: item.symbol)),
+        candidates=tuple(ordered_candidates),
         gainers=gainers,
         losers=losers,
         target_symbols=target_symbols,

@@ -688,7 +688,6 @@ def _state_row(
     row = market_state_15s_row(state)
     row.update(
         {
-            "symbol": state.symbol,
             "selection_reason": selected.reason,
             "gainer_rank": selected.rank,
             "utc_day_return": (

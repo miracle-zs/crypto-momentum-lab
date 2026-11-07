@@ -3,8 +3,8 @@
 The live decision loop must not perform a REST request for an auxiliary
 feature.  This module consumes shared market-data Hub snapshots
 on a background task and exposes only snapshots that had already arrived by
-the signal timestamp.  A refresh outage therefore removes a diagnostic field,
-not an execution capability.
+the signal timestamp. Cached snapshots do not expire, so a refresh outage can
+leave the diagnostic field stale; it does not affect order execution.
 """
 
 import asyncio
@@ -26,12 +26,6 @@ class QuoteVolume24hProvider(Protocol):
         *,
         as_of: datetime,
     ) -> "QuoteVolume24hSnapshot | None": ...
-
-    def metrics_snapshot(
-        self,
-        *,
-        now: datetime | None = None,
-    ) -> dict[str, object]: ...
 
 
 class QuoteVolumeSnapshotSource(AsyncIterable[QuoteVolume24hSnapshot], Protocol):
@@ -57,29 +51,24 @@ class WebSocketQuoteVolumeProvider:
         self._task: asyncio.Task[None] | None = None
         self._failure_count = 0
 
-    def oldest_snapshot_age_seconds(
-        self,
-        *,
-        now: datetime | None = None,
-    ) -> float | None:
-        oldest_at: datetime | None = None
-        for snapshot in self._snapshots.values():
-            if oldest_at is None or snapshot.fetched_at < oldest_at:
-                oldest_at = snapshot.fetched_at
-        if oldest_at is None:
-            return None
-        current = now or datetime.now(tz=UTC)
-        return max(0.0, (current - oldest_at).total_seconds())
-
     def metrics_snapshot(
         self,
         *,
         now: datetime | None = None,
     ) -> dict[str, object]:
+        oldest_at = min(
+            (snapshot.fetched_at for snapshot in self._snapshots.values()),
+            default=None,
+        )
+        oldest_age = (
+            None
+            if oldest_at is None
+            else max(0.0, ((now or datetime.now(UTC)) - oldest_at).total_seconds())
+        )
         return {
             "cached_symbol_count": len(self._snapshots),
             "total_snapshot_count": len(self._snapshots),
-            "oldest_snapshot_age_seconds": self.oldest_snapshot_age_seconds(now=now),
+            "oldest_snapshot_age_seconds": oldest_age,
             "lookup_hit_count": self._lookup_hit_count,
             "lookup_miss_count": self._lookup_miss_count,
         }

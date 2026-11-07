@@ -267,10 +267,6 @@ def create_dashboard_app(
             "dashboard authentication requires both CML_DASHBOARD_USERNAME "
             "and CML_DASHBOARD_PASSWORD"
         )
-    auth_enabled = (
-        resolved_auth_username is not None and resolved_auth_password is not None
-    )
-
     engine: AsyncEngine | None = None
     resolved_queries = queries
     if resolved_queries is None and database_url is not None:
@@ -314,11 +310,7 @@ def create_dashboard_app(
         ) -> Response:
             response = super().file_response(full_path, stat_result, scope, status_code)
             path = Path(full_path)
-            if path.is_relative_to(STATIC_DIR / "assets"):
-                response.headers["Cache-Control"] = (
-                    "public, max-age=31536000, immutable"
-                )
-            elif "vendor" in str(path):
+            if path.is_relative_to(STATIC_DIR / "assets") or "vendor" in str(path):
                 response.headers["Cache-Control"] = (
                     "public, max-age=31536000, immutable"
                 )
@@ -360,8 +352,6 @@ def create_dashboard_app(
             Depends(_BASIC_AUTH),
         ],
     ) -> None:
-        if not auth_enabled:
-            return
         if resolved_auth_username is None or resolved_auth_password is None:
             return
         if credentials is None or not (
@@ -519,17 +509,11 @@ def create_dashboard_app(
         try:
             cache_key = f"account:{account_label or 'latest'}:{equity_range}:{view}"
 
-            async def load_account() -> AccountOverviewResponse:
-                if account_label is None:
-                    return await query_service().account(equity_range)
-                return await query_service().account(
-                    equity_range,
-                    account_label=account_label,
-                )
-
             return await response_cache.get(
                 cache_key,
-                load_account,
+                lambda: query_service().account(
+                    equity_range, account_label=account_label
+                ),
                 stale_while_revalidate_seconds=default_stale_grace_seconds,
             )
         except TimeoutError as exc:

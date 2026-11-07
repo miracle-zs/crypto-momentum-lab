@@ -32,12 +32,9 @@ def _merged_live_services() -> dict[str, dict[str, object]]:
 
 def _service_account(body: dict[str, object]) -> str | None:
     command = body.get("command", [])
-    if "--account-label" in command:
-        raw = command[command.index("--account-label") + 1]
-    else:
-        raw = body.get("environment", {}).get("CML_ACCOUNT_LABEL")
-    if raw is None:
+    if "--account-label" not in command:
         return None
+    raw = command[command.index("--account-label") + 1]
     if raw.startswith("${"):
         raw = raw.split(":-", 1)[1].removesuffix("}")
     return raw

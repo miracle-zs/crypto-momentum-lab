@@ -1,6 +1,7 @@
 from dataclasses import fields
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -59,23 +60,13 @@ def test_validate_closed_states_rejects_naive_timestamp() -> None:
 
 
 @pytest.mark.asyncio
-async def test_revision_reference_inserts_are_chunked_at_the_database_safe_limit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    chunks: list[list[dict[str, object]]] = []
-
-    async def record_batch(
-        _session: object,
-        values: list[dict[str, object]],
-    ) -> None:
-        chunks.append(values)
-
-    monkeypatch.setattr(repository, "_insert_revision_refs_batch", record_batch)
+async def test_revision_reference_inserts_are_chunked_at_the_database_safe_limit() -> None:
+    session = AsyncMock()
     values = [{"revision_id": str(index)} for index in range(501)]
 
-    await repository._insert_revision_refs_idempotent(object(), values)
+    await repository._insert_revision_refs_idempotent(session, values)
 
-    assert [len(chunk) for chunk in chunks] == [500, 1]
+    assert [len(call.args[1]) for call in session.execute.await_args_list] == [500, 1]
 
 
 def fixture_state(symbol: str, bucket_index: int) -> MarketState15s:

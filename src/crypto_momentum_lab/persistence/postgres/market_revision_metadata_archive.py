@@ -126,7 +126,6 @@ class SqliteMarketRevisionMetadataArchive:
                         raise MarketRevisionArchiveError(
                             "Immutable cold revision identity conflict"
                         )
-                    values = encode_metadata(row)
             if emit_snapshot:
                 write_market_revision_archive(
                     root=self.path.parent / "metadata",

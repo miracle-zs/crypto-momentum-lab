@@ -131,9 +131,6 @@ def catalog_auto_daily(
             end_time=day_end,
             visibility_mode=MarketVisibilityMode.CANONICAL,
         )
-        if save:
-            repo.save_manifest(manifest)
-
         results.append(
             {
                 "manifest_id": manifest.manifest_id,

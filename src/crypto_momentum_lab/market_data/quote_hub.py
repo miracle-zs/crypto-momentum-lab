@@ -49,25 +49,7 @@ class MarketQuoteHubConfig:
     subscriber_queue_size: int = 256
     handshake_timeout_seconds: float = 10.0
     unavailable_timeout_seconds: float = 120.0
-    startup_timeout_seconds: float | None = None
-    recovery_timeout_seconds: float | None = None
     reconnect_delays: tuple[float, ...] = (0.0, 1.0, 5.0, 15.0)
-
-    @property
-    def effective_startup_timeout_seconds(self) -> float:
-        return (
-            self.startup_timeout_seconds
-            if self.startup_timeout_seconds is not None
-            else self.unavailable_timeout_seconds
-        )
-
-    @property
-    def effective_recovery_timeout_seconds(self) -> float:
-        return (
-            self.recovery_timeout_seconds
-            if self.recovery_timeout_seconds is not None
-            else self.unavailable_timeout_seconds
-        )
 
     def __post_init__(self) -> None:
         if not self.host.strip():
@@ -80,16 +62,6 @@ class MarketQuoteHubConfig:
             raise ValueError("handshake_timeout_seconds must be positive")
         if self.unavailable_timeout_seconds <= 0:
             raise ValueError("unavailable_timeout_seconds must be positive")
-        if (
-            self.startup_timeout_seconds is not None
-            and self.startup_timeout_seconds <= 0
-        ):
-            raise ValueError("startup_timeout_seconds must be positive")
-        if (
-            self.recovery_timeout_seconds is not None
-            and self.recovery_timeout_seconds <= 0
-        ):
-            raise ValueError("recovery_timeout_seconds must be positive")
         if not self.reconnect_delays or any(
             delay < 0 for delay in self.reconnect_delays
         ):
@@ -110,18 +82,9 @@ class MarketQuoteHub:
     def __init__(self, config: MarketQuoteHubConfig = MarketQuoteHubConfig()) -> None:
         self._config = config
         self._server: Server | None = None
-        self._bound_host: str | None = None
-        self._bound_port: int | None = None
         self._subscribers: dict[int, _Subscriber] = {}
         self._subscriber_lock = asyncio.Lock()
         self._latest_volumes: dict[tuple[str, str], QuoteVolume24hSnapshot] = {}
-
-    @property
-    def url(self) -> str:
-        if self._bound_host is None or self._bound_port is None:
-            raise RuntimeError("market quote hub is not started")
-        host = "127.0.0.1" if self._bound_host in {"0.0.0.0", ""} else self._bound_host
-        return f"ws://{host}:{self._bound_port}"
 
     async def start(self) -> None:
         if self._server is not None:
@@ -138,12 +101,10 @@ class MarketQuoteHub:
         if not sockets:
             raise RuntimeError("market quote hub did not bind a socket")
         address = sockets[0].getsockname()
-        self._bound_host = str(address[0])
-        self._bound_port = int(address[1])
         log.info(
             "market_quote_hub_started",
-            host=self._bound_host,
-            port=self._bound_port,
+            host=str(address[0]),
+            port=int(address[1]),
         )
 
     async def stop(self) -> None:
@@ -166,16 +127,10 @@ class MarketQuoteHub:
         )
         if writer_tasks:
             await asyncio.gather(*writer_tasks, return_exceptions=True)
-        self._bound_host = None
-        self._bound_port = None
-
     async def publish_volume(
         self,
-        snapshot: QuoteVolume24hSnapshot | tuple[QuoteVolume24hSnapshot, ...],
+        snapshots: tuple[QuoteVolume24hSnapshot, ...],
     ) -> None:
-        snapshots = (
-            (snapshot,) if isinstance(snapshot, QuoteVolume24hSnapshot) else snapshot
-        )
         for item in snapshots:
             self._latest_volumes[(item.environment, item.symbol)] = item
             message = encode_quote_volume(item)
@@ -317,7 +272,6 @@ class WebSocketMarketQuoteVolumeSource:
         environment: str,
         consumer_id: str,
         config: MarketQuoteHubConfig = MarketQuoteHubConfig(),
-        availability_clock: StreamAvailabilityClock | None = None,
     ) -> None:
         if not url.strip():
             raise ValueError("url must not be empty")
@@ -329,20 +283,16 @@ class WebSocketMarketQuoteVolumeSource:
         self._environment = environment
         self._consumer_id = consumer_id
         self._config = config
-        self._availability_clock = availability_clock or StreamAvailabilityClock(
+        self._availability_clock = StreamAvailabilityClock(
             StreamAvailabilityConfig(
-                startup_timeout_seconds=self._config.effective_startup_timeout_seconds,
+                startup_timeout_seconds=self._config.unavailable_timeout_seconds,
                 disrupted_timeout_seconds=self._config.unavailable_timeout_seconds,
-                recovery_timeout_seconds=self._config.effective_recovery_timeout_seconds,
+                recovery_timeout_seconds=self._config.unavailable_timeout_seconds,
             ),
             stream_name="market quote volume hub",
             clock=lambda: time.monotonic(),
         )
         self._stopping = False
-
-    @property
-    def availability_clock(self) -> StreamAvailabilityClock:
-        return self._availability_clock
 
     def stop(self) -> None:
         self._stopping = True
@@ -483,7 +433,7 @@ def encode_quote_volume(snapshot: QuoteVolume24hSnapshot) -> str:
 
 
 def decode_quote_volume(
-    payload: dict[str, object] | str | bytes,
+    payload: str | bytes,
     *,
     expected_environment: str | None = None,
 ) -> QuoteVolume24hSnapshot:
@@ -507,9 +457,7 @@ def decode_quote_volume(
     )
 
 
-def _decode_object(raw_message: str | bytes | dict[str, object]) -> dict[str, object]:
-    if isinstance(raw_message, dict):
-        return raw_message
+def _decode_object(raw_message: str | bytes) -> dict[str, object]:
     if isinstance(raw_message, bytes):
         raw_message = raw_message.decode("utf-8")
     if not isinstance(raw_message, str):

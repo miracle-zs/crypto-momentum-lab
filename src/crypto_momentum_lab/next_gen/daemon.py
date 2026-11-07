@@ -3,13 +3,16 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import structlog
 
+from crypto_momentum_lab.domain.strategy.position_exit import (
+    first_candle_start_after_entry,
+)
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     BinanceClosedCandle15mFeed,
     ClosedCandle15mFeedConfig,
@@ -17,8 +20,10 @@ from crypto_momentum_lab.live_rollout.closed_candle_feed import (
 from crypto_momentum_lab.live_rollout.runtime_manifest import LiveRuntimeAccount
 from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
     ScheduledRiskWindowConfig,
+    ScheduledRiskWindowPhase,
 )
 from crypto_momentum_lab.live_rollout.volume import WebSocketQuoteVolumeProvider
+from crypto_momentum_lab.market_data.binance.rest import BinanceUsdMRestClient
 from crypto_momentum_lab.market_data.quote_hub import WebSocketMarketQuoteVolumeSource
 from crypto_momentum_lab.next_gen.client import (
     BinanceOrderRejectedError,
@@ -168,14 +173,50 @@ class NextGenDaemon:
             if self.stop_event.is_set():
                 return
             await feed.start()
-            async for event in feed:
-                self.exit_manager.evaluate_active_batches(
-                    # A final exchange candle is closed even if the host clock
-                    # reports receipt just before its nominal end.
-                    now=event.candle.candle_end,
-                    current_prices={event.candle.symbol: event.candle.close_price},
-                    closed_candle=event.candle,
-                )
+            async with BinanceUsdMRestClient(
+                get_binance_urls(self.environment)[0]
+            ) as history:
+                async for event in feed:
+                    candle = event.candle
+                    entry_candles = {}
+                    schedule = self.state.scheduled_risk_window
+                    forced = (
+                        self.state.is_draining
+                        or self.state.scheduled_flatten_pending
+                        or (
+                            schedule is not None
+                            and schedule.phase(candle.candle_end)
+                            in {
+                                ScheduledRiskWindowPhase.FLATTENING,
+                                ScheduledRiskWindowPhase.DEADLINE,
+                                ScheduledRiskWindowPhase.VERIFYING,
+                            }
+                        )
+                    )
+                    if not forced and candle.close_price < candle.open_price:
+                        for batch in tuple(self.state.batches.values()):
+                            if (
+                                batch.symbol == candle.symbol
+                                and batch.position_side == "LONG"
+                                and batch.quantity > 0
+                                and batch.status == "ACTIVE"
+                                and candle.candle_start
+                                == first_candle_start_after_entry(batch.entry_bar_time)
+                            ):
+                                entry_candles[
+                                    batch.batch_id
+                                ] = await history.fetch_closed_15m_candle(
+                                    batch.symbol,
+                                    candle.candle_start - timedelta(minutes=15),
+                                )
+                    self.exit_manager.evaluate_active_batches(
+                        # A final exchange candle is closed even if the host clock
+                        # reports receipt just before its nominal end.
+                        now=candle.candle_end,
+                        current_prices={candle.symbol: candle.close_price},
+                        closed_candle=candle,
+                        entry_candles=entry_candles,
+                    )
         finally:
             await feed.stop()
 
@@ -371,8 +412,7 @@ class NextGenDaemon:
         finally:
             for f in (account_health_file, status_file):
                 try:
-                    if f.exists():  # noqa: ASYNC240
-                        f.unlink(missing_ok=True)  # noqa: ASYNC240
+                    f.unlink(missing_ok=True)  # noqa: ASYNC240
                 except Exception:
                     pass
 

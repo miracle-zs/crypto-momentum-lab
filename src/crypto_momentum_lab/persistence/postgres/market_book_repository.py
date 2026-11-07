@@ -146,21 +146,8 @@ class PostgresMarketBookRepository:
                         f"invalid: {error}"
                     ) from error
             state = market_state_from_payload(payload)
-            ref = MarketRevisionRef(
-                scope=row.scope,
-                symbol=row.symbol,
-                interval=row.interval,
-                bucket_start=row.bucket_start,
-                bucket_end=row.bucket_end,
-                revision_id=row.revision_id,
-                content_hash=row.content_hash,
-                published_at=row.published_at,
-                observed_at=_observed_at_from_lineage(row.lineage),
-                source_epoch=row.source_epoch,
-                visibility_mode=MarketVisibilityMode(row.visibility_mode),
-            )
             return MarketEnvelope(
-                ref=ref,
+                ref=_ref_from_row(row),
                 state=state,
                 lineage=row.lineage,
                 data_complete=state.data_complete,
@@ -194,19 +181,7 @@ class PostgresMarketBookRepository:
                         break
             if row is None:
                 return None
-            return MarketRevisionRef(
-                scope=row.scope,
-                symbol=row.symbol,
-                interval=row.interval,
-                bucket_start=row.bucket_start,
-                bucket_end=row.bucket_end,
-                revision_id=row.revision_id,
-                content_hash=row.content_hash,
-                published_at=row.published_at,
-                observed_at=_observed_at_from_lineage(row.lineage),
-                source_epoch=row.source_epoch,
-                visibility_mode=MarketVisibilityMode(row.visibility_mode),
-            )
+            return _ref_from_row(row)
 
     def set_canonical_ref(
         self,
@@ -278,22 +253,7 @@ class PostgresMarketBookRepository:
                     if row.revision_id not in hot_ids
                 )
                 rows.sort(key=lambda row: row.published_at)
-            return tuple(
-                MarketRevisionRef(
-                    scope=row.scope,
-                    symbol=row.symbol,
-                    interval=row.interval,
-                    bucket_start=row.bucket_start,
-                    bucket_end=row.bucket_end,
-                    revision_id=row.revision_id,
-                    content_hash=row.content_hash,
-                    published_at=row.published_at,
-                    observed_at=_observed_at_from_lineage(row.lineage),
-                    source_epoch=row.source_epoch,
-                    visibility_mode=MarketVisibilityMode(row.visibility_mode),
-                )
-                for row in rows
-            )
+            return tuple(_ref_from_row(row) for row in rows)
 
     def save_manifest(self, manifest: DatasetManifest) -> None:
         with self._session_factory() as session:
@@ -543,19 +503,7 @@ class PostgresMarketBookRepository:
             for row in rows:
                 key = (row.symbol, row.bucket_start)
                 if key not in result:
-                    result[key] = MarketRevisionRef(
-                        scope=row.scope,
-                        symbol=row.symbol,
-                        interval=row.interval,
-                        bucket_start=row.bucket_start,
-                        bucket_end=row.bucket_end,
-                        revision_id=row.revision_id,
-                        content_hash=row.content_hash,
-                        published_at=row.published_at,
-                        observed_at=_observed_at_from_lineage(row.lineage),
-                        source_epoch=row.source_epoch,
-                        visibility_mode=MarketVisibilityMode(row.visibility_mode),
-                    )
+                    result[key] = _ref_from_row(row)
             if self._metadata_archive is not None:
                 suppressed = set(
                     session.scalars(
@@ -574,19 +522,7 @@ class PostgresMarketBookRepository:
                 ):
                     key = (cold.symbol, cold.bucket_start)
                     if key not in result and cold.revision_id not in suppressed:
-                        result[key] = MarketRevisionRef(
-                            scope=cold.scope,
-                            symbol=cold.symbol,
-                            interval=cold.interval,
-                            bucket_start=cold.bucket_start,
-                            bucket_end=cold.bucket_end,
-                            revision_id=cold.revision_id,
-                            content_hash=cold.content_hash,
-                            published_at=cold.published_at,
-                            observed_at=_observed_at_from_lineage(cold.lineage),
-                            source_epoch=cold.source_epoch,
-                            visibility_mode=MarketVisibilityMode(cold.visibility_mode),
-                        )
+                        result[key] = _ref_from_row(cold)
             return result
 
     def list_manifests(

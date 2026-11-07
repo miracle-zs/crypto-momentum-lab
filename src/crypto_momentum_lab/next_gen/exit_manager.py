@@ -11,6 +11,7 @@ import structlog
 from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
 from crypto_momentum_lab.domain.strategy.models import StrategySide
 from crypto_momentum_lab.domain.strategy.position_exit import (
+    double_bearish_exit_reason,
     position_exit_reason,
 )
 from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
@@ -359,6 +360,7 @@ class ExitManager:
         now: datetime | None = None,
         current_prices: dict[str, Decimal] | None = None,
         closed_candle: ClosedCandle15m | None = None,
+        entry_candles: dict[str, ClosedCandle15m] | None = None,
     ) -> list[str]:
         """评估当前所有活跃批次，触发到期退出或 Drain 排空退出"""
         if not self._state.can_submit_exit_order():
@@ -414,6 +416,21 @@ class ExitManager:
                     side=StrategySide(batch.position_side.lower()),
                     closed_candle=closed_candle,
                 )
+                if (
+                    reason == "candle_15m_bearish"
+                    and entry_candles is not None
+                    and batch.batch_id in entry_candles
+                    and closed_candle is not None
+                ):
+                    double_reason = double_bearish_exit_reason(
+                        opened_at=batch.entry_bar_time,
+                        symbol=batch.symbol,
+                        side=StrategySide(batch.position_side.lower()),
+                        entry_candle=entry_candles[batch.batch_id],
+                        closed_candle=closed_candle,
+                    )
+                    if double_reason is not None:
+                        reason = double_reason
                 if reason is not None:
                     should_exit = True
                     exit_reason = reason
@@ -436,6 +453,7 @@ class ExitManager:
                 )
                 immediate = (
                     forced
+                    or exit_reason == "candle_15m_double_bearish"
                     or self.grace_period_sec == 0
                     or self.grace_profit_pct == 0
                     or (

@@ -415,7 +415,7 @@ def _calculate_lag_percentiles(samples: list[float]) -> dict[str, float]:
 
     def _percentile(p: float) -> float:
         idx = int(round((n - 1) * p))
-        return sorted_samples[min(max(idx, 0), n - 1)]
+        return sorted_samples[idx]
 
     return {
         "p50": round(_percentile(0.50) * 1000, 3),

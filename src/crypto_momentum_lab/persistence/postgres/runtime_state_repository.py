@@ -1,10 +1,10 @@
-from collections.abc import Collection, Mapping
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import cast
 
-from sqlalchemy import func, or_, select, text, tuple_, update
+from sqlalchemy import func, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -26,7 +26,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
 )
 
 _MAX_RUNTIME_STATE_INSERT_ROWS = 500
-RUNTIME_STATE_READY_CHANNEL = "cml_runtime_state_ready"
 type _RuntimeStateKey = tuple[str, str, datetime]
 
 
@@ -57,15 +56,8 @@ def runtime_state_row(
     source_watermark_at: datetime,
     input_sequence_min: int | None,
     input_sequence_max: int | None,
-    closure_reason: str = "watermark_elapsed",
-    created_at: datetime | None = None,
-    updated_at: datetime | None = None,
 ) -> dict[str, object]:
     _require_aware(source_watermark_at, "source_watermark_at")
-    if created_at is not None:
-        _require_aware(created_at, "created_at")
-    if updated_at is not None:
-        _require_aware(updated_at, "updated_at")
     captured_at = datetime.now(UTC)
     return {
         "environment": state.environment,
@@ -97,10 +89,10 @@ def runtime_state_row(
         "source_event_count": state.source_event_count,
         "first_received_at": state.first_received_at,
         "last_received_at": state.last_received_at,
-        "created_at": captured_at if created_at is None else created_at,
-        "updated_at": captured_at if updated_at is None else updated_at,
+        "created_at": captured_at,
+        "updated_at": captured_at,
         "source_watermark_at": source_watermark_at,
-        "closure_reason": closure_reason,
+        "closure_reason": "watermark_elapsed",
         "input_sequence_min": input_sequence_min,
         "input_sequence_max": input_sequence_max,
         "data_complete": state.data_complete,
@@ -224,14 +216,6 @@ class PostgresRuntimeMarketStateRepository:
                         }
                     )
                 await _insert_revision_refs_idempotent(session, revision_values)
-                for environment in sorted({state.environment for state in states}):
-                    await session.execute(
-                        text("SELECT pg_notify(:channel, :payload)"),
-                        {
-                            "channel": RUNTIME_STATE_READY_CHANNEL,
-                            "payload": environment,
-                        },
-                    )
 
     async def mark_incomplete(self, gap: AggTradeGap) -> None:
         previous_bucket = _bucket_start_15s(gap.previous_event_at)
@@ -325,8 +309,7 @@ class PostgresRuntimeMarketStateRepository:
                             },
                         }
                     )
-                if revision_values:
-                    await _insert_revision_refs_idempotent(session, revision_values)
+                await _insert_revision_refs_idempotent(session, revision_values)
 
     async def load_after(
         self,
@@ -334,8 +317,6 @@ class PostgresRuntimeMarketStateRepository:
         environment: str,
         cursor: _RuntimeStateCursor,
         limit: int,
-        upper_bound: datetime | None = None,
-        symbols: Collection[str] | None = None,
     ) -> tuple[MarketState15s, ...]:
         if limit <= 0:
             raise ValueError("limit must be positive")
@@ -343,16 +324,6 @@ class PostgresRuntimeMarketStateRepository:
             raise ValueError("environment must not be empty")
         if cursor.bucket_start is not None:
             _require_aware(cursor.bucket_start, "cursor.bucket_start")
-        if upper_bound is not None:
-            _require_aware(upper_bound, "upper_bound")
-        normalized_symbols: tuple[str, ...] | None = None
-        if symbols is not None:
-            normalized_symbols = tuple(
-                sorted(symbol.strip() for symbol in symbols if symbol.strip())
-            )
-            if not normalized_symbols:
-                return ()
-
         statement = (
             select(RuntimeMarketState15sRow)
             .where(RuntimeMarketState15sRow.environment == environment)
@@ -370,15 +341,6 @@ class PostgresRuntimeMarketStateRepository:
                     (RuntimeMarketState15sRow.bucket_start == cursor.bucket_start)
                     & (RuntimeMarketState15sRow.symbol > symbol),
                 )
-            )
-
-        if upper_bound is not None:
-            statement = statement.where(
-                RuntimeMarketState15sRow.bucket_start <= upper_bound
-            )
-        if normalized_symbols is not None:
-            statement = statement.where(
-                RuntimeMarketState15sRow.symbol.in_(normalized_symbols)
             )
 
         async with self._session_factory() as session:
@@ -414,20 +376,10 @@ async def _insert_revision_refs_idempotent(
 ) -> None:
     """Keep revision-reference inserts below asyncpg's bind-parameter limit."""
     for start in range(0, len(values), _MAX_RUNTIME_STATE_INSERT_ROWS):
-        await _insert_revision_refs_batch(
-            session,
+        await session.execute(
+            insert(MarketRevisionRefRow.__table__).on_conflict_do_nothing(),
             values[start : start + _MAX_RUNTIME_STATE_INSERT_ROWS],
         )
-
-
-async def _insert_revision_refs_batch(
-    session: AsyncSession,
-    values: list[dict[str, object]],
-) -> None:
-    await session.execute(
-        insert(MarketRevisionRefRow.__table__).on_conflict_do_nothing(),
-        values,
-    )
 
 
 async def _insert_batch_idempotent(
@@ -480,7 +432,7 @@ async def _insert_batch_idempotent(
         )
         existing_values = {name: getattr(existing, name) for name in compare_keys}
         new_values = {name: item[name] for name in compare_keys}
-        if not _core_fields_match(existing_values, new_values):
+        if _normalize_for_compare(existing_values) != _normalize_for_compare(new_values):
             incoming_is_synthetic = _is_synthetic_runtime_state_values(item)
             existing_is_synthetic = _is_synthetic_runtime_state_row(existing)
             if incoming_is_synthetic and not existing_is_synthetic:
@@ -602,13 +554,6 @@ def _apply_gap_completeness(
         data_complete=False,
         missing_agg_trade_count=max(state.missing_agg_trade_count, missing_count),
     )
-
-
-def _core_fields_match(
-    left: dict[str, object],
-    right: dict[str, object],
-) -> bool:
-    return _normalize_for_compare(left) == _normalize_for_compare(right)
 
 
 def _normalize_for_compare(value: object) -> object:

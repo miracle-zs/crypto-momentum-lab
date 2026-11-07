@@ -117,10 +117,8 @@ async def test_market_state_hub_metrics_keep_latest_bucket_start_monotonic() -> 
     assert hub.metrics.latest_bucket_start == newer.bucket_start
 
 
-@pytest.mark.parametrize("rewarm_on_stream_reset", [False, True])
 async def test_batch_source_can_fail_closed_with_replay_metadata(
     monkeypatch,
-    rewarm_on_stream_reset,
 ) -> None:
     messages = [
         json.dumps(
@@ -160,7 +158,6 @@ async def test_batch_source_can_fail_closed_with_replay_metadata(
         consumer_id="test-collector",
         config=MarketStateHubConfig(reconnect_delays=(0,)),
         fail_on_replay_unavailable=True,
-        rewarm_on_stream_reset=rewarm_on_stream_reset,
         on_connection_change=lambda *_args: None,
     )
     source.set_resume_cursor(stream_id="stream-a", sequence=5)
@@ -177,10 +174,8 @@ async def test_batch_source_can_fail_closed_with_replay_metadata(
     assert raised.value.stream_id == "stream-a"
 
 
-@pytest.mark.parametrize("rewarm_on_stream_reset", [False, True])
 async def test_durable_market_state_source_requires_ready_stream_epoch(
     monkeypatch,
-    rewarm_on_stream_reset,
 ) -> None:
     messages = [
         json.dumps(
@@ -217,7 +212,6 @@ async def test_durable_market_state_source_requires_ready_stream_epoch(
         consumer_id="test-live",
         config=MarketStateHubConfig(reconnect_delays=(0,)),
         fail_on_replay_unavailable=True,
-        rewarm_on_stream_reset=rewarm_on_stream_reset,
         on_connection_change=lambda *_args: None,
     )
     iterator = source.batches()
@@ -330,7 +324,6 @@ async def test_market_state_source_reports_consumed_batch_cursor(monkeypatch) ->
         "connect",
         lambda *_args, **_kwargs: FakeConnection(),
     )
-    observed: list[tuple[str, int]] = []
     batches: list[object] = []
     source = WebSocketMarketStateSource(
         url="ws://unused",
@@ -338,9 +331,6 @@ async def test_market_state_source_reports_consumed_batch_cursor(monkeypatch) ->
         consumer_id="test-live",
         config=MarketStateHubConfig(reconnect_delays=(0,)),
         on_batch=batches.append,  # type: ignore[arg-type]
-        on_cursor_change=lambda stream_id, sequence: observed.append(
-            (stream_id, sequence)
-        ),
         fail_on_replay_unavailable=True,
     )
     iterator = source.batches()
@@ -353,7 +343,8 @@ async def test_market_state_source_reports_consumed_batch_cursor(monkeypatch) ->
         source.stop()
         await iterator.aclose()
 
-    assert observed == [("stream-a", 1)]
+    assert source.stream_id == "stream-a"
+    assert source.last_sequence == 1
     assert len(batches) == 1
 
 
@@ -721,7 +712,7 @@ async def test_market_state_source_reader_skips_backlog_when_consumer_is_slow(
     try:
         assert await anext(iterator) == states[0]
         # Give the independent reader a chance to drain the socket while the
-        # strategy consumer is between state-processing calls.
+        # consumer is between state-processing calls.
         await asyncio.sleep(0.01)
         assert await anext(iterator) == states[4]
     finally:

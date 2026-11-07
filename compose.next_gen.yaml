@@ -138,7 +138,6 @@ services:
     container_name: cml-nextgen-strategy-primary
     environment:
       <<: *nextgen-account-environment
-      CML_ACCOUNT_LABEL: primary
       BINANCE_READ_API_KEY: ${BINANCE_READ_API_KEY:?set BINANCE_READ_API_KEY}
       BINANCE_READ_API_SECRET: ${BINANCE_READ_API_SECRET:?set BINANCE_READ_API_SECRET}
       BINANCE_TRADE_API_KEY: ${BINANCE_TRADE_API_KEY_PRIMARY:-${BINANCE_TRADE_API_KEY:?set BINANCE_TRADE_API_KEY}}
@@ -158,7 +157,6 @@ services:
     container_name: cml-nextgen-strategy-account-2
     environment:
       <<: *nextgen-account-environment
-      CML_ACCOUNT_LABEL: account-2
       BINANCE_READ_API_KEY: ${BINANCE_READ_API_KEY_ACCOUNT_2:?set BINANCE_READ_API_KEY_ACCOUNT_2}
       BINANCE_READ_API_SECRET: ${BINANCE_READ_API_SECRET_ACCOUNT_2:?set BINANCE_READ_API_SECRET_ACCOUNT_2}
       BINANCE_TRADE_API_KEY: ${BINANCE_TRADE_API_KEY_ACCOUNT_2:?set BINANCE_TRADE_API_KEY_ACCOUNT_2}
@@ -178,7 +176,6 @@ services:
     container_name: cml-nextgen-strategy-account-3
     environment:
       <<: *nextgen-account-environment
-      CML_ACCOUNT_LABEL: account-3
       BINANCE_READ_API_KEY: ${BINANCE_READ_API_KEY_ACCOUNT_3:?set BINANCE_READ_API_KEY_ACCOUNT_3}
       BINANCE_READ_API_SECRET: ${BINANCE_READ_API_SECRET_ACCOUNT_3:?set BINANCE_READ_API_SECRET_ACCOUNT_3}
       BINANCE_TRADE_API_KEY: ${BINANCE_TRADE_API_KEY_ACCOUNT_3:?set BINANCE_TRADE_API_KEY_ACCOUNT_3}
@@ -198,7 +195,6 @@ services:
     container_name: cml-nextgen-strategy-account-4
     environment:
       <<: *nextgen-account-environment
-      CML_ACCOUNT_LABEL: account-4
       BINANCE_READ_API_KEY: ${BINANCE_READ_API_KEY_ACCOUNT_4:?set BINANCE_READ_API_KEY_ACCOUNT_4}
       BINANCE_READ_API_SECRET: ${BINANCE_READ_API_SECRET_ACCOUNT_4:?set BINANCE_READ_API_SECRET_ACCOUNT_4}
       BINANCE_TRADE_API_KEY: ${BINANCE_TRADE_API_KEY_ACCOUNT_4:?set BINANCE_TRADE_API_KEY_ACCOUNT_4}

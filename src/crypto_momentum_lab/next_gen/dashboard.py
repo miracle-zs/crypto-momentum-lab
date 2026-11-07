@@ -303,10 +303,9 @@ class NextGenDashboardQueries:
         self,
         equity_range: str = "24h",
         account_label: str | None = None,
-        environment: str | None = None,
     ) -> AccountOverviewResponse:
         label = next(iter(self._accounts)) if account_label is None else account_label
-        if label not in self._accounts or environment not in (None, "live"):
+        if label not in self._accounts:
             raise ValueError("Unknown NextGen live account")
         config = self._accounts[label]
         account_statuses: dict[
@@ -658,7 +657,7 @@ class NextGenDashboardQueries:
             summary={
                 "position_count": len(batches),
                 "open_order_count": len(open_orders),
-                "recent_trade_count": sum(row.filled_quantity > 0 for row in orders),
+                "recent_trade_count": len(trade_rows),
                 "usdt_wallet_balance": None
                 if payload is None
                 else payload["balances"].get("USDT"),

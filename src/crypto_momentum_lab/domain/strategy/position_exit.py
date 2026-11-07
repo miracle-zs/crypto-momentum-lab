@@ -21,6 +21,29 @@ def first_candle_start_after_entry(opened_at: datetime) -> datetime:
     return candle_start + timedelta(minutes=15)
 
 
+def double_bearish_exit_reason(
+    *,
+    opened_at: datetime,
+    symbol: str,
+    side: StrategySide,
+    entry_candle: ClosedCandle15m,
+    closed_candle: ClosedCandle15m,
+) -> str | None:
+    """Identify the first two consecutive bearish candles for a long entry."""
+    next_start = first_candle_start_after_entry(opened_at)
+    if (
+        side is StrategySide.LONG
+        and entry_candle.symbol == symbol
+        and closed_candle.symbol == symbol
+        and entry_candle.candle_end == next_start
+        and closed_candle.candle_start == next_start
+        and entry_candle.close_price < entry_candle.open_price
+        and closed_candle.close_price < closed_candle.open_price
+    ):
+        return "candle_15m_double_bearish"
+    return None
+
+
 def position_exit_reason(
     *,
     held_until: datetime,

@@ -1,4 +1,4 @@
-"""Tests for the deploy/monitor maintenance-window handshake."""
+"""Tests for maintenance-window markers and monitor behavior."""
 
 import subprocess
 import sys
@@ -14,7 +14,6 @@ from deploy.ops.cml_ops_monitor import (
 from deploy.ops.maintenance_window import (
     clear_maintenance_window,
     default_maintenance_path,
-    is_maintenance_active,
     read_maintenance_window,
     write_maintenance_window,
 )
@@ -37,8 +36,8 @@ def test_window_round_trips_and_expires(tmp_path: Path) -> None:
     assert window is not None
     assert window.reason == "deploy"
 
-    assert is_maintenance_active(path, now=_START + timedelta(seconds=60))
-    assert not is_maintenance_active(path, now=_START + timedelta(seconds=901))
+    assert window.is_active(now=_START + timedelta(seconds=60))
+    assert not window.is_active(now=_START + timedelta(seconds=901))
 
 
 def test_window_requires_positive_ttl(tmp_path: Path) -> None:
@@ -60,11 +59,9 @@ def test_missing_or_corrupt_window_fails_open(tmp_path: Path) -> None:
 
     path = tmp_path / "maintenance.json"
     assert read_maintenance_window(path) is None
-    assert not is_maintenance_active(path, now=_START)
 
     path.write_text("{not json", encoding="utf-8")
     assert read_maintenance_window(path) is None
-    assert not is_maintenance_active(path, now=_START)
 
     # Structurally wrong payloads are treated the same way.
     path.write_text('{"started_at": "not-a-time", "expected_seconds": 60}')
@@ -79,11 +76,11 @@ def test_clearing_a_window_is_idempotent(tmp_path: Path) -> None:
     write_maintenance_window(path, started_at=_START, expected_seconds=60.0)
     clear_maintenance_window(path)
     assert not path.exists()
-    clear_maintenance_window(path)  # a deploy may never have declared one
+    clear_maintenance_window(path)  # clearing a missing marker is safe
 
 
 def test_only_lifecycle_alerts_are_silenced() -> None:
-    """Churn alerts go quiet during a deploy; memory and DB alerts do not."""
+    """A declared window suppresses churn alerts, not memory or DB alerts."""
 
     # Lifecycle churn: exactly the chain one deploy produced on account-2.
     assert _is_maintenance_noise("container_unhealthy")
@@ -184,7 +181,7 @@ def test_maintenance_does_not_hide_missing_postgres(monkeypatch, tmp_path):
 
 
 def test_default_path_honours_the_override(monkeypatch) -> None:
-    """The deploy script and the monitor must agree on the marker's location."""
+    """The monitor uses the configured marker location when provided."""
 
     monkeypatch.setenv("CML_MAINTENANCE_WINDOW_FILE", "/tmp/probe-window.json")
     assert default_maintenance_path() == Path("/tmp/probe-window.json")

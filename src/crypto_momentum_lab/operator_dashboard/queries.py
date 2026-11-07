@@ -179,12 +179,10 @@ class DashboardQueries:
         self,
         equity_range: str = "24h",
         account_label: str | None = None,
-        environment: str | None = None,
     ) -> AccountOverviewResponse:
         return await self._nextgen_queries.account(
             equity_range=equity_range,
             account_label=account_label,
-            environment=environment,
         )
 
     async def risk_execution(self) -> RiskExecutionResponse:

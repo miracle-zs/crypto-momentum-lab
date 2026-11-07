@@ -84,7 +84,13 @@ def resolve_binance_credentials(
     reference = _reference_for_role(config, role)
     missing = _missing_names(reference, values)
     if not missing:
-        return _resolved_from_reference(role, reference, values)
+        return ResolvedBinanceCredentials(
+            role=role,
+            api_key_env=reference.api_key_env,
+            api_secret_env=reference.api_secret_env,
+            api_key=values[reference.api_key_env],
+            api_secret=values[reference.api_secret_env],
+        )
 
     joined_names = ", ".join(missing)
     raise CredentialResolutionError(
@@ -176,24 +182,6 @@ def _missing_names(
             (reference.api_secret_env, values.get(reference.api_secret_env)),
         )
         if value is None or not value.strip()
-    )
-
-
-def _resolved_from_reference(
-    role: BinanceCredentialRole,
-    reference: BinanceCredentialRef,
-    values: Mapping[str, str],
-) -> ResolvedBinanceCredentials:
-    # Callers reach this helper only after _missing_names has established the
-    # invariant; indexing keeps the invariant explicit for type checkers.
-    api_key = values[reference.api_key_env]
-    api_secret = values[reference.api_secret_env]
-    return ResolvedBinanceCredentials(
-        role=role,
-        api_key_env=reference.api_key_env,
-        api_secret_env=reference.api_secret_env,
-        api_key=api_key,
-        api_secret=api_secret,
     )
 
 

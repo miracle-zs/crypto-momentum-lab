@@ -172,23 +172,16 @@ class WindowMaterializer:
             pending_sequences = [
                 receipt.sequence
                 for receipt, _ in self._staged_records.values()
-                if receipt.sequence is not None
             ]
             min_pending_seq = min(pending_sequences) if pending_sequences else None
 
             ready_empty: list[DurableReceipt] = []
             remaining_empty: list[DurableReceipt] = []
             for empty in self._empty_receipts:
-                if empty.sequence is not None:
-                    if min_pending_seq is None or empty.sequence < min_pending_seq:
-                        ready_empty.append(empty)
-                    else:
-                        remaining_empty.append(empty)
+                if min_pending_seq is None or empty.sequence < min_pending_seq:
+                    ready_empty.append(empty)
                 else:
-                    if not self._staged_records:
-                        ready_empty.append(empty)
-                    else:
-                        remaining_empty.append(empty)
+                    remaining_empty.append(empty)
 
             ready_receipts.extend(ready_empty)
             self._empty_receipts = remaining_empty

@@ -1,6 +1,5 @@
 """Durable paging and recovery reads consumed by market-state use cases."""
 
-from collections.abc import Collection
 from datetime import datetime
 from typing import Protocol
 
@@ -19,12 +18,6 @@ class RuntimeMarketStatePageReader(Protocol):
         environment: str,
         cursor: RuntimeStateCursor,
         limit: int,
-        upper_bound: datetime | None = None,
-        symbols: Collection[str] | None = None,
     ) -> tuple[MarketState15s, ...]:
-        """Read after the exclusive tuple cursor, ordered by bucket then symbol.
-
-        upper_bound is inclusive; absent symbol filtering reads all symbols,
-        whereas an empty symbol collection selects none.
-        """
+        """Read after the exclusive tuple cursor, ordered by bucket then symbol."""
         ...

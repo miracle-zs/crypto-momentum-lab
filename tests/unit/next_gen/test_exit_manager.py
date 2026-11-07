@@ -64,8 +64,14 @@ async def exit_setup():
 async def test_ambiguous_exit_does_not_freeze_other_symbols(exit_setup):
     state, repo, rest, manager = exit_setup
     batch = PositionBatch(
-        "live", "a1", "doubt_batch", "BTCUSDT", "LONG", Decimal("1"),
-        Decimal("65000"), datetime.now(UTC),
+        "live",
+        "a1",
+        "doubt_batch",
+        "BTCUSDT",
+        "LONG",
+        Decimal("1"),
+        Decimal("65000"),
+        datetime.now(UTC),
     )
     state.batches[batch.batch_id] = batch
     manager._pending_exits[batch.batch_id] = (Decimal("66000"), 7200, False)
@@ -87,8 +93,14 @@ async def test_ambiguous_exit_does_not_freeze_other_symbols(exit_setup):
     assert batch.exiting_quantity == Decimal("1")
     assert rest.post_order.await_count == 1
     other = PositionBatch(
-        "live", "a1", "other_batch", "ETHUSDT", "LONG", Decimal("1"),
-        Decimal("3000"), datetime.now(UTC),
+        "live",
+        "a1",
+        "other_batch",
+        "ETHUSDT",
+        "LONG",
+        Decimal("1"),
+        Decimal("3000"),
+        datetime.now(UTC),
     )
     state.batches[other.batch_id] = other
     manager._pending_exits[other.batch_id] = (None, 0, True)
@@ -104,8 +116,14 @@ async def test_exit_connection_failure_releases_reservation_and_retries_later(
 ):
     state, repo, rest, manager = exit_setup
     batch = PositionBatch(
-        "live", "a1", "connect_batch", "BTCUSDT", "LONG", Decimal("1"),
-        Decimal("65000"), datetime.now(UTC),
+        "live",
+        "a1",
+        "connect_batch",
+        "BTCUSDT",
+        "LONG",
+        Decimal("1"),
+        Decimal("65000"),
+        datetime.now(UTC),
     )
     state.batches[batch.batch_id] = batch
     rest.post_order.side_effect = BinanceConnectionError(None, "TLS handshake failed")
@@ -135,8 +153,14 @@ async def test_exit_connection_failure_releases_reservation_and_retries_later(
 async def test_connect_failure_after_watchdog_restores_account(exit_setup):
     state, repo, rest, manager = exit_setup
     batch = PositionBatch(
-        "live", "a1", "delayed_connect", "BTCUSDT", "LONG", Decimal("1"),
-        Decimal("65000"), datetime.now(UTC),
+        "live",
+        "a1",
+        "delayed_connect",
+        "BTCUSDT",
+        "LONG",
+        Decimal("1"),
+        Decimal("65000"),
+        datetime.now(UTC),
     )
     state.batches[batch.batch_id] = batch
 
@@ -160,8 +184,14 @@ async def test_connect_failure_after_watchdog_restores_account(exit_setup):
 async def test_connect_failure_cannot_resume_when_db_write_fails(exit_setup):
     state, repo, rest, manager = exit_setup
     batch = PositionBatch(
-        "live", "a1", "failed_persist", "BTCUSDT", "LONG", Decimal("1"),
-        Decimal("65000"), datetime.now(UTC),
+        "live",
+        "a1",
+        "failed_persist",
+        "BTCUSDT",
+        "LONG",
+        Decimal("1"),
+        Decimal("65000"),
+        datetime.now(UTC),
     )
     state.batches[batch.batch_id] = batch
     original_save = repo.async_save_order_and_batch
@@ -300,27 +330,44 @@ async def test_price_filter_retry_is_cancelled_before_market_sweep(exit_setup):
     state, _, rest, manager = exit_setup
     batch_id = generate_batch_id("BTCUSDT", "LONG", "a1", counter=21)
     state.batches[batch_id] = PositionBatch(
-        "live", "a1", batch_id, "BTCUSDT", "LONG", Decimal("1"),
-        Decimal("65000"), datetime.now(UTC),
+        "live",
+        "a1",
+        batch_id,
+        "BTCUSDT",
+        "LONG",
+        Decimal("1"),
+        Decimal("65000"),
+        datetime.now(UTC),
     )
     rest.post_order.side_effect = [
         BinanceOrderRejectedError(-4014, "tick size changed"),
         {"orderId": 111},
         {"orderId": 112},
     ]
-    rest.fetch_exchange_info.return_value = {"symbols": [{
-        "symbol": "BTCUSDT", "filters": [
-            {"filterType": "PRICE_FILTER", "tickSize": "1"},
-            {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.001"},
-            {"filterType": "MIN_NOTIONAL", "notional": "5"},
-        ],
-    }]}
+    rest.fetch_exchange_info.return_value = {
+        "symbols": [
+            {
+                "symbol": "BTCUSDT",
+                "filters": [
+                    {"filterType": "PRICE_FILTER", "tickSize": "1"},
+                    {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.001"},
+                    {"filterType": "MIN_NOTIONAL", "notional": "5"},
+                ],
+            }
+        ]
+    }
 
     async def observe_cancel(**params):
         order = state.orders[params["client_order_id"]]
         await state.on_order_trade_update(
-            order.client_order_id, order.symbol, order.position_side, order.side,
-            OrderStatus.CANCELED, Decimal("0"), Decimal("0"), Decimal("0"),
+            order.client_order_id,
+            order.symbol,
+            order.position_side,
+            order.side,
+            OrderStatus.CANCELED,
+            Decimal("0"),
+            Decimal("0"),
+            Decimal("0"),
             Decimal("0"),
         )
 
@@ -330,7 +377,9 @@ async def test_price_filter_retry_is_cancelled_before_market_sweep(exit_setup):
     )
 
     assert [call.kwargs["order_type"] for call in rest.post_order.call_args_list] == [
-        "LIMIT", "LIMIT", "MARKET"
+        "LIMIT",
+        "LIMIT",
+        "MARKET",
     ]
     retry_id = rest.post_order.call_args_list[1].kwargs["client_order_id"]
     rest.cancel_order.assert_awaited_once_with(
@@ -625,6 +674,47 @@ async def test_exit_manager_refuses_market_sweep_on_invalid_payload(exit_setup):
     assert state.system_mode == SystemMode.DEGRADED
     mock_rest.query_order.assert_not_awaited()
     await exit_mgr.close()
+
+
+@pytest.mark.asyncio
+async def test_double_bearish_submits_immediate_exit(exit_setup):
+    state, _, _, manager = exit_setup
+    start = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
+    batch = PositionBatch(
+        "live",
+        "a1",
+        "double",
+        "BTCUSDT",
+        "LONG",
+        Decimal("1"),
+        Decimal("100"),
+        start + timedelta(minutes=5),
+    )
+    state.batches[batch.batch_id] = batch
+    entry = ClosedCandle15m(
+        "BTCUSDT", start, start + timedelta(minutes=15), Decimal("100"), Decimal("99")
+    )
+    following = ClosedCandle15m(
+        "BTCUSDT",
+        entry.candle_end,
+        entry.candle_end + timedelta(minutes=15),
+        Decimal("99"),
+        Decimal("98"),
+    )
+    manager.execute_batch_exit = AsyncMock()
+    manager.evaluate_active_batches(
+        now=following.candle_end,
+        closed_candle=following,
+        current_prices={"BTCUSDT": Decimal("98")},
+        entry_candles={batch.batch_id: entry},
+    )
+    await asyncio.sleep(0)
+    assert manager.execute_batch_exit.await_args.kwargs["immediate"] is True
+    assert (
+        manager.execute_batch_exit.await_args.kwargs["exit_reason"]
+        == "candle_15m_double_bearish"
+    )
+    await manager.close()
 
 
 @pytest.mark.asyncio

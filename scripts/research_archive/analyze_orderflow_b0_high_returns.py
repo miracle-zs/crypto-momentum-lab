@@ -954,7 +954,7 @@ def main() -> None:
     manifest = {
         "generated_at": datetime.now(UTC).isoformat(),
         "command": (
-            "python scripts/analyze_orderflow_b0_high_returns.py "
+            "python scripts/research_archive/analyze_orderflow_b0_high_returns.py "
             f"--input {args.input} --history {args.history} "
             f"--overview {args.overview} --output-dir {args.output_dir}"
         ),

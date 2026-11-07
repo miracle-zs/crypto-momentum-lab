@@ -433,11 +433,12 @@ class DatasetCatalog:
         )
 
         gap_per_sym: dict[str, datetime | None] = {s: None for s in symbols}
+        ordered_symbols = sorted(symbols)
         current_time = start_time
         while current_time < end_time:
             b_start = current_time
             b_end = current_time + step
-            for sym in sorted(symbols):
+            for sym in ordered_symbols:
                 total_expected += 1
                 if canonical_map is not None:
                     ref = canonical_map.get((sym, b_start))
@@ -457,7 +458,7 @@ class DatasetCatalog:
                         gap_per_sym[sym] = b_start
             current_time += step
 
-        for sym in sorted(symbols):
+        for sym in ordered_symbols:
             g_start = gap_per_sym[sym]
             if g_start is not None:
                 holes.append((g_start, end_time))
@@ -471,7 +472,7 @@ class DatasetCatalog:
         # Compute deterministic manifest hash
         hasher = hashlib.sha256()
         hasher.update(scope.encode())
-        hasher.update(",".join(sorted(symbols)).encode())
+        hasher.update(",".join(ordered_symbols).encode())
         hasher.update(interval.encode())
         hasher.update(start_time.isoformat().encode())
         hasher.update(end_time.isoformat().encode())

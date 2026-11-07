@@ -24,7 +24,7 @@ _CGROUP_MEMORY_LIMIT_PATHS = (
 
 
 def current_rss_bytes() -> int | None:
-    """Return the current process RSS when the platform exposes it."""
+    """Return current RSS from procfs, or peak RSS when procfs is unavailable."""
     try:
         page_size = os.sysconf("SC_PAGE_SIZE")
         with open("/proc/self/statm", encoding="ascii") as statm:
@@ -66,15 +66,9 @@ def configure_tracemalloc(
 def tracemalloc_memory_snapshot() -> dict[str, bool | int | None]:
     """Return cheap current/peak Python allocation counters for structured logs."""
     enabled = tracemalloc.is_tracing()
-    if not enabled:
-        return {
-            "tracemalloc_enabled": False,
-            "tracemalloc_current_bytes": None,
-            "tracemalloc_peak_bytes": None,
-        }
-    current, peak = tracemalloc.get_traced_memory()
+    current, peak = tracemalloc.get_traced_memory() if enabled else (None, None)
     return {
-        "tracemalloc_enabled": True,
+        "tracemalloc_enabled": enabled,
         "tracemalloc_current_bytes": current,
         "tracemalloc_peak_bytes": peak,
     }

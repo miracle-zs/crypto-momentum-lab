@@ -533,7 +533,7 @@ class MarketStateHub:
 
 
 class WebSocketMarketStateSource:
-    """Async iterator adapter for the live strategy market-state stream."""
+    """Async iterator adapter for the market-state Hub stream."""
 
     def __init__(
         self,
@@ -544,12 +544,9 @@ class WebSocketMarketStateSource:
         config: MarketStateHubConfig = MarketStateHubConfig(),
         on_connection_change: Callable[[bool, str | None], None] | None = None,
         on_batch: Callable[[MarketStateBatch], None] | None = None,
-        on_cursor_change: Callable[[str, int], None] | None = None,
         fail_on_replay_unavailable: bool = False,
-        rewarm_on_stream_reset: bool = False,
         preserve_sequence_on_overflow: bool = False,
         client_receive_queue_size: int = _CLIENT_RECEIVE_QUEUE_SIZE,
-        availability_clock: StreamAvailabilityClock | None = None,
     ) -> None:
         if not url.strip():
             raise ValueError("url must not be empty")
@@ -559,24 +556,16 @@ class WebSocketMarketStateSource:
             raise ValueError("consumer_id must not be empty")
         if client_receive_queue_size <= 0:
             raise ValueError("client_receive_queue_size must be positive")
-        if rewarm_on_stream_reset and (
-            not fail_on_replay_unavailable or on_connection_change is None
-        ):
-            raise ValueError(
-                "stream reset rewarm requires strict replay and a recovery observer"
-            )
         self._url = url
         self._environment = environment
         self._consumer_id = consumer_id
         self._config = config
         self._on_connection_change = on_connection_change
         self._on_batch = on_batch
-        self._on_cursor_change = on_cursor_change
         self._fail_on_replay_unavailable = fail_on_replay_unavailable
-        self._rewarm_on_stream_reset = rewarm_on_stream_reset
         self._preserve_sequence_on_overflow = preserve_sequence_on_overflow
         self._client_receive_queue_size = client_receive_queue_size
-        self._availability_clock = availability_clock
+        self._availability_clock: StreamAvailabilityClock | None = None
         self._connection_available: bool | None = None
         self._connection_reason: str | None = None
         self._stream_id: str | None = None
@@ -702,22 +691,7 @@ class WebSocketMarketStateSource:
                         and ready_stream_id is not None
                         and ready_stream_id != self._stream_id
                     )
-                    # Durable consumers normally require an exact epoch. The
-                    # live worker can instead validate per-symbol continuity,
-                    # recover durable buckets, or reset and rewarm its rolling
-                    # state. Publish unavailability BEFORE handing any new-epoch
-                    # states to that worker. This does not relax missing epochs,
-                    # same-epoch replay failures, or batch sequence validation.
-                    can_rewarm = (
-                        stream_changed
-                        and self._rewarm_on_stream_reset
-                        and ready.get("replay_available") is True
-                    )
-                    if (
-                        stream_changed
-                        and self._fail_on_replay_unavailable
-                        and not can_rewarm
-                    ):
+                    if stream_changed and self._fail_on_replay_unavailable:
                         raise MarketStateHubReplayUnavailable(
                             "market-state replay is unavailable: Hub stream reset",
                             requested_sequence=self._last_sequence,
@@ -731,12 +705,6 @@ class WebSocketMarketStateSource:
                             ),
                             stream_id=ready_stream_id,
                         )
-                    if can_rewarm:
-                        self._rewarm_required = True
-                        self._notify_connection_change(
-                            False, "market_state_stream_reset"
-                        )
-                        availability_clock.mark_recovering()
                     if (
                         ready_stream_id is not None
                         and ready_stream_id != self._stream_id
@@ -851,7 +819,6 @@ class WebSocketMarketStateSource:
                             self._notify_batch(batch)
                             yield batch
                             self._last_sequence = batch.sequence
-                            self._notify_cursor_change()
                             availability_clock.mark_ready()
                             if self._rewarm_required:
                                 self._rewarm_required = False
@@ -924,7 +891,7 @@ class WebSocketMarketStateSource:
                 ):
                     raise MarketStateHubEpochError("market-state stream mismatch")
                 self._enqueue_market_state_batch(receive_queue, batch)
-                # Yield to the strategy consumer after each buffered message.
+                # Yield to the consumer after each buffered message.
                 # Without this fairness point a burst can be drained and
                 # coalesced before the consumer receives its first batch.
                 await asyncio.sleep(0)
@@ -1025,23 +992,6 @@ class WebSocketMarketStateSource:
                 available=available,
                 environment=self._environment,
                 consumer_id=self._consumer_id,
-            )
-
-    def _notify_cursor_change(self) -> None:
-        if self._on_cursor_change is None or self._stream_id is None:
-            return
-        sequence = self._last_sequence
-        if sequence is None:
-            return
-        try:
-            self._on_cursor_change(self._stream_id, sequence)
-        except Exception:
-            log.exception(
-                "market_state_hub_cursor_callback_failed",
-                environment=self._environment,
-                consumer_id=self._consumer_id,
-                stream_id=self._stream_id,
-                sequence=sequence,
             )
 
     def _notify_batch(self, batch: MarketStateBatch) -> None:

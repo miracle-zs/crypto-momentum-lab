@@ -69,10 +69,10 @@ def market_state_from_payload(
             ),
             data_complete=_require_bool(payload, "data_complete"),
             missing_agg_trade_count=_require_int(payload, "missing_agg_trade_count"),
-            is_backfill=_optional_bool_default(
-                payload,
-                "is_backfill",
-                default=False,
+            is_backfill=(
+                _require_bool(payload, "is_backfill")
+                if "is_backfill" in payload
+                else False
             ),
         )
     except ValueError as error:
@@ -100,20 +100,6 @@ def _require_int(payload: Mapping[str, object], name: str) -> int:
     value = payload.get(name)
     if not isinstance(value, int) or isinstance(value, bool):
         raise MarketStateCodecError(f"{name} must be an integer")
-    return value
-
-
-def _optional_bool_default(
-    payload: Mapping[str, object],
-    name: str,
-    *,
-    default: bool,
-) -> bool:
-    if name not in payload:
-        return default
-    value = payload[name]
-    if not isinstance(value, bool):
-        raise MarketStateCodecError(f"{name} must be a boolean")
     return value
 
 
