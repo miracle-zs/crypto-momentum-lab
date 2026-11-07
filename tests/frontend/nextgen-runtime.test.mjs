@@ -37,7 +37,8 @@ test("NextGen closing fill renders as an exit even without exchange reduceOnly",
   const [, html] = renderAccount({
     status: "READY", observed_at: new Date().toISOString(),
     account_label: "primary", environment: "live", account_config: {engine: "nextgen"},
-    summary: {}, positions: [], open_orders: [], balances: [], equity_curve: [],
+    summary: {}, startup_baseline: {}, positions: [], open_orders: [], balances: [],
+    exchange_positions: [], available_accounts: [], live_signals: [], equity_curve: [],
     fills: [{symbol: "MANTRAUSDT", side: "SELL", is_exit: true, quantity: "1", price: "1"}],
   });
   assert.match(html, /退出路径未记录/);

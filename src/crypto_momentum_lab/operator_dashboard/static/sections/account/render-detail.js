@@ -126,7 +126,7 @@ function renderBalancesTable(usdtBalances) {
 }
 
 function renderPositionsTable(positions, strategy) {
-  const positionRows = (positions || []).map((row) => ({
+  const positionRows = positions.map((row) => ({
     ...row,
     roi: computeRoi(row.unrealized_pnl, row.entry_notional),
   }));
@@ -207,17 +207,17 @@ function renderFillsTable(fills, strategy) {
 }
 
 export function renderAccount(data) {
-  const summary = data.summary || {};
-  const config = data.account_config || {};
-  const startupBaseline = data.startup_baseline || {};
-  const accountEquity = data.equity_curve || [];
+  const summary = data.summary;
+  const config = data.account_config;
+  const startupBaseline = data.startup_baseline;
+  const accountEquity = data.equity_curve;
   const accountSample = equitySampleLabel(data.equity_sample_interval_seconds);
   const accountEquityDelta = accountWindowDelta({ equity_curve: accountEquity });
   const latestAccountEquity = accountEquity.at(-1)?.equity;
   const normalized = (value) => String(value || "").trim().toLowerCase();
   const modeLabel = (value, yesLabel, noLabel) => value == null ? "—" : value ? yesLabel : noLabel;
   const syncStatus = normalized(data.status);
-  const runtimeAccount = (data.available_accounts || []).find(
+  const runtimeAccount = data.available_accounts.find(
     (account) => account.account_label === data.account_label,
   );
   const runtimeReadiness = normalized(runtimeAccount?.readiness);
@@ -261,20 +261,20 @@ export function renderAccount(data) {
     latestAccountEquity,
   );
   const accountFacts = renderAccountFacts(config, startupBaseline, modeLabel);
-  const usdtBalances = (data.balances || []).filter((row) => String(row.asset || "").toUpperCase() === "USDT");
+  const usdtBalances = data.balances.filter((row) => String(row.asset || "").toUpperCase() === "USDT");
   const balancesTable = renderBalancesTable(usdtBalances);
-  const positions = data.positions || [];
+  const positions = data.positions;
   const positionsTable = renderPositionsTable(positions, strategy);
-  const exchangePositions = data.exchange_positions || [];
+  const exchangePositions = data.exchange_positions;
   const exchangePositionsTable = renderExchangePositionsTable(
     exchangePositions,
     data.exchange_positions_observed_at,
   );
-  const openOrders = data.open_orders || [];
+  const openOrders = data.open_orders;
   const ordersTable = renderOrdersTable(openOrders, strategy);
-  const fills = data.fills || [];
+  const fills = data.fills;
   const fillsTable = renderFillsTable(fills, strategy);
-  const liveSignals = data.live_signals || [];
+  const liveSignals = data.live_signals;
   const liveSignalContent = renderLiveSignalsContent(liveSignals);
 
   const accountNeedsReview = !baselineMatched

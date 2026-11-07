@@ -26,17 +26,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
 )
 
 
-def _return_by_symbol(snapshot: UniverseSnapshot) -> dict[str, Decimal]:
-    return {
-        entry.symbol: entry.utc_day_return
-        for entry in (*snapshot.ranking.gainers, *snapshot.ranking.losers)
-    }
-
-
-def _rank_by_symbol(entries: tuple[RankEntry, ...]) -> dict[str, int]:
-    return {entry.symbol: entry.rank for entry in entries}
-
-
 def _candidate_return(candidate: MarketCandidate) -> Decimal | None:
     if (
         candidate.open_price is None
@@ -241,9 +230,16 @@ class PostgresUniverseRepository:
 
     async def save_snapshot(self, snapshot: UniverseSnapshot) -> None:
         self._snapshot_cache.pop(snapshot.snapshot_id, None)
-        returns = _return_by_symbol(snapshot)
-        gainer_ranks = _rank_by_symbol(snapshot.ranking.gainers)
-        loser_ranks = _rank_by_symbol(snapshot.ranking.losers)
+        returns = {
+            entry.symbol: entry.utc_day_return
+            for entry in (*snapshot.ranking.gainers, *snapshot.ranking.losers)
+        }
+        gainer_ranks = {
+            entry.symbol: entry.rank for entry in snapshot.ranking.gainers
+        }
+        loser_ranks = {
+            entry.symbol: entry.rank for entry in snapshot.ranking.losers
+        }
 
         async with self._session_factory() as session:
             async with session.begin():
@@ -283,9 +279,10 @@ class PostgresUniverseRepository:
                         "open_price": candidate.open_price,
                         "current_price": candidate.current_price,
                         "price_time": candidate.price_time,
-                        "utc_day_return": returns.get(
-                            candidate.symbol,
-                            _candidate_return(candidate),
+                        "utc_day_return": (
+                            returns[candidate.symbol]
+                            if candidate.symbol in returns
+                            else _candidate_return(candidate)
                         ),
                         "gainer_rank": gainer_ranks.get(candidate.symbol),
                         "loser_rank": loser_ranks.get(candidate.symbol),

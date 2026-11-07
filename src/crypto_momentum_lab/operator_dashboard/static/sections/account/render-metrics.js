@@ -1,7 +1,4 @@
-import {
-  asNumber,
-  esc,
-} from "../../dashboard-formatters.js";
+import { esc } from "../../dashboard-formatters.js";
 import { liveAccountMetricChart } from "../../dashboard-charts.js";
 import { blockTitle } from "../../dashboard-ui.js";
 import {
@@ -13,11 +10,10 @@ import {
 } from "./constants.js";
 
 export function renderLiveAccountMetrics(data) {
-  const accounts = Array.isArray(data?.accounts) ? data.accounts : [];
-  const interval = asNumber(data?.equity_sample_interval_seconds)
-    || DEFAULT_EQUITY_BUCKET_SECONDS;
+  const accounts = data.accounts;
+  const interval = data.equity_sample_interval_seconds || DEFAULT_EQUITY_BUCKET_SECONDS;
   const charts = LIVE_ACCOUNT_METRIC_DEFINITIONS.map((definition) => `
-    <article class="live-metric-card" data-metric-category="${esc(definition.category || "equity")}">
+    <article class="live-metric-card" data-metric-category="${esc(definition.category)}">
       <div class="live-metric-card-head">
         <div><h4>${esc(definition.title)}</h4><p>${esc(definition.subtitle)}</p></div>
       </div>
@@ -28,8 +24,8 @@ export function renderLiveAccountMetrics(data) {
         definition.title,
         `${definition.title}，实盘账户多维对比`,
         interval,
-        data?.equity_window_start,
-        data?.equity_window_end,
+        data.equity_window_start,
+        data.equity_window_end,
       )}
     </article>`).join("");
   const windowText = windowRangeText(data);

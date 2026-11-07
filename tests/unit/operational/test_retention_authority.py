@@ -19,6 +19,7 @@ from crypto_momentum_lab.domain.operational.retention_authority import (
     RetentionAuthority,
 )
 from crypto_momentum_lab.domain.operational.retention_models import (
+    ConsumerDependency,
     PruneOutcome,
     PrunePlanStatus,
     PruneReceiptStatus,
@@ -85,6 +86,22 @@ def test_retention_authority_dependency_registration_and_versioning() -> None:
     )
     assert v2.startswith("dep_")
     assert v2 != v1
+
+
+def test_sync_authority_rejects_async_repository_without_leaking_coroutine() -> None:
+    class AsyncRepository(InMemoryRetentionRepository):
+        async def get_dependencies(
+            self, dataset_name: str
+        ) -> tuple[ConsumerDependency, ...]:
+            return super().get_dependencies(dataset_name)
+
+    authority = RetentionAuthority(AsyncRepository())
+
+    with pytest.raises(
+        RuntimeError,
+        match="synchronous RetentionAuthority methods require a synchronous repository",
+    ):
+        authority.compute_dependency_version("account_position_snapshots")
 
 
 def test_plan_prune_unconstrained_when_no_dependencies() -> None:
@@ -228,7 +245,12 @@ def test_execute_prune_success_when_dependency_version_matches() -> None:
     # Executor dummy callback
     def dummy_executor(p) -> PruneOutcome:
         assert p.effective_cutoff == t_needed
-        return PruneOutcome(rows_archived=100, rows_deleted=100, batches=1, status=PruneReceiptStatus.SUCCESS)
+        return PruneOutcome(
+            rows_archived=100,
+            rows_deleted=100,
+            batches=1,
+            status=PruneReceiptStatus.SUCCESS,
+        )
 
     receipt = authority.execute_prune(
         plan=plan,
@@ -278,7 +300,12 @@ def test_execute_prune_rejects_when_new_dependency_registered_after_plan() -> No
     def dummy_executor(p) -> PruneOutcome:
         nonlocal executed
         executed = True
-        return PruneOutcome(rows_archived=100, rows_deleted=100, batches=1, status=PruneReceiptStatus.SUCCESS)
+        return PruneOutcome(
+            rows_archived=100,
+            rows_deleted=100,
+            batches=1,
+            status=PruneReceiptStatus.SUCCESS,
+        )
 
     receipt = authority.execute_prune(
         plan=plan,
@@ -358,7 +385,12 @@ def test_execute_prune_rejects_when_caller_passes_current_version_with_stale_pla
     def dummy_executor(p) -> PruneOutcome:
         nonlocal executed
         executed = True
-        return PruneOutcome(rows_archived=100, rows_deleted=100, batches=1, status=PruneReceiptStatus.SUCCESS)
+        return PruneOutcome(
+            rows_archived=100,
+            rows_deleted=100,
+            batches=1,
+            status=PruneReceiptStatus.SUCCESS,
+        )
 
     # Caller tries to pass latest_version with stale_plan
     receipt = authority.execute_prune(

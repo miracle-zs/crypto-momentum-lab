@@ -5,6 +5,7 @@ import {
   renderAccount,
   renderLiveAccountMetrics,
   renderLiveAccounts,
+  selectLiveAccount,
 } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/account.js";
 import { renderOverview } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/overview.js";
 import { disclosure } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-ui.js";
@@ -14,6 +15,8 @@ const populatedAccount = {
   observed_at: "2026-08-26T08:00:00Z",
   environment: "live",
   account_label: "primary",
+  exchange_positions: [],
+  available_accounts: [],
   account_config: { hedge_mode: false, multi_assets_mode: false, fee_tier: 0 },
   startup_baseline: { status: "MATCHED" },
   summary: {
@@ -97,20 +100,23 @@ test("live account fleet keeps four accounts visible and selects one detail", ()
       usdt_available_balance: String(800 + index * 100),
     },
   }));
-  const [status, html] = renderLiveAccounts({
-    status: "READY",
-    observed_at: populatedAccount.observed_at,
-    accounts,
-    account_count: 4,
-    selected_account_label: "account-3",
-  });
+  selectLiveAccount(null, "account-3");
+  try {
+    const [status, html] = renderLiveAccounts({
+      status: "READY",
+      observed_at: populatedAccount.observed_at,
+      accounts,
+    });
 
-  assert.equal(status, "READY");
-  assert.equal((html.match(/data-live-account-label=/g) || []).length, 4);
-  assert.match(html, /4 个账户/);
-  assert.match(html, /class="live-account-card is-selected"[^>]*data-live-account-label="account-3"/);
-  assert.match(html, /<h3 data-selected-account-label>account-3<\/h3>/);
-  assert.match(html, /4 正常 · 0 停止 · 0 需检查/);
+    assert.equal(status, "READY");
+    assert.equal((html.match(/data-live-account-label=/g) || []).length, 4);
+    assert.match(html, /4 个账户/);
+    assert.match(html, /class="live-account-card is-selected"[^>]*data-live-account-label="account-3"/);
+    assert.match(html, /<h3 data-selected-account-label>account-3<\/h3>/);
+    assert.match(html, /4 正常 · 0 停止 · 0 需检查/);
+  } finally {
+    selectLiveAccount(null, "primary");
+  }
 });
 
 test("live account fleet renders six comparable metric charts", () => {

@@ -432,7 +432,10 @@ async def _insert_batch_idempotent(
         )
         existing_values = {name: getattr(existing, name) for name in compare_keys}
         new_values = {name: item[name] for name in compare_keys}
-        if _normalize_for_compare(existing_values) != _normalize_for_compare(new_values):
+        if (
+            _normalize_for_compare(existing_values)
+            != _normalize_for_compare(new_values)
+        ):
             incoming_is_synthetic = _is_synthetic_runtime_state_values(item)
             existing_is_synthetic = _is_synthetic_runtime_state_row(existing)
             if incoming_is_synthetic and not existing_is_synthetic:

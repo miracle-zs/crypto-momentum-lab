@@ -10,9 +10,9 @@ import {
 } from "../dashboard-ui.js";
 
 export function renderRisk(data) {
-  const activeHalts = data.active_halts || [];
-  const ambiguousOrders = data.ambiguous_orders || [];
-  const pendingOrders = data.pending_orders || [];
+  const activeHalts = data.active_halts;
+  const ambiguousOrders = data.ambiguous_orders;
+  const pendingOrders = data.pending_orders;
   const metaStrip = `<div class="risk-meta-strip" data-state-key="risk-meta-strip"><span>实盘账户订单汇总</span><span class="chip-age">更新于 ${esc(dayTime(data.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</span></div>`;
   const halts = activeHalts.length
     ? activeHalts.map((halt) => `<div class="alert-box" data-state-key="halt-${esc(halt.account_label)}-${esc(halt.reason)}"><strong>${esc(halt.account_label)}</strong><div>${esc(halt.reason)}<small>${esc(dayTime(halt.created_at))} ${DISPLAY_TIME_ZONE_LABEL}</small></div></div>`).join("")

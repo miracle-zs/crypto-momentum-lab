@@ -13,6 +13,7 @@ from crypto_momentum_lab.domain.account.models import (
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionKey,
 )
+
 from .execution_head_migration_codec import (
     LegacyExitOrderSubmissionFact,
     PositionRecoveryCodec,

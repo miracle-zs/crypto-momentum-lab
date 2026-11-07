@@ -747,7 +747,9 @@ class NextGenDashboardQueries:
                 >= prior_limit.created_at + timedelta(seconds=grace_period_sec)
             ):
                 return "宽限期后止损"
-            if reason is not None and reason.startswith("candle_15m_"):
+            if reason == "candle_15m_double_bearish":
+                return "连续两根阴线加速退出"
+            if reason in {"candle_15m_bearish", "candle_15m_bullish"}:
                 return "首根反向 15 分钟 K 线止盈"
         return "退出路径未记录"
 

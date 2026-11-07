@@ -165,8 +165,6 @@ class ResearchCollectorResponse(DashboardSchema):
 class UniverseStatusResponse(DashboardSchema):
     status: OperationalStatus
     observed_at: datetime | None
-    gainers: list[dict[str, JsonValue]]
-    losers: list[dict[str, JsonValue]]
     monitored_symbols: list[dict[str, JsonValue]]
 
 

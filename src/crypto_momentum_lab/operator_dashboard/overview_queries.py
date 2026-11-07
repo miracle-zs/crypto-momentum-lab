@@ -118,8 +118,6 @@ class OverviewQueries:
                 return UniverseStatusResponse(
                     status=OperationalStatus.NO_DATA,
                     observed_at=None,
-                    gainers=[],
-                    losers=[],
                     monitored_symbols=[],
                 )
             entries = (
@@ -137,10 +135,6 @@ class OverviewQueries:
                 )
             ).all()
             entries_by_symbol = {entry.symbol: entry for entry in entries}
-        gainers = sorted(
-            (entry for entry in entries if entry.gainer_rank is not None),
-            key=lambda item: item.gainer_rank or 999,
-        )[:20]
         return UniverseStatusResponse(
             status=freshness_status(
                 now=self._clock(),
@@ -148,22 +142,6 @@ class OverviewQueries:
                 stale_after_seconds=3600,
             ),
             observed_at=snapshot.observed_at,
-            gainers=[
-                {
-                    "symbol": row.symbol,
-                    "rank": row.gainer_rank,
-                    "utc_day_return": (
-                        None if row.utc_day_return is None else str(row.utc_day_return)
-                    ),
-                    "current_price": (
-                        None if row.current_price is None else str(row.current_price)
-                    ),
-                }
-                for row in gainers
-            ],
-            # Loser ranks remain in the database for historical/research
-            # compatibility, but the operational dashboard is gainer-only.
-            losers=[],
             monitored_symbols=[
                 universe_membership(row, entries_by_symbol.get(row.symbol))
                 for row in sorted(

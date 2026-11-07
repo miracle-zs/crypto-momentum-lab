@@ -205,6 +205,7 @@ test("overview renderer exposes local heartbeat update hooks", () => {
   const [status, html] = renderOverview({
     database_status: "READY",
     active_halt_count: 0,
+    account_statuses: [],
     services: [{
       name: "strategy-runner",
       status: "LIVE",
@@ -269,6 +270,7 @@ test("collector renderer distinguishes normal spool from overdue spool", () => {
   const [freshStatus, freshHtml] = renderCollector({
     status: "FRESH",
     status_detail: "当前 15 分钟窗口写入中，待封存 3 个",
+    capacity_state: "healthy",
     pending_spool_files: 3,
     pending_spool_bytes: 2048,
     pending_spool_overdue_files: 0,
@@ -283,6 +285,7 @@ test("collector renderer distinguishes normal spool from overdue spool", () => {
   const [degradedStatus, degradedHtml] = renderCollector({
     status: "DEGRADED",
     status_detail: "spool 超时待处理 2 个（当前共 5 个）",
+    capacity_state: "healthy",
     pending_spool_files: 5,
     pending_spool_bytes: 4096,
     pending_spool_overdue_files: 2,
@@ -298,8 +301,6 @@ test("universe renderer includes relative snapshot age", () => {
   const [status, html] = renderUniverse({
     status: "READY",
     observed_at: "2026-08-18T04:51:00Z",
-    gainers: [],
-    losers: [],
     monitored_symbols: [],
   });
   assert.equal(status, "READY");
@@ -310,18 +311,6 @@ test("universe renderer shows all monitored members in one table", () => {
   const [status, html] = renderUniverse({
     status: "FRESH",
     observed_at: "2026-08-18T04:51:00Z",
-    gainers: [{
-      symbol: "AAAUSDT",
-      rank: 1,
-      current_price: "10",
-      utc_day_return: "0.12",
-    }],
-    losers: [{
-      symbol: "BBBUSD",
-      rank: 1,
-      current_price: "3",
-      utc_day_return: "-0.08",
-    }],
     monitored_symbols: [
       {
         symbol: "AAAUSDT",

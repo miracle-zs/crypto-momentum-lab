@@ -545,11 +545,21 @@ async def test_run_market_data_keeps_consumer_alive_while_capture_stops(
     publisher = FakePublisher()
     runtime = SimpleNamespace(
         quote_hub=SimpleNamespace(start=AsyncMock(), stop=AsyncMock()),
-        quote_volume_publisher=None,
-        daily_open_prefetcher=None,
-        operational_retention=None,
-        maintenance_session_factory=None,
-        maintenance_capture_repository=None,
+        quote_volume_publisher=SimpleNamespace(
+            start=AsyncMock(),
+            stop=AsyncMock(),
+        ),
+        daily_open_prefetcher=SimpleNamespace(
+            bootstrap_current_day=AsyncMock(),
+            start=AsyncMock(),
+            stop=AsyncMock(),
+        ),
+        operational_retention=object(),
+        database_retention_interval_seconds=300.0,
+        contract_metadata_retention_hours=6.0,
+        runtime_state_retention_hours=12.0,
+        maintenance_session_factory=object(),
+        maintenance_capture_repository=object(),
         capture=capture,
         connection_pool=SimpleNamespace(
             metrics_snapshot=lambda: SimpleNamespace(
@@ -601,6 +611,7 @@ async def test_run_market_data_keeps_consumer_alive_while_capture_stops(
     monkeypatch.setattr(main, "monitor_market_data_freshness", block_forever)
     monkeypatch.setattr(main, "monitor_market_data_health", block_forever)
     monkeypatch.setattr(main, "run_raw_archive_retention_loop", block_forever)
+    monkeypatch.setattr(main, "run_operational_database_retention_loop", block_forever)
     stop_requested = asyncio.Event()
     task = asyncio.create_task(
         main.run_market_data(Path("server.yaml"), stop_requested=stop_requested)

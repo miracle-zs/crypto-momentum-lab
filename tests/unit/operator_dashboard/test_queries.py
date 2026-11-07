@@ -72,7 +72,7 @@ async def test_overview_requires_all_account_timestamps_for_runner() -> None:
         assert runner.details["started_at"] == expected_started
 
 
-async def test_universe_dashboard_hides_loser_ranking() -> None:
+async def test_universe_dashboard_returns_ranked_monitor_pool_only() -> None:
     observed_at = datetime(2026, 9, 14, 0, 0, tzinfo=UTC)
     snapshot = SimpleNamespace(snapshot_id="snapshot", observed_at=observed_at)
     entries = (
@@ -91,6 +91,10 @@ async def test_universe_dashboard_hides_loser_ranking() -> None:
             current_price=Decimal("0.9"),
         ),
     )
+    memberships = (
+        SimpleNamespace(symbol="GAINERUSDT", status="target", side="gainer"),
+        SimpleNamespace(symbol="LOSERUSDT", status="forced", side="loser"),
+    )
 
     class Session:
         def __init__(self) -> None:
@@ -102,7 +106,7 @@ async def test_universe_dashboard_hides_loser_ranking() -> None:
         async def scalars(self, _statement):
             self.scalars_calls += 1
             return SimpleNamespace(
-                all=lambda: entries if self.scalars_calls == 1 else ()
+                all=lambda: entries if self.scalars_calls == 1 else memberships
             )
 
     class SessionContext:
@@ -128,8 +132,15 @@ async def test_universe_dashboard_hides_loser_ranking() -> None:
         nextgen_accounts=(),
     ).universe()
 
-    assert [row["symbol"] for row in result.gainers] == ["GAINERUSDT"]
-    assert result.losers == []
+    assert [
+        (row["symbol"], row["rank"])
+        for row in result.monitored_symbols
+    ] == [("GAINERUSDT", 1), ("LOSERUSDT", 1)]
+    assert set(result.model_dump()) == {
+        "status",
+        "observed_at",
+        "monitored_symbols",
+    }
 
 def test_decision_slo_response_aggregates_latency_health_and_reasons() -> None:
     start = datetime(2026, 9, 11, tzinfo=UTC)

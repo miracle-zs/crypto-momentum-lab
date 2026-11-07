@@ -16,7 +16,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Protocol
 from uuid import uuid4
 
 from crypto_momentum_lab.domain.operational.retention_models import (
@@ -31,28 +31,37 @@ from crypto_momentum_lab.domain.operational.retention_models import (
 )
 
 
-async def _maybe_await(val: Any) -> Any:
+async def _maybe_await[T](val: T | Awaitable[T]) -> T:
     if inspect.isawaitable(val):
         return await val
     return val
 
 
-async def _await_void_call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
-    """Invoke a possibly-async void repository method without using its result."""
-    result = fn(*args, **kwargs)
-    if inspect.isawaitable(result):
-        await result
+def _require_sync_result[T](val: T | Awaitable[T]) -> T:
+    if inspect.isawaitable(val):
+        if inspect.iscoroutine(val):
+            val.close()
+        raise RuntimeError(
+            "synchronous RetentionAuthority methods require a synchronous repository"
+        )
+    return val
 
 
 class RetentionRepository(Protocol):
-    """Protocol for storage of consumer dependencies, prune plans, and receipts."""
+    """Repository whose methods may be synchronous or asynchronous."""
 
-    def save_dependency(self, dependency: ConsumerDependency) -> None: ...
-    def delete_dependency(self, consumer_id: str, dataset_name: str) -> None: ...
-    def get_dependencies(self, dataset_name: str) -> tuple[ConsumerDependency, ...]: ...
-    def save_plan(self, plan: PrunePlan) -> None: ...
-    def update_plan(self, plan: PrunePlan) -> None: ...
-    def save_receipt(self, receipt: PruneReceipt) -> None: ...
+    def save_dependency(
+        self, dependency: ConsumerDependency
+    ) -> None | Awaitable[None]: ...
+    def delete_dependency(
+        self, consumer_id: str, dataset_name: str
+    ) -> None | Awaitable[None]: ...
+    def get_dependencies(
+        self, dataset_name: str
+    ) -> tuple[ConsumerDependency, ...] | Awaitable[tuple[ConsumerDependency, ...]]: ...
+    def save_plan(self, plan: PrunePlan) -> None | Awaitable[None]: ...
+    def update_plan(self, plan: PrunePlan) -> None | Awaitable[None]: ...
+    def save_receipt(self, receipt: PruneReceipt) -> None | Awaitable[None]: ...
 
 
 class InMemoryRetentionRepository:
@@ -187,7 +196,7 @@ class RetentionAuthority:
         scope = resolve_dataset_scope(dataset_name)
         all_deps: dict[tuple[str, str], ConsumerDependency] = {}
         for name in scope.related_dataset_names():
-            for dep in self._repo.get_dependencies(name):
+            for dep in _require_sync_result(self._repo.get_dependencies(name)):
                 all_deps[(dep.consumer_id, dep.dataset_name)] = dep
         return tuple(all_deps.values())
 
@@ -269,7 +278,7 @@ class RetentionAuthority:
             generation=generation,
             recovery_spec=recovery_spec,
         )
-        self._repo.save_dependency(dependency)
+        _require_sync_result(self._repo.save_dependency(dependency))
         return self.compute_dependency_version(recovery_spec.source_dataset)
 
     async def register_dependency_async(
@@ -290,7 +299,7 @@ class RetentionAuthority:
                 generation=generation,
                 recovery_spec=recovery_spec,
             )
-            await _await_void_call(self._repo.save_dependency, dependency)
+            await _maybe_await(self._repo.save_dependency(dependency))
             return await self.compute_dependency_version_async(
                 recovery_spec.source_dataset
             )
@@ -305,7 +314,9 @@ class RetentionAuthority:
         """Explicitly retires a consumer dependency."""
         if not retired_by.strip():
             raise ValueError("retired_by operator/migration must be specified")
-        self._repo.delete_dependency(consumer_id, dataset_name)
+        _require_sync_result(
+            self._repo.delete_dependency(consumer_id, dataset_name)
+        )
         return self.compute_dependency_version(dataset_name)
 
     def plan_prune(
@@ -331,7 +342,7 @@ class RetentionAuthority:
             manifest_hash=manifest_hash,
             cascade_target_tables=cascade_target_tables,
         )
-        self._repo.save_plan(plan)
+        _require_sync_result(self._repo.save_plan(plan))
         return plan
 
     def bind_manifest(self, plan: PrunePlan, manifest_hash: str) -> PrunePlan:
@@ -352,7 +363,7 @@ class RetentionAuthority:
                 f"Cannot bind manifest to plan in status {plan.status.value}"
             )
         bound_plan = replace(plan, manifest_hash=manifest_hash)
-        self._repo.update_plan(bound_plan)
+        _require_sync_result(self._repo.update_plan(bound_plan))
         return bound_plan
 
     async def compute_dependency_version_async(self, dataset_name: str) -> str:
@@ -386,7 +397,7 @@ class RetentionAuthority:
             manifest_hash=manifest_hash,
             cascade_target_tables=cascade_target_tables,
         )
-        await _await_void_call(self._repo.save_plan, plan)
+        await _maybe_await(self._repo.save_plan(plan))
         return plan
 
     def verify_fence(self, plan: PrunePlan) -> None:
@@ -436,7 +447,7 @@ class RetentionAuthority:
                 plan, expected_dependency_version, current_dep_version
             )
             if rejection is not None:
-                await _await_void_call(self._repo.save_receipt, rejection)
+                await _maybe_await(self._repo.save_receipt(rejection))
                 return rejection
 
             try:
@@ -446,15 +457,15 @@ class RetentionAuthority:
                     dependency_version_verified=current_dep_version,
                 )
                 completed_plan = replace(plan, status=PrunePlanStatus.COMPLETED)
-                await _await_void_call(self._repo.update_plan, completed_plan)
-                await _await_void_call(self._repo.save_receipt, receipt)
+                await _maybe_await(self._repo.update_plan(completed_plan))
+                await _maybe_await(self._repo.save_receipt(receipt))
                 return receipt
             except Exception as ex:
                 receipt = PruneOutcome(
                     status=PruneReceiptStatus.EXECUTION_FAILED,
                     details=f"Prune execution failed with exception: {ex}",
                 ).to_receipt(plan=plan, dependency_version_verified=current_dep_version)
-                await _await_void_call(self._repo.save_receipt, receipt)
+                await _maybe_await(self._repo.save_receipt(receipt))
                 return receipt
 
     def execute_prune(
@@ -477,7 +488,7 @@ class RetentionAuthority:
             plan, expected_dependency_version, current_dep_version
         )
         if rejection is not None:
-            self._repo.save_receipt(rejection)
+            _require_sync_result(self._repo.save_receipt(rejection))
             return rejection
 
         try:
@@ -487,13 +498,13 @@ class RetentionAuthority:
                 dependency_version_verified=current_dep_version,
             )
             completed_plan = replace(plan, status=PrunePlanStatus.COMPLETED)
-            self._repo.update_plan(completed_plan)
-            self._repo.save_receipt(receipt)
+            _require_sync_result(self._repo.update_plan(completed_plan))
+            _require_sync_result(self._repo.save_receipt(receipt))
             return receipt
         except Exception as ex:
             receipt = PruneOutcome(
                 status=PruneReceiptStatus.EXECUTION_FAILED,
                 details=f"Prune execution failed with exception: {ex}",
             ).to_receipt(plan=plan, dependency_version_verified=current_dep_version)
-            self._repo.save_receipt(receipt)
+            _require_sync_result(self._repo.save_receipt(receipt))
             return receipt

@@ -22,10 +22,7 @@ function bytes(value) {
 }
 
 function percentOf(value, limit) {
-  const parsed = Number(value);
-  const ceiling = Number(limit);
-  if (!Number.isFinite(parsed) || !Number.isFinite(ceiling) || ceiling <= 0) return 0;
-  return Math.max(0, Math.min(100, (parsed / ceiling) * 100));
+  return Math.max(0, Math.min(100, (value / limit) * 100));
 }
 
 function statusTone(status) {
@@ -51,12 +48,10 @@ function capacityMeter(label, value, limit, note, accent = "brand", available = 
 }
 
 function freeSpaceMeter(data, available) {
-  const free = available ? Number(data.disk_free_bytes) : Number.NaN;
-  const pauseLine = Number(data.disk_pause_free_bytes);
-  const warningLine = Number(data.disk_warning_free_bytes);
-  const width = available && Number.isFinite(free) && free >= 0 && pauseLine > 0
-    ? Math.min(100, (free / (free + pauseLine)) * 100)
-    : 0;
+  const free = available ? data.disk_free_bytes : Number.NaN;
+  const pauseLine = data.disk_pause_free_bytes;
+  const warningLine = data.disk_warning_free_bytes;
+  const width = available ? Math.min(100, (free / (free + pauseLine)) * 100) : 0;
   const accent = !available ? "warning" : free <= pauseLine ? "danger" : free < warningLine ? "warning" : "good";
   const freeText = available ? `${bytes(free)} 可用` : "—";
   const note = available
@@ -70,12 +65,12 @@ function freeSpaceMeter(data, available) {
 }
 
 function alertPanel(data, status) {
-  const alerts = Array.isArray(data.alerts) ? data.alerts : [];
+  const alerts = data.alerts;
   if (!alerts.length) {
     if (!["FRESH", "READY"].includes(status)) {
       return `<div class="alert-box collector-alert">
         <strong>待确认</strong>
-        <div><small>${esc(data?.status_detail || "采集状态不可用")}</small><small>容量、积压和窗口连续性告警无法确认</small></div>
+        <div><small>${esc(data.status_detail)}</small><small>容量、积压和窗口连续性告警无法确认</small></div>
       </div>`;
     }
     return `<div class="ok-box collector-ok"><i></i><span>checkpoint 正常 · 窗口连续 · 没有容量或超时积压告警</span></div>`;
@@ -87,32 +82,32 @@ function alertPanel(data, status) {
 }
 
 export function renderCollector(data) {
-  const status = normalizedStatus(data?.status || "UNKNOWN") || "UNKNOWN";
+  const status = normalizedStatus(data.status);
   const metricsAvailable = status !== "UNKNOWN";
   const tone = statusTone(status);
-  const lastSequence = data?.last_sequence == null ? "—" : num(data.last_sequence, 0);
-  const checkpointAge = data?.checkpoint_age_seconds == null
+  const lastSequence = data.last_sequence == null ? "—" : num(data.last_sequence, 0);
+  const checkpointAge = data.checkpoint_age_seconds == null
     ? "未知"
     : relAge(data.checkpoint_age_seconds);
-  const latestWrittenAge = data?.parquet_latest_age_seconds == null
+  const latestWrittenAge = data.parquet_latest_age_seconds == null
     ? "未知"
     : relAge(data.parquet_latest_age_seconds);
-  const pendingSpoolFiles = metricsAvailable ? Number(data?.pending_spool_files) || 0 : null;
-  const pendingSpoolOverdueFiles = metricsAvailable ? Number(data?.pending_spool_overdue_files) || 0 : null;
+  const pendingSpoolFiles = metricsAvailable ? data.pending_spool_files : null;
+  const pendingSpoolOverdueFiles = metricsAvailable ? data.pending_spool_overdue_files : null;
   const spoolLabel = pendingSpoolFiles == null
     ? "spool 状态"
     : pendingSpoolOverdueFiles ? "spool 超时积压" : "spool 待封存";
   const spoolNote = pendingSpoolFiles == null
     ? "采集数据不可读取，积压状态未知"
     : pendingSpoolOverdueFiles
-      ? `${num(pendingSpoolOverdueFiles, 0)} 个已超过封存时限 · ${bytes(data?.pending_spool_bytes)}`
+      ? `${num(pendingSpoolOverdueFiles, 0)} 个已超过封存时限 · ${bytes(data.pending_spool_bytes)}`
       : pendingSpoolFiles
-        ? `当前 15 分钟窗口写入中 · ${bytes(data?.pending_spool_bytes)}`
+        ? `当前 15 分钟窗口写入中 · ${bytes(data.pending_spool_bytes)}`
         : "无待封存批次";
   const spoolTone = pendingSpoolFiles == null || pendingSpoolOverdueFiles ? "warn" : "pos";
-  const parquetFileCount = metricsAvailable ? data?.parquet_file_count : null;
-  const parquetGapCount = metricsAvailable ? data?.parquet_gap_count : null;
-  const windows = Array.isArray(data?.recent_windows) ? data.recent_windows : [];
+  const parquetFileCount = metricsAvailable ? data.parquet_file_count : null;
+  const parquetGapCount = metricsAvailable ? data.parquet_gap_count : null;
+  const windows = data.recent_windows;
   const recentWindowTable = dataTable([
     {
       label: "窗口起点",
@@ -136,51 +131,51 @@ export function renderCollector(data) {
     emptyText: metricsAvailable ? "尚未发现 Parquet 窗口" : "采集数据不可读取，封存窗口无法确认",
     stateKey: "collector-recent-windows",
   });
-  const streamId = data?.stream_id ? `${String(data.stream_id).slice(0, 12)}…` : "—";
-  const parquetRange = data?.parquet_first_window_start && data?.parquet_latest_window_start
+  const streamId = data.stream_id ? `${String(data.stream_id).slice(0, 12)}…` : "—";
+  const parquetRange = data.parquet_first_window_start && data.parquet_latest_window_start
     ? `${readableTime(data.parquet_first_window_start)} → ${readableTime(data.parquet_latest_window_start)}`
     : "—";
   const lastSymbolLabel = metricsAvailable
-    ? data?.last_symbol || "暂无标的"
+    ? data.last_symbol || "暂无标的"
     : "采集数据不可读取";
   const capacitySummary = metricsAvailable
-    ? `${bytes(data?.collector_bytes)} / ${bytes(data?.collector_hard_limit_bytes)}`
-    : `容量待确认 / ${bytes(data?.collector_hard_limit_bytes)}`;
+    ? `${bytes(data.collector_bytes)} / ${bytes(data.collector_hard_limit_bytes)}`
+    : `容量待确认 / ${bytes(data.collector_hard_limit_bytes)}`;
   const hero = `<div class="collector-hero ${statusClass(status)}">
     <div class="collector-hero-copy">
       <span class="collector-kicker">RESEARCH CAPTURE · 15S STATE</span>
-      <h3>Top${escNumber(data?.top_count)} 数据采集</h3>
+      <h3>Top${escNumber(data.top_count)} 数据采集</h3>
       <p>15 秒状态持续归档 · 15 分钟原子封存</p>
     </div>
     <div class="collector-state-rail">
       <span class="collector-state-dot"></span>
       <strong>${status}</strong>
-      <small>${esc(data?.status_detail || "等待状态")}</small>
+      <small>${esc(data.status_detail)}</small>
     </div>
   </div>`;
   const metrics = `<div class="tile-grid collector-kpi-grid">
-    ${tile("采集状态", status, data?.status_detail || "等待数据", tone)}
-    ${tile("最近 checkpoint", checkpointAge, readableTime(data?.checkpoint_at), tone)}
-    ${tile("最后状态", readableTime(data?.last_bucket_start), lastSymbolLabel, "txt")}
+    ${tile("采集状态", status, data.status_detail, tone)}
+    ${tile("最近 checkpoint", checkpointAge, readableTime(data.checkpoint_at), tone)}
+    ${tile("最后状态", readableTime(data.last_bucket_start), lastSymbolLabel, "txt")}
     ${tile("窗口数量", parquetFileCount == null ? "—" : `${num(parquetFileCount, 0)} 个`, parquetGapCount == null ? "连续性无法确认" : parquetGapCount ? `缺口 ${num(parquetGapCount, 0)} 个` : "连续性未发现缺口", parquetGapCount == null ? "warn" : parquetGapCount ? "warn" : "pos")}
     ${tile(spoolLabel, pendingSpoolFiles == null ? "—" : `${num(pendingSpoolFiles, 0)} 个`, spoolNote, spoolTone)}
     ${tile("最新文件", latestWrittenAge, parquetFileCount == null ? "文件数量待确认" : `${num(parquetFileCount, 0)} 个 Parquet`, "num")}
   </div>`;
   const storage = `<div class="collector-meter-grid">
-    ${capacityMeter("采集卷占用", data?.collector_bytes, data?.collector_hard_limit_bytes, metricsAvailable ? `软上限 ${bytes(data?.collector_soft_limit_bytes)} · 硬上限 ${bytes(data?.collector_hard_limit_bytes)}` : "卷容量采样不可用", "brand", metricsAvailable)}
-    ${freeSpaceMeter(data || {}, metricsAvailable)}
+    ${capacityMeter("采集卷占用", data.collector_bytes, data.collector_hard_limit_bytes, metricsAvailable ? `软上限 ${bytes(data.collector_soft_limit_bytes)} · 硬上限 ${bytes(data.collector_hard_limit_bytes)}` : "卷容量采样不可用", "brand", metricsAvailable)}
+    ${freeSpaceMeter(data, metricsAvailable)}
   </div>`;
   const capacityStateLabels = { healthy: "正常", warning: "需关注", paused: "已暂停", unknown: "待确认" };
-  const capacityState = String(data?.capacity_state || "unknown").toLowerCase();
+  const capacityState = data.capacity_state.toLowerCase();
   const facts = `<div class="collector-facts">
-    <div><small>环境</small><b>${esc(data?.environment || "—")}</b></div>
-    <div><small>选择范围</small><b>涨幅 Top${escNumber(data?.top_count)}</b></div>
-    <div><small>封存窗口</small><b>${num((Number(data?.parquet_window_seconds) || 0) / 60, 0)} 分钟</b></div>
-    <div><small>迟到容忍</small><b>${num(data?.late_tolerance_seconds, 0)} 秒</b></div>
+    <div><small>环境</small><b>${esc(data.environment || "—")}</b></div>
+    <div><small>选择范围</small><b>涨幅 Top${escNumber(data.top_count)}</b></div>
+    <div><small>封存窗口</small><b>${num(data.parquet_window_seconds / 60, 0)} 分钟</b></div>
+    <div><small>迟到容忍</small><b>${num(data.late_tolerance_seconds, 0)} 秒</b></div>
     <div><small>Hub 序列号</small><b class="num">${lastSequence}</b></div>
-    <div><small>stream</small><b class="num" title="${esc(data?.stream_id || "暂无 stream")}">${esc(streamId)}</b></div>
+    <div><small>stream</small><b class="num" title="${esc(data.stream_id || "暂无 stream")}">${esc(streamId)}</b></div>
     <div><small>窗口覆盖</small><b title="${esc(parquetRange)}">${esc(parquetRange)}</b></div>
-    <div><small>容量状态</small><b>${esc(capacityStateLabels[capacityState] || data?.capacity_state || "待确认")}</b></div>
+    <div><small>容量状态</small><b>${esc(capacityStateLabels[capacityState] || data.capacity_state || "待确认")}</b></div>
   </div>`;
   const body = `${hero}
     ${metrics}

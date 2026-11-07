@@ -81,8 +81,22 @@ def resolve_binance_credentials(
     """
 
     values = os.environ if environ is None else environ
-    reference = _reference_for_role(config, role)
-    missing = _missing_names(reference, values)
+    if role is BinanceCredentialRole.READ:
+        reference = config.read
+    elif role is BinanceCredentialRole.TRADE:
+        reference = config.trade
+    else:
+        raise CredentialResolutionError(
+            f"unsupported Binance credential role: {role!r}"
+        )
+    missing = tuple(
+        variable_name
+        for variable_name, value in (
+            (reference.api_key_env, values.get(reference.api_key_env)),
+            (reference.api_secret_env, values.get(reference.api_secret_env)),
+        )
+        if value is None or not value.strip()
+    )
     if not missing:
         return ResolvedBinanceCredentials(
             role=role,
@@ -169,28 +183,3 @@ def _default_reference(role: BinanceCredentialRole) -> BinanceCredentialRef:
         api_key_env=api_key_env,
         api_secret_env=api_secret_env,
     )
-
-
-def _missing_names(
-    reference: BinanceCredentialRef,
-    values: Mapping[str, str],
-) -> tuple[str, ...]:
-    return tuple(
-        variable_name
-        for variable_name, value in (
-            (reference.api_key_env, values.get(reference.api_key_env)),
-            (reference.api_secret_env, values.get(reference.api_secret_env)),
-        )
-        if value is None or not value.strip()
-    )
-
-
-def _reference_for_role(
-    config: BinanceCredentialConfig,
-    role: BinanceCredentialRole,
-) -> BinanceCredentialRef:
-    if role is BinanceCredentialRole.READ:
-        return config.read
-    if role is BinanceCredentialRole.TRADE:
-        return config.trade
-    raise CredentialResolutionError(f"unsupported Binance credential role: {role!r}")

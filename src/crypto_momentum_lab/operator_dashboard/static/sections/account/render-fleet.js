@@ -6,7 +6,6 @@ import {
 import { emptyBox, pill } from "../../dashboard-ui.js";
 import { K } from "../../ui/css-keys.js";
 import { DISPLAY_TIME_ZONE_LABEL } from "./constants.js";
-import { normalizeSelectedAccount } from "./state.js";
 
 export function liveAccountStatusLabel(status) {
   const normalized = String(status || "UNKNOWN").toUpperCase();
@@ -71,19 +70,21 @@ function liveAccountSummary(accounts, overallStatus) {
 }
 
 export function renderLiveAccounts(state, data) {
-  const sourceAccounts = Array.isArray(data?.accounts) ? data.accounts : [];
-  const accounts = sourceAccounts;
+  const accounts = data.accounts;
   if (!accounts.length) {
-    return [data?.status || "UNKNOWN", `<div class="live-account-empty">${emptyBox("等待实盘账户状态", "账户状态写入后会显示实盘账户矩阵。")}</div>`];
+    return [data.status, `<div class="live-account-empty">${emptyBox("等待实盘账户状态", "账户状态写入后会显示实盘账户矩阵。")}</div>`];
   }
-  const selectedLabel = normalizeSelectedAccount(state, accounts, data?.selected_account_label);
+  if (!accounts.some((account) => account.account_label === state.selectedLiveAccount)) {
+    state.selectedLiveAccount = accounts[0].account_label;
+  }
+  const selectedLabel = state.selectedLiveAccount;
   const selectedAccount = accounts.find(
     (account) => account.account_label === selectedLabel,
-  ) || accounts[0];
+  );
   const readyCount = accounts.filter((account) => String(account.status).toUpperCase() === "READY").length;
   const haltedCount = accounts.filter((account) => String(account.status).toUpperCase() === "HALTED").length;
   const reviewCount = accounts.length - readyCount - haltedCount;
-  const overallStatus = data?.status || (haltedCount ? "HALTED" : reviewCount ? "UNKNOWN" : "READY");
+  const overallStatus = data.status;
   const selectedDetail = `<div class="lazy-detail"><strong>账户详情加载中…</strong><small>${esc(selectedAccount.account_label || "交易所账户")} · 正在读取余额、持仓、挂单和权益。</small></div>`;
   const cards = `<div class="live-account-grid" role="tablist" aria-label="实盘账户选择">${accounts.map((account, index) => liveAccountCard(account, index, selectedLabel)).join("")}</div>`;
   const detail = `<div id="live-account-detail" class="live-account-detail" ${K.liveAccountDetail} role="tabpanel" aria-labelledby="live-account-tab-${accounts.indexOf(selectedAccount)}" data-account-label="${esc(selectedAccount.account_label || "")}">

@@ -48,6 +48,12 @@ test("live account renderer shows the online 24h window without archived range c
       { observed_at: "2026-08-23T23:54:00Z", equity: "280" },
       { observed_at: "2026-08-24T00:00:00Z", equity: "282" },
     ],
+    summary: {},
+    account_config: {},
+    startup_baseline: {},
+    exchange_positions: [],
+    available_accounts: [],
+    live_signals: [],
     balances: [], positions: [], open_orders: [], fills: [],
   });
 

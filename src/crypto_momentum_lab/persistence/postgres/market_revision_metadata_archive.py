@@ -99,12 +99,22 @@ class SqliteMarketRevisionMetadataArchive:
         with sqlite3.connect(self.path, timeout=5) as connection:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA synchronous=FULL")
-            connection.execute("""CREATE TABLE IF NOT EXISTS revisions (
-                revision_id TEXT PRIMARY KEY, scope TEXT NOT NULL, symbol TEXT NOT NULL,
-                interval TEXT NOT NULL, bucket_start TEXT NOT NULL, published_at TEXT NOT NULL,
-                is_canonical INTEGER NOT NULL, metadata BLOB NOT NULL, digest TEXT NOT NULL)""")
             connection.execute(
-                "CREATE INDEX IF NOT EXISTS revision_buckets ON revisions(scope,symbol,interval,bucket_start,is_canonical)"
+                """CREATE TABLE IF NOT EXISTS revisions (
+                    revision_id TEXT PRIMARY KEY,
+                    scope TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    interval TEXT NOT NULL,
+                    bucket_start TEXT NOT NULL,
+                    published_at TEXT NOT NULL,
+                    is_canonical INTEGER NOT NULL,
+                    metadata BLOB NOT NULL,
+                    digest TEXT NOT NULL
+                )"""
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS revision_buckets ON "
+                "revisions(scope,symbol,interval,bucket_start,is_canonical)"
             )
             connection.execute("BEGIN IMMEDIATE")
             ordered = sorted(rows, key=lambda item: item.published_at)
@@ -149,7 +159,8 @@ class SqliteMarketRevisionMetadataArchive:
                 ).encode()
                 if row.is_canonical:
                     connection.execute(
-                        "UPDATE revisions SET is_canonical=0 WHERE scope=? AND symbol=? AND interval=? AND bucket_start=?",
+                        "UPDATE revisions SET is_canonical=0 "
+                        "WHERE scope=? AND symbol=? AND interval=? AND bucket_start=?",
                         (row.scope, row.symbol, row.interval, values["bucket_start"]),
                     )
                 connection.execute(
@@ -231,7 +242,9 @@ class SqliteMarketRevisionMetadataArchive:
             )
             canonical_filter = " AND is_canonical=1" if canonical else ""
             records = connection.execute(
-                f"SELECT * FROM revisions WHERE scope=? AND symbol IN ({placeholders}) AND interval=? AND {time_filter}{canonical_filter} ORDER BY published_at DESC",
+                f"SELECT * FROM revisions WHERE scope=? AND symbol IN ({placeholders}) "
+                f"AND interval=? AND {time_filter}{canonical_filter} "
+                "ORDER BY published_at DESC",
                 (scope, *symbols, interval, *times),
             )
             for row in records:
@@ -245,7 +258,8 @@ class SqliteMarketRevisionMetadataArchive:
             return []
         try:
             return connection.execute(
-                "SELECT DISTINCT substr(bucket_start,1,10),symbol FROM revisions WHERE scope=? AND interval=? AND is_canonical=1 ORDER BY 1,2",
+                "SELECT DISTINCT substr(bucket_start,1,10),symbol FROM revisions "
+                "WHERE scope=? AND interval=? AND is_canonical=1 ORDER BY 1,2",
                 (scope, interval),
             ).fetchall()
         finally:

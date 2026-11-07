@@ -42,7 +42,14 @@ def test_all_read_only_dashboard_routes_are_available() -> None:
             "/api/readiness",
             "/api/health/operational",
         ):
-            assert client.get(route, auth=DASHBOARD_BASIC_AUTH).status_code == 200
+            response = client.get(route, auth=DASHBOARD_BASIC_AUTH)
+            assert response.status_code == 200
+            if route == "/api/universe":
+                assert set(response.json()) == {
+                    "status",
+                    "observed_at",
+                    "monitored_symbols",
+                }
 
 
 def test_operational_health_endpoint() -> None:

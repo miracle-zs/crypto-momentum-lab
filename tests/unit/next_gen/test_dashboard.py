@@ -47,3 +47,36 @@ def test_exit_path_uses_decision_recorded_before_each_order():
         )
         == "定时清仓"
     )
+
+
+def test_exit_path_distinguishes_double_bearish_and_market_sweep():
+    started_at = datetime(2026, 10, 22, 1, 0, tzinfo=UTC)
+    market_order = SimpleNamespace(
+        batch_id="batch-1",
+        created_at=started_at + timedelta(seconds=1),
+        order_type="MARKET",
+    )
+    limit_order = SimpleNamespace(
+        order_type="LIMIT",
+        created_at=started_at - timedelta(seconds=7200),
+        status="CANCELED",
+    )
+
+    assert (
+        NextGenDashboardQueries._close_path(
+            market_order, [], "candle_15m_double_bearish", 7200
+        )
+        == "连续两根阴线加速退出"
+    )
+    assert (
+        NextGenDashboardQueries._close_path(
+            market_order, [], "candle_15m_bearish", 7200
+        )
+        == "首根反向 15 分钟 K 线止盈"
+    )
+    assert (
+        NextGenDashboardQueries._close_path(
+            market_order, [limit_order], "candle_15m_bearish", 7200
+        )
+        == "宽限期后止损"
+    )

@@ -84,17 +84,17 @@ def _timestamp_field(name: str) -> pa.Field:
 # after a 1s realtime closure, while the PostgreSQL durable row is closed after
 # 3s and therefore also folds in events that arrived in between.  When both
 # versions of one key disagree, the more complete source wins.
-_SOURCE_PRIORITY: dict[str, int] = {
-    SourceKind.POSTGRES_BACKFILL.value: 2,
-    SourceKind.HUB.value: 1,
+_SOURCE_PRIORITY: dict[SourceKind, int] = {
+    SourceKind.POSTGRES_BACKFILL: 2,
+    SourceKind.HUB: 1,
 }
 
 
 def _source_priority(row: dict[str, object]) -> int:
-    kind = row.get("source_kind")
+    kind = row["source_kind"]
     if not isinstance(kind, str):
-        return 0
-    return _SOURCE_PRIORITY.get(kind, 0)
+        raise TypeError("Parquet row source_kind must be a string")
+    return _SOURCE_PRIORITY[SourceKind(kind)]
 
 
 _PARQUET_SCHEMA = pa.schema(

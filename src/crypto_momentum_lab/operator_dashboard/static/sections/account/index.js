@@ -34,7 +34,7 @@ export function selectLiveAccount(root, accountLabel) {
 }
 
 export function wireLiveAccounts(root, data, { requestJson = defaultAccountRequestJson } = {}) {
-  const accounts = Array.isArray(data?.accounts) ? data.accounts : [];
+  const accounts = data.accounts;
   root.__liveAccountData = accounts;
   root.__requestJson = requestJson;
   root.querySelectorAll(sel.accountCards()).forEach((button) => {
@@ -71,7 +71,7 @@ export function wireLiveAccounts(root, data, { requestJson = defaultAccountReque
   });
   const selected = accounts.find(
     (account) => account.account_label === state.selectedLiveAccount,
-  ) || accounts[0];
+  );
   if (selected) {
     void loadLiveAccountDetail(
       state,
@@ -84,8 +84,8 @@ export function wireLiveAccounts(root, data, { requestJson = defaultAccountReque
 }
 
 export async function updateLiveAccountsDynamic(root, data) {
-  if (!root || !data) return;
-  const accounts = Array.isArray(data?.accounts) ? data.accounts : [];
+  if (!root) return;
+  const accounts = data.accounts;
   if (!accounts.length) return;
   root.__liveAccountData = accounts;
 
@@ -111,7 +111,7 @@ export async function updateLiveAccountsDynamic(root, data) {
   const readyCount = accounts.filter((account) => String(account.status).toUpperCase() === "READY").length;
   const haltedCount = accounts.filter((account) => String(account.status).toUpperCase() === "HALTED").length;
   const reviewCount = accounts.length - readyCount - haltedCount;
-  const overallStatus = data?.status || (haltedCount ? "HALTED" : reviewCount ? "UNKNOWN" : "READY");
+  const overallStatus = data.status;
 
   const fleetStatusEl = root.querySelector(`.${K.liveAccountFleetStatus}`);
   if (fleetStatusEl) {

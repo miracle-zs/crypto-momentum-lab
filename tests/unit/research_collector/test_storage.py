@@ -2,7 +2,9 @@ from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 
+import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from crypto_momentum_lab.market_data.hub import MarketStateBatch
 from crypto_momentum_lab.research_collector.models import (
@@ -122,6 +124,32 @@ def test_parquet_sink_backfill_supersedes_hub_row(tmp_path) -> None:
     assert rejected.conflicting_rows == 1
     assert rejected.upgraded_rows == 0
     assert len(pq.ParquetFile(paths[0]).read().to_pylist()) == 1
+
+
+def test_parquet_sink_rejects_unknown_existing_source_kind(tmp_path) -> None:
+    state = fixture_state("BTCUSDT", 0)
+    selection = _selection(state.symbol, state.bucket_start)
+    sink = ParquetWindowSink(
+        tmp_path / "parquet",
+        window_seconds=15,
+        late_tolerance_seconds=0,
+    )
+    sink.append(_batch(state, 1), selection)
+    sink.flush_all()
+
+    path = next(tmp_path.joinpath("parquet").rglob("*.parquet"))
+    table = pq.ParquetFile(path).read()
+    source_kind_column = table.schema.get_field_index("source_kind")
+    malformed_table = table.set_column(
+        source_kind_column,
+        "source_kind",
+        pa.array(["unregistered_source"], type=pa.string()),
+    )
+    pq.write_table(malformed_table, path)
+
+    changed = replace(state, close_price=Decimal("102"))
+    with pytest.raises(ValueError, match="not a valid SourceKind"):
+        sink.append(_batch(changed, 2), selection)
 
 
 def test_research_collector_state_conflicts_aggregated(monkeypatch, tmp_path) -> None:

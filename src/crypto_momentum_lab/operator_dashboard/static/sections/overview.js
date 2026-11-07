@@ -9,11 +9,11 @@ import {
 import { blockTitle, emptyBox, pill, tile } from "../dashboard-ui.js";
 
 export function renderOverview(data) {
-  const services = data.services || [];
-  const accountStatuses = data.account_statuses || [];
-  const haltCount = data.active_halt_count || 0;
+  const services = data.services;
+  const accountStatuses = data.account_statuses;
+  const haltCount = data.active_halt_count;
   const tiles = `<div class="tile-grid">
-    ${tile("数据库", data.database_status || "UNKNOWN", "PostgreSQL 只读", statusSlug(data.database_status) === "READY" ? "pos" : "warn")}
+    ${tile("数据库", data.database_status, "PostgreSQL 只读", statusSlug(data.database_status) === "READY" ? "pos" : "warn")}
     ${tile("活跃停机", haltCount, haltCount ? "入场信号已阻断" : "正常无停机", haltCount ? "neg" : "")}
   </div>`;
   const serviceRows = services.map((service) => {
@@ -43,9 +43,9 @@ export function renderOverview(data) {
 }
 
 export function updateOverviewDynamic(section, data) {
-  if (!section || !data) return;
+  if (!section || !Array.isArray(data?.services)) return;
   const services = new Map(
-    (data.services || []).map((service) => [String(service.name), service]),
+    data.services.map((service) => [String(service.name), service]),
   );
   section.querySelectorAll("[data-service-age]").forEach((element) => {
     const service = services.get(element.dataset.serviceAge);

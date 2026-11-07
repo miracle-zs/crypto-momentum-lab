@@ -9,14 +9,10 @@ export function sectionRenderKey(id, data) {
   delete snapshot.generated_at;
 
   if (id === "overview") {
-    if (Array.isArray(snapshot.services)) {
-      snapshot.services = snapshot.services.map(({ age_seconds, observed_at, ...rest }) => rest);
-    }
-    if (Array.isArray(snapshot.account_statuses)) {
-      snapshot.account_statuses = snapshot.account_statuses.map(
-        ({ observed_at, ...rest }) => rest,
-      );
-    }
+    snapshot.services = snapshot.services.map(({ age_seconds, observed_at, ...rest }) => rest);
+    snapshot.account_statuses = snapshot.account_statuses.map(
+      ({ observed_at, ...rest }) => rest,
+    );
   }
 
   if (id === "risk") {
@@ -44,14 +40,13 @@ export function sectionRenderKey(id, data) {
       "mode",
       "environment",
     ];
-    snapshot.accounts = (snapshot.accounts || []).map((account) =>
+    snapshot.accounts = snapshot.accounts.map((account) =>
       Object.fromEntries(
         fields
           .filter((field) => account[field] !== undefined)
           .map((field) => [field, account[field]]),
       ),
     );
-    delete snapshot.selected_account_label;
     delete snapshot.status;
   }
 

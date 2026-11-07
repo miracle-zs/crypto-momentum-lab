@@ -61,7 +61,7 @@ function setSectionStatus(id, status, cacheStatus = null) {
 
 export function createPoller({ renderers, onAfterRender }) {
   function updateGlobalMode(data) {
-    const live = data.services?.find(
+    const live = data.services.find(
       (service) => service.name === "strategy-runner" && service.details?.engine === "nextgen",
     );
     const mode = liveModeForService(live, data.active_halt_count);

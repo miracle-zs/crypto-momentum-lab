@@ -855,20 +855,14 @@ class MarketDataRuntime:
     universe_refresh_interval_minutes: int
     enabled_streams: tuple[CaptureStream, ...]
     initial_symbols: frozenset[str]
-    quote_volume_publisher: Binance24hQuoteVolumePublisher | None = None
-    daily_open_prefetcher: DailyOpenPrefetcher | None = None
-    maintenance_capture_repository: PostgresCaptureRepository | None = None
-    operational_retention: PostgresOperationalRetentionRepository | None = None
+    maintenance_capture_repository: PostgresCaptureRepository
+    operational_retention: PostgresOperationalRetentionRepository
+    maintenance_session_factory: async_sessionmaker[AsyncSession]
+    quote_volume_publisher: Binance24hQuoteVolumePublisher
+    daily_open_prefetcher: DailyOpenPrefetcher
     database_retention_interval_seconds: float = _DATABASE_RETENTION_INTERVAL_SECONDS
     contract_metadata_retention_hours: float = _CONTRACT_METADATA_RETENTION_HOURS
     runtime_state_retention_hours: float = _RUNTIME_STATE_RETENTION_HOURS
-    maintenance_session_factory: async_sessionmaker[AsyncSession] | None = None
-
-
-def _archive_retention_repository(
-    runtime: MarketDataRuntime,
-) -> PostgresCaptureRepository:
-    return runtime.maintenance_capture_repository or runtime.capture_repository
 
 
 def _market_data_watchdog_diagnostics(
@@ -1350,8 +1344,6 @@ async def run_market_data(
         auxiliary_tasks: tuple[asyncio.Task[None], ...] = ()
         stop_task: asyncio.Task[bool] | None = None
         quote_hub = runtime.quote_hub
-        quote_volume_publisher = runtime.quote_volume_publisher
-        daily_open_prefetcher = runtime.daily_open_prefetcher
         try:
             await runtime.state_hub.start()
             startup_timer.mark("state_hub_started")
@@ -1373,13 +1365,12 @@ async def run_market_data(
                 second=0,
                 microsecond=0,
             )
-            if daily_open_prefetcher is not None:
-                await daily_open_prefetcher.bootstrap_current_day(startup_observed_at)
-                startup_timer.mark("daily_open_bootstrap_completed")
-                await daily_open_prefetcher.start()
-                startup_timer.mark("daily_open_prefetch_started")
-            else:
-                startup_timer.mark("daily_open_prefetch_skipped")
+            await runtime.daily_open_prefetcher.bootstrap_current_day(
+                startup_observed_at
+            )
+            startup_timer.mark("daily_open_bootstrap_completed")
+            await runtime.daily_open_prefetcher.start()
+            startup_timer.mark("daily_open_prefetch_started")
             startup_snapshot = await runtime.universe.refresh(
                 observed_at=startup_observed_at
             )
@@ -1392,11 +1383,8 @@ async def run_market_data(
                 membership_count=len(startup_snapshot.memberships),
                 target_symbol_count=len(startup_snapshot.ranking.target_symbols),
             )
-            if quote_volume_publisher is not None:
-                await quote_volume_publisher.start()
-                startup_timer.mark("quote_volume_publisher_started")
-            else:
-                startup_timer.mark("quote_volume_publisher_skipped")
+            await runtime.quote_volume_publisher.start()
+            startup_timer.mark("quote_volume_publisher_started")
             capture_task = asyncio.create_task(runtime.capture.run())
             startup_timer.mark("capture_task_scheduled")
             auxiliary_tasks = (
@@ -1431,48 +1419,40 @@ async def run_market_data(
                 ),
                 asyncio.create_task(
                     run_raw_archive_retention_loop(
-                        _archive_retention_repository(runtime),
+                        runtime.maintenance_capture_repository,
                         runtime.archive_root,
                         retention_days=runtime.archive_retention_days,
                         interval_seconds=runtime.archive_retention_interval_seconds,
                     )
                 ),
             )
-            operational_retention = runtime.operational_retention
-            if operational_retention is not None:
-                maintenance_sessions = runtime.maintenance_session_factory
-                if maintenance_sessions is None:
-                    raise ValueError(
-                        "operational retention requires maintenance sessions"
-                    )
+            maintenance_sessions = runtime.maintenance_session_factory
 
-                async def consumer_req_provider() -> tuple[
-                    RetentionConsumerRequirement, ...
-                ]:
-                    return await _resolve_market_data_consumer_requirements(
-                        maintenance_sessions
-                    )
-
-                auxiliary_tasks += (
-                    asyncio.create_task(
-                        run_operational_database_retention_loop(
-                            operational_retention,
-                            authority=RetentionAuthority(
-                                AsyncPostgresRetentionRepository(maintenance_sessions)
-                            ),
-                            interval_seconds=(
-                                runtime.database_retention_interval_seconds
-                            ),
-                            contract_metadata_retention_hours=(
-                                runtime.contract_metadata_retention_hours
-                            ),
-                            runtime_state_retention_hours=(
-                                runtime.runtime_state_retention_hours
-                            ),
-                            consumer_requirements_provider=consumer_req_provider,
-                        )
-                    ),
+            async def consumer_req_provider() -> tuple[
+                RetentionConsumerRequirement, ...
+            ]:
+                return await _resolve_market_data_consumer_requirements(
+                    maintenance_sessions
                 )
+
+            auxiliary_tasks += (
+                asyncio.create_task(
+                    run_operational_database_retention_loop(
+                        runtime.operational_retention,
+                        authority=RetentionAuthority(
+                            AsyncPostgresRetentionRepository(maintenance_sessions)
+                        ),
+                        interval_seconds=runtime.database_retention_interval_seconds,
+                        contract_metadata_retention_hours=(
+                            runtime.contract_metadata_retention_hours
+                        ),
+                        runtime_state_retention_hours=(
+                            runtime.runtime_state_retention_hours
+                        ),
+                        consumer_requirements_provider=consumer_req_provider,
+                    )
+                ),
+            )
             startup_timer.mark(
                 "background_tasks_started",
                 auxiliary_task_count=len(auxiliary_tasks),
@@ -1520,10 +1500,8 @@ async def run_market_data(
             if capture_task is not None:
                 await asyncio.gather(capture_task, return_exceptions=True)
             await runtime.runtime_state_publisher.stop()
-            if daily_open_prefetcher is not None:
-                await daily_open_prefetcher.stop()
-            if quote_volume_publisher is not None:
-                await quote_volume_publisher.stop()
+            await runtime.daily_open_prefetcher.stop()
+            await runtime.quote_volume_publisher.stop()
             await quote_hub.stop()
             await runtime.state_hub.stop()
     if health is not None:

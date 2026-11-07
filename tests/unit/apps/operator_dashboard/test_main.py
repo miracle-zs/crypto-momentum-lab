@@ -157,8 +157,6 @@ class FakeQueries:
         return UniverseStatusResponse(
             status=OperationalStatus.NO_DATA,
             observed_at=None,
-            gainers=[],
-            losers=[],
             monitored_symbols=[],
         )
 
