@@ -170,6 +170,7 @@ class BinanceClosedCandle15mFeed:
         self._seen_keys: set[tuple[str, datetime]] = set()
         self._seen_order: deque[tuple[str, datetime]] = deque()
         self._started = False
+        self.connection_opened = asyncio.Event()
 
     @property
     def symbols(self) -> frozenset[str]:
@@ -236,6 +237,9 @@ class BinanceClosedCandle15mFeed:
             self._stream_names(normalized), generation=max(1, self._generation)
         )
 
+    def has_received(self, symbol: str, candle_start: datetime) -> bool:
+        return (symbol, candle_start) in self._seen_keys
+
     def __aiter__(self) -> AsyncIterator[ClosedCandle15mEvent]:
         return self._iterate()
 
@@ -282,6 +286,8 @@ class BinanceClosedCandle15mFeed:
         del envelope
 
     async def _observe_lifecycle(self, event: ConnectionLifecycleEvent) -> None:
+        if event.opened:
+            self.connection_opened.set()
         log.info(
             "live_closed_candle_feed_connection",
             consumer_id=self._config.consumer_id,

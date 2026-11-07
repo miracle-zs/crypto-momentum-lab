@@ -677,6 +677,42 @@ async def test_exit_manager_refuses_market_sweep_on_invalid_payload(exit_setup):
 
 
 @pytest.mark.asyncio
+async def test_recovered_bearish_exit_is_immediate_and_batch_scoped(exit_setup):
+    state, _, _, manager = exit_setup
+    start = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
+    for batch_id in ("recovered", "other"):
+        state.batches[batch_id] = PositionBatch(
+            "live",
+            "a1",
+            batch_id,
+            "BTCUSDT",
+            "LONG",
+            Decimal("1"),
+            Decimal("100"),
+            start + timedelta(minutes=5),
+        )
+    candle = ClosedCandle15m(
+        "BTCUSDT",
+        start + timedelta(minutes=15),
+        start + timedelta(minutes=30),
+        Decimal("100"),
+        Decimal("98"),
+    )
+    manager.execute_batch_exit = AsyncMock()
+    scheduled = manager.evaluate_active_batches(
+        now=candle.candle_end + timedelta(seconds=5),
+        closed_candle=candle,
+        current_prices={"BTCUSDT": candle.close_price},
+        recovered_batch_id="recovered",
+    )
+    await asyncio.sleep(0)
+    assert scheduled == ["recovered"]
+    assert manager.execute_batch_exit.await_args.kwargs["immediate"] is True
+    assert manager.execute_batch_exit.await_count == 1
+    await manager.close()
+
+
+@pytest.mark.asyncio
 async def test_double_bearish_submits_immediate_exit(exit_setup):
     state, _, _, manager = exit_setup
     start = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)

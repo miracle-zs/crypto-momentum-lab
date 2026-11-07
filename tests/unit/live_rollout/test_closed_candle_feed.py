@@ -8,6 +8,7 @@ from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
 from crypto_momentum_lab.domain.market.models import (
     CaptureRoute,
     CaptureStream,
+    ConnectionLifecycleEvent,
     RawEnvelope,
 )
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
@@ -19,6 +20,25 @@ from crypto_momentum_lab.live_rollout.closed_candle_feed import (
 )
 
 RECEIVED_AT = datetime(2026, 8, 24, 14, 45, 0, 100000, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_connection_open_notifies_recovery() -> None:
+    feed = BinanceClosedCandle15mFeed(
+        config=ClosedCandle15mFeedConfig(websocket_url="wss://example.test/ws")
+    )
+    event = ConnectionLifecycleEvent(
+        session_id=UUID(int=1),
+        route=CaptureRoute.MARKET,
+        stream=CaptureStream.KLINE_15M,
+        symbols=("BTCUSDT",),
+        occurred_at=RECEIVED_AT,
+        opened=True,
+        reason=None,
+    )
+    assert not feed.connection_opened.is_set()
+    await feed._observe_lifecycle(event)
+    assert feed.connection_opened.is_set()
 
 
 def test_required_exit_symbols_need_acknowledged_live_connection():
@@ -146,15 +166,25 @@ async def test_symbol_targets_replace_synchronously_while_control_ack_is_pending
         BinanceWebSocketConnection,
     )
 
-    feed = BinanceClosedCandle15mFeed(config=ClosedCandle15mFeedConfig(
-        websocket_url="wss://example.test/market/ws"))
-    connection = BinanceWebSocketConnection(base_url="wss://example.test/market/ws",
-        route=CaptureRoute.MARKET, environment="live", desired_names=(),
-        stream=CaptureStream.KLINE_15M, generation=1,
-        on_envelope=feed._discard_envelope, on_lifecycle=feed._observe_lifecycle,
-        reconnect_delays=(0,), connection_lifetime_seconds=60,
-        open_timeout_seconds=1, ping_interval_seconds=1, ping_timeout_seconds=1,
-        silence_timeout_seconds=60)
+    feed = BinanceClosedCandle15mFeed(
+        config=ClosedCandle15mFeedConfig(websocket_url="wss://example.test/market/ws")
+    )
+    connection = BinanceWebSocketConnection(
+        base_url="wss://example.test/market/ws",
+        route=CaptureRoute.MARKET,
+        environment="live",
+        desired_names=(),
+        stream=CaptureStream.KLINE_15M,
+        generation=1,
+        on_envelope=feed._discard_envelope,
+        on_lifecycle=feed._observe_lifecycle,
+        reconnect_delays=(0,),
+        connection_lifetime_seconds=60,
+        open_timeout_seconds=1,
+        ping_interval_seconds=1,
+        ping_timeout_seconds=1,
+        silence_timeout_seconds=60,
+    )
     pending_ack = object()
     connection._pending_control = pending_ack
     feed._connection = connection
@@ -173,8 +203,9 @@ async def test_symbol_targets_replace_synchronously_while_control_ack_is_pending
 
 
 def test_symbol_target_can_be_set_before_connection_start():
-    feed = BinanceClosedCandle15mFeed(config=ClosedCandle15mFeedConfig(
-        websocket_url="wss://example.test/market/ws"))
+    feed = BinanceClosedCandle15mFeed(
+        config=ClosedCandle15mFeedConfig(websocket_url="wss://example.test/market/ws")
+    )
     assert feed.set_symbols(frozenset({" btcusdt ", ""})) is None
     assert feed.symbols == frozenset({"BTCUSDT"})
     assert feed._generation == 1

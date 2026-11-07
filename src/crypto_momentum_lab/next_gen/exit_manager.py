@@ -361,6 +361,7 @@ class ExitManager:
         current_prices: dict[str, Decimal] | None = None,
         closed_candle: ClosedCandle15m | None = None,
         entry_candles: dict[str, ClosedCandle15m] | None = None,
+        recovered_batch_id: str | None = None,
     ) -> list[str]:
         """评估当前所有活跃批次，触发到期退出或 Drain 排空退出"""
         if not self._state.can_submit_exit_order():
@@ -372,6 +373,8 @@ class ExitManager:
         prices = current_prices or {}
 
         for batch in list(self._state.batches.values()):
+            if recovered_batch_id is not None and batch.batch_id != recovered_batch_id:
+                continue
             if batch.status == "CLOSED" or batch.quantity <= Decimal("0"):
                 self._pending_exits.pop(batch.batch_id, None)
                 self._rejected_exit_until.pop(batch.batch_id, None)
@@ -453,6 +456,7 @@ class ExitManager:
                 )
                 immediate = (
                     forced
+                    or recovered_batch_id is not None
                     or exit_reason == "candle_15m_double_bearish"
                     or self.grace_period_sec == 0
                     or self.grace_profit_pct == 0

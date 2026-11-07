@@ -165,6 +165,84 @@ class NextGenDaemon:
     def _on_market_connection_change(self, connected: bool) -> None:
         self.strategy_engine.market_connected = connected
 
+    async def _recover_exit_candles(
+        self, history: BinanceUsdMRestClient, now: datetime
+    ) -> None:
+        """Recover missed formal closes for positions that still need an exit."""
+        schedule = self.state.scheduled_risk_window
+        if (
+            self.state.is_draining
+            or self.state.scheduled_flatten_pending
+            or (
+                schedule is not None
+                and schedule.phase(now)
+                in {
+                    ScheduledRiskWindowPhase.FLATTENING,
+                    ScheduledRiskWindowPhase.DEADLINE,
+                    ScheduledRiskWindowPhase.VERIFYING,
+                }
+            )
+        ):
+            return
+        for batch in tuple(self.state.batches.values()):
+            if batch.status != "ACTIVE" or batch.quantity <= 0:
+                continue
+            if (
+                self.state.account_label,
+                batch.batch_id,
+            ) in self.state.active_exit_orders:
+                continue
+            next_start = first_candle_start_after_entry(batch.entry_bar_time)
+            candle_start = next_start
+            while candle_start + timedelta(minutes=15) <= now:
+                candle = await history.fetch_closed_15m_candle(
+                    batch.symbol, candle_start
+                )
+                opposing = (
+                    batch.position_side == "LONG"
+                    and candle.close_price < candle.open_price
+                ) or (
+                    batch.position_side == "SHORT"
+                    and candle.close_price > candle.open_price
+                )
+                if self._candle_feed.has_received(batch.symbol, candle_start):
+                    if opposing:
+                        break
+                    candle_start += timedelta(minutes=15)
+                    continue
+                if opposing:
+                    entry_candles = {}
+                    if batch.position_side == "LONG" and candle_start == next_start:
+                        entry_candles[
+                            batch.batch_id
+                        ] = await history.fetch_closed_15m_candle(
+                            batch.symbol, next_start - timedelta(minutes=15)
+                        )
+                    if self._candle_feed.has_received(batch.symbol, candle_start):
+                        break
+                    self.exit_manager.evaluate_active_batches(
+                        now=now,
+                        current_prices={batch.symbol: candle.close_price},
+                        closed_candle=candle,
+                        entry_candles=entry_candles,
+                        recovered_batch_id=batch.batch_id,
+                    )
+                    break
+                candle_start += timedelta(minutes=15)
+
+    async def _recover_on_connection(
+        self, feed: BinanceClosedCandle15mFeed, history: BinanceUsdMRestClient
+    ) -> None:
+        while True:
+            await feed.connection_opened.wait()
+            feed.connection_opened.clear()
+            while True:
+                if feed.connection_available:
+                    break
+                await asyncio.sleep(0.1)
+            await asyncio.sleep(2.0)
+            await self._recover_exit_candles(history, datetime.now(UTC))
+
     async def _run_exit_candles(self) -> None:
         """Feed formal exchange 15m closes directly to the existing exit policy."""
         feed = self._candle_feed
@@ -176,47 +254,54 @@ class NextGenDaemon:
             async with BinanceUsdMRestClient(
                 get_binance_urls(self.environment)[0]
             ) as history:
-                async for event in feed:
-                    candle = event.candle
-                    entry_candles = {}
-                    schedule = self.state.scheduled_risk_window
-                    forced = (
-                        self.state.is_draining
-                        or self.state.scheduled_flatten_pending
-                        or (
-                            schedule is not None
-                            and schedule.phase(candle.candle_end)
-                            in {
-                                ScheduledRiskWindowPhase.FLATTENING,
-                                ScheduledRiskWindowPhase.DEADLINE,
-                                ScheduledRiskWindowPhase.VERIFYING,
-                            }
+                async with asyncio.TaskGroup() as group:
+                    recovery_task = group.create_task(
+                        self._recover_on_connection(feed, history)
+                    )
+                    async for event in feed:
+                        candle = event.candle
+                        entry_candles = {}
+                        schedule = self.state.scheduled_risk_window
+                        forced = (
+                            self.state.is_draining
+                            or self.state.scheduled_flatten_pending
+                            or (
+                                schedule is not None
+                                and schedule.phase(candle.candle_end)
+                                in {
+                                    ScheduledRiskWindowPhase.FLATTENING,
+                                    ScheduledRiskWindowPhase.DEADLINE,
+                                    ScheduledRiskWindowPhase.VERIFYING,
+                                }
+                            )
                         )
-                    )
-                    if not forced and candle.close_price < candle.open_price:
-                        for batch in tuple(self.state.batches.values()):
-                            if (
-                                batch.symbol == candle.symbol
-                                and batch.position_side == "LONG"
-                                and batch.quantity > 0
-                                and batch.status == "ACTIVE"
-                                and candle.candle_start
-                                == first_candle_start_after_entry(batch.entry_bar_time)
-                            ):
-                                entry_candles[
-                                    batch.batch_id
-                                ] = await history.fetch_closed_15m_candle(
-                                    batch.symbol,
-                                    candle.candle_start - timedelta(minutes=15),
-                                )
-                    self.exit_manager.evaluate_active_batches(
-                        # A final exchange candle is closed even if the host clock
-                        # reports receipt just before its nominal end.
-                        now=candle.candle_end,
-                        current_prices={candle.symbol: candle.close_price},
-                        closed_candle=candle,
-                        entry_candles=entry_candles,
-                    )
+                        if not forced and candle.close_price < candle.open_price:
+                            for batch in tuple(self.state.batches.values()):
+                                if (
+                                    batch.symbol == candle.symbol
+                                    and batch.position_side == "LONG"
+                                    and batch.quantity > 0
+                                    and batch.status == "ACTIVE"
+                                    and candle.candle_start
+                                    == first_candle_start_after_entry(
+                                        batch.entry_bar_time
+                                    )
+                                ):
+                                    entry_candles[
+                                        batch.batch_id
+                                    ] = await history.fetch_closed_15m_candle(
+                                        batch.symbol,
+                                        candle.candle_start - timedelta(minutes=15),
+                                    )
+                        self.exit_manager.evaluate_active_batches(
+                            # A final exchange candle is closed even if the host clock
+                            # reports receipt just before its nominal end.
+                            now=candle.candle_end,
+                            current_prices={candle.symbol: candle.close_price},
+                            closed_candle=candle,
+                            entry_candles=entry_candles,
+                        )
+                    recovery_task.cancel()
         finally:
             await feed.stop()
 

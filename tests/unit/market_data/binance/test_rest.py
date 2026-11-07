@@ -29,6 +29,24 @@ async def test_fetches_exact_closed_15m_candle() -> None:
 
 
 @respx.mock
+@pytest.mark.parametrize(
+    "rows",
+    [[], [[1781396100000, "100", "103", "99", "101", "1", 1781396999999]]],
+)
+async def test_rejects_missing_or_wrong_historical_candle(
+    rows: list[list[object]],
+) -> None:
+    respx.get("https://fapi.binance.com/fapi/v1/klines").mock(
+        return_value=httpx.Response(200, json=rows)
+    )
+    async with BinanceUsdMRestClient("https://fapi.binance.com") as client:
+        with pytest.raises(ValueError):
+            await client.fetch_closed_15m_candle(
+                "BTCUSDT", datetime(2026, 6, 14, tzinfo=UTC)
+            )
+
+
+@respx.mock
 async def test_lists_only_active_usdt_perpetuals() -> None:
     respx.get("https://fapi.binance.com/fapi/v1/exchangeInfo").mock(
         return_value=httpx.Response(

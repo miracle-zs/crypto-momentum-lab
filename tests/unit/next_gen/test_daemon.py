@@ -48,9 +48,16 @@ def fake_closed_candle_feed(monkeypatch):
     class Feed:
         def __init__(self, **kwargs):
             self.symbols = frozenset()
+            self.connection_opened = asyncio.Event()
 
         def set_symbols(self, symbols):
             self.symbols = symbols
+
+        def has_received(self, symbol, candle_start):
+            return False
+
+        async def wait_for_candle(self, symbol, candle_start, wait_seconds):
+            return False
 
         connection_available = True
 
@@ -94,6 +101,264 @@ def mock_rest_client(clean_account_snapshot: AccountSnapshot) -> AsyncMock:
 
 
 @pytest.mark.asyncio
+async def test_each_connection_open_runs_recovery(
+    account_config, mock_rest_client: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    daemon = NextGenDaemon(
+        environment="live",
+        account_label="a1",
+        db=InMemoryTradingRepository(),
+        rest_client=mock_rest_client,
+        account_config=account_config,
+    )
+    reached = asyncio.Queue()
+
+    async def recover(history, now):
+        await reached.put(now)
+
+    monkeypatch.setattr(daemon, "_recover_exit_candles", recover)
+    feed = daemon._candle_feed
+    task = asyncio.create_task(daemon._recover_on_connection(feed, AsyncMock()))
+    try:
+        for _ in range(2):
+            feed.connection_opened.set()
+            await asyncio.wait_for(reached.get(), timeout=3)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["existing_exit", "scheduled_flatten"])
+async def test_candle_recovery_respects_existing_exit_or_flatten(
+    account_config, mock_rest_client: AsyncMock, case: str
+) -> None:
+    start = datetime(2026, 10, 18, 12, tzinfo=UTC)
+    daemon = NextGenDaemon(
+        environment="live",
+        account_label="a1",
+        db=InMemoryTradingRepository(),
+        rest_client=mock_rest_client,
+        account_config=account_config,
+    )
+    daemon.state.batches["batch"] = PositionBatch(
+        "live",
+        "a1",
+        "batch",
+        "BTCUSDT",
+        "LONG",
+        Decimal("1"),
+        Decimal("100"),
+        start + timedelta(minutes=5),
+    )
+    if case == "existing_exit":
+        daemon.state.active_exit_orders[("a1", "batch")] = "exit-order"
+    else:
+        daemon.state.scheduled_flatten_pending = True
+    history = AsyncMock()
+    await daemon._recover_exit_candles(history, start + timedelta(hours=1))
+    history.fetch_closed_15m_candle.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_recovery_of_missed_bearish_close_requests_immediate_exit(
+    account_config, mock_rest_client: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    start = datetime(2026, 10, 18, 12, tzinfo=UTC)
+    entry = ClosedCandle15m(
+        "BTCUSDT", start, start + timedelta(minutes=15), Decimal("100"), Decimal("99")
+    )
+    following = ClosedCandle15m(
+        "BTCUSDT",
+        entry.candle_end,
+        entry.candle_end + timedelta(minutes=15),
+        Decimal("99"),
+        Decimal("98"),
+    )
+    history = AsyncMock()
+    history.fetch_closed_15m_candle.side_effect = [following, entry]
+    daemon = NextGenDaemon(
+        environment="live",
+        account_label="a1",
+        db=InMemoryTradingRepository(),
+        rest_client=mock_rest_client,
+        account_config=account_config,
+    )
+    daemon.state.batches["batch"] = PositionBatch(
+        "live",
+        "a1",
+        "batch",
+        "BTCUSDT",
+        "LONG",
+        Decimal("1"),
+        Decimal("100"),
+        start + timedelta(minutes=5),
+    )
+    received = []
+    monkeypatch.setattr(
+        daemon.exit_manager,
+        "evaluate_active_batches",
+        lambda **kwargs: received.append(kwargs),
+    )
+    await daemon._recover_exit_candles(
+        history, following.candle_end + timedelta(seconds=5)
+    )
+    assert received[0]["closed_candle"] == following
+    assert received[0]["entry_candles"] == {"batch": entry}
+    assert received[0]["recovered_batch_id"] == "batch"
+
+
+@pytest.mark.asyncio
+async def test_recovery_waits_for_live_close_in_transit(
+    account_config, mock_rest_client: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    start = datetime(2026, 10, 18, 12, tzinfo=UTC)
+    candle = ClosedCandle15m(
+        "BTCUSDT",
+        start + timedelta(minutes=15),
+        start + timedelta(minutes=30),
+        Decimal("100"),
+        Decimal("98"),
+    )
+    history = AsyncMock()
+    history.fetch_closed_15m_candle.return_value = candle
+    daemon = NextGenDaemon(
+        environment="live",
+        account_label="a1",
+        db=InMemoryTradingRepository(),
+        rest_client=mock_rest_client,
+        account_config=account_config,
+    )
+    daemon.state.batches["batch"] = PositionBatch(
+        "live",
+        "a1",
+        "batch",
+        "BTCUSDT",
+        "LONG",
+        Decimal("1"),
+        Decimal("100"),
+        start + timedelta(minutes=5),
+    )
+    received = asyncio.Event()
+    monkeypatch.setattr(
+        daemon._candle_feed,
+        "has_received",
+        lambda symbol, candle_start: received.is_set(),
+    )
+
+    calls = []
+    monkeypatch.setattr(
+        daemon.exit_manager,
+        "evaluate_active_batches",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    received.set()
+    await daemon._recover_exit_candles(
+        history, candle.candle_end + timedelta(seconds=5)
+    )
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_recovery_does_not_override_received_live_close(
+    account_config, mock_rest_client: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    start = datetime(2026, 10, 18, 12, tzinfo=UTC)
+    candle = ClosedCandle15m(
+        "BTCUSDT",
+        start + timedelta(minutes=15),
+        start + timedelta(minutes=30),
+        Decimal("100"),
+        Decimal("98"),
+    )
+    history = AsyncMock()
+    history.fetch_closed_15m_candle.return_value = candle
+    daemon = NextGenDaemon(
+        environment="live",
+        account_label="a1",
+        db=InMemoryTradingRepository(),
+        rest_client=mock_rest_client,
+        account_config=account_config,
+    )
+    daemon.state.batches["batch"] = PositionBatch(
+        "live",
+        "a1",
+        "batch",
+        "BTCUSDT",
+        "LONG",
+        Decimal("1"),
+        Decimal("100"),
+        start + timedelta(minutes=5),
+    )
+    monkeypatch.setattr(
+        daemon._candle_feed, "has_received", lambda symbol, candle_start: True
+    )
+    received = []
+    monkeypatch.setattr(
+        daemon.exit_manager,
+        "evaluate_active_batches",
+        lambda **kwargs: received.append(kwargs),
+    )
+    await daemon._recover_exit_candles(
+        history, candle.candle_end + timedelta(seconds=5)
+    )
+    assert received == []
+
+
+@pytest.mark.asyncio
+async def test_recovery_skips_green_then_recovers_first_bearish(
+    account_config, mock_rest_client: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    start = datetime(2026, 10, 18, 12, tzinfo=UTC)
+    first = ClosedCandle15m(
+        "BTCUSDT",
+        start + timedelta(minutes=15),
+        start + timedelta(minutes=30),
+        Decimal("100"),
+        Decimal("101"),
+    )
+    second = ClosedCandle15m(
+        "BTCUSDT",
+        first.candle_end,
+        first.candle_end + timedelta(minutes=15),
+        Decimal("101"),
+        Decimal("99"),
+    )
+    history = AsyncMock()
+    history.fetch_closed_15m_candle.side_effect = [first, second]
+    daemon = NextGenDaemon(
+        environment="live",
+        account_label="a1",
+        db=InMemoryTradingRepository(),
+        rest_client=mock_rest_client,
+        account_config=account_config,
+    )
+    daemon.state.batches["batch"] = PositionBatch(
+        "live",
+        "a1",
+        "batch",
+        "BTCUSDT",
+        "LONG",
+        Decimal("1"),
+        Decimal("100"),
+        start + timedelta(minutes=5),
+    )
+    received = []
+    monkeypatch.setattr(
+        daemon.exit_manager,
+        "evaluate_active_batches",
+        lambda **kwargs: received.append(kwargs),
+    )
+    await daemon._recover_exit_candles(
+        history, second.candle_end + timedelta(seconds=5)
+    )
+    assert history.fetch_closed_15m_candle.await_count == 2
+    assert received[0]["closed_candle"] == second
+    assert received[0]["entry_candles"] == {}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("forced", [False, True])
 async def test_formal_second_candle_loads_entry_candle(
     account_config,
@@ -125,6 +390,9 @@ async def test_formal_second_candle_loads_entry_candle(
             return None
 
     class Feed:
+        def __init__(self):
+            self.connection_opened = asyncio.Event()
+
         def set_symbols(self, symbols):
             pass
 
