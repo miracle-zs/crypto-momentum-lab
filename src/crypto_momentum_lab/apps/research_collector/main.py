@@ -363,7 +363,7 @@ async def _run_collector(
                 request_stop,
                 shutdown_signal.name,
             )
-        except (NotImplementedError, RuntimeError):
+        except RuntimeError:
             continue
         registered_signals.append(shutdown_signal)
 

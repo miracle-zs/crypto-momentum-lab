@@ -5,7 +5,6 @@ bounded, small-batch delete keeps the database's working set finite and avoids
 one large transaction holding locks or generating a second memory spike.
 """
 
-import logging
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -30,8 +29,6 @@ from crypto_momentum_lab.persistence.postgres.strategy_runtime_event_partitions 
     EVENT_PARTITION_LOOKAHEAD,
     ensure_event_partitions,
 )
-
-_logger = logging.getLogger(__name__)
 
 
 class PostgresOperationalRetentionRepository:
@@ -113,17 +110,11 @@ class PostgresOperationalRetentionRepository:
 
     async def ensure_strategy_runtime_event_partitions(self) -> int:
         """Create missing daily event partitions."""
-        try:
-            observed_at = datetime.now(UTC)
-            return await ensure_event_partitions(
-                self._session_factory,
-                through=observed_at + EVENT_PARTITION_LOOKAHEAD,
-            )
-        except Exception:
-            _logger.exception(
-                "Failed to ensure strategy runtime event partitions; continuing"
-            )
-            return 0
+        observed_at = datetime.now(UTC)
+        return await ensure_event_partitions(
+            self._session_factory,
+            through=observed_at + EVENT_PARTITION_LOOKAHEAD,
+        )
 
     async def _execute_delete(
         self,

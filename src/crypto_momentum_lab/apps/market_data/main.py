@@ -1547,7 +1547,7 @@ async def run_market_data_with_signal_handlers(config_path: Path) -> None:
                 request_stop,
                 shutdown_signal.name,
             )
-        except (NotImplementedError, RuntimeError):
+        except RuntimeError:
             continue
         registered_signals.append(shutdown_signal)
     try:

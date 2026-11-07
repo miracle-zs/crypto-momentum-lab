@@ -22,3 +22,18 @@ async def test_partition_failure_does_not_switch_to_row_deletion(monkeypatch) ->
             before=datetime(2026, 10, 1, tzinfo=UTC)
         )
     sessions.assert_not_called()
+
+
+async def test_strategy_event_partition_failure_propagates(monkeypatch) -> None:
+    monkeypatch.setattr(
+        retention,
+        "ensure_event_partitions",
+        AsyncMock(side_effect=RuntimeError("event partition DDL failed")),
+    )
+    sessions = Mock()
+    repository = PostgresOperationalRetentionRepository(sessions)
+
+    with pytest.raises(RuntimeError, match="event partition DDL failed"):
+        await repository.ensure_strategy_runtime_event_partitions()
+
+    sessions.assert_not_called()

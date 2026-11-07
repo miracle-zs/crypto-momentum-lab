@@ -115,7 +115,7 @@ async def _run_with_signal_handlers(
         try:
             loop.add_signal_handler(sig, handle_signal, sig)
             registered_signals.append(sig)
-        except (NotImplementedError, RuntimeError, ValueError):
+        except (RuntimeError, ValueError):
             log.warning(
                 "next_gen_signal_handler_unavailable",
                 signal=sig.name,
@@ -127,7 +127,7 @@ async def _run_with_signal_handlers(
         for sig in registered_signals:
             try:
                 loop.remove_signal_handler(sig)
-            except (NotImplementedError, RuntimeError, ValueError):
+            except (RuntimeError, ValueError):
                 pass
 
 
