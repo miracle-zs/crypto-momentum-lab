@@ -1,6 +1,5 @@
 [Unit]
 Description=Crypto Momentum Lab bounded market revision zstd archive
-Documentation=file:///opt/crypto-momentum-lab/docs/runbooks/postgres-operations.md
 After=docker.service
 Requires=docker.service
 

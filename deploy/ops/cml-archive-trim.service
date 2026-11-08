@@ -1,6 +1,5 @@
 [Unit]
 Description=Crypto Momentum Lab archive and trim of cold PostgreSQL rows
-Documentation=file:///opt/crypto-momentum-lab/docs/runbooks/postgres-operations.md
 After=docker.service
 Requires=docker.service
 

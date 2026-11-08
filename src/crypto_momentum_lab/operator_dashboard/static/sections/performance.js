@@ -1,4 +1,3 @@
-import { DISPLAY_TIME_ZONE_LABEL } from "../dashboard-config.js";
 import {
   dayTime,
   esc,
