@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from types import SimpleNamespace
 
 from crypto_momentum_lab.next_gen.dashboard import NextGenDashboardQueries
@@ -80,3 +81,32 @@ def test_exit_path_distinguishes_double_bearish_and_market_sweep():
         )
         == "宽限期后止损"
     )
+
+
+def test_entry_path_distinguishes_initial_and_repriced_limit_fills():
+    attempted_at = datetime(2026, 11, 9, 10, 3, tzinfo=UTC)
+    initial_fill = SimpleNamespace(
+        order_type="LIMIT",
+        entry_initial_limit_price=Decimal("100"),
+        entry_reprice_attempted_at=attempted_at,
+        price=Decimal("100"),
+    )
+    repriced_fill = SimpleNamespace(
+        order_type="LIMIT",
+        entry_initial_limit_price=Decimal("100"),
+        entry_reprice_attempted_at=attempted_at,
+        price=Decimal("101"),
+    )
+    old_fill = SimpleNamespace(
+        order_type="LIMIT",
+        entry_initial_limit_price=None,
+        entry_reprice_attempted_at=None,
+        price=Decimal("100"),
+    )
+
+    assert NextGenDashboardQueries._entry_path(initial_fill) == "初始限价成交"
+    assert NextGenDashboardQueries._entry_path(repriced_fill) == "调价后限价成交"
+    assert NextGenDashboardQueries._entry_path(old_fill) == "历史开仓路径未记录"
+
+    market_fill = SimpleNamespace(order_type="MARKET")
+    assert NextGenDashboardQueries._entry_path(market_fill) == "市价开仓"

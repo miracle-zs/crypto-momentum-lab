@@ -190,6 +190,8 @@ async def test_postgres_save_and_retrieve_order(
         order_type="LIMIT",
         quantity=Decimal("0.5"),
         price=Decimal("60000.0"),
+        entry_initial_limit_price=Decimal("60000.0"),
+        entry_reprice_attempted_at=now,
         status=OrderStatus.SUBMITTED,
         exchange_order_id=123456789,
         created_at=now,
@@ -209,12 +211,14 @@ async def test_postgres_save_and_retrieve_order(
     assert loaded.status == OrderStatus.SUBMITTED
     assert loaded.quantity == Decimal("0.5")
     assert loaded.price == Decimal("60000.0")
+    assert loaded.entry_initial_limit_price == Decimal("60000.0")
     assert loaded.exchange_order_id == 123456789
 
     # 测试 ON CONFLICT DO UPDATE
     order.status = OrderStatus.FILLED
     order.filled_qty = Decimal("0.5")
     order.avg_price = Decimal("60000.0")
+    order.price = Decimal("61000.0")
     order.updated_at = datetime.now(UTC)
     await postgres_repo.async_save_order(order)
 
@@ -225,6 +229,9 @@ async def test_postgres_save_and_retrieve_order(
     assert updated.status == OrderStatus.FILLED
     assert updated.filled_qty == Decimal("0.5")
     assert updated.avg_price == Decimal("60000.0")
+    assert updated.price == Decimal("61000.0")
+    assert updated.entry_initial_limit_price == Decimal("60000.0")
+    assert updated.entry_reprice_attempted_at == now
 
 
 @pytest.mark.integration

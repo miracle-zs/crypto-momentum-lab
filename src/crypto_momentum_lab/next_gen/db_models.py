@@ -120,6 +120,9 @@ class LiveOrderRow(Base):
     )  # LIMIT / MARKET
     quantity: Mapped[Decimal] = mapped_column(Numeric(28, 10), nullable=False)
     price: Mapped[Decimal | None] = mapped_column(Numeric(28, 10), nullable=True)
+    entry_initial_limit_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(28, 10), nullable=True
+    )
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     filled_quantity: Mapped[Decimal] = mapped_column(
         Numeric(28, 10), nullable=False, default=Decimal("0")

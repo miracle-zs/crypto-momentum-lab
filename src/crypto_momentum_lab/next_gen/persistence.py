@@ -72,6 +72,11 @@ def _order_from_row(row: RowMapping) -> Order:
         avg_price=Decimal(str(row["average_price"])),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        entry_initial_limit_price=(
+            Decimal(str(row["entry_initial_limit_price"]))
+            if row["entry_initial_limit_price"] is not None
+            else None
+        ),
         entry_reprice_attempted_at=row["entry_reprice_attempted_at"],
     )
 
@@ -480,12 +485,14 @@ class PostgresTradingRepository:
         INSERT INTO live_orders (
             environment, account_label, client_order_id, exchange_order_id,
             batch_id, symbol, side, position_side, order_type,
-            quantity, price, status, filled_quantity, average_price,
+            quantity, price, entry_initial_limit_price, status,
+            filled_quantity, average_price,
             created_at, updated_at, entry_reprice_attempted_at
         ) VALUES (
             :environment, :account_label, :client_order_id, :exchange_order_id,
             :batch_id, :symbol, :side, :position_side, :order_type,
-            :quantity, :price, :status, :filled_quantity, :average_price,
+            :quantity, :price, :entry_initial_limit_price, :status,
+            :filled_quantity, :average_price,
             :created_at, :updated_at, :entry_reprice_attempted_at
         )
         ON CONFLICT (environment, account_label, client_order_id)
@@ -497,6 +504,10 @@ class PostgresTradingRepository:
             entry_reprice_attempted_at = COALESCE(
                 live_orders.entry_reprice_attempted_at,
                 EXCLUDED.entry_reprice_attempted_at
+            ),
+            entry_initial_limit_price = COALESCE(
+                live_orders.entry_initial_limit_price,
+                EXCLUDED.entry_initial_limit_price
             ),
             status = CASE 
                 WHEN live_orders.status IN (
@@ -525,6 +536,7 @@ class PostgresTradingRepository:
             "order_type": order.order_type,
             "quantity": order.quantity,
             "price": order.price,
+            "entry_initial_limit_price": order.entry_initial_limit_price,
             "status": order.status.name,
             "filled_quantity": order.filled_qty,
             "average_price": order.avg_price,
@@ -666,7 +678,8 @@ class PostgresTradingRepository:
         sql = """
         SELECT environment, account_label, client_order_id, exchange_order_id,
                batch_id, symbol, side, position_side, order_type, quantity, price,
-               status, filled_quantity, average_price, created_at, updated_at,
+               entry_initial_limit_price, status, filled_quantity, average_price,
+               created_at, updated_at,
                entry_reprice_attempted_at
         FROM live_orders
         WHERE environment = :env AND account_label = :acc

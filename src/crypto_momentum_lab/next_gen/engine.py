@@ -352,6 +352,7 @@ class AccountState:
             quantity=quantity,
             price=price,
             status=OrderStatus.PENDING,
+            entry_initial_limit_price=price if order_type == "LIMIT" else None,
         )
         self.orders[client_order_id] = order
         self.active_entry_orders[entry_key] = client_order_id

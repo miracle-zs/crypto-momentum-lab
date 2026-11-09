@@ -503,6 +503,9 @@ class NextGenDashboardQueries:
                     )
                     if self._is_exit_order(order)
                     else None,
+                    "entry_path": self._entry_path(order)
+                    if not self._is_exit_order(order)
+                    else None,
                     "quantity": str(order.filled_quantity),
                     "price": str(
                         sum((item["notional"] for item in detail), Decimal("0"))
@@ -752,6 +755,19 @@ class NextGenDashboardQueries:
             if reason in {"candle_15m_bearish", "candle_15m_bullish"}:
                 return "首根反向 15 分钟 K 线止盈"
         return "退出路径未记录"
+
+    @staticmethod
+    def _entry_path(order: LiveOrderRow) -> str:
+        if order.order_type == "MARKET":
+            return "市价开仓"
+        if order.order_type != "LIMIT":
+            return "开仓路径未记录"
+        initial_price = order.entry_initial_limit_price
+        if initial_price is None or order.price is None:
+            return "历史开仓路径未记录"
+        if order.price != initial_price:
+            return "调价后限价成交"
+        return "初始限价成交"
 
     @staticmethod
     def _order(row: LiveOrderRow) -> dict[str, Any]:

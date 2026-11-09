@@ -51,6 +51,7 @@ def test_create_entry_order_acquires_lock_and_prevents_duplicate(
 
     assert order1.client_order_id == f"e_{batch_id}_01"
     assert order1.status == OrderStatus.PENDING
+    assert order1.entry_initial_limit_price == Decimal("65000")
     entry_key = ("a1", "BTCUSDT", "LONG")
     assert account_state.active_entry_orders[entry_key] == order1.client_order_id
 

@@ -197,7 +197,7 @@ function renderFillsTable(fills, strategy) {
     { label: "数量", value: (row) => num(row.quantity, 4), align: "right" },
     { label: "已实现盈亏", value: (row) => signedMoney(row.realized_pnl), align: "right", cls: (row) => pnlClass(row.realized_pnl) },
     { label: "手续费", value: (row) => row.fees ? Object.entries(row.fees).map(([asset, amount]) => `${num(amount, 4)} ${asset}`).join(" / ") : `${num(row.fee, 4)} ${row.fee_asset || ""}`, align: "right" },
-    { label: "退出路径", value: (row) => row.is_exit ? (row.close_path || "退出路径未记录") : "开仓", cls: "muted" },
+    { label: "成交路径", value: (row) => row.is_exit ? (row.close_path || "退出路径未记录") : (row.entry_path || "开仓路径未记录"), cls: "muted" },
   ], fills, {
     emptyText: "尚无成交记录",
     tall: true,
