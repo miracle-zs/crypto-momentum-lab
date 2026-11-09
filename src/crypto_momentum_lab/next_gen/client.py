@@ -23,6 +23,16 @@ from crypto_momentum_lab.next_gen.models import OrderStatus
 
 log = structlog.get_logger("next_gen_client")
 
+EXCHANGE_ORDER_STATUS_MAP = {
+    "NEW": OrderStatus.OPEN,
+    "PARTIALLY_FILLED": OrderStatus.PARTIALLY_FILLED,
+    "FILLED": OrderStatus.FILLED,
+    "CANCELED": OrderStatus.CANCELED,
+    "EXPIRED": OrderStatus.CANCELED,
+    "EXPIRED_IN_MATCH": OrderStatus.CANCELED,
+    "REJECTED": OrderStatus.REJECTED,
+}
+
 
 class BinanceOrderRejectedError(Exception):
     """币安订单网关业务拒单异常 (如 -2010 余额不足, -2019 保证金不足)"""
@@ -445,6 +455,29 @@ class BinanceRestClient:
         )
         return dict(res)
 
+    async def modify_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: Decimal,
+        price: Decimal,
+        client_order_id: str,
+    ) -> dict[str, Any]:
+        """PUT /fapi/v1/order - 修改现有 LIMIT 订单价格。"""
+        res = await self._request(
+            "PUT",
+            "/fapi/v1/order",
+            signed=True,
+            params={
+                "symbol": symbol,
+                "side": side.upper(),
+                "quantity": str(quantity),
+                "price": str(price),
+                "origClientOrderId": client_order_id,
+            },
+        )
+        return dict(res)
+
     async def fetch_exchange_info(self) -> dict[str, Any]:
         """GET /fapi/v1/exchangeInfo - 获取交易所元数据与交易对过滤器"""
         res = await self._request("GET", "/fapi/v1/exchangeInfo", signed=False)
@@ -540,18 +573,9 @@ class BinanceUserDataStream:
         if event_type == "ORDER_TRADE_UPDATE":
             o = event["o"]
             status_str = o["X"]
-            status_mapping = {
-                "NEW": OrderStatus.OPEN,
-                "PARTIALLY_FILLED": OrderStatus.PARTIALLY_FILLED,
-                "FILLED": OrderStatus.FILLED,
-                "CANCELED": OrderStatus.CANCELED,
-                "EXPIRED": OrderStatus.CANCELED,
-                "EXPIRED_IN_MATCH": OrderStatus.CANCELED,
-                "REJECTED": OrderStatus.REJECTED,
-            }
-            if status_str not in status_mapping:
+            if status_str not in EXCHANGE_ORDER_STATUS_MAP:
                 raise ValueError(f"Unknown order status from WS: {status_str}")
-            mapped_status = status_mapping[status_str]
+            mapped_status = EXCHANGE_ORDER_STATUS_MAP[status_str]
 
             tx_time_ms = o.get("T") or event.get("T")
             trade_time = (
@@ -568,6 +592,7 @@ class BinanceUserDataStream:
                 order_status=mapped_status,
                 cum_filled_qty=Decimal(str(o["z"])),
                 avg_price=Decimal(str(o["ap"])),
+                order_price=Decimal(str(o["p"])),
                 last_filled_qty=Decimal(str(o["l"])),
                 last_filled_price=Decimal(str(o["L"])),
                 exchange_order_id=int(o.get("i", 0)) if o.get("i") else None,

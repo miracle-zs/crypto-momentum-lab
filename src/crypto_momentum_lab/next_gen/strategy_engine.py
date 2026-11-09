@@ -19,7 +19,7 @@ from crypto_momentum_lab.live_rollout.volume import QuoteVolume24hProvider
 from crypto_momentum_lab.next_gen.client import BinanceOrderRejectedError
 from crypto_momentum_lab.next_gen.engine import AccountState
 from crypto_momentum_lab.next_gen.executor import OrderExecutor
-from crypto_momentum_lab.next_gen.models import generate_batch_id
+from crypto_momentum_lab.next_gen.models import OrderStatus, generate_batch_id
 from crypto_momentum_lab.next_gen.sizing import EntrySizer, EntrySizingUnavailable
 from crypto_momentum_lab.next_gen.symbol_rules import SymbolRulesRegistry
 from crypto_momentum_lab.strategies.registry import build_runtime_strategy
@@ -52,6 +52,7 @@ class MomentumStrategyEngine:
         self.market_connected = False
         self.market_data_observation: dict[str, Any] | None = None
         self.latest_prices = state.latest_prices
+        self._latest_market_states: dict[str, MarketState15s] = {}
         self.entry_sizer = entry_sizer or EntrySizer(
             state, account_config.execution_inputs
         )
@@ -130,6 +131,7 @@ class MomentumStrategyEngine:
                 self.runtime.reset_symbol(market_state.symbol)
             self.runtime.warm_market_state(market_state)
             self._last_state_at[market_state.symbol] = market_state.bucket_end
+            self._latest_market_states[market_state.symbol] = market_state
             if market_state.effective_price is not None:
                 self.latest_prices[market_state.symbol] = market_state.effective_price
 
@@ -154,6 +156,7 @@ class MomentumStrategyEngine:
         ):
             self.runtime.reset_symbol(symbol)
         self._last_state_at[symbol] = market_state.bucket_end
+        self._latest_market_states[symbol] = market_state
         if market_state.effective_price is not None:
             self.latest_prices[symbol] = market_state.effective_price
         decision = self.runtime.on_market_state(market_state)
@@ -414,13 +417,98 @@ class MomentumStrategyEngine:
 
     async def cancel_stale_entry_orders(self) -> None:
         now = datetime.now(UTC)
-        ttl = self.account_config.strategy_inputs.entry_limit_ttl_seconds
+        strategy_inputs = self.account_config.strategy_inputs
+        ttl = strategy_inputs.entry_limit_ttl_seconds
+        reprice_after = strategy_inputs.entry_limit_reprice_after_seconds
         # Snapshot IDs: private order updates may release locks while cancel awaits.
         for order_id in list(self.state.active_entry_orders.values()):
             order = self.state.orders.get(order_id)
             if order is not None and not order.is_terminal:
-                if (now - order.created_at).total_seconds() >= ttl:
+                age_seconds = (now - order.created_at).total_seconds()
+                if age_seconds >= ttl:
                     await self.order_executor.cancel_and_confirm(order)
+                    continue
+                if (
+                    reprice_after is None
+                    or order.entry_reprice_attempted_at is not None
+                    or order.filled_qty > 0
+                    or order.status is not OrderStatus.OPEN
+                ):
+                    continue
+                market_state = self._latest_market_states.get(order.symbol)
+                if (
+                    not self.market_connected
+                    or market_state is None
+                    or not market_state.data_complete
+                    or market_state.close_price is None
+                ):
+                    continue
+                market_state_age = (now - market_state.bucket_end).total_seconds()
+                if market_state_age < -5 or market_state_age > 45:
+                    continue
+
+                bucket_start = order.created_at.replace(
+                    second=(order.created_at.second // 15) * 15,
+                    microsecond=0,
+                )
+                if bucket_start < order.created_at:
+                    bucket_start += timedelta(seconds=15)
+                reprice_at = bucket_start + timedelta(
+                    seconds=reprice_after - 15
+                )
+                if market_state.bucket_end < reprice_at:
+                    continue
+
+                repository = self.state.db
+                if repository is None:
+                    raise RuntimeError("Entry repricing requires a durable repository")
+                order.entry_reprice_attempted_at = market_state.bucket_end
+                order.updated_at = now
+                await repository.async_save_order(order)
+
+                price = self.symbol_rules.round_price(
+                    order.symbol, market_state.close_price
+                )
+                valid, reason = self.symbol_rules.validate_order(
+                    order.symbol, order.quantity, price
+                )
+                if not valid:
+                    log.warning(
+                        "entry_order_reprice_skipped_invalid_order",
+                        account=self.state.account_label,
+                        symbol=order.symbol,
+                        order_id=order.client_order_id,
+                        reason=reason,
+                    )
+                    continue
+                if not self.state.check_notional_limits(
+                    order.symbol,
+                    order.quantity,
+                    price,
+                    latest_prices=self.latest_prices,
+                    exclude_order_id=order.client_order_id,
+                ):
+                    log.warning(
+                        "entry_order_reprice_skipped_notional_limit",
+                        account=self.state.account_label,
+                        symbol=order.symbol,
+                        order_id=order.client_order_id,
+                        price=str(price),
+                    )
+                    continue
+                if price == order.price:
+                    continue
+                original_price = order.price
+                if await self.order_executor.modify_entry_limit_order(order, price):
+                    log.info(
+                        "entry_order_repriced",
+                        account=self.state.account_label,
+                        symbol=order.symbol,
+                        order_id=order.client_order_id,
+                        original_price=str(original_price),
+                        updated_price=str(price),
+                        market_state_bucket_end=market_state.bucket_end.isoformat(),
+                    )
 
     async def run(self, stop_event: asyncio.Event) -> None:
         while not stop_event.is_set():

@@ -54,6 +54,28 @@ def _batch_from_row(row: RowMapping) -> PositionBatch:
     )
 
 
+def _order_from_row(row: RowMapping) -> Order:
+    return Order(
+        environment=row["environment"],
+        account_label=row["account_label"],
+        client_order_id=row["client_order_id"],
+        batch_id=row["batch_id"],
+        symbol=row["symbol"],
+        side=row["side"],
+        position_side=row["position_side"],
+        order_type=row["order_type"],
+        quantity=Decimal(str(row["quantity"])),
+        price=Decimal(str(row["price"])) if row["price"] is not None else None,
+        status=OrderStatus[row["status"]],
+        exchange_order_id=row["exchange_order_id"],
+        filled_qty=Decimal(str(row["filled_quantity"])),
+        avg_price=Decimal(str(row["average_price"])),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        entry_reprice_attempted_at=row["entry_reprice_attempted_at"],
+    )
+
+
 def compute_advisory_lock_key(environment: str, account_label: str) -> str:
     """生成 PostgreSQL 会话级咨询锁键 (如 live:a1)"""
     return f"{environment}:{account_label}"
@@ -407,27 +429,7 @@ class PostgresTradingRepository:
                 ),
                 {"env": environment, "acc": account_label, "batch_id": batch_id},
             )
-            return [
-                Order(
-                    environment=r["environment"],
-                    account_label=r["account_label"],
-                    client_order_id=r["client_order_id"],
-                    batch_id=r["batch_id"],
-                    symbol=r["symbol"],
-                    side=r["side"],
-                    position_side=r["position_side"],
-                    order_type=r["order_type"],
-                    quantity=r["quantity"],
-                    price=r["price"],
-                    status=OrderStatus[r["status"]],
-                    exchange_order_id=r["exchange_order_id"],
-                    filled_qty=r["filled_quantity"],
-                    avg_price=r["average_price"],
-                    created_at=r["created_at"],
-                    updated_at=r["updated_at"],
-                )
-                for r in result.mappings()
-            ]
+            return [_order_from_row(row) for row in result.mappings()]
 
     async def async_get_active_orders(
         self, environment: str, account_label: str
@@ -479,17 +481,22 @@ class PostgresTradingRepository:
             environment, account_label, client_order_id, exchange_order_id,
             batch_id, symbol, side, position_side, order_type,
             quantity, price, status, filled_quantity, average_price,
-            created_at, updated_at
+            created_at, updated_at, entry_reprice_attempted_at
         ) VALUES (
             :environment, :account_label, :client_order_id, :exchange_order_id,
             :batch_id, :symbol, :side, :position_side, :order_type,
             :quantity, :price, :status, :filled_quantity, :average_price,
-            :created_at, :updated_at
+            :created_at, :updated_at, :entry_reprice_attempted_at
         )
         ON CONFLICT (environment, account_label, client_order_id)
         DO UPDATE SET
             exchange_order_id = COALESCE(
                 EXCLUDED.exchange_order_id, live_orders.exchange_order_id
+            ),
+            price = COALESCE(EXCLUDED.price, live_orders.price),
+            entry_reprice_attempted_at = COALESCE(
+                live_orders.entry_reprice_attempted_at,
+                EXCLUDED.entry_reprice_attempted_at
             ),
             status = CASE 
                 WHEN live_orders.status IN (
@@ -523,6 +530,7 @@ class PostgresTradingRepository:
             "average_price": order.avg_price,
             "created_at": order.created_at,
             "updated_at": order.updated_at,
+            "entry_reprice_attempted_at": order.entry_reprice_attempted_at,
         }
         await conn.execute(text(sql), params)
 
@@ -658,7 +666,8 @@ class PostgresTradingRepository:
         sql = """
         SELECT environment, account_label, client_order_id, exchange_order_id,
                batch_id, symbol, side, position_side, order_type, quantity, price,
-               status, filled_quantity, average_price, created_at, updated_at
+               status, filled_quantity, average_price, created_at, updated_at,
+               entry_reprice_attempted_at
         FROM live_orders
         WHERE environment = :env AND account_label = :acc
         ORDER BY created_at DESC
@@ -669,27 +678,7 @@ class PostgresTradingRepository:
                 text(sql), {"env": environment, "acc": account_label, "limit": limit}
             )
             rows = res.mappings().all()
-            return [
-                Order(
-                    environment=r["environment"],
-                    account_label=r["account_label"],
-                    client_order_id=r["client_order_id"],
-                    batch_id=r["batch_id"],
-                    symbol=r["symbol"],
-                    side=r["side"],
-                    position_side=r["position_side"],
-                    order_type=r["order_type"],
-                    quantity=Decimal(str(r["quantity"])),
-                    price=Decimal(str(r["price"])) if r["price"] is not None else None,
-                    status=OrderStatus[r["status"]],
-                    exchange_order_id=r["exchange_order_id"],
-                    filled_qty=Decimal(str(r["filled_quantity"])),
-                    avg_price=Decimal(str(r["average_price"])),
-                    created_at=r["created_at"],
-                    updated_at=r["updated_at"],
-                )
-                for r in rows
-            ]
+            return [_order_from_row(row) for row in rows]
 
     async def async_save_runtime_status(
         self,

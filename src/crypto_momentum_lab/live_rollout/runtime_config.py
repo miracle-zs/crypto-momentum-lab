@@ -42,6 +42,7 @@ def _live_strategy_config_hash(
     require_price_above_ema10: bool,
     entry_order_type: EntryType,
     entry_limit_ttl_seconds: int,
+    entry_limit_reprice_after_seconds: int | None = None,
 ) -> str:
     if (
         entry_positive_gainer_top_count is not None
@@ -52,6 +53,23 @@ def _live_strategy_config_hash(
         raise TypeError("entry_order_type must be an EntryType")
     if entry_limit_ttl_seconds < 601:
         raise ValueError("entry_limit_ttl_seconds must be at least 601")
+    if entry_limit_reprice_after_seconds is not None and (
+        entry_limit_reprice_after_seconds <= 0
+        or entry_limit_reprice_after_seconds >= entry_limit_ttl_seconds
+        or entry_limit_reprice_after_seconds % 15 != 0
+    ):
+        raise ValueError(
+            "entry_limit_reprice_after_seconds must be a positive multiple of 15 "
+            "below entry_limit_ttl_seconds"
+        )
+    entry_execution = {
+        "order_type": entry_order_type.value,
+        "limit_ttl_seconds": entry_limit_ttl_seconds,
+    }
+    if entry_limit_reprice_after_seconds is not None:
+        entry_execution["limit_reprice_after_seconds"] = (
+            entry_limit_reprice_after_seconds
+        )
     return deterministic_config_hash(
         {
             "strategy": build_runtime_config(
@@ -66,9 +84,6 @@ def _live_strategy_config_hash(
                 "require_price_above_ema5": require_price_above_ema5,
                 "require_price_above_ema10": require_price_above_ema10,
             },
-            "entry_execution": {
-                "order_type": entry_order_type.value,
-                "limit_ttl_seconds": entry_limit_ttl_seconds,
-            },
+            "entry_execution": entry_execution,
         }
     )

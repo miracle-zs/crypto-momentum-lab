@@ -9,6 +9,7 @@ from typing import Any
 import structlog
 
 from crypto_momentum_lab.next_gen.client import (
+    EXCHANGE_ORDER_STATUS_MAP,
     BinanceConnectionError,
     BinanceNetworkError,
     BinanceOrderNotFoundError,
@@ -109,6 +110,67 @@ class OrderExecutor:
             self._state.set_system_mode(SystemMode.DEGRADED)
         return order.is_terminal
 
+    async def modify_entry_limit_order(self, order: Order, price: Decimal) -> bool:
+        is_entry = (order.position_side == "LONG" and order.side == "BUY") or (
+            order.position_side == "SHORT" and order.side == "SELL"
+        )
+        if order.order_type != "LIMIT" or not is_entry:
+            raise ValueError("Only LIMIT entry orders can be repriced")
+        if order.entry_reprice_attempted_at is None:
+            raise RuntimeError("Entry reprice attempt must be persisted first")
+        if order.is_terminal or order.filled_qty > 0:
+            return False
+        try:
+            result = await self._rest.modify_order(
+                symbol=order.symbol,
+                side=order.side,
+                quantity=order.quantity,
+                price=price,
+                client_order_id=order.client_order_id,
+            )
+        except BinanceConnectionError as error:
+            log.warning(
+                "entry_order_reprice_not_sent",
+                order_id=order.client_order_id,
+                reason=error.message,
+            )
+            return False
+        except BinanceOrderRejectedError as error:
+            log.warning(
+                "entry_order_reprice_rejected",
+                order_id=order.client_order_id,
+                code=error.code,
+                reason=error.message,
+            )
+            return False
+        except BinanceNetworkError as error:
+            if not order.is_terminal:
+                order.status = OrderStatus.RECONCILING
+                order.updated_at = datetime.now(UTC)
+                self._state.set_system_mode(SystemMode.DEGRADED)
+                await self._db.async_save_order(order)
+            log.error(
+                "entry_order_reprice_in_doubt",
+                order_id=order.client_order_id,
+                reason=error.message,
+            )
+            raise
+
+        if (
+            result["clientOrderId"] != order.client_order_id
+            or result["symbol"] != order.symbol
+            or result["side"] != order.side
+        ):
+            raise RuntimeError("Modified entry order identity does not match")
+        order_price = Decimal(str(result["price"]))
+        if order_price != price:
+            raise RuntimeError("Exchange modified entry order to an unexpected price")
+        order.price = order_price
+        order.exchange_order_id = int(result["orderId"])
+        order.updated_at = datetime.now(UTC)
+        await self._db.async_save_order(order)
+        return True
+
     async def load_active_state(self) -> None:
         """Restore outstanding orders and their batches, without replaying history."""
         env, account = self._state.environment, self._state.account_label
@@ -158,15 +220,6 @@ class OrderExecutor:
         """Recover stored responsibility once, before admitting strategy orders."""
         if self._state.system_mode != SystemMode.BOOTING:
             raise RuntimeError("REST recovery is only allowed during startup")
-        mapping = {
-            "NEW": OrderStatus.OPEN,
-            "PARTIALLY_FILLED": OrderStatus.PARTIALLY_FILLED,
-            "FILLED": OrderStatus.FILLED,
-            "CANCELED": OrderStatus.CANCELED,
-            "EXPIRED": OrderStatus.CANCELED,
-            "EXPIRED_IN_MATCH": OrderStatus.CANCELED,
-            "REJECTED": OrderStatus.REJECTED,
-        }
         not_found_order_ids: set[str] = set()
         for order in list(self._state.orders.values()):
             if order.is_terminal:
@@ -204,7 +257,7 @@ class OrderExecutor:
             if quantity < order.filled_qty:
                 # The connected stream has already advanced this order.
                 continue
-            status = mapping[row["status"]]
+            status = EXCHANGE_ORDER_STATUS_MAP[row["status"]]
             if quantity > 0 and average <= 0:
                 raise RuntimeError("Startup filled order has no execution price")
             if status == OrderStatus.FILLED and quantity != order.quantity:
@@ -223,6 +276,9 @@ class OrderExecutor:
                 average,
                 exchange_order_id=int(row["orderId"]),
                 trade_time=datetime.fromtimestamp(row["updateTime"] / 1000, tz=UTC),
+                order_price=(
+                    Decimal(str(row["price"])) if order.order_type == "LIMIT" else None
+                ),
             )
         snapshot, open_orders = await asyncio.gather(
             self._read.fetch_account_information(),

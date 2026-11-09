@@ -555,6 +555,7 @@ class AccountState:
         trade_time: datetime | None = None,
         exchange_realized_pnl: Decimal | None = None,
         trade_payload: dict[str, Any] | None = None,
+        order_price: Decimal | None = None,
     ) -> None:
         async with self._update_lock:
             if trade_payload is not None and self._db is not None:
@@ -588,6 +589,7 @@ class AccountState:
                 exchange_order_id,
                 trade_time,
                 exchange_realized_pnl,
+                order_price,
             )
 
     async def _apply_order_trade_update(
@@ -602,6 +604,7 @@ class AccountState:
         exchange_order_id: int | None = None,
         trade_time: datetime | None = None,
         exchange_realized_pnl: Decimal | None = None,
+        order_price: Decimal | None = None,
     ) -> None:
         """【单笔成交原子状态转移】：推进订单与批次 ->
         原地异步直调写透 DB (支持微退避重试)。
@@ -619,6 +622,8 @@ class AccountState:
             return
 
         previous_quantity, previous_average = order.filled_qty, order.avg_price
+        if order.order_type == "LIMIT" and order_price is not None and order_price > 0:
+            order.price = order_price
         delta_qty = order.apply_update(
             new_status=order_status,
             cum_filled_qty=cum_filled_qty,

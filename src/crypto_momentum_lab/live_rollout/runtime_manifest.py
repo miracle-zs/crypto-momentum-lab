@@ -51,6 +51,7 @@ class LiveRuntimeStrategyInputs:
     require_price_above_ema10: bool
     entry_order_type: EntryType
     entry_limit_ttl_seconds: int
+    entry_limit_reprice_after_seconds: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,6 +251,9 @@ def _computed_strategy_config_hash(
             require_price_above_ema10=inputs.require_price_above_ema10,
             entry_order_type=inputs.entry_order_type,
             entry_limit_ttl_seconds=inputs.entry_limit_ttl_seconds,
+            entry_limit_reprice_after_seconds=(
+                inputs.entry_limit_reprice_after_seconds
+            ),
         )
     except StrategyRegistryError as error:
         raise RuntimeManifestError(str(error)) from error
@@ -314,6 +318,21 @@ def _strategy_inputs(value: Any, prefix: str) -> LiveRuntimeStrategyInputs:
             raise RuntimeManifestError(
                 f"{field}.entry_limit_ttl_seconds must be at least 601"
             )
+        reprice_after_seconds = config.get("entry_limit_reprice_after_seconds")
+        if reprice_after_seconds is not None:
+            reprice_after_seconds = _integer(
+                reprice_after_seconds,
+                f"{field}.entry_limit_reprice_after_seconds",
+            )
+            if (
+                reprice_after_seconds <= 0
+                or reprice_after_seconds >= ttl_seconds
+                or reprice_after_seconds % 15 != 0
+            ):
+                raise RuntimeManifestError(
+                    f"{field}.entry_limit_reprice_after_seconds must be a positive "
+                    "multiple of 15 below entry_limit_ttl_seconds"
+                )
         return LiveRuntimeStrategyInputs(
             profile=profile,
             entry_positive_gainer_top_count=top_count,
@@ -327,6 +346,7 @@ def _strategy_inputs(value: Any, prefix: str) -> LiveRuntimeStrategyInputs:
             ),
             entry_order_type=order_type,
             entry_limit_ttl_seconds=ttl_seconds,
+            entry_limit_reprice_after_seconds=reprice_after_seconds,
         )
     except (InvalidOperation, ValueError) as error:
         if isinstance(error, RuntimeManifestError):

@@ -105,6 +105,7 @@ class Order:
     avg_price: Decimal = Decimal("0")
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    entry_reprice_attempted_at: datetime | None = None
     lot_reservation_released: bool = False  # 跟踪是否已幂等释放过批次预留
 
     def __post_init__(self) -> None:

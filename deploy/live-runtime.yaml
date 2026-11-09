@@ -30,6 +30,7 @@ accounts:
       entry_policy_mode: "${CML_LIVE_ENTRY_POLICY_MODE:-enforce}"
       entry_order_type: limit
       entry_limit_ttl_seconds: 900
+      entry_limit_reprice_after_seconds: 180
     # sizing_mode: fixed / daily / per_trade / flat_reset. Compounding requires
     # equity_fraction in (0, 1]: the fraction of equity used as ENTRY NOTIONAL,
     # not margin. Each account has its own settings; no fraction is inferred.
@@ -65,6 +66,7 @@ accounts:
       entry_policy_mode: "${CML_LIVE_ENTRY_POLICY_MODE_ACCOUNT_2:-enforce}"
       entry_order_type: limit
       entry_limit_ttl_seconds: 900
+      entry_limit_reprice_after_seconds: 180
     execution_config:
       target_notional: "${CML_LIVE_TARGET_NOTIONAL_ACCOUNT_2:-100.00}"
       sizing_mode: "${CML_LIVE_SIZING_MODE_ACCOUNT_2:-flat_reset}"
@@ -97,6 +99,7 @@ accounts:
       entry_policy_mode: "${CML_LIVE_ENTRY_POLICY_MODE_ACCOUNT_3:-enforce}"
       entry_order_type: limit
       entry_limit_ttl_seconds: 900
+      entry_limit_reprice_after_seconds: 180
     execution_config:
       target_notional: "${CML_LIVE_TARGET_NOTIONAL_ACCOUNT_3:-100.00}"
       sizing_mode: "${CML_LIVE_SIZING_MODE_ACCOUNT_3:-daily}"
@@ -129,6 +132,7 @@ accounts:
       entry_policy_mode: "${CML_LIVE_ENTRY_POLICY_MODE_ACCOUNT_4:-enforce}"
       entry_order_type: limit
       entry_limit_ttl_seconds: 900
+      entry_limit_reprice_after_seconds: 180
     execution_config:
       target_notional: "${CML_LIVE_TARGET_NOTIONAL_ACCOUNT_4:-100.00}"
       sizing_mode: "${CML_LIVE_SIZING_MODE_ACCOUNT_4:-per_trade}"

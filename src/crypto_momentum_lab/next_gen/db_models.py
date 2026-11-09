@@ -78,7 +78,6 @@ class LivePositionBatchRow(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
-
     __table_args__ = (
         CheckConstraint("quantity >= 0", name="live_batches_quantity_non_negative"),
         CheckConstraint(
@@ -133,6 +132,9 @@ class LiveOrderRow(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    entry_reprice_attempted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
     __table_args__ = (
