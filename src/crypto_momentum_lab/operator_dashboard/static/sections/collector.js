@@ -1,4 +1,5 @@
 import {
+  bytes,
   dayTime,
   esc,
   num,
@@ -7,19 +8,6 @@ import {
   normalizedStatus,
 } from "../dashboard-formatters.js";
 import { blockTitle, dataTable, tile } from "../dashboard-ui.js";
-
-const GIB = 1024 ** 3;
-const MIB = 1024 ** 2;
-
-function bytes(value) {
-  if (value == null || value === "") return "—";
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return "—";
-  if (parsed >= GIB) return `${(parsed / GIB).toFixed(2)} GiB`;
-  if (parsed >= MIB) return `${(parsed / MIB).toFixed(1)} MiB`;
-  if (parsed >= 1024) return `${(parsed / 1024).toFixed(1)} KiB`;
-  return `${Math.round(parsed)} B`;
-}
 
 function percentOf(value, limit) {
   return Math.max(0, Math.min(100, (value / limit) * 100));

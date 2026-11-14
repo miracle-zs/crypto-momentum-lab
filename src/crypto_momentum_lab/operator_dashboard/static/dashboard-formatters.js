@@ -15,9 +15,17 @@ const DISPLAY_TIME_FORMATTER = new Intl.DateTimeFormat("en-CA", {
 
 const UNCERTAIN_STATUSES = new Set(["UNKNOWN", "STALE", "DOWN", "NO DATA", "NO-DATA"]);
 
-export const esc = (value) => String(value ?? "—").replace(/[&<>'"]/g, (char) => ({
-  "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
-}[char]));
+export const esc = (value) => {
+  if (value == null) return "—";
+  return String(value).replace(/[&<>'"`]/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "'": "&#39;",
+    '"': "&quot;",
+    "`": "&#96;",
+  }[char] || char));
+};
 
 export const statusSlug = (status) => String(status || "UNKNOWN")
   .trim()
@@ -45,11 +53,22 @@ export const asNumber = (value) => {
   return Number.isFinite(parsed) ? parsed : null;
 };
 
+const numberFormatters = new Map();
+function getNumberFormatter(digits) {
+  let fmt = numberFormatters.get(digits);
+  if (!fmt) {
+    fmt = new Intl.NumberFormat("en-US", {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    });
+    numberFormatters.set(digits, fmt);
+  }
+  return fmt;
+}
+
 export const num = (value, digits = 2) => {
   const parsed = asNumber(value);
-  return parsed == null ? "—" : parsed.toLocaleString("en-US", {
-    minimumFractionDigits: digits, maximumFractionDigits: digits,
-  });
+  return parsed == null ? "—" : getNumberFormatter(digits).format(parsed);
 };
 
 export const price = (value) => {
@@ -70,14 +89,27 @@ export const signedMoney = (value) => {
   return parsed == null ? "—" : `${parsed > 0 ? "+" : parsed < 0 ? "−" : ""}$${num(Math.abs(parsed))}`;
 };
 
+const percentFormatters = new Map();
+function getPercentFormatter(digits) {
+  let fmt = percentFormatters.get(digits);
+  if (!fmt) {
+    fmt = new Intl.NumberFormat("en-US", {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    });
+    percentFormatters.set(digits, fmt);
+  }
+  return fmt;
+}
+
 export const percent = (value, digits = 2) => {
   const parsed = asNumber(value);
-  return parsed == null ? "—" : `${(parsed * 100).toFixed(digits)}%`;
+  return parsed == null ? "—" : `${getPercentFormatter(digits).format(parsed * 100)}%`;
 };
 
 export const signedPercent = (value, digits = 2) => {
   const parsed = asNumber(value);
-  return parsed == null ? "—" : `${parsed > 0 ? "+" : ""}${(parsed * 100).toFixed(digits)}%`;
+  return parsed == null ? "—" : `${parsed > 0 ? "+" : parsed < 0 ? "−" : ""}${getPercentFormatter(digits).format(Math.abs(parsed) * 100)}%`;
 };
 
 export const pnlClass = (value) => {
@@ -180,3 +212,16 @@ export const shortHash = (value) => {
   const hash = String(value || "").trim();
   return hash.length > 8 ? `${hash.slice(0, 8)}…` : hash || "—";
 };
+
+const GIB = 1024 ** 3;
+const MIB = 1024 ** 2;
+
+export function bytes(value) {
+  if (value == null || value === "") return "—";
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return "—";
+  if (parsed >= GIB) return `${(parsed / GIB).toFixed(2)} GiB`;
+  if (parsed >= MIB) return `${(parsed / MIB).toFixed(1)} MiB`;
+  if (parsed >= 1024) return `${(parsed / 1024).toFixed(1)} KiB`;
+  return `${Math.round(parsed)} B`;
+}

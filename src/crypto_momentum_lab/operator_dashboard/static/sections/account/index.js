@@ -83,6 +83,14 @@ export function wireLiveAccounts(root, data, { requestJson = defaultAccountReque
   void loadLiveAccountMetrics(state, root, requestJson);
 }
 
+function setHtml(element, html) {
+  if (typeof element.setHTMLUnsafe === "function") {
+    element.setHTMLUnsafe(html);
+  } else {
+    element.innerHTML = html;
+  }
+}
+
 export async function updateLiveAccountsDynamic(root, data) {
   if (!root) return;
   const accounts = data.accounts;
@@ -99,12 +107,12 @@ export async function updateLiveAccountsDynamic(root, data) {
     }
     const stateEl = card.querySelector(`.${K.liveAccountCardState}`);
     if (stateEl) {
-      stateEl.innerHTML = liveAccountGateSummary(account);
+      setHtml(stateEl, liveAccountGateSummary(account));
     }
 
     const stateDetailEl = card.querySelector(`.${K.liveAccountCardStateDetail}`);
     if (stateDetailEl) {
-      stateDetailEl.innerHTML = liveAccountObservationSummary(account);
+      setHtml(stateDetailEl, liveAccountObservationSummary(account));
     }
   });
 
@@ -115,7 +123,7 @@ export async function updateLiveAccountsDynamic(root, data) {
 
   const fleetStatusEl = root.querySelector(`.${K.liveAccountFleetStatus}`);
   if (fleetStatusEl) {
-    fleetStatusEl.innerHTML = `${pill(overallStatus)}<span>${readyCount} 正常 · ${haltedCount} 停止 · ${reviewCount} 需检查</span>`;
+    setHtml(fleetStatusEl, `${pill(overallStatus)}<span>${readyCount} 正常 · ${haltedCount} 停止 · ${reviewCount} 需检查</span>`);
   }
 
   const isSectionHidden = root?.hidden === true || Boolean(root?.closest?.("[hidden]")) || root?.isConnected === false;

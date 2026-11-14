@@ -11,7 +11,7 @@ import { returnBar } from "../dashboard-charts.js";
 
 export function renderUniverse(data) {
   const labels = { target: "目标", extended: "扩展监控", retained: "保留", forced: "持仓保护" };
-  const monitored = [...data.monitored_symbols].sort((left, right) => (
+  const monitored = data.monitored_symbols.toSorted((left, right) => (
     (left.rank ?? Infinity) - (right.rank ?? Infinity)
     || String(left.symbol || "").localeCompare(String(right.symbol || ""))
   ));

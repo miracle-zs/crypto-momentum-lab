@@ -1,75 +1,114 @@
 /* ============ overview: services ============ */
 
-.service-list { display: grid; gap: 8px; }
+@layer sections {
+  .service-list {
+    display: grid;
+    gap: 8px;
+  }
 
-.service-row {
-  display: grid;
-  grid-template-columns: minmax(120px, 200px) minmax(0, 1fr) 74px auto;
-  align-items: center;
-  gap: 14px;
-  min-height: 52px;
-  padding: 10px 14px;
-  border: 1px solid var(--line);
-  border-radius: 11px;
-  background: rgba(21, 33, 44, .76);
-}
+  .service-row {
+    display: grid;
+    grid-template-columns: minmax(120px, 200px) minmax(0, 1fr) 74px auto;
+    align-items: center;
+    gap: 14px;
+    min-height: 52px;
+    padding-block: 10px;
+    padding-inline: 14px;
+    border: 1px solid var(--line);
+    border-radius: 11px;
+    background: rgba(21, 33, 44, .76);
 
-.service-row b { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    & b {
+      font-size: 13px;
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
 
-.service-meter { height: 4px; border-radius: 999px; background: var(--surface-3); overflow: hidden; }
-.service-meter i { display: block; height: 100%; border-radius: 999px; background: var(--s, var(--faint)); }
+  .service-meter {
+    height: 4px;
+    border-radius: 999px;
+    background: var(--surface-3);
+    overflow: hidden;
 
-.service-age { color: var(--faint); font-size: 10.5px; text-align: right; }
+    & i {
+      display: block;
+      height: 100%;
+      border-radius: 999px;
+      background: var(--s, var(--faint));
+    }
+  }
 
-.overview-account-status-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
-  margin-bottom: 18px;
-}
+  .service-age {
+    color: var(--faint);
+    font-size: 10.5px;
+    text-align: end;
+  }
 
-.overview-account-status-card {
-  display: grid;
-  min-width: 0;
-  gap: 6px;
-  padding: 13px 14px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  color: var(--text);
-  background: var(--surface-2);
-  text-decoration: none;
-  transition: border-color .15s ease, background .15s ease, transform .15s ease;
-}
+  .overview-account-status-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+    margin-block-end: 18px;
+  }
 
-.overview-account-status-card:hover,
+  .overview-account-status-card {
+    display: grid;
+    min-width: 0;
+    gap: 6px;
+    padding-block: 13px;
+    padding-inline: 14px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    color: var(--text);
+    background: var(--surface-2);
+    text-decoration: none;
+    transition: border-color .15s ease, background .15s ease, transform .15s ease;
 
-.overview-account-status-card:focus-visible {
-  border-color: var(--brand);
-  background: var(--surface-3);
-  transform: translateY(-1px);
-}
+    &:hover, &:focus-visible {
+      border-color: var(--brand);
+      background: var(--surface-3);
+      transform: translateY(-1px);
+    }
 
-.overview-account-status-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  color: var(--faint);
-  font: 9px var(--mono);
-  letter-spacing: .12em;
-}
+    & strong {
+      overflow: hidden;
+      font-size: 14px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
 
-.overview-account-status-card strong {
-  overflow: hidden;
-  font-size: 14px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+    & small {
+      overflow: hidden;
+      color: var(--muted);
+      font-size: 10px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
 
-.overview-account-status-card small {
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  .overview-account-status-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    color: var(--faint);
+    font: 9px var(--mono);
+    letter-spacing: .12em;
+  }
+
+  @container card (max-width: 900px) {
+    .overview-account-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+
+  @container card (max-width: 520px) {
+    .overview-account-status-grid { grid-template-columns: 1fr; }
+  }
+
+  @media (max-width: 760px) {
+    .service-row { grid-template-columns: minmax(0, 1fr) auto; }
+    .service-meter, .service-age { display: none; }
+  }
 }

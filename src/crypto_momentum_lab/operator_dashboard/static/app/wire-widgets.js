@@ -42,7 +42,14 @@ export function wireTableFilters(root) {
           emptyRow = document.createElement("tr");
           emptyRow.className = "search-empty-row";
           const colCount = container.querySelectorAll("thead th").length || 1;
-          emptyRow.innerHTML = `<td colspan="${colCount}" class="search-empty-cell"><small class="muted">没有匹配结果</small></td>`;
+          const cell = document.createElement("td");
+          cell.colSpan = colCount;
+          cell.className = "search-empty-cell";
+          const small = document.createElement("small");
+          small.className = "muted";
+          small.textContent = "没有匹配结果";
+          cell.appendChild(small);
+          emptyRow.appendChild(cell);
           tbody.appendChild(emptyRow);
         } else {
           emptyRow.hidden = false;
@@ -141,7 +148,7 @@ export function wireTableSorting(root) {
           }
           return newOrder === "asc" ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
         });
-        rows.forEach((row) => tbody.appendChild(row));
+        tbody.replaceChildren(...rows);
       });
       th.addEventListener("keydown", (event) => {
         if (event.key !== "Enter" && event.key !== " ") return;

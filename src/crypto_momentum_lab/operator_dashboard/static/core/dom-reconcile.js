@@ -5,7 +5,11 @@
 
 export function fragmentFromHtml(ownerDocument, html) {
   const template = ownerDocument.createElement("template");
-  template.innerHTML = html;
+  if (typeof template.setHTMLUnsafe === "function") {
+    template.setHTMLUnsafe(html);
+  } else {
+    template.innerHTML = html;
+  }
   return template.content;
 }
 
@@ -104,6 +108,9 @@ export function reconcileChildren(parent, templateParent) {
   });
 
   oldChildren.forEach((node) => {
-    if (!used.has(node) && node.parentNode === parent) parent.removeChild(node);
+    if (!used.has(node) && node.parentNode === parent) {
+      if (typeof node.remove === "function") node.remove();
+      else parent.removeChild(node);
+    }
   });
 }

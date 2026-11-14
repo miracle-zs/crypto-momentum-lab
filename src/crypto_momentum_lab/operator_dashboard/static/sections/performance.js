@@ -1,20 +1,10 @@
 import {
+  bytes,
   dayTime,
   esc,
   normalizedStatus,
 } from "../dashboard-formatters.js";
 import { blockTitle, tile } from "../dashboard-ui.js";
-
-const GIB = 1024 ** 3;
-const MIB = 1024 ** 2;
-
-function bytes(value) {
-  if (value == null || !Number.isFinite(value) || value < 0) return "—";
-  if (value >= GIB) return `${(value / GIB).toFixed(2)} GiB`;
-  if (value >= MIB) return `${(value / MIB).toFixed(1)} MiB`;
-  if (value >= 1024) return `${(value / 1024).toFixed(1)} KiB`;
-  return `${Math.round(value)} B`;
-}
 
 function meterCard(label, valText, percent, note, tone = "good") {
   const pct = Math.max(0, Math.min(100, percent));

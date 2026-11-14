@@ -129,7 +129,6 @@ export function createShell({ onNavigate }) {
       activeLink.scrollIntoView({ block: "nearest", inline: "center" });
     }
     onNavigate?.(id);
-    requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
   }
 
   function setWorkspace(value, { selectDefault = true, updateHistory = true } = {}) {

@@ -19,6 +19,7 @@ const CHART_INSTANCES = new Map();
 const WIRED_ROOTS = new WeakSet();
 const ROOT_LIFECYCLES = new WeakMap();
 const APPLIED_PAYLOAD_SIGNATURES = new WeakMap();
+const RESIZE_OBSERVERS = new WeakMap();
 
 export function chartPayloadSignature(payload) {
   if (!payload) return "";
@@ -208,7 +209,7 @@ function tooltipTime(params, payload) {
 }
 
 function tooltipValue(param) {
-  const value = Array.isArray(param?.value) ? param.value[1] : param?.value;
+  const value = Array.isArray(param?.value) ? param.value.at(1) : param?.value;
   return Number(value);
 }
 
@@ -314,6 +315,11 @@ function chartShells(root) {
 }
 
 function disposeChart(shell) {
+  const ro = RESIZE_OBSERVERS.get(shell);
+  if (ro) {
+    ro.disconnect();
+    RESIZE_OBSERVERS.delete(shell);
+  }
   const chart = CHART_INSTANCES.get(shell);
   if (!chart) return;
   chart.dispose();
@@ -343,6 +349,18 @@ function mountChart(shell, doc) {
   CHART_INSTANCES.set(shell, chart);
   shell.dataset.echartMounted = "true";
   shell.removeAttribute("data-echart-state");
+
+  if (typeof ResizeObserver === "function" && surface) {
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.contentRect.width > 0 && entry.contentRect.height > 0) {
+          chart.resize();
+        }
+      }
+    });
+    ro.observe(surface);
+    RESIZE_OBSERVERS.set(shell, ro);
+  }
 }
 
 function showChartPoint(shell, index) {
@@ -410,13 +428,11 @@ export function wireEcharts(root = document) {
   };
   scan();
 
-  const observationTarget = root.nodeType === 9 ? root.body : root;
+  const observationTarget = root.querySelector?.("main") || (root.nodeType === 9 ? root.body : root);
   if (typeof MutationObserver === "function" && observationTarget) {
     lifecycle.observer = new MutationObserver(scan);
     lifecycle.observer.observe(observationTarget, { childList: true, subtree: true });
   }
-  const view = doc?.defaultView;
-  view?.addEventListener("resize", lifecycle.resize, { passive: true });
 }
 
 export function refreshEcharts(root = document) {

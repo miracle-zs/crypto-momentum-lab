@@ -55,9 +55,7 @@ export function updateOverviewDynamic(section, data) {
       ? Math.max(0, (Date.now() - observedAt) / 1000)
       : asNumber(service.age_seconds);
     element.textContent = age == null ? "未知" : relAge(age);
-    const meter = Array.from(section.querySelectorAll("[data-service-meter]")).find(
-      (candidate) => candidate.dataset.serviceMeter === element.dataset.serviceAge,
-    );
+    const meter = element.closest(".service-row")?.querySelector("[data-service-meter]");
     if (meter && age != null) {
       const freshness = Math.max(6, 100 - Math.min(100, (age / 120) * 100));
       meter.style.width = `${freshness.toFixed(0)}%`;

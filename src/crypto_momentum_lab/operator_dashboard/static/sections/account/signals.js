@@ -117,7 +117,7 @@ function liveSignalRecordLag(row) {
 }
 
 function liveSignalMeta(signals) {
-  const newest = signals[0];
+  const newest = signals.at(0);
   if (!newest) {
     return `<p class="live-signal-note">实盘信号记录尚未到达，或当前账户还没有可展示的信号。</p>`;
   }

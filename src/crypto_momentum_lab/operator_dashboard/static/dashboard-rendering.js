@@ -5,7 +5,7 @@
  */
 export function sectionRenderKey(id, data) {
   if (!data || typeof data !== "object") return String(data);
-  const snapshot = { ...data };
+  const snapshot = typeof structuredClone === "function" ? structuredClone(data) : { ...data };
   delete snapshot.generated_at;
 
   if (id === "overview") {

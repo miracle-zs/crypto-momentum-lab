@@ -1,70 +1,73 @@
 /* ============ system performance & observability ============ */
 
-.performance-kpi-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  margin-bottom: 16px;
-}
+@layer sections {
+  .performance-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    margin-block-end: 16px;
+  }
 
-.performance-meter-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  margin-top: 12px;
-}
+  .performance-meter-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    margin-block-start: 12px;
+  }
 
-.performance-meter-card {
-  padding: 13px 15px;
-  border: 1px solid var(--line);
-  border-radius: 11px;
-  background: var(--surface-2);
-}
+  .performance-meter-card {
+    padding-block: 13px;
+    padding-inline: 15px;
+    border: 1px solid var(--line);
+    border-radius: 11px;
+    background: var(--surface-2);
 
-.performance-meter-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-}
+    & small {
+      color: var(--faint);
+      font-size: 10px;
+    }
+  }
 
-.performance-meter-head span {
-  color: var(--muted);
-  font-size: 11px;
-}
+  .performance-meter-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
 
-.performance-meter-head b {
-  color: var(--text);
-  font-size: 11px;
-  font-weight: 500;
-  white-space: nowrap;
-}
+    & span {
+      color: var(--muted);
+      font-size: 11px;
+    }
 
-.performance-progress {
-  height: 7px;
-  margin: 11px 0 8px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: var(--surface-3);
-}
+    & b {
+      color: var(--text);
+      font-size: 11px;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+  }
 
-.performance-progress i {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: var(--brand);
-}
+  .performance-progress {
+    height: 7px;
+    margin-block: 11px 8px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: var(--surface-3);
 
-.performance-progress.good i { background: var(--success); }
-.performance-progress.warning i { background: var(--warn); }
-.performance-progress.danger i { background: var(--danger); }
+    & i {
+      display: block;
+      height: 100%;
+      border-radius: inherit;
+      background: var(--brand);
+    }
 
-.performance-meter-card small {
-  color: var(--faint);
-  font-size: 10px;
-}
+    &.good i { background: var(--success); }
+    &.warning i { background: var(--warn); }
+    &.danger i { background: var(--danger); }
+  }
 
-@media (max-width: 700px) {
-  .performance-kpi-grid { grid-template-columns: 1fr; }
-  .performance-meter-grid { grid-template-columns: 1fr; }
+  @container card (max-width: 700px) {
+    .performance-kpi-grid { grid-template-columns: 1fr; }
+    .performance-meter-grid { grid-template-columns: 1fr; }
+  }
 }

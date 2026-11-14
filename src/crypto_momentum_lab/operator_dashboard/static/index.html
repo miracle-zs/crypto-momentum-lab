@@ -3,19 +3,24 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="description" content="CML Operator Flight Deck - Crypto Momentum Lab 运行控制台">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#070b10" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
   <title>CML · 运行控制 · 总览 · Flight Deck</title>
-  <link rel="stylesheet" href="static/assets/dashboard-cd7151ff7b889b10.css">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23101922'/%3E%3Ctext x='16' y='21' font-family='monospace' font-weight='bold' font-size='14' text-anchor='middle' fill='%2371d6d0'%3ECML%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="static/assets/dashboard-dea2bd84e6dd5412.css">
 </head>
 <body>
-  <a class="skip-link" href="#overview">跳到当前工作视图</a>
+  <a class="skip-link" href="#main-content">跳到当前工作视图</a>
   <div class="shell">
     <aside class="sidebar">
       <div class="brand">
         <div class="brand-mark" aria-hidden="true"><span>C</span><i>/</i><span>ML</span></div>
-        <div class="brand-name">
-          <b>Flight Deck</b>
-          <small>LOCAL OPERATOR</small>
-        </div>
+        <h1 class="brand-title brand-name">
+          <b class="brand-name">Flight Deck</b>
+          <small class="brand-sub">LOCAL OPERATOR</small>
+        </h1>
       </div>
 
       <div class="workspace-switcher" role="group" aria-label="工作区">
@@ -32,22 +37,22 @@
       <nav class="nav" aria-label="控制台分区">
         <div class="nav-workspace" data-workspace-nav="ops">
           <span class="nav-group-label">RUN CONTROL</span>
-          <a href="#overview" data-nav="overview" data-label="总览"><kbd class="nav-key">1</kbd><span>总览</span><em class="nav-dot status-UNKNOWN" data-nav-dot="overview"></em></a>
-          <a href="#risk" data-nav="risk" data-label="执行"><kbd class="nav-key">2</kbd><span>执行风控</span><em class="nav-dot status-UNKNOWN" data-nav-dot="risk"></em></a>
-          <a href="#account" data-nav="account" data-label="账户"><kbd class="nav-key">3</kbd><span>实盘账户</span><em class="nav-dot status-UNKNOWN" data-nav-dot="account"></em></a>
-          <a href="#performance" data-nav="performance" data-label="性能"><kbd class="nav-key">4</kbd><span>系统性能</span><em class="nav-dot status-UNKNOWN" data-nav-dot="performance"></em></a>
+          <a href="#overview" data-nav="overview" data-label="总览"><kbd class="nav-key">1</kbd><span>总览</span><em class="nav-dot status-UNKNOWN" data-nav-dot="overview" aria-hidden="true"></em></a>
+          <a href="#risk" data-nav="risk" data-label="执行"><kbd class="nav-key">2</kbd><span>执行风控</span><em class="nav-dot status-UNKNOWN" data-nav-dot="risk" aria-hidden="true"></em></a>
+          <a href="#account" data-nav="account" data-label="账户"><kbd class="nav-key">3</kbd><span>实盘账户</span><em class="nav-dot status-UNKNOWN" data-nav-dot="account" aria-hidden="true"></em></a>
+          <a href="#performance" data-nav="performance" data-label="性能"><kbd class="nav-key">4</kbd><span>系统性能</span><em class="nav-dot status-UNKNOWN" data-nav-dot="performance" aria-hidden="true"></em></a>
         </div>
         <div class="nav-workspace" data-workspace-nav="data" hidden>
           <span class="nav-group-label">MARKET &amp; DATA</span>
-          <a href="#universe" data-nav="universe" data-label="市场"><span>市场行情</span><em class="nav-dot status-UNKNOWN" data-nav-dot="universe"></em></a>
-          <a href="#collector" data-nav="collector" data-label="数据采集"><span>数据采集</span><em class="nav-dot status-UNKNOWN" data-nav-dot="collector"></em></a>
+          <a href="#universe" data-nav="universe" data-label="市场"><span>市场行情</span><em class="nav-dot status-UNKNOWN" data-nav-dot="universe" aria-hidden="true"></em></a>
+          <a href="#collector" data-nav="collector" data-label="数据采集"><span>数据采集</span><em class="nav-dot status-UNKNOWN" data-nav-dot="collector" aria-hidden="true"></em></a>
         </div>
       </nav>
 
       <div class="sidebar-foot">
-        <div class="legend" aria-label="状态语义">
-          <div class="legend-row"><small>状态</small><span><i class="dot status-READY"></i>READY</span><span><i class="dot status-DEGRADED"></i>REVIEW</span><span><i class="dot status-HALTED"></i>HALTED</span></div>
-          <div class="legend-row"><small>模式</small><span><i class="dot status-LIVE"></i>LIVE</span><span><i class="dot status-STALE"></i>STALE</span><span><i class="dot status-UNKNOWN"></i>UNKNOWN</span></div>
+        <div class="legend" role="region" aria-label="状态语义">
+          <div class="legend-row"><small>状态</small><span><i class="dot status-READY" aria-hidden="true"></i>READY</span><span><i class="dot status-DEGRADED" aria-hidden="true"></i>REVIEW</span><span><i class="dot status-HALTED" aria-hidden="true"></i>HALTED</span></div>
+          <div class="legend-row"><small>模式</small><span><i class="dot status-LIVE" aria-hidden="true"></i>LIVE</span><span><i class="dot status-STALE" aria-hidden="true"></i>STALE</span><span><i class="dot status-UNKNOWN" aria-hidden="true"></i>UNKNOWN</span></div>
         </div>
         <p>只读控制台 · 本机 PG 直连 · 交易所写入受控</p>
       </div>
@@ -67,30 +72,30 @@
           </div>
         </div>
         <div class="topbar-meta">
-          <div id="global-mode" class="mode-badge runtime-line status-UNKNOWN" aria-label="执行模式">
+          <div id="global-mode" class="mode-badge runtime-line status-UNKNOWN" role="region" aria-label="执行模式">
             <small>运行模式</small><strong data-mode-value>UNKNOWN</strong><span data-mode-detail>等待数据</span>
           </div>
           <button type="button" id="manual-refresh-btn" class="poll-state poll-refresh-btn" title="点击立即强制刷新 (当前 15s 自动轮询)" aria-label="立即强制刷新">
             <span class="pulse" aria-hidden="true"></span>
             <strong id="last-cycle">UNKNOWN</strong>
-            <svg class="refresh-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+            <svg class="refresh-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true" focusable="false"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
           </button>
           <div class="clock"><small>UTC+8</small><strong id="utc-clock">--:--:--</strong></div>
         </div>
-        <div id="readiness-strip" class="readiness-strip status-UNKNOWN" aria-label="全局运行就绪状态与摘要">
+        <div id="readiness-strip" class="readiness-strip status-UNKNOWN" role="region" aria-label="全局运行就绪状态与摘要">
           <div class="readiness-lead">
             <small class="readiness-scope">全局</small>
             <strong id="global-readiness">UNKNOWN</strong>
             <span id="global-readiness-detail">检测中</span>
           </div>
-          <div class="readiness-metrics" aria-label="全局运行摘要">
+          <div class="readiness-metrics" role="region" aria-label="全局运行摘要">
             <span class="readiness-metric"><b id="global-uncertain">—</b><small>需确认</small></span>
             <span class="readiness-metric"><b id="global-halts">—</b><small>活跃停机</small></span>
             <span class="readiness-metric"><b id="global-ambiguous">—</b><small>未决订单</small></span>
             <span class="readiness-metric"><b id="global-accounts-ready">—</b><small>账户就绪</small></span>
           </div>
         </div>
-        <div id="emergency-triage-hud" class="emergency-triage-hud" hidden></div>
+        <div id="emergency-triage-hud" class="emergency-triage-hud" role="alert" aria-live="assertive" aria-atomic="true" hidden></div>
         <div id="runtime-announcer" class="sr-only runtime-announcer" aria-live="polite" aria-atomic="true"></div>
         <div class="pollbar" id="pollbar" aria-hidden="true"></div>
       </header>
@@ -99,74 +104,74 @@
         <section id="overview" class="card is-active-view" data-workspace="ops" data-view-title="总览" data-endpoint="api/overview" aria-labelledby="overview-title">
           <header class="card-head">
             <div class="card-title"><div><h2 id="overview-title">系统总览</h2><small>15S 轮询刷新</small></div></div>
-            <span class="section-state status-UNKNOWN" aria-label="当前页面数据状态：待确认">UNKNOWN</span>
+            <span class="section-state status-UNKNOWN" role="status" aria-label="当前页面数据状态：待确认">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
-            <div class="skeleton"><s style="width:38%"></s><s style="width:92%"></s><s style="width:74%"></s><s style="width:83%"></s></div>
+            <div class="skeleton" aria-hidden="true"><span class="skeleton-bone" style="width:38%"></span><span class="skeleton-bone" style="width:92%"></span><span class="skeleton-bone" style="width:74%"></span><span class="skeleton-bone" style="width:83%"></span></div>
           </div>
         </section>
 
         <section id="risk" class="card card-risk" data-workspace="ops" data-view-title="执行" data-endpoint="api/risk-execution" aria-labelledby="risk-title" hidden>
           <header class="card-head">
             <div class="card-title"><div><h2 id="risk-title">执行风控</h2><small>风控闸门与订单流水</small></div></div>
-            <span class="section-state status-UNKNOWN" aria-label="当前页面数据状态：待确认">UNKNOWN</span>
+            <span class="section-state status-UNKNOWN" role="status" aria-label="当前页面数据状态：待确认">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
-            <div class="skeleton"><s style="width:29%"></s><s style="width:76%"></s><s style="width:81%"></s></div>
+            <div class="skeleton" aria-hidden="true"><span class="skeleton-bone" style="width:29%"></span><span class="skeleton-bone" style="width:76%"></span><span class="skeleton-bone" style="width:81%"></span></div>
           </div>
         </section>
 
         <section id="account" class="card" data-workspace="ops" data-view-title="账户" data-endpoint="api/live-accounts" aria-labelledby="account-title" hidden>
           <header class="card-head">
             <div class="card-title"><div><h2 id="account-title">实盘账户</h2><small>资金模式、余额与持仓</small></div></div>
-            <span class="section-state status-UNKNOWN" aria-label="当前页面数据状态：待确认">UNKNOWN</span>
+            <span class="section-state status-UNKNOWN" role="status" aria-label="当前页面数据状态：待确认">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
-            <div class="skeleton"><s style="width:35%"></s><s style="width:82%"></s><s style="width:69%"></s></div>
+            <div class="skeleton" aria-hidden="true"><span class="skeleton-bone" style="width:35%"></span><span class="skeleton-bone" style="width:82%"></span><span class="skeleton-bone" style="width:69%"></span></div>
           </div>
         </section>
 
         <section id="universe" class="card" data-workspace="data" data-view-title="市场" data-endpoint="api/universe" aria-labelledby="universe-title" hidden>
           <header class="card-head">
             <div class="card-title"><div><h2 id="universe-title">市场行情</h2><small>UTC 动量排名与监控池</small></div></div>
-            <span class="section-state status-UNKNOWN" aria-label="当前页面数据状态：待确认">UNKNOWN</span>
+            <span class="section-state status-UNKNOWN" role="status" aria-label="当前页面数据状态：待确认">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
-            <div class="skeleton"><s style="width:42%"></s><s style="width:85%"></s><s style="width:85%"></s><s style="width:58%"></s></div>
+            <div class="skeleton" aria-hidden="true"><span class="skeleton-bone" style="width:42%"></span><span class="skeleton-bone" style="width:85%"></span><span class="skeleton-bone" style="width:85%"></span><span class="skeleton-bone" style="width:58%"></span></div>
           </div>
         </section>
 
         <section id="collector" class="card card-collector" data-workspace="data" data-view-title="数据采集" data-endpoint="api/research-collector" aria-labelledby="collector-title" hidden>
           <header class="card-head">
             <div class="card-title"><div><h2 id="collector-title">数据采集</h2><small>15S 状态归档监控</small></div></div>
-            <span class="section-state status-UNKNOWN" aria-label="当前页面数据状态：待确认">UNKNOWN</span>
+            <span class="section-state status-UNKNOWN" role="status" aria-label="当前页面数据状态：待确认">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
-            <div class="skeleton"><s style="width:38%"></s><s style="width:92%"></s><s style="width:74%"></s><s style="width:83%"></s></div>
+            <div class="skeleton" aria-hidden="true"><span class="skeleton-bone" style="width:38%"></span><span class="skeleton-bone" style="width:92%"></span><span class="skeleton-bone" style="width:74%"></span><span class="skeleton-bone" style="width:83%"></span></div>
           </div>
         </section>
 
         <section id="performance" class="card card-performance" data-workspace="ops" data-view-title="性能" data-endpoint="api/performance" aria-labelledby="performance-title" hidden>
           <header class="card-head">
             <div class="card-title"><div><h2 id="performance-title">系统性能</h2><small>行情时延与主机资源</small></div></div>
-            <span class="section-state status-UNKNOWN" aria-label="当前页面数据状态：待确认">UNKNOWN</span>
+            <span class="section-state status-UNKNOWN" role="status" aria-label="当前页面数据状态：待确认">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
-            <div class="skeleton"><s style="width:36%"></s><s style="width:85%"></s><s style="width:72%"></s><s style="width:90%"></s></div>
+            <div class="skeleton" aria-hidden="true"><span class="skeleton-bone" style="width:36%"></span><span class="skeleton-bone" style="width:85%"></span><span class="skeleton-bone" style="width:72%"></span><span class="skeleton-bone" style="width:90%"></span></div>
           </div>
         </section>
       </main>
 
       <footer class="page-foot">
         <span>CML // OPERATOR CONSOLE</span>
-        <button type="button" id="palette-toggle-btn" class="palette-toggle-btn" title="切换涨跌配色（国际绿涨红跌 / 国内红涨绿跌）" aria-label="切换涨跌配色">
-          <i class="dot" style="background:var(--up);width:6px;height:6px;border-radius:50%;display:inline-block"></i><span id="palette-label">国际配色 (绿涨红跌)</span>
+        <button type="button" id="palette-toggle-btn" class="palette-toggle-btn" title="切换涨跌配色（国际绿涨红跌 / 国内红涨绿跌）">
+          <i class="dot" style="background:var(--up);width:6px;height:6px;border-radius:50%;display:inline-block" aria-hidden="true"></i><span id="palette-label">国际配色 (绿涨红跌)</span>
         </button>
         <span>LOCALHOST / NO CREDENTIAL FIELDS</span>
       </footer>
     </div>
   </div>
-  <script src="static/assets/echarts-dae720e256d2461b.js"></script>
-  <script type="module" src="static/assets/dashboard-2b672186c73b1ae9.js" defer></script>
+  <script src="static/assets/echarts-dae720e256d2461b.js" defer></script>
+  <script type="module" src="static/assets/dashboard-7b42384bfd97a5a8.js"></script>
 </body>
 </html>

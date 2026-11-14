@@ -1,98 +1,110 @@
-/* ============ design tokens ============ */
+/* ============ cascade layers & design tokens ============ */
 
-:root {
-  --bg: #070b10;
-  --bg-raise: #0b1219;
-  --surface: #101922;
-  --surface-2: #15212c;
-  --surface-3: #1b2a37;
-  --line: #293b4b;
-  --line-strong: #466075;
-  --text: #edf3f6;
-  --muted: #aebbc5;
-  --faint: #8293a2;
-  --brand: #71d6d0;
-  --accent: var(--brand);
-  --success: #65d39a;
-  --danger: #f4777f;
-  --up: #65d39a;
-  --down: #f4777f;
-  --warn: #e9b45b;
-  --info: #86aef5;
-  --live: #34d399;
-  --series-amber: #e9b45b;
-  --series-violet: #c084fc;
-  --series-cyan: #22d3ee;
-  --series-lime: #a3e635;
-  --sans: "Avenir Next", "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", -apple-system, sans-serif;
-  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "IBM Plex Mono", Menlo, Consolas, monospace;
+@layer reset, tokens, base, layout, components, sections, overrides;
+
+@layer tokens {
+  :root {
+    --bg: #070b10;
+    --bg-raise: #0b1219;
+    --surface: #101922;
+    --surface-2: #15212c;
+    --surface-3: #1b2a37;
+    --line: #293b4b;
+    --line-strong: #466075;
+    --text: #edf3f6;
+    --muted: #aebbc5;
+    --faint: #8293a2;
+    --brand: #71d6d0;
+    --accent: var(--brand);
+    --success: #65d39a;
+    --danger: #f4777f;
+    --up: #65d39a;
+    --down: #f4777f;
+    --warn: #e9b45b;
+    --info: #86aef5;
+    --live: #34d399;
+    --series-amber: #e9b45b;
+    --series-violet: #c084fc;
+    --series-cyan: #22d3ee;
+    --series-lime: #a3e635;
+    --sans: "Avenir Next", "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", -apple-system, sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "IBM Plex Mono", Menlo, Consolas, monospace;
+    accent-color: var(--brand);
+  }
+
+  /* status → accent color (--s) */
+  :is(.status-READY, .status-FRESH, .status-ACTIVE, .status-COMPLETED) { --s: var(--success); }
+  :is(.status-SHADOW, .status-NEW, .status-SHADOW-RUNNING) { --s: var(--info); }
+  :is(.status-STALE, .status-PENDING-CANCEL, .status-PARTIALLY-FILLED) { --s: var(--warn); }
+  :is(.status-DEGRADED, .status-ATTENTION, .status-REVIEW) { --s: var(--warn); }
+  :is(.status-HALTED, .status-BLOCKED, .status-DOWN, .status-ABORTED, .status-REJECTED) { --s: var(--danger); }
+  :is(.status-LIVE, .status-LIVE-ENABLED) { --s: var(--live); }
+  :is(.status-UNKNOWN, .status-NO-DATA, .is-locked) { --s: var(--faint); }
+
+  [data-color-palette="cn"] {
+    --up: #f4777f;
+    --down: #65d39a;
+  }
 }
 
-/* status → accent color (--s) */
-.status-READY, .status-FRESH, .status-ACTIVE, .status-COMPLETED { --s: var(--success); }
-.status-SHADOW, .status-NEW, .status-SHADOW-RUNNING { --s: var(--info); }
-.status-STALE, .status-PENDING-CANCEL, .status-PARTIALLY-FILLED { --s: var(--warn); }
-.status-DEGRADED, .status-ATTENTION, .status-REVIEW { --s: var(--warn); }
-.status-HALTED, .status-BLOCKED, .status-DOWN, .status-ABORTED, .status-REJECTED { --s: var(--danger); }
-.status-LIVE, .status-LIVE-ENABLED { --s: var(--live); }
-.status-UNKNOWN, .status-NO-DATA, .is-locked { --s: var(--faint); }
-
-* { box-sizing: border-box; }
-
-/* auto: smooth scrolling made background-poll scroll restore look like an
-   animated jump to the top. Anchor navigation can opt in per control. */
-html { background: var(--bg); color-scheme: dark; scroll-behavior: auto; }
-
-body {
-  margin: 0;
-  min-width: 320px;
-  overflow-x: hidden;
-  /* Let the browser keep the reading position when content above changes. */
-  overflow-anchor: auto;
-  color: var(--text);
-  background:
-    radial-gradient(1000px 480px at 18% -8%, rgba(113, 214, 208, .07), transparent 62%),
-    radial-gradient(820px 420px at 96% 4%, rgba(101, 211, 154, .045), transparent 58%),
-    var(--bg);
-  font: 13px/1.55 var(--sans);
-  -webkit-font-smoothing: antialiased;
+@layer reset {
+  *, *::before, *::after { box-sizing: border-box; }
 }
 
-::selection { background: color-mix(in srgb, var(--brand) 32%, transparent); }
+@layer base {
+  html {
+    background: var(--bg);
+    color-scheme: dark;
+    scroll-behavior: auto;
+    scrollbar-gutter: stable;
+  }
 
-:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+  body {
+    margin: 0;
+    min-inline-size: 320px;
+    overflow-x: hidden;
+    overflow-anchor: auto;
+    color: var(--text);
+    background:
+      radial-gradient(1000px 480px at 18% -8%, rgba(113, 214, 208, .07), transparent 62%),
+      radial-gradient(820px 420px at 96% 4%, rgba(101, 211, 154, .045), transparent 58%),
+      var(--bg);
+    font: 13px/1.55 var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
 
-.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
-.muted { color: var(--muted); }
-.pos { color: var(--up); }
-.neg { color: var(--down); }
-.warn { color: var(--warn); }
-.hero { color: var(--brand); }
+  ::selection { background: color-mix(in srgb, var(--brand) 32%, transparent); }
 
-.poll-state.status-STALE strong { color: var(--danger); }
-.poll-state.status-UNKNOWN strong { color: var(--faint); }
+  :focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 
-[data-color-palette="cn"] {
-  --up: #f4777f;
-  --down: #65d39a;
-}
+  .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .muted { color: var(--muted); }
+  .pos { color: var(--up); }
+  .neg { color: var(--down); }
+  .warn { color: var(--warn); }
+  .hero { color: var(--brand); }
 
-.palette-toggle-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: transparent;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 3px 8px;
-  color: var(--muted);
-  font: 10px var(--mono);
-  cursor: pointer;
-  transition: all .15s ease;
-}
+  .poll-state.status-STALE strong { color: var(--danger); }
+  .poll-state.status-UNKNOWN strong { color: var(--faint); }
 
-.palette-toggle-btn:hover {
-  background: var(--surface-2);
-  color: var(--text);
-  border-color: var(--brand);
+  .palette-toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: transparent;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding-block: 3px;
+    padding-inline: 8px;
+    color: var(--muted);
+    font: 10px var(--mono);
+    cursor: pointer;
+    transition: all .15s ease;
+
+    &:hover {
+      background: var(--surface-2);
+      color: var(--text);
+      border-color: var(--brand);
+    }
+  }
 }

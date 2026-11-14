@@ -11,10 +11,17 @@ import { renderAccount } from "./render-detail.js";
 import { renderLiveAccountMetrics } from "./render-metrics.js";
 import { wireMetricFilters } from "../../app/wire-widgets.js";
 
-export async function defaultAccountRequestJson(url, { timeoutMs = 15000 } = {}) {
-  const signal = typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
-    ? AbortSignal.timeout(timeoutMs)
-    : undefined;
+export async function defaultAccountRequestJson(url, { timeoutMs = 15000, signal: externalSignal } = {}) {
+  let signal = externalSignal;
+  if (!signal) {
+    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+      signal = AbortSignal.timeout(timeoutMs);
+    } else if (typeof AbortController !== "undefined") {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), timeoutMs);
+      signal = controller.signal;
+    }
+  }
   const response = await fetch(url, {
     headers: { "Accept": "application/json" },
     signal,
@@ -42,6 +49,7 @@ export function renderedPayloadMatches(
 }
 
 function rememberRenderedPayload(slot, payload) {
+  slot.__cmlRenderedSnapshot = typeof structuredClone === "function" ? structuredClone(payload) : payload;
   slot.__cmlRenderedPayload = JSON.stringify(payload);
 }
 
@@ -63,7 +71,12 @@ function setLiveAccountDetailHeader(slot, accountLabel, data = {}, loadingMessag
   if (label) label.textContent = accountLabel || "交易所账户";
   const status = slot.querySelector(`.${K.liveAccountDetailStatus}`);
   if (status && (data.status || data.observed_at)) {
-    status.innerHTML = `${pill(data.status || "UNKNOWN")}<span>${esc(dayTime(data.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</span><small class="muted" ${K.accountLoadState}${loadingMessage ? "" : " hidden"}>${esc(loadingMessage)}</small>`;
+    const html = `${pill(data.status || "UNKNOWN")}<span>${esc(dayTime(data.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</span><small class="muted" ${K.accountLoadState}${loadingMessage ? "" : " hidden"}>${esc(loadingMessage)}</small>`;
+    if (typeof status.setHTMLUnsafe === "function") {
+      status.setHTMLUnsafe(html);
+    } else {
+      status.innerHTML = html;
+    }
   } else {
     const loadState = slot.querySelector(sel.accountLoadState());
     if (loadState) {

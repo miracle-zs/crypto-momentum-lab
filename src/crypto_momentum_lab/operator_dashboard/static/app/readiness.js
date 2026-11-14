@@ -183,7 +183,7 @@ export function renderGlobalReadiness() {
       const isHalt = Number(model.halts) > 0;
       const isAmbiguous = Number(model.ambiguous) > 0;
       const label = isHalt ? "活跃停机警报" : isAmbiguous ? "未决订单待核" : "风控态势注意";
-      hud.innerHTML = `
+      const html = `
         <div class="emergency-triage-lead">
           <strong>${label}</strong>
           <span>${model.detail}</span>
@@ -192,9 +192,14 @@ export function renderGlobalReadiness() {
           <a href="#risk" class="emergency-triage-btn ${isHalt ? "danger" : ""}">查看风控详情</a>
         </div>
       `;
+      if (typeof hud.setHTMLUnsafe === "function") {
+        hud.setHTMLUnsafe(html);
+      } else {
+        hud.innerHTML = html;
+      }
     } else {
       hud.hidden = true;
-      hud.innerHTML = "";
+      hud.replaceChildren();
     }
   }
 }

@@ -1,46 +1,109 @@
 /* ============ universe ============ */
 
-.ret { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
-.ret .num { min-width: 62px; text-align: right; font-size: 11.5px; }
-.ret-track { width: 74px; height: 4px; border-radius: 999px; background: var(--surface-3); overflow: hidden; }
-.ret-track i { display: block; height: 100%; border-radius: 999px; }
-.ret-track i.pos { background: var(--up); }
-.ret-track i.neg { background: var(--down); }
+@layer sections {
+  .ret {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
 
-.membership-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 7px;
-  border: 1px solid currentColor;
-  border-radius: 999px;
-  font-size: 9.5px;
-  font-weight: 650;
-  line-height: 1;
-}
+    & .num {
+      min-width: 62px;
+      text-align: end;
+      font-size: 11.5px;
+    }
+  }
 
-.membership-status::before {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: currentColor;
-  content: "";
-}
+  .ret-track {
+    width: 74px;
+    height: 4px;
+    border-radius: 999px;
+    background: var(--surface-3);
+    overflow: hidden;
 
-.membership-status.target { color: var(--info); background: rgba(138, 180, 255, .1); }
-.membership-status.extended { color: var(--muted); background: var(--surface-3); }
-.membership-status.retained { color: var(--warn); background: rgba(245, 183, 85, .1); }
-.membership-status.forced { color: var(--live); background: rgba(103, 232, 249, .1); }
-.membership-status.unknown { color: var(--faint); background: rgba(115, 128, 153, .1); }
+    & i {
+      display: block;
+      height: 100%;
+      border-radius: 999px;
 
-.monitor-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin: 0 0 12px; color: var(--muted); font-size: 11px; }
-.monitor-summary b { color: var(--text); font: 600 10px var(--mono); }
+      &.pos { background: var(--up); }
+      &.neg { background: var(--down); }
+    }
+  }
 
-.market-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
-.market-controls label { display: flex; align-items: center; gap: 6px; color: var(--muted); }
-.market-controls select { color: var(--text); background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px; }
+  .membership-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding-block: 3px;
+    padding-inline: 7px;
+    border: 1px solid currentColor;
+    border-radius: 999px;
+    font-size: 9.5px;
+    font-weight: 650;
+    line-height: 1;
 
-@media (max-width: 600px) {
-  .market-board > .block-title { align-items: flex-start; flex-direction: column; gap: 10px; }
-  .market-controls { gap: 8px; }
+    &::before {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: currentColor;
+      content: "";
+    }
+
+    &.target { color: var(--info); background: rgba(138, 180, 255, .1); }
+    &.extended { color: var(--muted); background: var(--surface-3); }
+    &.retained { color: var(--warn); background: rgba(245, 183, 85, .1); }
+    &.forced { color: var(--live); background: rgba(103, 232, 249, .1); }
+    &.unknown { color: var(--faint); background: rgba(115, 128, 153, .1); }
+  }
+
+  .monitor-summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 14px;
+    margin-block-end: 12px;
+    color: var(--muted);
+    font-size: 11px;
+
+    & b { color: var(--text); font: 600 10px var(--mono); }
+  }
+
+  .market-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+
+    & label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+    }
+
+    & select {
+      color: var(--text);
+      background: var(--surface-2);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 6px;
+      color-scheme: dark;
+
+      &:focus-visible {
+        outline: 2px solid var(--brand);
+        outline-offset: 2px;
+      }
+    }
+  }
+
+  @container card (max-width: 600px) {
+    .market-board > .block-title {
+      align-items: flex-start;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .market-controls { gap: 8px; }
+  }
 }

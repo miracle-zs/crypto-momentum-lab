@@ -1,65 +1,33 @@
-.risk-meta-strip {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 18px;
-  margin-bottom: 12px;
-  color: var(--muted);
-  font-size: 11px;
-}
+/* ============ risk management ============ */
 
-.risk-meta-strip .chip-age { color: var(--faint); }
-.risk-ambiguous .block-title strong { color: var(--warn); }
-.risk-empty-note {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 9px;
-  margin-top: 18px;
-  color: var(--muted);
-  font-size: 11px;
-}
-.risk-empty-note strong { color: var(--success); font-family: var(--mono); }
-.risk-empty-note small { color: var(--faint); }
+@layer sections {
+  .risk-meta-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 18px;
+    margin-block-end: 12px;
+    color: var(--muted);
+    font-size: 11px;
 
-@media (max-width: 1023px) {
-  .workspace-switcher { display: none; }
-  .nav-workspace { display: contents; }
-  .nav-workspace + .nav-workspace { margin-top: 0; padding-top: 0; border-top: 0; }
-  .mobile-workspace-switcher {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 4px;
-    min-width: 188px;
-    padding: 3px;
-    border: 1px solid var(--line);
-    border-radius: 9px;
-    background: rgba(21, 33, 44, .58);
+    & .chip-age { color: var(--faint); }
   }
-  .mobile-workspace-switcher .workspace-tab {
-    display: block;
-    min-height: 29px;
-    padding: 6px 8px;
-    border: 0;
-    border-radius: 6px;
-    background: transparent;
-    color: var(--faint);
-    font-size: 10px;
-    text-align: center;
-    white-space: nowrap;
-  }
-  .mobile-workspace-switcher .workspace-tab.is-active { background: color-mix(in srgb, var(--brand) 16%, var(--surface-2)); color: var(--text); box-shadow: none; }
-  .mobile-workspace-switcher .workspace-tab-index,
-  .mobile-workspace-switcher .workspace-tab-copy small,
-  .mobile-workspace-switcher .workspace-tab-copy em { display: none; }
-  .mobile-workspace-switcher .workspace-tab-copy { display: block; }
-  .mobile-workspace-switcher .workspace-tab-copy b { font-size: 10px; font-weight: 600; }
-}
 
-@media (max-width: 520px) {
-  .mobile-workspace-switcher { width: 100%; }
-  .topbar-primary { grid-template-columns: 1fr; grid-template-areas: "workspace" "heading"; gap: 6px; }
-  .mobile-workspace-switcher { justify-self: stretch; }
-  .nav a { flex: 1 1 0; min-width: 46px; }
-  .view-tab { grid-template-columns: 1fr; gap: 1px; min-height: 42px; padding-inline: 7px; }
-  .view-tab small { font-size: 7px; }
+  .risk-ambiguous .block-title strong { color: var(--warn); }
+
+  .risk-empty-note {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 9px;
+    margin-block-start: 18px;
+    color: var(--muted);
+    font-size: 11px;
+
+    & strong {
+      color: var(--success);
+      font-family: var(--mono);
+    }
+
+    & small { color: var(--faint); }
+  }
 }

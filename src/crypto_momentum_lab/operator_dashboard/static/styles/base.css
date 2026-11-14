@@ -1,45 +1,50 @@
-/* ============ scrollbars ============ */
+/* ============ base & resets ============ */
 
-.table-scroll::-webkit-scrollbar, .sidebar::-webkit-scrollbar { width: 8px; height: 8px; }
-.table-scroll::-webkit-scrollbar-thumb, .sidebar::-webkit-scrollbar-thumb {
-  background: var(--line-strong);
-  border-radius: 999px;
-}
-.table-scroll::-webkit-scrollbar-track, .sidebar::-webkit-scrollbar-track { background: transparent; }
-
-[hidden] { display: none !important; }
-
-body {
-  background:
-    linear-gradient(rgba(113, 214, 208, .025) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(113, 214, 208, .02) 1px, transparent 1px),
-    radial-gradient(900px 520px at 76% -12%, rgba(113, 214, 208, .085), transparent 65%),
-    radial-gradient(740px 420px at 10% 20%, rgba(134, 174, 245, .055), transparent 65%),
-    var(--bg);
-  background-size: 56px 56px, 56px 56px, auto, auto, auto;
-  font-size: 14px;
+@layer reset {
+  [hidden] { display: none; }
 }
 
-.skip-link {
-  position: fixed;
-  z-index: 100;
-  top: 10px;
-  left: 14px;
-  padding: 9px 13px;
-  border: 1px solid var(--brand);
-  border-radius: 8px;
-  background: var(--surface-3);
-  color: var(--text);
-  font-size: 12px;
-  text-decoration: none;
-  transform: translateY(-150%);
-  transition: transform .16s ease;
+@layer base {
+  /* ============ standard w3c scrollbars ============ */
+  .table-scroll, .sidebar {
+    scrollbar-width: thin;
+    scrollbar-color: var(--line-strong) transparent;
+  }
+
+  body {
+    background:
+      linear-gradient(rgba(113, 214, 208, .025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(113, 214, 208, .02) 1px, transparent 1px),
+      radial-gradient(900px 520px at 76% -12%, rgba(113, 214, 208, .085), transparent 65%),
+      radial-gradient(740px 420px at 10% 20%, rgba(134, 174, 245, .055), transparent 65%),
+      var(--bg);
+    background-size: 56px 56px, 56px 56px, auto, auto, auto;
+    font-size: 14px;
+  }
+
+  .skip-link {
+    position: fixed;
+    z-index: 100;
+    inset-block-start: 10px;
+    inset-inline-start: 14px;
+    padding-block: 9px;
+    padding-inline: 13px;
+    border: 1px solid var(--brand);
+    border-radius: 8px;
+    background: var(--surface-3);
+    color: var(--text);
+    font-size: 12px;
+    text-decoration: none;
+    transform: translateY(-150%);
+    transition: transform .16s ease;
+
+    &:focus {
+      transform: translateY(0);
+    }
+  }
+
+  body[data-active-workspace="data"] {
+    .nav a.active, .workspace-tab.is-active { --brand: var(--info); }
+    .topbar-workspace-kicker { color: var(--info); }
+  }
 }
-
-.skip-link:focus { transform: translateY(0); }
-
-body[data-active-workspace="data"] .nav a.active { --brand: var(--info); }
-
-body[data-active-workspace="data"] .workspace-tab.is-active { --brand: var(--info); }
-
-body[data-active-workspace="data"] .topbar-workspace-kicker { color: var(--info); }

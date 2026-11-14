@@ -218,7 +218,7 @@ export function liveAccountMetricModel(
     )
   ));
   const buckets = [...new Set(maps.flatMap((map) => [...map.keys()]))]
-    .sort((left, right) => left - right)
+    .toSorted((left, right) => left - right)
     .filter((bucket) => (
       (!Number.isFinite(chartStart) || bucket >= chartStart)
       && (!Number.isFinite(requestedEnd) || bucket <= requestedEnd)
